@@ -1,0 +1,16 @@
+version: "2"
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (io.ReadCloser).Close
+  exclusions:
+    presets:
+      - std-error-handling
+    rules:
+      - path: _test\.go
+        linters:
+          - errcheck

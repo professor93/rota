@@ -1,0 +1,1549 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rota playground</title>
+<style>
+/* =============================================================== tokens ==
+   One palette, defined once for light and once for dark. Every colour in
+   the page comes from here, so a theme is a variable swap and nothing else.
+   ======================================================================= */
+:root {
+  --bg:#faf9f7; --panel:#fff; --sunk:#f3f2ee;
+  --fg:#1b1b19; --muted:#68685f; --faint:#94948c;
+  --line:#e3e2dc; --line2:#eeede8;
+  --accent:#3f6b3f; --accent-fg:#fff; --accent-soft:#eef3ec;
+  --bad:#a2332f; --warn:#8a6a1c; --ok:#2f6b3a;
+  --code:#f6f5f1;
+  --j-key:#2f5aa8; --j-str:#2f6b3a; --j-num:#8a4b1f; --j-bool:#7a3fa0; --j-null:#94948c;
+  --r:8px; --r-lg:12px;
+  --shadow:0 1px 2px rgba(0,0,0,.05), 0 6px 16px rgba(0,0,0,.045);
+  --rail:172px;
+}
+:root { color-scheme: light dark }
+:root[data-theme="light"] { color-scheme: light }
+:root[data-theme="dark"] { color-scheme: dark }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg:#131315; --panel:#1a1a1d; --sunk:#151517;
+    --fg:#e9e8e3; --muted:#a09f98; --faint:#78776f;
+    --line:#2b2b30; --line2:#212125;
+    --accent:#8fb47a; --accent-fg:#131315; --accent-soft:#1e2620;
+    --bad:#e08a8a; --warn:#d9bd6a; --ok:#8fc79a;
+    --code:#0f0f11;
+    --j-key:#88b4f0; --j-str:#9fd0a4; --j-num:#e0a878; --j-bool:#c8a2e8; --j-null:#78776f;
+    --shadow:0 1px 2px rgba(0,0,0,.35), 0 6px 18px rgba(0,0,0,.3);
+  }
+}
+:root[data-theme="dark"] {
+  --bg:#131315; --panel:#1a1a1d; --sunk:#151517;
+  --fg:#e9e8e3; --muted:#a09f98; --faint:#78776f;
+  --line:#2b2b30; --line2:#212125;
+  --accent:#8fb47a; --accent-fg:#131315; --accent-soft:#1e2620;
+  --bad:#e08a8a; --warn:#d9bd6a; --ok:#8fc79a;
+  --code:#0f0f11;
+  --j-key:#88b4f0; --j-str:#9fd0a4; --j-num:#e0a878; --j-bool:#c8a2e8; --j-null:#78776f;
+  --shadow:0 1px 2px rgba(0,0,0,.35), 0 6px 18px rgba(0,0,0,.3);
+}
+
+*, *::before, *::after { box-sizing:border-box }
+html, body { height:100% }
+body {
+  margin:0; background:var(--bg); color:var(--fg);
+  font:14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing:antialiased;
+}
+button, input, select, textarea { font:inherit; color:inherit }
+button { cursor:pointer }
+::placeholder { color:var(--faint) }
+:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:4px }
+@media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important } }
+
+/* Screen-reader-only, and a skip link that appears on focus. */
+.sr { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0 }
+.skip { position:absolute; left:-9999px; top:8px; z-index:60; background:var(--panel); padding:8px 14px; border-radius:var(--r); border:1px solid var(--line) }
+.skip:focus { left:8px }
+
+/* =============================================================== header == */
+header.top {
+  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  padding:9px 14px; background:var(--panel); border-bottom:1px solid var(--line);
+  position:sticky; top:0; z-index:20;
+}
+.brand { font-weight:680; letter-spacing:-.015em; font-size:15px }
+.brand span { color:var(--muted); font-weight:400 }
+.ver { color:var(--faint); font-size:11.5px; font-family:ui-monospace, Menlo, monospace }
+.grow { flex:1 }
+#token { width:min(260px, 42vw); padding:6px 10px; border:1px solid var(--line); border-radius:var(--r); background:var(--bg) }
+
+/* ================================================================ atoms == */
+.btn {
+  border:1px solid var(--line); background:var(--panel); padding:6px 12px;
+  border-radius:var(--r); font-size:13px; line-height:1.4;
+  transition:background .12s, border-color .12s, color .12s;
+}
+.btn:hover { background:var(--line2) }
+.btn.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-fg); font-weight:620 }
+.btn.primary:hover { filter:brightness(1.07) }
+.btn.ghost { border-color:transparent; background:none; color:var(--muted) }
+.btn.ghost:hover { background:var(--line2); color:var(--fg) }
+.btn.icon { width:32px; padding:6px 0; text-align:center }
+.btn:disabled { opacity:.45; cursor:not-allowed }
+.btn.tiny { padding:3px 8px; font-size:11.5px; border-radius:6px }
+
+.pill {
+  font-size:11.5px; padding:3px 9px; border-radius:999px; border:1px solid var(--line);
+  color:var(--muted); white-space:nowrap;
+}
+.pill.ok { color:var(--ok); border-color:color-mix(in oklab, var(--ok) 45%, var(--line)) }
+.pill.bad { color:var(--bad); border-color:color-mix(in oklab, var(--bad) 45%, var(--line)) }
+.pill.busy { color:var(--warn); border-color:color-mix(in oklab, var(--warn) 45%, var(--line)) }
+.badge {
+  font-size:10px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
+  color:var(--accent-fg); background:var(--accent); border-radius:999px; padding:2px 7px;
+}
+.count {
+  display:inline-block; min-width:17px; text-align:center; margin-left:6px; padding:0 5px;
+  font-size:10.5px; font-weight:700; border-radius:999px; background:var(--accent); color:var(--accent-fg);
+}
+.empty { color:var(--muted); text-align:center; padding:46px 14px; font-size:13px }
+.empty b { display:block; color:var(--fg); font-size:14px; margin-bottom:4px }
+
+/* ================================================================ shell == */
+.shell {
+  display:grid; height:calc(100vh - 51px);
+  grid-template-columns:var(--rail) minmax(380px,1fr) minmax(360px,1fr);
+}
+@media (max-width:1040px) {
+  .shell { grid-template-columns:1fr; height:auto }
+  .rail { flex-direction:row !important; overflow-x:auto; border-right:none !important; border-bottom:1px solid var(--line) }
+  .pane { max-height:none }
+}
+.rail {
+  display:flex; flex-direction:column; gap:2px; padding:10px 8px;
+  background:var(--panel); border-right:1px solid var(--line);
+}
+.rail button {
+  display:flex; align-items:center; gap:8px; width:100%; text-align:left;
+  border:none; background:none; color:var(--muted); padding:8px 10px;
+  border-radius:var(--r); font-size:13.5px; white-space:nowrap;
+}
+.rail button:hover { background:var(--line2); color:var(--fg) }
+.rail button[aria-current="page"] { background:var(--accent-soft); color:var(--fg); font-weight:620 }
+.rail .k { font-family:ui-monospace, Menlo, monospace; font-size:11px; color:var(--faint); margin-left:auto }
+.rail button[aria-current="page"] .k { color:var(--muted) }
+
+.pane { display:flex; flex-direction:column; min-height:0; min-width:0 }
+.pane.out { border-left:1px solid var(--line); background:var(--panel) }
+.pane-body { overflow:auto; padding:16px; flex:1; min-height:0 }
+.pane-foot {
+  border-top:1px solid var(--line); padding:10px 16px; background:var(--panel);
+  display:flex; gap:9px; align-items:center; flex-wrap:wrap;
+}
+
+/* ================================================================= tabs == */
+.tabs { display:flex; gap:2px; padding:8px 14px 0; border-bottom:1px solid var(--line); background:var(--panel) }
+.tabs button {
+  border:none; background:none; color:var(--muted); padding:7px 11px; font-size:13px;
+  border-bottom:2px solid transparent; margin-bottom:-1px; border-radius:6px 6px 0 0;
+}
+.tabs button:hover { color:var(--fg); background:var(--line2) }
+.tabs button[aria-selected="true"] { color:var(--fg); font-weight:620; border-bottom-color:var(--accent) }
+
+/* ================================================================ forms == */
+.field { margin:0 0 15px }
+.flabel { display:block; font-weight:600; font-size:13px; margin-bottom:2px }
+.flabel .name { font-family:ui-monospace, Menlo, monospace; font-size:11px; color:var(--faint); font-weight:400; margin-left:6px }
+.help { color:var(--muted); font-size:12px; margin:0 0 6px; max-width:64ch }
+.ctl {
+  width:100%; padding:7px 10px; border:1px solid var(--line); border-radius:var(--r);
+  background:var(--bg); transition:border-color .12s, box-shadow .12s;
+}
+.ctl:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent) }
+textarea.ctl { resize:vertical; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12.5px; line-height:1.5 }
+select.ctl {
+  appearance:none; padding-right:30px;
+  background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
+  background-position:calc(100% - 15px) 55%, calc(100% - 10px) 55%; background-size:5px 5px; background-repeat:no-repeat;
+}
+.row2 { display:grid; grid-template-columns:1fr 1fr; gap:12px }
+@media (max-width:560px) { .row2 { grid-template-columns:1fr } }
+
+/* the account bar at the top of Ask */
+.target { display:flex; gap:10px; align-items:center; margin-bottom:12px }
+.target select { flex:1 }
+.target .pill { flex:none }
+
+/* the field filter */
+.filter { position:relative; margin-bottom:14px }
+.filter input { width:100%; padding:7px 30px 7px 10px; border:1px solid var(--line); border-radius:999px; background:var(--bg) }
+.filter .x { position:absolute; right:4px; top:4px; border:none; background:none; color:var(--muted); padding:2px 7px; border-radius:999px }
+
+/* collapsible groups */
+.group { border:1px solid var(--line); border-radius:var(--r-lg); margin-bottom:10px; background:var(--panel); overflow:hidden }
+.group > .head {
+  display:flex; align-items:center; gap:9px; width:100%; text-align:left;
+  border:none; background:none; padding:11px 13px; font-size:13.5px; font-weight:620;
+}
+.group > .head:hover { background:var(--line2) }
+.group > .head .sub { font-weight:400; color:var(--muted); font-size:12px }
+.group > .head .chev { margin-left:auto; color:var(--faint); font-size:11px; transition:transform .15s }
+.group.open > .head .chev { transform:rotate(90deg) }
+/* Collapsing is a class, not a re-render: the header keeps its identity, so
+   opening a group with the keyboard does not throw focus back to the top. */
+.group > .body { display:none; padding:4px 13px 13px; border-top:1px solid var(--line2) }
+.group.open > .body { display:block }
+
+/* toggles */
+.toggle { display:flex; align-items:flex-start; gap:10px; padding:9px 0; border-top:1px solid var(--line2) }
+.toggle:first-child { border-top:none }
+.switch { position:relative; width:34px; height:20px; flex:none; margin-top:1px }
+.switch input { position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer }
+.switch i { position:absolute; inset:0; background:var(--line); border-radius:999px; transition:background .15s }
+.switch i::after { content:""; position:absolute; width:16px; height:16px; border-radius:50%; background:var(--panel); top:2px; left:2px; transition:transform .15s; box-shadow:0 1px 2px rgba(0,0,0,.2) }
+.switch input:checked + i { background:var(--accent) }
+.switch input:checked + i::after { transform:translateX(14px) }
+.switch input:focus-visible + i { box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 25%, transparent) }
+.toggle .t-text { min-width:0 }
+.toggle .t-text b { font-weight:600; font-size:13px; display:block }
+.toggle .t-text span { color:var(--muted); font-size:12px }
+
+/* danger */
+.danger .flabel, .danger .t-text b { color:var(--bad) }
+.danger-note { color:var(--bad); font-size:11.5px; margin-top:3px }
+.locked { opacity:.55 }
+
+/* chips */
+.chips { display:flex; flex-wrap:wrap; gap:5px; padding:5px; border:1px solid var(--line); border-radius:var(--r); background:var(--bg) }
+.chips:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent) }
+.chip { display:inline-flex; align-items:center; gap:5px; background:var(--line2); border:1px solid var(--line);
+  border-radius:5px; padding:1px 4px 1px 7px; font-size:12px; font-family:ui-monospace, Menlo, monospace }
+.chip button { border:none; background:none; color:var(--muted); font-size:14px; line-height:1; padding:0 2px }
+.chip button:hover { color:var(--bad) }
+.chips input { border:none; background:none; outline:none; flex:1; min-width:110px; padding:3px 4px; font-size:13px }
+
+/* key/value map */
+.kv { display:grid; grid-template-columns:1fr 1fr auto; gap:6px; margin-bottom:6px }
+
+/* json editor */
+.json-ed { border:1px solid var(--line); border-radius:var(--r); overflow:hidden; background:var(--bg) }
+.json-ed header { display:flex; gap:6px; align-items:center; padding:5px 7px; background:var(--line2); border-bottom:1px solid var(--line) }
+.json-ed textarea { width:100%; border:none; background:none; padding:10px 12px; min-height:130px; resize:vertical;
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12.5px; outline:none }
+.json-status { padding:4px 12px 7px; font-size:11.5px; color:var(--muted) }
+.json-status.ok { color:var(--ok) } .json-status.bad { color:var(--bad) }
+.sb-row { display:grid; grid-template-columns:1fr 130px auto auto; gap:6px; align-items:center; margin-bottom:6px }
+.sb-req { display:flex; align-items:center; gap:5px; font-size:12px; color:var(--muted); white-space:nowrap }
+
+/* files */
+.drop { border:1.5px dashed var(--line); border-radius:var(--r); padding:18px; text-align:center; color:var(--muted); font-size:13px }
+.drop:hover, .drop.over { border-color:var(--accent); color:var(--fg); background:var(--accent-soft) }
+.filelist { margin-top:8px; display:flex; flex-direction:column; gap:5px }
+.filerow { display:flex; gap:8px; align-items:center; font-size:12.5px; border:1px solid var(--line); border-radius:6px; padding:4px 7px }
+.filerow code { font-family:ui-monospace, Menlo, monospace; flex:1; overflow:hidden; text-overflow:ellipsis }
+
+/* ========================================================= code & output == */
+pre.code {
+  margin:0; padding:12px 14px; background:var(--code); border-radius:var(--r); border:1px solid var(--line);
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12.5px; line-height:1.55;
+  overflow:auto; white-space:pre-wrap; word-break:break-word; tab-size:2;
+}
+.j-key { color:var(--j-key) } .j-str { color:var(--j-str) } .j-num { color:var(--j-num) }
+.j-bool { color:var(--j-bool) } .j-null { color:var(--j-null) } .j-punc { color:var(--muted) }
+.answer { background:var(--bg); border:1px solid var(--line); border-radius:var(--r); padding:13px 15px; margin-bottom:12px; white-space:pre-wrap }
+.answer h4, .sect h4 { margin:0 0 6px; font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted) }
+.sect { margin-bottom:14px }
+.meta { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:11px }
+.ev { border-left:3px solid var(--line); padding:6px 0 6px 10px; margin-bottom:6px }
+.ev-name { font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--muted) }
+.pathin { font-size:12px; padding:4px 6px; min-width:150px }
+.answer p { white-space:pre-wrap; margin:0 0 9px }
+.answer p:last-child { margin-bottom:0 }
+.sect.asking { border-left:3px solid var(--warn); padding-left:10px }
+.asked { font-weight:600; margin:0 0 8px }
+.opts { list-style:none; padding:0; margin:0 0 8px }
+.opts li { display:flex; gap:7px; align-items:center; padding:2px 0 }
+.ev.init { border-left-color:var(--muted) } .ev.init .ev-name { color:var(--muted) }
+.ev.text { border-left-color:var(--j-key) } .ev.text .ev-name { color:var(--j-key) }
+.ev.thinking { border-left-color:var(--line) } .ev.thinking .ev-name { color:var(--faint) }
+.ev.tool, .ev.tool_result { border-left-color:var(--j-num) }
+.ev.blocked { border-left-color:var(--warn) } .ev.blocked .ev-name { color:var(--warn) }
+.ev.usage { border-left-color:var(--line2) } .ev.usage .ev-name { color:var(--faint) }
+.ev.error { border-left-color:var(--bad) } .ev.error .ev-name { color:var(--bad) }
+.ev.done { border-left-color:var(--accent) } .ev.done .ev-name { color:var(--accent) }
+
+/* history */
+.hist { display:flex; flex-direction:column; gap:6px }
+.hist-item { border:1px solid var(--line); border-radius:var(--r); padding:9px 11px; background:var(--bg); transition:border-color .12s }
+.hist-item:hover { border-color:var(--accent) }
+.hist-item.on { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 15%, transparent) }
+.banner {
+  display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px;
+  padding:7px 10px; font-size:12px; color:var(--muted);
+  background:var(--accent-soft); border:1px solid var(--line); border-radius:var(--r);
+}
+.hist-top { display:flex; gap:8px; align-items:center; font-size:12px; color:var(--muted) }
+.hist-prompt { font-size:13px; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.hist-actions { display:flex; gap:6px; margin-top:7px }
+
+/* ============================================================== tables === */
+table { border-collapse:collapse; width:100%; font-size:13px }
+th, td { text-align:left; padding:8px 9px; border-bottom:1px solid var(--line2); vertical-align:middle }
+th { color:var(--muted); font-weight:500; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em }
+tr.out td { opacity:.5 }
+tr.next td { background:var(--accent-soft) }
+.bar { height:5px; background:var(--line); border-radius:3px; overflow:hidden; min-width:56px; margin-top:4px }
+.bar i { display:block; height:100%; background:var(--accent) }
+.bar i.hot { background:var(--bad) }
+.ordercell { white-space:nowrap; display:flex; gap:3px; align-items:center }
+.mv { border:1px solid var(--line); background:var(--panel); border-radius:6px; width:22px; height:22px;
+  line-height:1; padding:0; font-size:10px; color:var(--muted) }
+.mv:hover:not(:disabled) { background:var(--line2); color:var(--fg) }
+.mv:disabled { opacity:.3; cursor:not-allowed }
+.num { width:58px; padding:4px 6px; border:1px solid var(--line); border-radius:6px; background:var(--bg); text-align:right }
+.num:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent) }
+
+/* steps, for the sign-in flow */
+.step { border:1px solid var(--line); border-radius:var(--r-lg); padding:14px; margin-bottom:12px; background:var(--panel) }
+.step h3 { margin:0 0 3px; font-size:13.5px; display:flex; align-items:center; gap:8px }
+.step h3 i { font-style:normal; width:20px; height:20px; border-radius:50%; background:var(--accent); color:var(--accent-fg);
+  font-size:11px; font-weight:700; display:inline-flex; align-items:center; justify-content:center; flex:none }
+</style>
+
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="top">
+  <div class="brand">rota <span>playground</span></div>
+  <span id="ver" class="ver"></span>
+  <span class="grow"></span>
+  <label class="sr" for="token">Bearer token</label>
+  <input id="token" type="password" placeholder="bearer token" autocomplete="off" spellcheck="false">
+  <button id="connect" class="btn">Connect</button>
+  <span id="state" class="pill" role="status" aria-live="polite">not connected</span>
+  <button id="theme" class="btn icon" title="Switch light and dark" aria-label="Switch light and dark">◐</button>
+</header>
+
+<div class="shell">
+  <nav id="nav" class="rail" aria-label="Sections"></nav>
+  <main id="main" class="pane">
+    <div id="panel" class="pane-body"></div>
+    <div id="foot" class="pane-foot"></div>
+  </main>
+  <aside class="pane out" aria-label="Output">
+    <nav id="ionav" class="tabs"></nav>
+    <div id="io" class="pane-body"></div>
+  </aside>
+</div>
+
+<script>
+"use strict";
+
+/* ============================================================ utilities == */
+const $ = (s, r = document) => r.querySelector(s);
+
+// el builds a node from a tag, attributes and children. Attributes that are
+// null, undefined or false are skipped, so a conditional attribute is just
+// an expression rather than an if.
+function el(tag, attrs = {}, kids = []) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "text") n.textContent = v;
+    else if (k === "html") n.innerHTML = v;
+    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
+    else n.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of [].concat(kids)) if (kid) n.append(kid);
+  return n;
+}
+const esc = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+
+// colorJSON paints a JSON document without a parser: it walks the token
+// shapes JSON.stringify produces, which is all that is ever shown here.
+function colorJSON(value) {
+  let text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  try { if (typeof value === "string") text = JSON.stringify(JSON.parse(value), null, 2); } catch {}
+  return esc(text).replace(
+    /("(\\.|[^"\\])*")(\s*:)?|\b(true|false)\b|\bnull\b|-?\d+(\.\d+)?([eE][+-]?\d+)?/g,
+    (m, str, _e, colon) => {
+      if (str) return colon ? `<span class="j-key">${str}</span><span class="j-punc">:</span>` : `<span class="j-str">${str}</span>`;
+      if (m === "true" || m === "false") return `<span class="j-bool">${m}</span>`;
+      if (m === "null") return `<span class="j-null">${m}</span>`;
+      return `<span class="j-num">${m}</span>`;
+    });
+}
+const codeBlock = v => el("pre", { class: "code", html: colorJSON(v) });
+const ms = n => (n >= 1000 ? (n / 1000).toFixed(1) + "s" : n + "ms");
+
+/* ================================================================ state == */
+let token = sessionStorage.getItem("rota.token") || "";
+let schema = null;               // GET /v1/schema
+let accounts = [];               // GET /v1/accounts, already in rotation order
+let defaultAccount = null;       // the account a run with no id would use
+let view = "ask";                // which rail section is showing
+let ioTab = "response";          // which output tab is showing
+let filter = "";                 // narrows the field list
+let open = new Set(["core"]);    // which field groups are expanded
+let values = {};                 // the request, by field name
+let uploads = [];                // {path, content} pending files
+let fieldsHost = null;           // the part of Ask the filter redraws
+let lastResponse = null, lastEvents = [], lastAnswer = "", streaming = false;
+// selected is a run from history being read in the output panes instead of
+// the live request. Null means "show what is about to be sent".
+let selected = null;
+
+const HIST_KEY = "rota.history";
+const loadHistory = () => { try { return JSON.parse(localStorage.getItem(HIST_KEY)) || []; } catch { return []; } };
+
+// saveHistory keeps as much as the browser will hold. A single run with a
+// large response must not cost the whole history, so a quota refusal drops
+// the oldest half and tries again rather than losing everything.
+function saveHistory(h) {
+  let list = h.slice(0, 40);
+  for (;;) {
+    try { localStorage.setItem(HIST_KEY, JSON.stringify(list)); return; }
+    catch {
+      if (list.length <= 1) { try { localStorage.removeItem(HIST_KEY); } catch {} return; }
+      list = list.slice(0, Math.floor(list.length / 2));
+    }
+  }
+}
+
+// slim is a response small enough to keep. The event log is the bulky part
+// and a count says as much as replaying it would.
+function slim(doc) {
+  if (!doc || typeof doc !== "object") return doc;
+  const copy = Object.assign({}, doc);
+  if (Array.isArray(copy.events)) { copy.events = undefined; delete copy.events; }
+  return copy;
+}
+
+/* ================================================================= http == */
+async function api(method, path, body, extra = {}) {
+  const headers = Object.assign({ authorization: "Bearer " + token }, extra.headers || {});
+  if (body !== undefined) headers["content-type"] = "application/json";
+  const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const text = await r.text();
+  let doc = text;
+  try { doc = JSON.parse(text); } catch {}
+  return { ok: r.ok, status: r.status, doc };
+}
+
+function setState(text, kind) {
+  const n = $("#state");
+  n.textContent = text;
+  n.className = "pill" + (kind ? " " + kind : "");
+}
+
+// connect proves the token with the first thing the page needs anyway, so a
+// wrong one says so at once and a right one costs no extra round trip.
+async function connect() {
+  token = $("#token").value.trim();
+  if (!token) return setState("enter a token", "bad");
+  setState("connecting…", "busy");
+  let first;
+  try { first = await refreshAccounts(false); }
+  catch { return setState("unreachable", "bad"); }
+  if (!first.ok) {
+    setState(first.status === 429 ? "blocked" : "rejected", "bad");
+    showResponse(first.doc, first.status);
+    return;
+  }
+  sessionStorage.setItem("rota.token", token);
+  setState("connected", "ok");
+  schema = (await api("GET", "/v1/schema")).doc;
+  $("#ver").textContent = "v" + (schema.version || "?");
+  renderNav(); render();
+}
+
+async function refreshAccounts(force) {
+  const r = await api("GET", "/v1/accounts" + (force ? "?refresh=1" : ""));
+  accounts = (r.doc && r.doc.accounts) || [];
+  // The server sends them in rotation order and names the one it would
+  // pick, so the page never has to work either out for itself.
+  defaultAccount = (r.doc && r.doc.default) || null;
+  return r;
+}
+
+// setRotation writes one account's place in the queue, or the usage at which
+// the queue moves past it.
+async function setRotation(id, patch) {
+  setState("saving…", "busy");
+  const r = await api("PATCH", "/v1/accounts/" + id, patch);
+  showResponse(r.doc, r.status);
+  setState(r.ok ? "saved" : "failed " + r.status, r.ok ? "ok" : "bad");
+  return r.ok;
+}
+
+/* ============================================================ navigation == */
+const VIEWS = [
+  ["ask", "Ask", "1"],
+  ["accounts", "Accounts", "2"],
+  ["running", "Running", "3"],
+  ["signin", "Sign in", "4"],
+  ["console", "Console", "5"],
+];
+function renderNav() {
+  $("#nav").replaceChildren(...VIEWS.map(([id, label, key]) =>
+    el("button", {
+      "aria-current": id === view ? "page" : null,
+      onclick: () => { view = id; renderNav(); render(); },
+    }, [el("span", { text: label }), el("span", { class: "k", text: key })])));
+}
+
+const IO_TABS = [["response", "Response"], ["request", "Request"], ["history", "History"]];
+function renderIONav() {
+  $("#ionav").replaceChildren(...IO_TABS.map(([id, label]) => {
+    const b = el("button", { text: label, role: "tab", "aria-selected": String(id === ioTab),
+      onclick: () => { ioTab = id; renderIONav(); renderIO(); } });
+    if (id === "history") { const n = loadHistory().length; if (n) b.append(el("span", { class: "count", text: n })); }
+    return b;
+  }));
+}
+
+/* ======================================================== the field model == */
+const account = () => accounts.find(a => String(a.id) === String(values.__account));
+
+// providerFields is the vocabulary for whoever will answer. With an account
+// named that is the account's provider; with the rotation chosen it is the
+// provider-neutral set, because which CLI answers is not settled until it
+// does — and a model belonging to one provider would be refused by another.
+const providerFields = () => {
+  const a = account();
+  const p = a && schema.providers[a.provider];
+  return (p && p.fields) || schema.fields || [];
+};
+
+const GROUPS = [
+  ["core", "Essentials", "What most requests set"],
+  ["session", "Session", "Continuing, forking and naming conversations"],
+  ["context", "Context", "Where it runs, and what it may read"],
+  ["permissions", "Permissions", "What it may do without asking"],
+  ["stream", "Output", "What comes back, and how much"],
+];
+
+function setValue(name, v) {
+  if (v === "" || v === undefined || v === null || (Array.isArray(v) && !v.length)) delete values[name];
+  else values[name] = v;
+  if (ioTab === "request") renderIO();
+  renderFoot();
+}
+
+// buildBody turns the form into the exact JSON the server will receive.
+// Keys starting with __ are the page's own bookkeeping and never sent.
+function buildBody() {
+  const body = {};
+  for (const [k, v] of Object.entries(values)) if (!k.startsWith("__")) body[k] = v;
+  if (uploads.length) body.files = uploads;
+  return body;
+}
+
+// matches decides whether a field survives the filter box: its name, label
+// and help are all searched, so "directory" finds add_dirs.
+const matches = f => {
+  if (!filter) return true;
+  const q = filter.toLowerCase();
+  return (f.name + " " + (f.label || "") + " " + (f.help || "")).toLowerCase().includes(q);
+};
+
+/* ====================================================== field rendering === */
+function helpNode(f) { return f.help ? el("p", { class: "help", text: f.help }) : null; }
+
+function renderField(f) {
+  const dangerous = (f.dangerous || []).length > 0;
+  const locked = dangerous && schema && !schema.allow_dangerous;
+  const id = "f_" + f.name;
+
+  if (f.kind === "bool") {
+    const input = el("input", { type: "checkbox", id, checked: !!values[f.name], disabled: locked,
+      onchange: e => setValue(f.name, e.target.checked || "") });
+    return el("div", { class: "toggle" + (dangerous ? " danger" : "") + (locked ? " locked" : "") }, [
+      el("span", { class: "switch" }, [input, el("i", {})]),
+      el("label", { class: "t-text", for: id }, [
+        el("b", { text: f.label || f.name }),
+        f.help ? el("span", { text: f.help }) : null,
+        locked ? el("div", { class: "danger-note", text: "the server was started without --allow-dangerous" }) : null,
+      ]),
+    ]);
+  }
+
+  const label = el("label", { class: "flabel", for: id }, [
+    el("span", { text: f.label || f.name }),
+    el("span", { class: "name", text: f.name }),
+  ]);
+  let control;
+  switch (f.kind) {
+    case "enum": {
+      control = el("select", { class: "ctl", id, disabled: locked,
+        onchange: e => setValue(f.name, e.target.value) });
+      control.append(el("option", { value: "", text: f.default ? `default (${f.default})` : "— not set —" }));
+      for (const v of f.enum || []) {
+        control.append(el("option", { value: v, text: v, selected: values[f.name] === v }));
+      }
+      break;
+    }
+    case "text":
+      control = el("textarea", { class: "ctl", id, rows: f.name === "prompt" ? 6 : 4, spellcheck: "false",
+        placeholder: f.placeholder || "", oninput: e => setValue(f.name, e.target.value) });
+      control.value = values[f.name] || "";
+      break;
+    case "number":
+      control = el("input", { class: "ctl", id, type: "number", placeholder: f.placeholder || "",
+        oninput: e => setValue(f.name, e.target.value === "" ? "" : Number(e.target.value)) });
+      control.value = values[f.name] ?? "";
+      break;
+    case "list":
+      control = chipsInput(f);
+      break;
+    case "map":
+      control = mapInput(f);
+      break;
+    case "json":
+      control = jsonEditor(f);
+      break;
+    case "files":
+      control = filesInput();
+      break;
+    default:
+      control = el("input", { class: "ctl", id, type: "text", placeholder: f.placeholder || "", disabled: locked,
+        oninput: e => setValue(f.name, e.target.value) });
+      control.value = values[f.name] || "";
+  }
+  return el("div", { class: "field" + (dangerous ? " danger" : "") + (locked ? " locked" : "") }, [
+    label, helpNode(f), control,
+    locked ? el("div", { class: "danger-note", text: "the server was started without --allow-dangerous" }) : null,
+  ]);
+}
+
+function chipsInput(f) {
+  const box = el("div", { class: "chips" });
+  const input = el("input", { placeholder: f.placeholder || "type and press Enter" });
+  const draw = () => {
+    box.replaceChildren(...(values[f.name] || []).map((v, i) =>
+      el("span", { class: "chip" }, [el("span", { text: v }),
+        el("button", { type: "button", text: "×", title: "remove", onclick: () => {
+          const next = (values[f.name] || []).slice(); next.splice(i, 1);
+          setValue(f.name, next); draw();
+        } })])), input);
+  };
+  const add = raw => {
+    const parts = raw.split(",").map(s => s.trim()).filter(Boolean);
+    if (!parts.length) return;
+    setValue(f.name, (values[f.name] || []).concat(parts));
+    input.value = ""; draw(); input.focus();
+  };
+  input.addEventListener("keydown", e => {
+    if (e.key === "Enter") { e.preventDefault(); add(input.value); }
+    else if (e.key === "Backspace" && !input.value && (values[f.name] || []).length) {
+      const next = values[f.name].slice(); next.pop(); setValue(f.name, next); draw(); input.focus();
+    }
+  });
+  input.addEventListener("blur", () => add(input.value));
+  draw();
+  return box;
+}
+
+function mapInput(f) {
+  const box = el("div");
+  const draw = () => {
+    const entries = Object.entries(values[f.name] || {});
+    box.replaceChildren(...entries.map(([k, v], i) => el("div", { class: "kv" }, [
+      el("input", { class: "ctl", value: k, placeholder: "key", onchange: e => {
+        const next = {}; entries.forEach(([kk, vv], j) => { next[j === i ? e.target.value : kk] = vv; });
+        setValue(f.name, next); draw();
+      } }),
+      el("input", { class: "ctl", value: v, placeholder: "value", oninput: e => {
+        const next = Object.fromEntries(entries); next[k] = e.target.value; setValue(f.name, next);
+      } }),
+      el("button", { class: "btn", type: "button", text: "×", onclick: () => {
+        const next = Object.fromEntries(entries.filter((_, j) => j !== i)); setValue(f.name, next); draw();
+      } }),
+    ])), el("button", { class: "btn tiny", type: "button", text: "+ add pair", onclick: () => {
+      const next = Object.assign({}, values[f.name] || {}); next[""] = ""; setValue(f.name, next); draw();
+    } }));
+  };
+  draw();
+  return box;
+}
+
+/* --------------------------------------------------- JSON / schema editor */
+const SCHEMA_TYPES = ["string", "number", "integer", "boolean", "array", "object"];
+
+// jsonEditor edits a JSON value two ways: a builder for the common
+// object-with-properties shape, and the raw document for everything else.
+// The builder is what makes a JSON Schema quick to write; the raw view is
+// what keeps every other schema possible.
+function jsonEditor(f) {
+  const isSchema = f.name.endsWith("schema");
+  let mode = isSchema ? "build" : "raw";
+  const host = el("div", { class: "json-ed" });
+
+  const status = el("div", { class: "json-status", text: "" });
+  const area = el("textarea", { spellcheck: "false", placeholder: f.placeholder || "{ }" });
+  area.value = values[f.name] ? JSON.stringify(values[f.name], null, 2) : "";
+
+  const validate = () => {
+    const raw = area.value.trim();
+    if (!raw) { setValue(f.name, ""); status.className = "json-status"; status.textContent = ""; return; }
+    try {
+      setValue(f.name, JSON.parse(raw));
+      status.className = "json-status ok"; status.textContent = "valid JSON";
+    } catch (e) {
+      status.className = "json-status bad"; status.textContent = e.message;
+    }
+  };
+  area.addEventListener("input", validate);
+  area.addEventListener("keydown", e => {
+    if (e.key === "Tab") {
+      e.preventDefault();
+      const s = area.selectionStart;
+      area.setRangeText("  ", s, area.selectionEnd, "end");
+      validate();
+    }
+  });
+
+  const builder = el("div", { style: "padding:10px 11px" });
+  const drawBuilder = () => {
+    const doc = values[f.name] && typeof values[f.name] === "object" ? values[f.name] : { type: "object", properties: {}, required: [] };
+    const props = doc.properties || {};
+    const required = new Set(doc.required || []);
+    const commit = () => {
+      const out = { type: "object", properties: props, required: [...required].filter(k => k in props) };
+      if (!out.required.length) delete out.required;
+      setValue(f.name, out);
+      area.value = JSON.stringify(out, null, 2);
+      status.className = "json-status ok"; status.textContent = "valid JSON";
+      drawBuilder();
+    };
+    const rows = Object.entries(props).map(([name, spec]) => el("div", { class: "sb-row" }, [
+      el("input", { class: "ctl", value: name, placeholder: "field name", onchange: e => {
+        const v = props[name]; delete props[name]; props[e.target.value || "field"] = v;
+        if (required.delete(name)) required.add(e.target.value || "field");
+        commit();
+      } }),
+      (() => {
+        const s = el("select", { class: "ctl", onchange: e => { props[name] = Object.assign({}, props[name], { type: e.target.value }); commit(); } });
+        for (const t of SCHEMA_TYPES) s.append(el("option", { value: t, text: t, selected: (spec || {}).type === t }));
+        return s;
+      })(),
+      el("label", { class: "sb-req" }, [
+        el("input", { type: "checkbox", checked: required.has(name),
+          onchange: e => { e.target.checked ? required.add(name) : required.delete(name); commit(); } }),
+        el("span", { text: "required" }),
+      ]),
+      el("button", { class: "btn tiny", type: "button", text: "×", title: "remove",
+        onclick: () => { delete props[name]; required.delete(name); commit(); } }),
+    ]));
+    builder.replaceChildren(
+      ...(rows.length ? rows : [el("p", { class: "help", text: "No fields yet. Add one to shape the answer." })]),
+      el("button", { class: "btn tiny", type: "button", text: "+ add field", onclick: () => {
+        let n = "field", i = 1;
+        while (n in props) n = "field" + ++i;
+        props[n] = { type: "string" }; commit();
+      } }),
+    );
+  };
+
+  const modeBtns = el("header");
+  const setMode = m => {
+    mode = m;
+    builder.style.display = m === "build" ? "" : "none";
+    area.style.display = m === "raw" ? "" : "none";
+    for (const b of modeBtns.querySelectorAll("[data-mode]")) b.classList.toggle("primary", b.dataset.mode === m);
+    if (m === "build") drawBuilder();
+  };
+  if (isSchema) {
+    modeBtns.append(
+      el("button", { class: "btn tiny", type: "button", "data-mode": "build", text: "Builder", onclick: () => setMode("build") }),
+      el("button", { class: "btn tiny", type: "button", "data-mode": "raw", text: "JSON", onclick: () => setMode("raw") }),
+    );
+  }
+  modeBtns.append(
+    el("span", { class: "grow" }),
+    el("button", { class: "btn tiny", type: "button", text: "Format", onclick: () => {
+      try { area.value = JSON.stringify(JSON.parse(area.value), null, 2); } catch {}
+      validate();
+    } }),
+    el("button", { class: "btn tiny", type: "button", text: "Clear",
+      onclick: () => { area.value = ""; validate(); if (mode === "build") drawBuilder(); } }),
+  );
+
+  host.append(modeBtns, builder, area, status);
+  setMode(mode);
+  validate();
+  return host;
+}
+
+function filesInput() {
+  const box = el("div");
+  const list = el("div", { class: "filelist" });
+  const drop = el("div", { class: "drop", text: "Drop files here, or click to choose" });
+  const picker = el("input", { type: "file", multiple: true, class: "sr" });
+  const draw = () => {
+    list.replaceChildren(...uploads.map((u, i) => el("div", { class: "filerow" }, [
+      el("code", { text: u.path }),
+      el("span", { class: "pill", text: Math.ceil((u.content.length * 3) / 4 / 1024) + " KB" }),
+      el("button", { class: "btn tiny", type: "button", text: "×",
+        onclick: () => { uploads.splice(i, 1); draw(); setValue("__files", uploads.length || ""); } }),
+    ])));
+  };
+  const take = files => {
+    for (const file of files) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        uploads.push({ path: file.name, content: String(reader.result).split(",")[1] || "" });
+        draw(); setValue("__files", uploads.length);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+  drop.addEventListener("click", () => picker.click());
+  drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
+  drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+  drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("over"); take(e.dataTransfer.files); });
+  picker.addEventListener("change", () => take(picker.files));
+  box.append(drop, picker, list);
+  draw();
+  return box;
+}
+
+/* ============================================================ view: Ask == */
+// groupCount is how many values a collapsed group is hiding, so nothing set
+// is ever invisible.
+function groupCount(g) {
+  const names = providerFields().filter(f => f.group === g).map(f => f.name);
+  let n = names.filter(name => values[name] !== undefined && name !== "prompt").length;
+  if (g === "context" && uploads.length) n++;
+  return n;
+}
+
+function viewAsk(panel) {
+  if (!accounts.length) {
+    panel.append(el("div", { class: "empty" }, [
+      el("b", { text: "No accounts yet" }),
+      el("span", { text: "Open Sign in to add one." }),
+    ]));
+    return;
+  }
+  // "" means "let the rotation choose", which is what a run posted to
+  // /v1/run does. It is the first option because it is the usual one.
+  if (values.__account === undefined) values.__account = defaultAccount ? "" : String(accounts[0].id);
+
+  const next = accounts.find(x => x.id === defaultAccount);
+  const pick = el("select", { class: "ctl", id: "account", onchange: e => { values.__account = e.target.value; render(); } });
+  pick.append(el("option", { value: "", selected: values.__account === "",
+    text: next ? `Rotation — next is #${next.id} ${next.provider}` : "Rotation — nothing available" }));
+  for (const a of accounts) {
+    pick.append(el("option", { value: a.id, selected: String(a.id) === values.__account, disabled: a.status === "reauth",
+      text: `#${a.id}  ${a.provider}  ·  ${a.email || a.uuid || "account"}` +
+        (a.order ? `  ·  ${a.order} in rotation` : "  ·  out of rotation") +
+        (a.status === "ok" ? "" : `  (${a.status})`) }));
+  }
+  const a = account();
+  const p = a && schema.providers[a.provider];
+  panel.append(
+    el("label", { class: "flabel", for: "account", text: "Account" }),
+    el("p", { class: "help", text: a
+      ? `${(p && (p.models || []).length) || 0} models · default ${(p && p.defaults.model) || "chosen by the CLI"}${p && p.defaults.effort ? " · effort " + p.defaults.effort : ""}`
+      : "Leave this on Rotation and rota takes the first account still under its threshold. Arrange that queue under Accounts." }),
+    el("div", { class: "target" }, [pick]),
+  );
+
+  // The filter is the answer to a vocabulary this large: nothing is hidden
+  // behind a tab, and anything can be found by name, label or description.
+  // It lives outside the redrawn region, so typing into it never destroys
+  // the box being typed into.
+  const box = el("input", { type: "search", placeholder: "Filter fields…", "aria-label": "Filter fields" });
+  box.value = filter;
+  box.addEventListener("input", e => { filter = e.target.value; drawFields(); });
+  panel.append(el("div", { class: "filter" }, [
+    box,
+    el("button", { class: "x", title: "clear the filter", "aria-label": "clear the filter", text: "×",
+      onclick: () => { filter = ""; box.value = ""; drawFields(); } }),
+  ]));
+
+  fieldsHost = el("div");
+  panel.append(fieldsHost);
+  drawFields();
+}
+
+// drawFields redraws the grouped field list, and only that. Every group's
+// body is rendered whether it is open or not, and openness is a class: the
+// header button then survives being toggled, which is what keeps keyboard
+// focus where the person put it.
+function drawFields() {
+  const host = fieldsHost;
+  if (!host) return;
+  host.replaceChildren();
+  const all = providerFields();
+  let shown = 0;
+  for (const [g, title, sub] of GROUPS) {
+    const fields = all.filter(f => f.group === g && matches(f));
+    if (!fields.length) continue;
+    shown += fields.length;
+    // A filter that matched here opens the group: hiding a hit behind a
+    // collapsed header would make the search look broken.
+    const isOpen = !!filter || open.has(g);
+    const n = groupCount(g);
+    const head = el("button", { class: "head", "aria-expanded": String(isOpen) }, [
+      el("span", { text: title }),
+      el("span", { class: "sub", text: sub }),
+      n ? el("span", { class: "count", text: n }) : null,
+      el("span", { class: "chev", text: "›" }),
+    ]);
+    const section = el("section", { class: "group" + (isOpen ? " open" : "") }, [
+      head, el("div", { class: "body" }, fields.map(renderField)),
+    ]);
+    head.addEventListener("click", () => {
+      const now = !section.classList.contains("open");
+      section.classList.toggle("open", now);
+      head.setAttribute("aria-expanded", String(now));
+      if (now) open.add(g); else open.delete(g);
+    });
+    host.append(section);
+  }
+  if (!shown) {
+    host.append(el("div", { class: "empty" }, [
+      el("b", { text: "Nothing matches" }),
+      el("span", { text: `No field mentions “${filter}”.` }),
+    ]));
+  }
+}
+
+/* ======================================================= view: Accounts == */
+// viewAccounts is the rotation itself, in the order it is spent. The order
+// and the threshold are the two numbers that decide that, so they are
+// editable here rather than merely displayed.
+// viewRunning shows what the CLIs are doing: the ones open right now, and the
+// conversations that could be picked up again.
+//
+// It is asked for when the section is opened rather than kept current.
+// Answering means reading directories that belong to other programs, and none
+// of it changes fast enough to be worth polling; Refresh asks again.
+function viewRunning(panel) {
+  const host = el("div");
+  const fill = doc => {
+    const instances = (doc && doc.instances) || [];
+    const sessions = (doc && doc.sessions) || [];
+    const kids = [el("button", { class: "btn tiny", text: "Refresh", onclick: () => draw() })];
+
+    const running = [el("h4", { text: "Running now" })];
+    if (!instances.length) {
+      running.push(el("p", { class: "help", text: "No vendor CLI or editor has anything open." }));
+    } else {
+      const t = el("table", {}, [el("tr", {}, ["what", "account", "directory", "session", "pid"]
+        .map(h => el("th", { text: h, scope: "col" })))]);
+      for (const i of instances) {
+        t.append(el("tr", {}, [
+          el("td", { text: i.kind === "cli" ? (i.provider || "cli") : i.kind }),
+          el("td", { text: i.account ? "#" + i.account + " " + (i.label || "") : "—" }),
+          el("td", { text: i.dir || "—" }),
+          el("td", { text: i.session ? i.session.slice(0, 8) : "—" }),
+          el("td", { text: i.pid ? String(i.pid) : "" }),
+        ]));
+      }
+      running.push(t);
+    }
+    kids.push(el("div", { class: "sect" }, running));
+
+    const resume = [el("h4", { text: "Could be resumed" })];
+    if (!sessions.length) {
+      resume.push(el("p", { class: "help", text: "No conversation rota can read." }));
+    } else {
+      const t = el("table", {}, [el("tr", {}, ["account", "provider", "session", "directory", ""]
+        .map(h => el("th", { text: h, scope: "col" })))]);
+      for (const x of sessions) {
+        // The whole id, not the eight characters shown: --resume takes all of
+        // it, and a button that copied a prefix would be worse than none.
+        const copy = el("button", { class: "btn tiny", text: "Copy id", title: x.id || "",
+          onclick: () => { try { navigator.clipboard.writeText(x.id); } catch {} } });
+        t.append(el("tr", {}, [
+          el("td", { text: x.account ? "#" + x.account + " " + (x.label || "") : "shared" }),
+          el("td", { text: x.provider || "" }),
+          el("td", { text: (x.id || "").slice(0, 8) }),
+          el("td", { text: x.dir || "—" }),
+          el("td", {}, [copy]),
+        ]));
+      }
+      resume.push(t);
+    }
+    kids.push(el("div", { class: "sect" }, resume));
+
+    if (doc && doc.shared) {
+      kids.push(el("p", { class: "help", text:
+        doc.shared.dir + " holds " + doc.shared.sessions + " conversations across " +
+        doc.shared.projects + " projects, shared by every account with no project of its own, " +
+        "so none of them belongs to one account." }));
+    }
+    for (const n of (doc && doc.notes) || []) {
+      kids.push(el("p", { class: "help", text: n }));
+    }
+    host.replaceChildren(...kids);
+  };
+
+  const draw = async () => {
+    setState("loading…", "busy");
+    const r = await api("GET", "/v1/accounts?sessions=1");
+    setState(r.ok ? "connected" : "failed", r.ok ? "ok" : "bad");
+    showResponse(r.doc, r.status);
+    fill(r.ok ? r.doc : {});
+  };
+
+  fill({});
+  panel.append(host);
+  draw();
+}
+
+function viewAccounts(panel) {
+  const table = el("table");
+  const draw = async force => {
+    setState(force ? "refreshing…" : "loading…", "busy");
+    const r = await refreshAccounts(force);
+    setState(r.ok ? "connected" : "failed", r.ok ? "ok" : "bad");
+    showResponse(r.doc, r.status);
+    fill();
+  };
+  const write = async (id, patch) => { if (await setRotation(id, patch)) await draw(false); else fill(); };
+  const remove = async a => {
+    if (!confirm(`Remove account #${a.id} (${a.email || a.provider})?\n\nIts staged credentials are deleted with it.`)) return;
+    const r = await api("DELETE", "/v1/accounts/" + a.id);
+    showResponse(r.doc, r.status);
+    setState(r.ok ? "removed" : "failed " + r.status, r.ok ? "ok" : "bad");
+    await draw(false);
+  };
+
+  const fill = () => {
+    const queue = accounts.filter(x => x.order > 0);
+    table.replaceChildren(el("tr", {}, ["order", "id", "provider", "account", "project", "usage", "moves on at", "checked", "status", ""]
+      .map(h => el("th", { text: h, scope: "col" }))));
+    for (const a of accounts) {
+      const at = queue.indexOf(a);
+      // The server does the shifting: an arrow says where the account goes
+      // and the neighbour moves with it, in one write.
+      const order = el("td", {}, [el("div", { class: "ordercell" }, [
+        el("button", { class: "mv", text: "▲", title: "one place earlier in the rotation", "aria-label": "move earlier",
+          disabled: at <= 0, onclick: () => write(a.id, { order: "up" }) }),
+        el("button", { class: "mv", text: "▼", title: "one place later in the rotation", "aria-label": "move later",
+          disabled: at < 0 || at >= queue.length - 1, onclick: () => write(a.id, { order: "down" }) }),
+        el("input", { class: "num", type: "number", min: "0", value: String(a.order),
+          "aria-label": "place in the rotation",
+          title: "1 is tried first; the accounts after it move down one. 0 keeps this account out of the rotation",
+          onchange: e => write(a.id, { order: Math.max(0, Number(e.target.value) | 0) }) }),
+      ])]);
+
+      const usage = el("td");
+      for (const w of a.windows || []) {
+        usage.append(el("div", { style: "margin-bottom:5px" }, [
+          el("div", { style: "font-size:12px", text: `${w.name} ${Math.round(w.percent)}%${w.resetIn ? " · resets in " + w.resetIn : ""}` }),
+          el("div", { class: "bar" }, [el("i", { class: w.percent >= a.threshold ? "hot" : "", style: `width:${Math.min(100, w.percent)}%` })]),
+        ]));
+      }
+      if (!(a.windows || []).length) {
+        usage.append(el("span", { class: "help", style: "margin:0", text: a.metered ? "not read yet" : "no usage endpoint" }));
+      }
+
+      const status = el("td", {}, [el("span", { class: "pill " + (a.status === "ok" ? "ok" : "bad"), text: a.status })]);
+      if (a.id === defaultAccount) status.append(el("span", { class: "badge", style: "margin-left:6px", text: "next" }));
+
+      table.append(el("tr", { class: a.order === 0 ? "out" : (a.id === defaultAccount ? "next" : "") }, [
+        order,
+        el("td", { text: "#" + a.id }),
+        el("td", { text: a.provider }),
+        el("td", { text: a.email || a.uuid || "" }),
+        el("td", {}, [
+          el("input", { class: "ctl pathin", value: a.cwd || "", placeholder: "runs anywhere",
+            "aria-label": "working directory for this account",
+            title: "runs on this account start here when the request names no directory",
+            onchange: e => write(a.id, { cwd: e.target.value.trim() }) }),
+          el("input", { class: "ctl pathin", style: "margin-top:4px", value: a.config_dir || "", placeholder: "default config",
+            "aria-label": "configuration directory for this account",
+            title: "this account's own memory, skills and staged credentials — must not be the project directory",
+            onchange: e => write(a.id, { config_dir: e.target.value.trim() }) }),
+        ]),
+        usage,
+        el("td", {}, [el("input", { class: "num", type: "number", min: "1", max: "100", value: String(a.threshold),
+          "aria-label": "usage at which the rotation moves on", disabled: !a.metered,
+          title: a.metered ? "the rotation moves on once this account is this much used"
+                           : "this provider publishes no usage, so there is nothing to threshold",
+          onchange: e => write(a.id, { threshold: Math.max(1, Math.min(100, Number(e.target.value) | 0)) }) })]),
+        el("td", { text: a.metered ? (a.checkedAgo || "never") : "n/a" }),
+        status,
+        el("td", {}, [el("button", { class: "btn tiny ghost", text: "Remove", onclick: () => remove(a) })]),
+      ]));
+    }
+  };
+
+  panel.append(
+    el("p", { class: "help", text: "A run that names no account goes down this list from the top and takes the first one still under its threshold. The queue is a list: giving an account a place moves the ones after it down, and the numbers always read 1, 2, 3. Order 0 keeps an account out of the queue without removing it — it can still be run by id." }),
+    el("p", { class: "help", text: "Project is where an account belongs: the directory its runs start in, and the directory holding its own memory, skills and credentials. Both must be absolute paths, and they must not be the same one — a credential file does not belong in a repository." }),
+    table,
+    el("p", { class: "help", style: "margin-top:12px", text: "Quota readings are cached for five minutes; a running server also refreshes them on its own. Refreshing here asks the provider now." }),
+  );
+  $("#foot").replaceChildren(el("button", { class: "btn primary", text: "Refresh limits", onclick: () => draw(true) }));
+  draw(false);
+}
+
+/* ========================================================= view: Sign in == */
+function viewSignIn(panel) {
+  const provider = el("select", { class: "ctl", id: "provider" });
+  for (const name of Object.keys(schema.providers || {})) provider.append(el("option", { value: name, text: name }));
+  const idIn = el("input", { class: "ctl", id: "loginid", placeholder: "login id" });
+  const codeIn = el("input", { class: "ctl", id: "logincode", placeholder: "code, key, or the whole redirect URL" });
+  const hint = el("p", { class: "help", text: "" });
+
+  panel.append(
+    el("section", { class: "step" }, [
+      el("h3", {}, [el("i", { text: "1" }), el("span", { text: "Start a login" })]),
+      el("p", { class: "help", text: "Opens the provider's approval page in a new tab. For a second account of the same provider use a private window, or the browser will reuse the session you are already signed into." }),
+      provider,
+      el("div", { style: "margin-top:9px" }, [el("button", { class: "btn", text: "Start login", onclick: async () => {
+        const r = await api("POST", "/v1/login", { provider: provider.value });
+        showResponse(r.doc, r.status);
+        setState(r.ok ? "login started" : "failed", r.ok ? "ok" : "bad");
+        if (!r.ok) return;
+        idIn.value = r.doc.id;
+        hint.textContent = r.doc.delegated
+          ? "This provider can also register an account with no credential at all: leave the code empty, and rota prints one command that signs it in itself."
+          : "";
+        if (r.doc.url) window.open(r.doc.url, "_blank", "noopener");
+      } })]),
+    ]),
+    el("section", { class: "step" }, [
+      el("h3", {}, [el("i", { text: "2" }), el("span", { text: "Finish it" })]),
+      el("p", { class: "help", text: "Paste what the page gave you — a code, an API key, or the whole redirect URL. A device login needs no code at all: approve in the browser, then press finish." }),
+      hint,
+      idIn, el("div", { style: "height:8px" }), codeIn,
+      el("div", { style: "margin-top:9px" }, [el("button", { class: "btn primary", text: "Finish login", onclick: async () => {
+        const r = await api("POST", "/v1/login/" + encodeURIComponent(idIn.value.trim()), { code: codeIn.value.trim() });
+        showResponse(r.doc, r.status);
+        setState(r.ok ? (r.doc.status || "ok") : "failed", r.ok ? "ok" : "bad");
+        if (r.ok && r.doc.loginCommand) {
+          hint.textContent = "Account added. rota holds no credential for it — run this once: " + r.doc.loginCommand;
+        }
+        await refreshAccounts(false);
+      } })]),
+    ]),
+  );
+}
+
+/* ========================================================= view: Console == */
+function viewConsole(panel) {
+  const method = el("select", { class: "ctl", id: "method" });
+  for (const m of ["GET", "POST", "PATCH", "DELETE"]) method.append(el("option", { value: m, text: m }));
+  const path = el("input", { class: "ctl", id: "path", value: "/v1/accounts" });
+  const body = el("textarea", { class: "ctl", id: "rawbody", rows: 10, placeholder: '{"prompt": "hi"}', spellcheck: "false" });
+  panel.append(
+    el("p", { class: "help", text: "Every endpoint is reachable here, including any the other sections do not cover." }),
+    el("div", { class: "row2" }, [
+      el("div", { class: "field" }, [el("label", { class: "flabel", for: "method", text: "Method" }), method]),
+      el("div", { class: "field" }, [el("label", { class: "flabel", for: "path", text: "Path" }), path]),
+    ]),
+    el("div", { class: "field" }, [el("label", { class: "flabel", for: "rawbody", text: "Body" }), body]),
+  );
+  $("#foot").replaceChildren(el("button", { class: "btn primary", text: "Send", onclick: async () => {
+    let payload;
+    if (body.value.trim()) {
+      try { payload = JSON.parse(body.value); }
+      catch (e) { setState("bad JSON", "bad"); showResponse({ error: String(e) }, 0); return; }
+    }
+    const r = await api(method.value, path.value.trim(), payload);
+    showResponse(r.doc, r.status);
+    setState(r.ok ? "ok " + r.status : "failed " + r.status, r.ok ? "ok" : "bad");
+  } }));
+}
+
+/* ============================================================== running == */
+// runPath is where a run is posted: at an account when one is named, at the
+// rotation when none is.
+const runPath = id => (id ? `/v1/accounts/${id}/run` : "/v1/run");
+
+async function doRun() {
+  const body = buildBody();
+  if (!body.prompt) {
+    open.add("core"); filter = ""; renderPanel();
+    setState("a prompt is required", "bad");
+    return;
+  }
+  const id = values.__account;
+  const btn = $("#foot .primary");
+  if (btn) btn.disabled = true;
+  selected = null; // a new run is what the panes should be showing now
+  ioTab = "response"; renderIONav();
+  const started = Date.now();
+  lastEvents = []; lastResponse = null; lastAnswer = ""; streaming = !!body.stream;
+  try {
+    if (body.stream) await runStream(id, body, started);
+    else {
+      const r = await api("POST", runPath(id), body);
+      lastResponse = { status: r.status, ok: r.ok, doc: r.doc };
+      // The rotation's choice is only known once it has answered.
+      remember({ account: (r.doc && r.doc.account) || id, endpoint: runPath(id),
+        ok: r.ok, status: r.status, took: Date.now() - started, body, doc: r.doc });
+      setState(r.ok ? "done" : "failed " + r.status, r.ok ? "ok" : "bad");
+    }
+  } catch (e) {
+    lastResponse = { status: 0, ok: false, doc: { error: String(e) } };
+    setState("network error", "bad");
+  } finally {
+    if (btn) btn.disabled = false;
+    renderIO(); renderIONav();
+  }
+}
+
+// runStream reads Server-Sent Events by hand: EventSource can send neither a
+// POST body nor an Authorization header.
+async function runStream(id, body, started) {
+  const r = await fetch(runPath(id), {
+    method: "POST",
+    headers: { authorization: "Bearer " + token, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok && !String(r.headers.get("content-type")).includes("event-stream")) {
+    const doc = await r.json().catch(() => ({}));
+    lastResponse = { status: r.status, ok: false, doc };
+    remember({ account: id, endpoint: runPath(id), ok: false, status: r.status,
+      took: Date.now() - started, body, doc });
+    setState("failed " + r.status, "bad");
+    return;
+  }
+  setState("streaming…", "busy");
+  const reader = r.body.getReader(), dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const chunks = buf.split("\n\n"); buf = chunks.pop();
+    for (const chunk of chunks) {
+      let name = "message", data = "";
+      for (const line of chunk.split("\n")) {
+        if (line.startsWith("event: ")) name = line.slice(7);
+        else if (line.startsWith("data: ")) data += line.slice(6);
+      }
+      if (!data) continue;
+      let doc = data;
+      try { doc = JSON.parse(data); } catch {}
+      lastEvents.push({ name, doc });
+      // The answer arrives mid-stream; the terminal event only says how the
+      // run ended, so keep it here or it would be buried in the log.
+      if (doc && typeof doc === "object") {
+        if (typeof doc.result === "string" && doc.result) lastAnswer = doc.result;
+        else if (doc.item && doc.item.type === "agent_message" && doc.item.text) lastAnswer = doc.item.text;
+      }
+      if (name === "done" || name === "error") {
+        lastResponse = { status: r.status, ok: name === "done" && !doc.is_error, doc };
+        remember({ account: doc.account || id, endpoint: runPath(id), ok: name === "done",
+          status: r.status, took: Date.now() - started, body, events: lastEvents.length,
+          doc: Object.assign({ result: lastAnswer }, doc) });
+        setState(name === "done" ? "done" : "failed", name === "done" ? "ok" : "bad");
+      }
+      if (ioTab === "response") renderIO();
+    }
+  }
+}
+
+/* ============================================================== history == */
+// remember keeps the whole exchange, not a summary of it: the body that was
+// sent, the endpoint it went to and the response that came back. Reading an
+// earlier run is the point of keeping them, and a truncated preview cannot
+// answer "what did I actually send".
+function remember(e) {
+  const a = accounts.find(x => String(x.id) === String(e.account));
+  const h = loadHistory();
+  h.unshift({
+    at: Date.now(),
+    account: Number(e.account) || 0,
+    provider: a ? a.provider : "",
+    endpoint: e.endpoint,
+    ok: e.ok, status: e.status, took: e.took,
+    prompt: String(e.body.prompt || "").slice(0, 300),
+    model: e.body.model || "",
+    body: e.body,
+    res: slim(e.doc),
+    // Buffered runs can carry an event log too, and slim drops it; count it
+    // here or the pane would not say it existed.
+    events: e.events || (e.doc && Array.isArray(e.doc.events) ? e.doc.events.length : 0),
+    answer: String((e.doc && (e.doc.result || e.doc.error)) || "").slice(0, 400),
+  });
+  saveHistory(h);
+  renderIONav();
+}
+
+function restore(item) {
+  values = Object.assign({}, item.body, { __account: item.account ? String(item.account) : "" });
+  uploads = [];
+  selected = null; // the form now holds it, so the live request is the truth
+  view = "ask"; open.add("core"); filter = "";
+  renderNav(); render();
+  setState("loaded from history", "ok");
+}
+
+// look opens a past run in the output panes. It starts on Request because
+// that is the question history is usually asked: what did that one send?
+function look(item) {
+  selected = item;
+  ioTab = "request";
+  renderIONav(); renderIO();
+}
+
+function renderHistory(host) {
+  const h = loadHistory();
+  if (!h.length) {
+    host.append(el("div", { class: "empty" }, [
+      el("b", { text: "No runs yet" }),
+      el("span", { text: "Every run is kept here, in this browser only." }),
+    ]));
+    return;
+  }
+  host.append(el("div", { class: "hist" }, h.map(item => el("div", { class: "hist-item" + (item === selected ? " on" : "") }, [
+    el("div", { class: "hist-top" }, [
+      el("span", { class: "pill " + (item.ok ? "ok" : "bad"), text: item.ok ? "ok" : "failed " + item.status }),
+      el("span", { text: `#${item.account} ${item.provider}` }),
+      item.model ? el("span", { text: item.model }) : null,
+      item.events ? el("span", { text: item.events + " events" }) : null,
+      el("span", { class: "grow" }),
+      el("span", { text: new Date(item.at).toLocaleTimeString() }),
+      el("span", { text: ms(item.took) }),
+    ]),
+    el("div", { class: "hist-prompt", text: item.prompt || "(no prompt)" }),
+    item.answer ? el("div", { class: "help", style: "margin:4px 0 0", text: item.answer.slice(0, 160) }) : null,
+    el("div", { class: "hist-actions" }, [
+      el("button", { class: "btn tiny", text: "View", title: "show this run's request and response",
+        onclick: () => look(item) }),
+      el("button", { class: "btn tiny", text: "Load", title: "put this request back into the form",
+        onclick: () => restore(item) }),
+      el("button", { class: "btn tiny", text: "Copy JSON",
+        onclick: () => navigator.clipboard.writeText(JSON.stringify(item.body, null, 2)) }),
+    ]),
+  ]))));
+  host.append(el("div", { style: "margin-top:12px" }, [
+    el("button", { class: "btn tiny ghost", text: "Clear history",
+      onclick: () => { saveHistory([]); renderIO(); renderIONav(); } }),
+  ]));
+}
+
+/* =============================================================== output == */
+function showResponse(doc, status, note) {
+  lastResponse = { status, ok: status >= 200 && status < 300, doc, note };
+  lastEvents = []; lastAnswer = "";
+  selected = null; // something just happened; that is what to show
+  ioTab = "response"; renderIONav(); renderIO();
+}
+
+// pastBanner marks the panes as showing something that already happened, and
+// offers the way back. Without it a stored request is indistinguishable from
+// the one about to be sent, which is worse than not showing it at all.
+function pastBanner(item) {
+  return el("div", { class: "banner" }, [
+    el("span", { class: "pill " + (item.ok ? "ok" : "bad"), text: item.ok ? "ok" : "failed " + item.status }),
+    el("span", { text: `from history · ${new Date(item.at).toLocaleTimeString()} · #${item.account} ${item.provider}` }),
+    el("span", { class: "grow" }),
+    el("button", { class: "btn tiny", text: "Show the live request",
+      onclick: () => { selected = null; renderIO(); } }),
+  ]);
+}
+
+// renderPast shows one stored run: exactly what was sent, and exactly what
+// came back.
+function renderPast(host, item) {
+  host.append(pastBanner(item));
+  if (ioTab === "request") {
+    host.append(
+      el("div", { class: "sect" }, [
+        el("h4", { text: "Endpoint" }),
+        el("pre", { class: "code", text: "POST " + (item.endpoint || `/v1/accounts/${item.account}/run`) }),
+      ]),
+      el("div", { class: "sect" }, [el("h4", { text: "Body" }), codeBlock(item.body || {})]),
+    );
+    return;
+  }
+  const doc = item.res;
+  const answer = (doc && doc.result) || item.answer || "";
+  if (answer) host.append(el("div", { class: "answer" }, [el("h4", { text: "Answer" }), el("div", { text: answer })]));
+  const meta = el("div", { class: "meta" }, [
+    el("span", { class: "pill " + (item.ok ? "ok" : "bad"), text: "HTTP " + item.status }),
+    el("span", { class: "pill", text: "took " + ms(item.took) }),
+    item.events ? el("span", { class: "pill", text: item.events + " events" }) : null,
+  ]);
+  host.append(meta);
+  host.append(el("div", { class: "sect" }, [
+    el("h4", { text: "Response" }),
+    doc ? codeBlock(doc) : el("p", { class: "help", text: "This run was recorded before responses were kept." }),
+  ]));
+  if (item.events) {
+    host.append(el("p", { class: "help", text: `The ${item.events} events this run produced are not kept: an event log can be very large, and a stored copy of one would be the biggest thing in this browser.` }));
+  }
+}
+
+function renderIO() {
+  const host = $("#io");
+  host.replaceChildren();
+  if (ioTab === "history") { renderHistory(host); return; }
+  if (selected) { renderPast(host, selected); return; }
+  if (ioTab === "request") {
+    const id = values.__account;
+    host.append(
+      el("div", { class: "sect" }, [
+        el("h4", { text: "Endpoint" }),
+        // Plain text, not codeBlock: a path is not JSON, and colouring its
+        // digits as numbers would be a lie about what it is.
+        el("pre", { class: "code", text: `POST ${runPath(id)}` }),
+      ]),
+      el("div", { class: "sect" }, [
+        el("h4", { text: "Body" }),
+        codeBlock(buildBody()),
+      ]),
+    );
+    return;
+  }
+
+  // Response.
+  if (!lastResponse && !lastEvents.length) {
+    host.append(el("div", { class: "empty" }, [
+      el("b", { text: "Nothing yet" }),
+      el("span", { text: "Run something, and the answer appears here." }),
+    ]));
+    return;
+  }
+  const doc = lastResponse ? lastResponse.doc : null;
+  const answer = lastAnswer || (doc && typeof doc === "object" && doc.result) || "";
+  if (answer) {
+    host.append(el("div", { class: "answer" }, [el("h4", { text: "Answer" }), el("div", { text: answer })]));
+  }
+  if (doc && typeof doc === "object") {
+    const meta = el("div", { class: "meta" });
+    const add = (label, v) => { if (v !== undefined && v !== null && v !== "") meta.append(el("span", { class: "pill", text: `${label} ${v}` })); };
+    if (lastResponse) meta.append(el("span", { class: "pill " + (lastResponse.ok ? "ok" : "bad"), text: "HTTP " + lastResponse.status }));
+    add("account", doc.account);
+    add("provider", doc.provider);
+    add("model", doc.model);
+    add("effort", doc.effort);
+    add("exit", doc.exit_code);
+    if (doc.cost_usd) add("cost", "$" + Number(doc.cost_usd).toFixed(4));
+    if (doc.duration_ms) add("took", ms(doc.duration_ms));
+    add("session", doc.session_id);
+    if (meta.children.length) host.append(meta);
+    if (doc.error) host.append(el("div", { class: "sect" }, [el("h4", { text: "Error" }), codeBlock(doc)]));
+    const shown = answerSection(doc);
+    if (shown) host.append(shown);
+    const asked = askSection(doc);
+    if (asked) host.append(asked);
+  }
+  if (lastEvents.length) {
+    host.append(el("div", { class: "sect" }, [
+      el("h4", { text: `${lastEvents.length} events` }),
+      ...lastEvents.map(ev => el("div", { class: "ev " + ev.name }, [
+        el("div", { class: "ev-name", text: ev.name }),
+        codeBlock(ev.doc),
+      ])),
+    ]));
+  } else if (doc) {
+    host.append(el("div", { class: "sect" }, [el("h4", { text: "Response" }), codeBlock(doc)]));
+  }
+}
+
+/* ================================================================ shell == */
+// answerSection shows the reply the way it was written: prose as prose,
+// code as code. rota already split it, so the page does not have to know
+// what markdown is either.
+function answerSection(doc) {
+  if (!doc || !(doc.blocks || []).length) return null;
+  return el("div", { class: "sect" }, [
+    el("h4", { text: "Answer" }),
+    el("div", { class: "answer" }, doc.blocks.map(b => b.kind === "code"
+      ? el("pre", { class: "code", text: b.text })
+      : el("p", { text: b.text }))),
+  ]);
+}
+
+// askSection shows a run that ended by asking something. The choices are
+// shown but not clickable: a headless run has already exited, and there is
+// nowhere to send an answer except a new run.
+function askSection(doc) {
+  if (!doc || !doc.ask) return null;
+  const ask = doc.ask;
+  const kids = [el("h4", { text: "It ended by asking" }), el("p", { class: "asked", text: ask.question })];
+  if ((ask.options || []).length) {
+    kids.push(el("ul", { class: "opts" }, ask.options.map(o => el("li", {}, [
+      el("input", { type: ask.multiple ? "checkbox" : "radio", name: "ask-opt", disabled: true }),
+      el("span", { text: o }),
+    ]))));
+    if (ask.multiple) kids.push(el("p", { class: "help", text: "Written as a task list, so more than one may be taken." }));
+  }
+  kids.push(el("p", { class: "help", text: "Read from the wording of the answer, not sent by the CLI — a headless run has no structured question, and no way to be answered in place. Reply by running again with resume." }));
+  return el("div", { class: "sect asking" }, kids);
+}
+
+// renderFoot is separate from render because the footer changes on every
+// keystroke — the target account, whether the run will stream — and
+// rebuilding the whole form for that would lose focus mid-word.
+function renderFoot() {
+  if (view !== "ask") return;
+  const who = accounts.find(x => String(x.id) === (values.__account || String(defaultAccount)));
+  $("#foot").replaceChildren(
+    el("button", { class: "btn primary", text: "▶  Run", onclick: doRun }),
+    el("span", { class: "pill", text: values.stream ? "streaming" : "buffered" }),
+    el("span", { class: "pill", title: values.__account ? "the account you named" : "the rotation's current choice",
+      text: who ? `→ #${who.id} ${who.provider}${who.metered ? "  " + Math.round(who.percent) + "%" : ""}` : "no account available" }),
+    el("span", { class: "grow" }),
+    el("span", { class: "help", style: "margin:0", text: "⌘/Ctrl + Enter" }),
+  );
+}
+
+// renderPanel redraws the main column only. render also redraws the footer
+// and the output, which is what a change of section needs.
+function renderPanel() {
+  const panel = $("#panel");
+  panel.replaceChildren();
+  if (!schema) {
+    panel.append(el("div", { class: "empty" }, [
+      el("b", { text: "Not connected" }),
+      el("span", { text: "Enter the token this server was started with, then press Connect." }),
+    ]));
+    return;
+  }
+  ({ ask: viewAsk, accounts: viewAccounts, running: viewRunning, signin: viewSignIn, console: viewConsole }[view] || viewAsk)(panel);
+}
+
+function render() {
+  $("#foot").replaceChildren();
+  renderPanel();
+  renderFoot();
+  renderIO();
+}
+
+/* ================================================================= boot == */
+const THEME_KEY = "rota.theme";
+function applyTheme(t) {
+  try { localStorage.setItem(THEME_KEY, t); } catch {}
+  const root = document.documentElement;
+  if (!root) return;
+  if (t === "system") root.removeAttribute("data-theme");
+  else root.setAttribute("data-theme", t);
+}
+function cycleTheme() {
+  let now = "system";
+  try { now = localStorage.getItem(THEME_KEY) || "system"; } catch {}
+  applyTheme({ system: "light", light: "dark", dark: "system" }[now]);
+}
+try { applyTheme(localStorage.getItem(THEME_KEY) || "system"); } catch {}
+
+$("#connect").addEventListener("click", connect);
+$("#theme").addEventListener("click", cycleTheme);
+$("#token").addEventListener("keydown", e => { if (e.key === "Enter") connect(); });
+document.addEventListener("keydown", e => {
+  if (!schema) return;
+  if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && view === "ask") { e.preventDefault(); doRun(); return; }
+  // Bare digits jump between sections, but not while something is being
+  // typed into — a "2" belongs in the field, not in the navigation.
+  const tag = e.target && e.target.tagName;
+  if (e.metaKey || e.ctrlKey || e.altKey || tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  const hit = VIEWS.find(v => v[2] === e.key);
+  if (hit) { view = hit[0]; renderNav(); render(); }
+});
+
+$("#token").value = token;
+renderNav();
+renderIONav();
+render();
+if (token) connect();
+</script>

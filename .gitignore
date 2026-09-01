@@ -1,0 +1,33 @@
+# Built binaries. `go build -o rota ./cmd/rota` is one command; a 7 MB
+# artifact in history is for ever.
+/rota
+/rota.exe
+/cmd/rota/rota
+
+# Test and coverage output.
+*.test
+*.out
+coverage.*
+
+# Credential files, defensively.
+#
+# None of these belong in the repository — rota keeps them under ~/.rota —
+# but a bug or a stray test run can drop one into the working directory, and
+# that is exactly the mistake worth making impossible rather than unlikely.
+auth.json
+accounts.json
+pending.json
+credentials/
+kimi-code.json
+*.pem
+*.key
+*.crt
+
+# Editors and platforms.
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Release artifacts built by scripts/release.sh.
+/dist/
