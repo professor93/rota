@@ -1020,9 +1020,15 @@ func (c *cli) set(args []string) error {
 	if len(args) == 0 {
 		return usageError(setUsage)
 	}
-	id, err := parseID(args[0])
-	if err != nil {
-		return err
+	// The flags may be asked for before an account is named, as every
+	// other command allows; "-h" is a question, not an id.
+	var id int
+	var err error
+	if args[0] != "-h" && args[0] != "--help" {
+		if id, err = parseID(args[0]); err != nil {
+			return err
+		}
+		args = args[1:]
 	}
 	fs := flag.NewFlagSet("set", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -1034,7 +1040,7 @@ func (c *cli) set(args []string) error {
 		config    = fs.String("config", "", "this account's own CLI configuration and credentials")
 		clear     = fs.Bool("clear", false, "forget cwd and config, so the account goes back to the defaults")
 	)
-	if _, err := parseFlags(fs, args[1:]); err != nil {
+	if _, err := parseFlags(fs, args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fmt.Fprint(c.out, setUsage)
 			fs.SetOutput(c.out)

@@ -34,6 +34,17 @@ func TestBareRotaIsShortAndHelpIsFull(t *testing.T) {
 	}
 }
 
+// `rota set -h` asks for the flags before naming an account, as the banner
+// promises for every command; it must not be read as an account id.
+func TestSetHelpNeedsNoID(t *testing.T) {
+	for _, flag := range []string{"-h", "--help"} {
+		out, errOut, code := call(t, "set", flag)
+		if code != 0 || !strings.Contains(out, "usage: rota set") {
+			t.Fatalf("set %s: code %d out %q err %q", flag, code, out, errOut)
+		}
+	}
+}
+
 // Every everyday run flag has a one-letter form.
 func TestRunFlagsHaveShortForms(t *testing.T) {
 	dir := t.TempDir()
