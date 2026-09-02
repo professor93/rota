@@ -32,7 +32,9 @@ func TestKimiAcceptsWhatRotaBuilds(t *testing.T) {
 		{Prompt: "hi", Model: "k2", PermissionMode: "plan", Agent: "reviewer", Continue: true},
 		{Prompt: "hi", PermissionMode: "auto", Resume: "s-1"},
 	} {
-		argv, err := spec.argv("kimi", nil)
+		// The auto mode is gated like every other permission bypass; the
+		// contract being checked is the CLI's flag parser, so allow it.
+		argv, err := spec.argv("kimi", &Limits{AllowDangerous: true})
 		if err != nil {
 			t.Fatalf("%+v: %v", spec, err)
 		}
