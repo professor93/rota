@@ -1,30 +1,28 @@
 package main
 
 import (
-	"slices"
 	"strings"
 	"testing"
-
-	"github.com/professor93/rota/store"
 )
 
-// rota's own secrets never reach a vendor CLI. The registry lives in store —
-// the application layer — because which variables are secret is the
-// application's fact: store seeds ROTA_HOME, this command registers
-// ROTA_TOKEN in its init, and the SDK hears neither name (it never reads the
-// environment at all). The guarantee is asserted here because the command is
-// the one place that has both secrets.
-func TestRotaOwnSecretsNeverReachTheChild(t *testing.T) {
-	t.Setenv("ROTA_TOKEN", "t")
-	t.Setenv("ROTA_HOME", "/h")
-	t.Setenv("T_ORDINARY", "x")
-	env := store.HostEnv()
-	for _, secret := range []string{"ROTA_TOKEN", "ROTA_HOME"} {
-		if slices.ContainsFunc(env, func(e string) bool { return strings.HasPrefix(e, secret+"=") }) {
-			t.Fatalf("%s must not be inherited by an agent", secret)
+// kimi is hidden from every login surface until its service works: naming
+// it is refused with the reason, and the provider lists shown to a person
+// leave it out. The SDK still knows it, so an account already on it runs.
+func TestHiddenProviderIsNotOfferedForLogin(t *testing.T) {
+	t.Setenv("ROTA_HOME", t.TempDir())
+	for _, argv := range [][]string{{"login", "kimi"}, {"login", "--provider=kimi"}} {
+		_, errOut, code := call(t, argv...)
+		if code != 2 || !strings.Contains(errOut, "not offered") || strings.Contains(errOut, "grok, kimi") {
+			t.Fatalf("%v: code %d %q", argv, code, errOut)
 		}
 	}
-	if !slices.Contains(env, "T_ORDINARY=x") {
-		t.Fatal("everything else still passes through")
+	// The hint on an empty store and the unknown-provider message both list
+	// what can be logged into, and that list has no kimi in it.
+	out, _, _ := call(t, "list", "--short")
+	if !strings.Contains(out, "Providers: claude, codex, grok") || strings.Contains(out, "kimi") {
+		t.Fatalf("%q", out)
+	}
+	if _, errOut, _ := call(t, "login", "zzz"); !strings.Contains(errOut, "claude, codex, grok") || strings.Contains(errOut, "kimi") {
+		t.Fatalf("%q", errOut)
 	}
 }

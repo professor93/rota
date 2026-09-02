@@ -376,6 +376,7 @@ func (s *Server) schema(w http.ResponseWriter, _ *http.Request) {
 			"defaults": map[string]any{"model": dm, "effort": de},
 			"metered":  rota.Metered(name),
 			"fields":   wire.Fields(name),
+			"hidden":   wire.Hidden(name),
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -598,6 +599,10 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	// An empty body is fine: it means the default provider.
 	_ = decodeJSON(r, &body)
+	if wire.Hidden(body.Provider) {
+		fail(w, http.StatusBadRequest, body.Provider+" is not offered for login yet")
+		return
+	}
 	st, ok := s.open(w)
 	if !ok {
 		return

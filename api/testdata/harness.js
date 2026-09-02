@@ -372,6 +372,10 @@ const settle = () => new Promise(r => setTimeout(r, 5));
   // every view, account and group must render without throwing
   let passes = 0;
   for (const v of ['ask', 'accounts', 'running', 'signin', 'console']) { pg.view = v; pg.render(); passes++; }
+  // 16. a hidden provider is not offered for sign-in, and the rest are
+  pg.view = 'signin'; pg.render();
+  const offered = findAll(nodes['#panel'], e => e.tagName === 'OPTION').map(o => o.attrs.value);
+  assert(offered.includes('claude') && !offered.includes('kimi'), 'sign-in offers the visible providers only: ' + offered.join(','));
   pg.view = 'ask';
   for (const acct of accountsDoc.accounts) {
     pg.values.__account = String(acct.id);

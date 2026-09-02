@@ -285,6 +285,9 @@ func (c *cli) login(args []string) error {
 	// A provider name is taken out first because it can also be written
 	// --provider=x, and because naming one always means "start a new one".
 	name, rest := takeProvider(args)
+	if wire.Hidden(name) {
+		return usageErr("%s is not offered for login yet; providers: %s", name, strings.Join(wire.LoginProviders(), ", "))
+	}
 	if name != "" || len(rest) == 0 {
 		if rest, _, err := splitFlags(rest); err != nil {
 			return err
@@ -330,7 +333,7 @@ func (c *cli) login(args []string) error {
 		return fmt.Errorf("%w; see `rota list`", rota.WrapNoAccount(id))
 	}
 	return fmt.Errorf("%q is not a known provider, account id or login id; providers: %s",
-		rest[0], strings.Join(rota.Providers(), ", "))
+		rest[0], strings.Join(wire.LoginProviders(), ", "))
 }
 
 const loginUsage = `usage: rota login [provider]             start a new account there
@@ -449,7 +452,7 @@ func (c *cli) list(args []string) error {
 		if filter != "" {
 			fmt.Fprintf(c.out, "No %s accounts. Run `rota login %s`.\n", filter, filter)
 		} else {
-			fmt.Fprintf(c.out, "No accounts yet. Run `rota login [provider]`.\nProviders: %s\n", strings.Join(rota.Providers(), ", "))
+			fmt.Fprintf(c.out, "No accounts yet. Run `rota login [provider]`.\nProviders: %s\n", strings.Join(wire.LoginProviders(), ", "))
 		}
 		return nil
 	}

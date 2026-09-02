@@ -1,6 +1,6 @@
 # rota
 
-Run several AI coding CLIs — **claude**, **codex**, **grok**, **kimi** —
+Run several AI coding CLIs — **claude**, **codex**, **grok** —
 across several accounts, without ever switching the account you are logged
 into.
 
@@ -33,7 +33,7 @@ go install github.com/professor93/rota/cmd/rota@latest
 
 ```sh
 rota login                     # sign a Claude account in (prints a URL)
-rota login codex               # ...or another provider: codex, grok, kimi
+rota login codex               # ...or another provider: codex, grok
 rota login <login-id> <code>   # finish with the code from the browser
 rota list                      # every account, in rotation order, with usage
 

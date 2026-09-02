@@ -1085,7 +1085,10 @@ function viewAccounts(panel) {
 /* ========================================================= view: Sign in == */
 function viewSignIn(panel) {
   const provider = el("select", { class: "ctl", id: "provider" });
-  for (const name of Object.keys(schema.providers || {})) provider.append(el("option", { value: name, text: name }));
+  for (const [name, p] of Object.entries(schema.providers || {})) {
+    if (p.hidden) continue;
+    provider.append(el("option", { value: name, text: name }));
+  }
   const idIn = el("input", { class: "ctl", id: "loginid", placeholder: "login id" });
   const codeIn = el("input", { class: "ctl", id: "logincode", placeholder: "code, key, or the whole redirect URL" });
   const hint = el("p", { class: "help", text: "" });

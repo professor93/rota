@@ -66,6 +66,26 @@ type Window struct {
 	Primary  bool    `json:"primary,omitzero"`
 }
 
+// hidden names the providers no login surface offers. The SDK still carries
+// them and an account already on one still runs; what is withheld is the
+// invitation. kimi is here while its service refuses this build's logins.
+var hidden = map[string]bool{"kimi": true}
+
+// Hidden reports whether a provider is withheld from login.
+func Hidden(provider string) bool { return hidden[provider] }
+
+// LoginProviders is what a person may log into: every registered provider
+// that is not hidden, sorted.
+func LoginProviders() []string {
+	var out []string
+	for _, name := range rota.Providers() {
+		if !hidden[name] {
+			out = append(out, name)
+		}
+	}
+	return out
+}
+
 // Describe renders an account for display. It does no network calls.
 func Describe(a *rota.Account) Account {
 	v := Account{ID: a.ID, Provider: a.Provider, Email: a.Email, UUID: a.UUID, Status: a.Status(),
@@ -232,4 +252,4 @@ func Countdown(w rota.When) string {
 // Version is the applications' release number — the command and the
 // server, which share it. The SDK underneath carries its own (rota.Version);
 // the two move independently now that lib is a module anyone can take.
-const Version = "1.0.2"
+const Version = "1.0.3"
