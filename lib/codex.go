@@ -227,7 +227,7 @@ func adoptCodexFS(a *Account, fsys fs.FS) {
 // Models are what this Codex CLI actually offers; the list is its own,
 // printed by `codex debug models`, in the order its picker uses. The hidden
 // entries are accepted but not advertised, so they are not listed here.
-func (codexProvider) Models() []Model { return append([]Model(nil), codexModels...) }
+func (codexProvider) Models() []Model { return copyModels(codexModels) }
 
 // codexModels is built once. Models is called several times per run — by the
 // command line, by the request check, by the form description — and

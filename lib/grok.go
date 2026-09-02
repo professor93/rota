@@ -126,7 +126,7 @@ func (grokProvider) SignedIn(a *Account, home string) error {
 // CatalogIsFloor says exactly that, so an id beyond the list passes through.
 func (grokProvider) CatalogIsFloor() bool { return true }
 
-func (grokProvider) Models() []Model { return append([]Model(nil), grokModels...) }
+func (grokProvider) Models() []Model { return copyModels(grokModels) }
 
 // grokModels is built once. Models is called several times per run — by the
 // command line, by the request check, by the form description — and

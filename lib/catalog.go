@@ -65,6 +65,17 @@ func catalogOf(provider string) Catalog {
 	return c
 }
 
+// copyModels hands a catalog out as the caller's own, alias slices included,
+// so nothing written into it reaches the next caller.
+func copyModels(src []Model) []Model {
+	out := make([]Model, len(src))
+	for i, m := range src {
+		out[i] = m
+		out[i].Aliases = append([]string(nil), m.Aliases...)
+	}
+	return out
+}
+
 // Models lists a provider's models, or nil when it publishes none.
 func Models(provider string) []Model {
 	if c := catalogOf(provider); c != nil {

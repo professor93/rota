@@ -207,7 +207,7 @@ func (claudeProvider) Launch(a *Account, home string) (*Command, error) {
 // Models are the Claude 5 family plus the aliases Claude Code resolves to
 // "the latest of that line". Aliases are what people type; rota sends the
 // full id so a run is reproducible even after an alias moves.
-func (claudeProvider) Models() []Model { return append([]Model(nil), claudeModels...) }
+func (claudeProvider) Models() []Model { return copyModels(claudeModels) }
 
 // claudeModels is built once. Models is called several times per run — by the
 // command line, by the request check, by the form description — and
