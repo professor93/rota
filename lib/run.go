@@ -1349,7 +1349,7 @@ func readOutput(r io.Reader, out io.Writer, streaming, keep bool, cp caps, res *
 		}
 	}
 	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') && jsontext.Value(trimmed).IsValid() {
+	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') && encodable(trimmed) {
 		doc := json.RawMessage(trimmed)
 		if keep && trimmed[0] == '{' {
 			res.Events = append(res.Events, doc)
@@ -1400,16 +1400,25 @@ func scanEvents(r io.Reader, out io.Writer, keep bool, cp caps, res *Result) err
 		}
 		if keep {
 			doc := json.RawMessage(slices.Clone(line))
-			// An array line carries the events inside it; absorb keeps
-			// those. Anything else is itself one event.
-			if line[0] != '[' {
-				if len(res.Events) < cp.events {
-					res.Events = append(res.Events, doc)
-				} else {
-					res.Truncated = true
-				}
+			if !encodable(doc) {
+				// Not JSON a reply can carry. Its outcome is still read,
+				// and the line is kept as what it is, the text the CLI
+				// printed: a caller asking for everything gets everything.
+				absorb(doc, false, cp, res)
+				doc, _ = jsontext.AppendQuote(nil, doc) // the error only reports bad bytes, which are replaced
+			} else if line[0] == '[' {
+				// An array line carries the events inside it; absorb
+				// keeps those. Anything else is itself one event.
+				absorb(doc, true, cp, res)
+				continue
+			} else {
+				absorb(doc, false, cp, res)
 			}
-			absorb(doc, keep, cp, res)
+			if len(res.Events) < cp.events {
+				res.Events = append(res.Events, doc)
+			} else {
+				res.Truncated = true
+			}
 			continue
 		}
 		if interesting(line, res) {
@@ -1417,9 +1426,35 @@ func scanEvents(r io.Reader, out io.Writer, keep bool, cp caps, res *Result) err
 		}
 	}
 	if res.Result == "" {
-		res.Result = strings.TrimSpace(plain.String())
+		// Prose is bytes the CLI chose; the reply is strict UTF-8.
+		res.Result = strings.ToValidUTF8(strings.TrimSpace(plain.String()), "\uFFFD")
 	}
 	return sc.Err()
+}
+
+// jsonDepth is how deep the JSON decoder and encoder both go, and
+// replyDepth is how many of those levels a reply spends around a value it
+// carries: two of its own, and room for a transport wrapping it again.
+const (
+	jsonDepth  = 10000
+	replyDepth = 8
+)
+
+// encodable reports whether a raw value a CLI printed can be written into
+// a reply: strictly valid JSON, nested shallowly enough to sit inside one.
+// Reading is lenient and writing is not, and a value that gets in but
+// cannot get out loses the whole reply, not just itself.
+func encodable(v json.RawMessage) bool {
+	if len(v) < 2*(jsonDepth-replyDepth) {
+		// Too short to nest deeper than the reply allows: validity is all.
+		return jsontext.Value(v).IsValid()
+	}
+	// Long enough that depth matters, and the validator cannot be told
+	// about the levels around it, so read it as if it already sat there.
+	opens, closes := strings.Repeat("[", replyDepth), strings.Repeat("]", replyDepth)
+	dec := jsontext.NewDecoder(io.MultiReader(strings.NewReader(opens), bytes.NewReader(v), strings.NewReader(closes)))
+	_, err := dec.ReadValue()
+	return err == nil
 }
 
 // eventsOfInterest are the event types that carry an outcome. Every other
@@ -1485,7 +1520,12 @@ func absorb(doc json.RawMessage, keep bool, cp caps, res *Result) {
 			}
 		}
 		for _, e := range arr {
-			absorb(e, false, cp, res)
+			// Only objects are events. Descending into an array nested
+			// here would decode it again at every level, and a deep one
+			// turns one line into minutes.
+			if len(e) > 0 && e[0] == '{' {
+				absorb(e, false, cp, res)
+			}
 		}
 		return
 	}
@@ -1512,6 +1552,14 @@ func absorb(doc json.RawMessage, keep bool, cp caps, res *Result) {
 	}
 	if decodeLenient(doc, &e) != nil {
 		return
+	}
+	// Read leniently, these can hold what the reply refuses to write — a
+	// repeated name, a bad byte. The outcome stays; the raw value goes.
+	if len(e.Usage) > 0 && !encodable(e.Usage) {
+		e.Usage = nil
+	}
+	if len(e.Structured) > 0 && !encodable(e.Structured) {
+		e.Structured = nil
 	}
 	if e.SessionID == "" {
 		e.SessionID = e.SessionIDCamel
@@ -1616,10 +1664,12 @@ func (t *tailBuffer) Write(p []byte) (int, error) {
 }
 
 func (t *tailBuffer) String() string {
+	// The cut falls on a byte, not a rune, and the reply is strict UTF-8.
+	tail := strings.ToValidUTF8(string(t.buf), "\uFFFD")
 	if t.dropped == 0 {
-		return string(t.buf)
+		return tail
 	}
-	return fmt.Sprintf("[%d earlier bytes dropped]\n%s", t.dropped, t.buf)
+	return fmt.Sprintf("[%d earlier bytes dropped]\n%s", t.dropped, tail)
 }
 
 // Check validates a spec against one provider without running anything: the
