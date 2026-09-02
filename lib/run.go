@@ -335,9 +335,6 @@ func (s *Spec) planFor(provider string, models []Model, lim *Limits) (*plan, err
 	if err := s.checkExtra(mediated, lim.AllowRawFlags); err != nil {
 		return nil, err
 	}
-	if err := s.checkSuppliedConfig(mediated, lim, lim.AllowRawFlags); err != nil {
-		return nil, err
-	}
 	set, err := s.fieldsSet()
 	if err != nil {
 		return nil, err
@@ -346,7 +343,14 @@ func (s *Spec) planFor(provider string, models []Model, lim *Limits) (*plan, err
 	if err := checkFlavor(provider, flavor, set); err != nil {
 		return nil, err
 	}
+	// Paths first, because the config check opens the files a caller
+	// names. A confined caller must get the roots' refusal for a path
+	// outside them and nothing else — not whether the file exists, not
+	// what keys it carries.
 	if err := s.checkPaths(flavor, lim); err != nil {
+		return nil, err
+	}
+	if err := s.checkSuppliedConfig(mediated, lim, lim.AllowRawFlags); err != nil {
 		return nil, err
 	}
 	if s.ScratchDir != "" {
