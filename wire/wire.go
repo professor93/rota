@@ -152,9 +152,13 @@ func StageUploads(files []Upload) (dir string, err error) {
 		return dir, err
 	}
 	for _, f := range files {
-		clean := filepath.Clean(f.Path)
-		if f.Path == "" || filepath.IsAbs(f.Path) || strings.HasPrefix(f.Path, "~") ||
-			clean != f.Path || strings.HasPrefix(clean, "..") {
+		// A caller writes paths with forward slashes whatever it runs on;
+		// the check is made in this platform's form so that "notes/a.txt"
+		// is as plain on Windows as anywhere.
+		native := filepath.FromSlash(f.Path)
+		clean := filepath.Clean(native)
+		if f.Path == "" || filepath.IsAbs(native) || filepath.VolumeName(native) != "" ||
+			strings.HasPrefix(f.Path, "~") || clean != native || strings.HasPrefix(clean, "..") {
 			return dir, rota.Invalid("upload path %q must be a plain relative path", f.Path)
 		}
 		target := filepath.Join(dir, clean)

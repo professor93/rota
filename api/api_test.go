@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/professor93/rota/internal/fakecli"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -25,7 +26,7 @@ import (
 // TestMain doubles as the fake vendor CLIs: the test binary is symlinked as
 // `claude` and `codex` into a private PATH, and behaves by its argv[0].
 func TestMain(m *testing.M) {
-	switch filepath.Base(os.Args[0]) {
+	switch strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") {
 	case "claude":
 		fakeClaude()
 	case "codex":
@@ -126,12 +127,8 @@ type harness struct {
 func newHarness(t testing.TB, opts Options) *harness {
 	t.Helper()
 	bin := t.TempDir()
-	self, err := os.Executable()
-	if err != nil {
-		t.Fatal(err)
-	}
 	for _, name := range []string{"claude", "codex"} {
-		if err := os.Symlink(self, filepath.Join(bin, name)); err != nil {
+		if err := fakecli.Link(filepath.Join(bin, fakecli.Exe(name))); err != nil {
 			t.Fatal(err)
 		}
 	}

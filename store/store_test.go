@@ -96,7 +96,7 @@ func TestBeginLoginParksStateAndReportsKind(t *testing.T) {
 		t.Fatalf("device login=%+v", l2)
 	}
 	fi, err := os.Stat(s.pendingPath())
-	if err != nil || fi.Mode().Perm() != 0o600 {
+	if err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
 		t.Fatalf("pending file: %v %v", err, fi)
 	}
 	if _, err := s.BeginLogin(context.Background(), "nope"); err == nil {
@@ -240,10 +240,11 @@ func TestRefreshTouchesOnlyMeteredProvidersAndCachesQuota(t *testing.T) {
 func TestPrepareRefreshesStagesRecordsAndSaves(t *testing.T) {
 	s := openTemp(t)
 	rota.Register(fakeRefresher{&fakeProvider{name: "t-run", refreshTok: &rota.Token{Access: "fresh", ExpiresAt: nowMS() + 3_600_000}}})
+	onPath(t, "true")
 	a := s.add("t-run")
 	a.Token = rota.Token{Access: "stale", Refresh: "r", ExpiresAt: 1}
 	path, env, _, err := s.Prepare(context.Background(), a)
-	if err != nil || filepath.Base(path) != "true" || !slices.Contains(env, "FAKE_TOKEN=fresh") {
+	if err != nil || strings.TrimSuffix(filepath.Base(path), ".exe") != "true" || !slices.Contains(env, "FAKE_TOKEN=fresh") {
 		t.Fatalf("path=%q err=%v env has token: %v", path, err, slices.Contains(env, "FAKE_TOKEN=fresh"))
 	}
 	s.Close()

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/professor93/rota/internal/fakecli"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,8 +16,8 @@ func TestResumeFollowsTheRotationAcrossAccounts(t *testing.T) {
 	t.Setenv("ROTA_HOME", dir)
 	h1, h2 := filepath.Join(dir, "own1"), filepath.Join(dir, "own2")
 	seedAccounts(t, dir, `{"accounts":[
-		{"id":1,"provider":"claude","uuid":"c1","order":1,"token":{"accessToken":"t1"},"configDir":"`+h1+`"},
-		{"id":2,"provider":"claude","uuid":"c2","order":2,"token":{"accessToken":"t2"},"configDir":"`+h2+`"}],"nextId":3,"ordered":true}`)
+		{"id":1,"provider":"claude","uuid":"c1","order":1,"token":{"accessToken":"t1"},"configDir":"`+filepath.ToSlash(h1)+`"},
+		{"id":2,"provider":"claude","uuid":"c2","order":2,"token":{"accessToken":"t2"},"configDir":"`+filepath.ToSlash(h2)+`"}],"nextId":3,"ordered":true}`)
 
 	id := "01a00000-0000-7000-8000-00000000d00d"
 	rel := filepath.Join("projects", "-tmp-x", id+".jsonl")
@@ -29,11 +30,7 @@ func TestResumeFollowsTheRotationAcrossAccounts(t *testing.T) {
 	}
 
 	bin := t.TempDir()
-	script := "#!/bin/sh\ncat >/dev/null\n" +
-		`printf '{"type":"result","subtype":"success","is_error":false,"session_id":"s1","result":"ok","num_turns":1}\n'` + "\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakecli.Install(t, bin, "claude", fakecli.Lines(`{"type":"result","subtype":"success","is_error":false,"session_id":"s1","result":"ok","num_turns":1}`))
 	t.Setenv("PATH", bin)
 
 	_, errb, code := call(t, "run", "2", "--resume", id, "go on")

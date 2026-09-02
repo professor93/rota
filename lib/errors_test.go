@@ -26,7 +26,7 @@ func TestVerdictsAreTypedNotStringMatched(t *testing.T) {
 		{"dangerous mode", (Spec{Prompt: "p", PermissionMode: "bypassPermissions"}).Check("claude", nil), ErrDangerous},
 		{"dangerous flag", (Spec{Prompt: "p", DangerouslySkipPermissions: true}).Check("claude", nil), ErrDangerous},
 		{"dangerous sandbox", (Spec{Prompt: "p", Sandbox: "danger-full-access"}).Check("codex", nil), ErrDangerous},
-		{"cwd outside", (Spec{Prompt: "p", Cwd: "/etc"}).Check("claude", &Limits{Roots: []string{"/usr"}}), ErrOutsideRoots},
+		{"cwd outside", (Spec{Prompt: "p", Cwd: t.TempDir()}).Check("claude", &Limits{Roots: []string{t.TempDir()}}), ErrOutsideRoots},
 		{"missing cwd", (Spec{Prompt: "p", Cwd: "/no/such/dir"}).Check("claude", nil), ErrInvalidRequest},
 		{"no headless interface", (Spec{Prompt: "p"}).Check("claude-noeffort", nil), ErrUnsupported},
 	}

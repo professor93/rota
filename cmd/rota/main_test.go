@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"github.com/professor93/rota/internal/fakecli"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -24,6 +25,7 @@ import (
 // says ok. That had been happening, silently, to everything below
 // main_test.go. A test that means to exercise the handover calls handover(t).
 func TestMain(m *testing.M) {
+	fakecli.Maybe()
 	execProcess = func(path string, _, _ []string) error {
 		panic("this test reached the real process handover (" + path + "); call handover(t) to watch it instead")
 	}
@@ -149,9 +151,7 @@ func TestAccountLifecycleThroughTheCLI(t *testing.T) {
 	// binary has to be findable for that to be the honest complaint —
 	// otherwise the missing CLI is the more useful thing to say.
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakecli.Install(t, bin, "claude", fakecli.Spec{})
 	t.Setenv("PATH", bin)
 	if _, err, code := call(t, "run", "1", "-p", "hi"); code != 1 || !strings.Contains(err, "rota run <id> --") {
 		t.Fatalf("run without a modelled CLI: %d %q", code, err)
@@ -373,11 +373,7 @@ func TestRunTakesThePromptHoweverItIsWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := t.TempDir()
-	script := "#!/bin/sh\ncat >/dev/null\n" +
-		`printf '[{"type":"result","result":"ANSWERED","session_id":"s-1"}]\n'` + "\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakecli.Install(t, bin, "claude", fakecli.Lines(`[{"type":"result","result":"ANSWERED","session_id":"s-1"}]`))
 	t.Setenv("PATH", bin)
 
 	// The prompt is positional, but -p and --print are what people's hands
@@ -422,12 +418,7 @@ func TestRunPrintsOnlyTheAnswerUnlessAsked(t *testing.T) {
 	// A stand-in for the vendor CLI that answers and says a few other
 	// things, the way a real one does.
 	bin := t.TempDir()
-	script := "#!/bin/sh\ncat >/dev/null\n" +
-		`printf '[{"type":"system","subtype":"init","session_id":"s-1"},` +
-		`{"type":"result","result":"THE ANSWER","session_id":"s-1","total_cost_usd":0.01}]\n'` + "\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakecli.Install(t, bin, "claude", fakecli.Lines(`[{"type":"system","subtype":"init","session_id":"s-1"},{"type":"result","result":"THE ANSWER","session_id":"s-1","total_cost_usd":0.01}]`))
 	t.Setenv("PATH", bin)
 
 	out, errOut, code := call(t, "run", "1", "hello")
@@ -467,11 +458,7 @@ func TestRunTakesJSONWhereverItIsWritten(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := t.TempDir()
-	script := "#!/bin/sh\ncat >/dev/null\n" +
-		`printf '[{"type":"result","result":"ANSWERED","session_id":"s-1"}]\n'` + "\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakecli.Install(t, bin, "claude", fakecli.Lines(`[{"type":"result","result":"ANSWERED","session_id":"s-1"}]`))
 	t.Setenv("PATH", bin)
 
 	for _, argv := range [][]string{
@@ -551,11 +538,7 @@ func TestAPromptNeedsNoVerb(t *testing.T) {
 		t.Fatal(err)
 	}
 	bin := t.TempDir()
-	script := "#!/bin/sh\ncat >/dev/null\n" +
-		`printf '[{"type":"result","result":"ANSWERED","session_id":"s-1"}]\n'` + "\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakecli.Install(t, bin, "claude", fakecli.Lines(`[{"type":"result","result":"ANSWERED","session_id":"s-1"}]`))
 	t.Setenv("PATH", bin)
 
 	for _, argv := range [][]string{

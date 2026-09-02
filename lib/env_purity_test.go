@@ -3,8 +3,8 @@ package rota
 import (
 	"bytes"
 	"context"
+	"github.com/professor93/rota/internal/fakecli"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -40,15 +40,9 @@ func TestTheSDKReadsNoEnvironment(t *testing.T) {
 // process behind the caller's back. A parent-only variable must not leak in,
 // and a BaseEnv entry must arrive verbatim.
 func TestTheChildEnvironmentComesOnlyFromTheCaller(t *testing.T) {
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "envcli")
-	script := `#!/bin/sh
-exec </dev/null
-printf '{"type":"result","subtype":"success","is_error":false,"session_id":"s-env","result":"M=%s P=%s","num_turns":1}\n' "$MARKER" "$PARENT_ONLY"
-`
-	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	bin := fakecli.Install(t, t.TempDir(), "envcli", fakecli.Spec{KeepStdin: true, Stdout: []string{
+		`{"type":"result","subtype":"success","is_error":false,"session_id":"s-env","result":"M={{env:MARKER}} P={{env:PARENT_ONLY}}","num_turns":1}`,
+	}})
 	t.Setenv("PARENT_ONLY", "leaked")
 
 	a := &Account{ID: 1, Provider: "claude"}

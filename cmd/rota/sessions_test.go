@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/professor93/rota/internal/fakecli"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,9 +123,7 @@ func TestAHandedOverRunIsListedUnderItsAccount(t *testing.T) {
 	writeStore(t, home, `{"ordered":true,"nextId":3,"accounts":[
 		{"id":2,"provider":"claude","email":"payer@x","order":1,"token":{"accessToken":"t"}}]}`)
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakecli.Install(t, bin, "claude", fakecli.Spec{})
 	t.Setenv("PATH", bin)
 
 	handover(t)

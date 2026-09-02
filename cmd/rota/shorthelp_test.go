@@ -1,8 +1,7 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
+	"github.com/professor93/rota/internal/fakecli"
 	"strings"
 	"testing"
 
@@ -52,11 +51,7 @@ func TestRunFlagsHaveShortForms(t *testing.T) {
 	seedAccounts(t, dir, `{"accounts":[
 		{"id":1,"provider":"claude","uuid":"c1","order":1,"token":{"accessToken":"tok"}}],"nextId":2,"ordered":true}`)
 	bin := t.TempDir()
-	script := "#!/bin/sh\ncat >/dev/null\n" +
-		`printf '{"type":"result","subtype":"success","is_error":false,"session_id":"s1","result":"ARGS=%s","num_turns":1}\n' "$*"` + "\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakecli.Install(t, bin, "claude", fakecli.Lines(`{"type":"result","subtype":"success","is_error":false,"session_id":"s1","result":"ARGS={{args}}","num_turns":1}`))
 	t.Setenv("PATH", bin)
 
 	out, errb, code := call(t, "run", "1", "-m", "sonnet", "-e", "low", "-S", "hello")

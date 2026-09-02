@@ -114,7 +114,7 @@ func TestSpecConfinesPathsWhenRootsAreSet(t *testing.T) {
 	if _, err := specArgv(Spec{Prompt: "p", Cwd: t.TempDir()}, "claude", lim); err == nil {
 		t.Fatal("cwd outside a root must be refused")
 	}
-	if _, err := specArgv(Spec{Prompt: "p", AddDirs: []string{"/etc"}}, "claude", lim); err == nil {
+	if _, err := specArgv(Spec{Prompt: "p", AddDirs: []string{t.TempDir()}}, "claude", lim); err == nil {
 		t.Fatal("add_dirs outside a root must be refused")
 	}
 	if _, err := specArgv(Spec{Prompt: "p", Cwd: filepath.Join(root, "nope")}, "claude", lim); err == nil {
@@ -123,7 +123,7 @@ func TestSpecConfinesPathsWhenRootsAreSet(t *testing.T) {
 	if _, err := specArgv(Spec{Prompt: "p", Cwd: filepath.Join(root, "sub")}, "claude", lim); err != nil {
 		t.Fatalf("inside a root: %v", err)
 	}
-	if _, err := specArgv(Spec{Prompt: "p", Cwd: "/etc"}, "claude", nil); err != nil {
+	if _, err := specArgv(Spec{Prompt: "p", Cwd: t.TempDir()}, "claude", nil); err != nil {
 		t.Fatalf("without roots any cwd goes: %v", err)
 	}
 }
@@ -628,7 +628,7 @@ func TestRunStagesUnlessTheCallerAlreadyStaged(t *testing.T) {
 	if _, err := Run(context.Background(), a, "", nil, spec(), nil, &out); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "which:rota") {
+	if !strings.Contains(out.String(), `"which":"rota"`) {
 		t.Fatalf("a nil command must be staged by rota: %q", out.String())
 	}
 
@@ -638,7 +638,7 @@ func TestRunStagesUnlessTheCallerAlreadyStaged(t *testing.T) {
 	if _, err := Run(context.Background(), a, "", given, spec(), nil, &out); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out.String(), "which:caller") {
+	if !strings.Contains(out.String(), `"which":"caller"`) {
 		t.Fatalf("a caller's own command must be run as given: %q", out.String())
 	}
 }

@@ -1,8 +1,7 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
+	"github.com/professor93/rota/internal/fakecli"
 	"strings"
 	"testing"
 )
@@ -18,11 +17,7 @@ func TestStatelessMapsPerProviderOrRefuses(t *testing.T) {
 		{"id":8,"provider":"grok","uuid":"g1","order":2,"token":{"accessToken":"xai-key"}}],"nextId":9,"ordered":true}`)
 
 	bin := t.TempDir()
-	script := "#!/bin/sh\ncat >/dev/null\n" +
-		`printf '{"type":"result","subtype":"success","is_error":false,"session_id":"s1","result":"ARGS=%s CONFIGDIR=%s","num_turns":1}\n' "$*" "${CLAUDE_CONFIG_DIR:-NONE}"` + "\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakecli.Install(t, bin, "claude", fakecli.Lines(`{"type":"result","subtype":"success","is_error":false,"session_id":"s1","result":"ARGS={{args}} CONFIGDIR={{env:CLAUDE_CONFIG_DIR|NONE}}","num_turns":1}`))
 	t.Setenv("PATH", bin)
 
 	out, errb, code := call(t, "run", "1", "--stateless", "hello")

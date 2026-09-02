@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,7 +83,9 @@ func ProcessInstances(known []int) ([]Instance, string) {
 // ones, and every ps this was checked against prints the resolved path.
 func cliFor(argv0 string) string {
 	argv0 = strings.TrimSpace(argv0)
-	if !strings.ContainsRune(argv0, filepath.Separator) {
+	// A path, on either convention: ps on unix prints one, and so does
+	// the Windows process table, and a test may feed either to either.
+	if !strings.ContainsAny(argv0, `/\`) {
 		return ""
 	}
 	// Windows executables carry .exe; the provider name does not.
@@ -96,11 +99,44 @@ func cliFor(argv0 string) string {
 // psList reads the process table. There is no way to do this from the standard
 // library, and ps is the one tool present on every unix rota runs on.
 func psList() ([]proc, error) {
+	if runtime.GOOS == "windows" {
+		return windowsList()
+	}
 	out, err := exec.Command("ps", "-axo", "pid=,command=").Output()
 	if err != nil {
 		return nil, err
 	}
 	return parsePS(string(out)), nil
+}
+
+// windowsList reads the process table the way Windows exposes it: the
+// executable's full path per process, which is what cliFor needs. There
+// is no ps; PowerShell is on every supported Windows.
+func windowsList() ([]proc, error) {
+	out, err := exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
+		`Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)|$($_.ExecutablePath)" }`).Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseWindowsList(string(out)), nil
+}
+
+// parseWindowsList turns "pid|path" lines into procs. A path may hold
+// spaces, so the separator is one that cannot appear in it.
+func parseWindowsList(out string) []proc {
+	var list []proc
+	for line := range strings.SplitSeq(out, "\n") {
+		id, path, ok := strings.Cut(strings.TrimSpace(line), "|")
+		if !ok {
+			continue
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(id))
+		if err != nil || strings.TrimSpace(path) == "" {
+			continue
+		}
+		list = append(list, proc{pid: pid, command: strings.TrimSpace(path)})
+	}
+	return list
 }
 
 // parsePS turns what ps prints into pids and their argv[0]. It is separate
@@ -134,6 +170,11 @@ func parsePS(out string) []proc {
 // no way to ask without cgo, so it takes lsof — which is present on a stock
 // install but is still another program, and one rota can do without.
 func processCwd(pid int) (string, error) {
+	if runtime.GOOS == "windows" {
+		// Another process's working directory is not readable without
+		// native calls rota does not make; the row is still listed, blind.
+		return "", errors.New("the working directory of another process is not readable on windows")
+	}
 	if runtime.GOOS == "linux" {
 		return os.Readlink("/proc/" + strconv.Itoa(pid) + "/cwd")
 	}

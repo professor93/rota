@@ -3,6 +3,7 @@ package rota
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -48,7 +49,7 @@ func TestStageWritesPrivateFileAndRecordsWhatWasStaged(t *testing.T) {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(path)
-	if err != nil || fi.Mode().Perm() != 0o600 || a.Staged != fingerprint("r1") {
+	if err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) || a.Staged != fingerprint("r1") {
 		t.Fatalf("err=%v mode=%v staged=%q", err, fi.Mode(), a.Staged)
 	}
 	var out map[string]string

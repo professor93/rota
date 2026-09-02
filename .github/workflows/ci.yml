@@ -32,9 +32,8 @@ jobs:
       - name: test
         run: go test ./...
 
-  # Windows compiles and vets everything, and runs the tests that need no
-  # shell: the fake vendor CLIs the other packages use are sh scripts,
-  # which Windows cannot exec.
+  # The same suite on Windows. The fake vendor CLIs are the test binary
+  # itself (internal/fakecli), so nothing here needs a shell.
   windows:
     runs-on: windows-latest
     steps:
@@ -48,4 +47,4 @@ jobs:
       - name: vet
         run: go vet ./...
       - name: test
-        run: go test ./message/ ./rotation/
+        run: go test ./...

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/professor93/rota/internal/fakecli"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,12 +37,8 @@ func writeStore(t *testing.T, home, blob string) {
 func answering(t *testing.T, names ...string) string {
 	t.Helper()
 	bin := t.TempDir()
-	script := "#!/bin/sh\ncat >/dev/null\n" +
-		`printf '[{"type":"result","result":"ANSWERED","session_id":"s-1"}]\n'` + "\n"
 	for _, n := range names {
-		if err := os.WriteFile(filepath.Join(bin, n), []byte(script), 0o700); err != nil {
-			t.Fatal(err)
-		}
+		fakecli.Install(t, bin, n, fakecli.Lines(`[{"type":"result","result":"ANSWERED","session_id":"s-1"}]`))
 	}
 	t.Setenv("PATH", bin)
 	return bin

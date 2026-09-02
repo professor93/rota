@@ -2,9 +2,8 @@ package main
 
 import (
 	jsonv2 "encoding/json/v2"
+	"github.com/professor93/rota/internal/fakecli"
 	"io"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -14,14 +13,12 @@ import (
 func streamingCLI(t *testing.T) {
 	t.Helper()
 	bin := t.TempDir()
-	script := "#!/bin/sh\ncat >/dev/null\n" +
-		`printf '{"type":"system","subtype":"init","session_id":"s-1"}\n'` + "\n" +
-		`printf '{"type":"assistant","message":{"content":[{"type":"text","text":"hello "}]}}\n'` + "\n" +
-		`printf '{"type":"assistant","message":{"content":[{"type":"text","text":"world"}]}}\n'` + "\n" +
-		`printf '{"type":"result","subtype":"success","is_error":false,"session_id":"s-1","result":"hello world","num_turns":1,"total_cost_usd":0.01}\n'` + "\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakecli.Install(t, bin, "claude", fakecli.Lines(
+		`{"type":"system","subtype":"init","session_id":"s-1"}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"hello "}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"world"}]}}`,
+		`{"type":"result","subtype":"success","is_error":false,"session_id":"s-1","result":"hello world","num_turns":1,"total_cost_usd":0.01}`,
+	))
 	t.Setenv("PATH", bin)
 }
 

@@ -2,30 +2,27 @@ package rota
 
 import (
 	"os"
-	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/professor93/rota/internal/fakecli"
 )
 
-// fakeCLI writes a shell script that behaves like a vendor CLI: it echoes
-// what it was given as a result event, so a test can assert on argv, stdin
-// and environment without a network or a real CLI.
+// fakeCLI installs a stand-in vendor CLI on PATH: it prints extraLine (one
+// or more lines) and then a result event echoing stdin and argv, so a test
+// can assert on what reached it without a network or a real CLI.
 func fakeCLI(t *testing.T, name string, extraLine, exitCode string) string {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, name)
-	if exitCode == "" {
-		exitCode = "0"
+	spec := fakecli.Result(0)
+	if exitCode != "" && exitCode != "0" {
+		spec.Exit = 1
+		if exitCode == "3" {
+			spec.Exit = 3
+		}
 	}
-	script := `#!/bin/sh
-stdin=$(cat)
-echo "` + extraLine + `"
-printf '{"type":"result","subtype":"success","is_error":false,"session_id":"s-fake","result":"STDIN=%s ARGS=%s","num_turns":1,"total_cost_usd":0.5}\n' "$stdin" "$*"
-echo "fake-stderr" >&2
-exit ` + exitCode + `
-`
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	spec.Stdout = append(strings.Split(extraLine, "\n"), spec.Stdout...)
+	fakecli.Install(t, dir, name, spec)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	return name
 }

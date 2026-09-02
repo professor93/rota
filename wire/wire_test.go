@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -27,14 +28,14 @@ func TestUploadsLandInAPrivateDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	fi, err := os.Stat(dir)
-	if err != nil || fi.Mode().Perm() != 0o700 {
+	if err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o700) {
 		t.Fatalf("the directory must be private: %v %v", err, fi.Mode())
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "notes", "a.txt"))
 	if err != nil || string(raw) != "hi" {
 		t.Fatalf("%q %v", raw, err)
 	}
-	if fi, _ := os.Stat(filepath.Join(dir, "b.bin")); fi.Mode().Perm() != 0o600 {
+	if fi, _ := os.Stat(filepath.Join(dir, "b.bin")); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("uploaded files must be private: %v", fi.Mode())
 	}
 }

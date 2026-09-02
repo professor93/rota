@@ -3,6 +3,7 @@ package rota
 import (
 	"bytes"
 	"context"
+	"github.com/professor93/rota/internal/fakecli"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,14 +19,9 @@ func TestHermeticIsolatesTheConfigDirectoryAndCleansItUp(t *testing.T) {
 	if r, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = r // ScratchDir is symlink-resolved at check time; compare resolved
 	}
-	bin := filepath.Join(dir, "envcli")
-	script := `#!/bin/sh
-exec </dev/null
-printf '{"type":"result","subtype":"success","is_error":false,"session_id":"s","result":"DIR=%s","num_turns":1}\n' "$CLAUDE_CONFIG_DIR"
-`
-	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	bin := fakecli.Install(t, t.TempDir(), "envcli", fakecli.Spec{KeepStdin: true, Stdout: []string{
+		`{"type":"result","subtype":"success","is_error":false,"session_id":"s","result":"DIR={{env:CLAUDE_CONFIG_DIR}}","num_turns":1}`,
+	}})
 	a := &Account{ID: 1, Provider: "claude"}
 	a.Token.Access = "tok"
 	given := &Command{Bin: bin, Env: []string{"FAKE=1"}, BaseEnv: []string{"PATH=/usr/bin:/bin", "CLAUDE_CONFIG_DIR=/Users/me/.claude"}}

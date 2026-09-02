@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"github.com/professor93/rota/internal/fakecli"
 	"os"
 	"path/filepath"
 	"testing"
@@ -476,8 +477,6 @@ func TestARetiredIDIsNeverHandedOutAgain(t *testing.T) {
 func onPath(t *testing.T, name string) {
 	t.Helper()
 	bin := t.TempDir()
-	if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakecli.Install(t, bin, name, fakecli.Spec{})
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }

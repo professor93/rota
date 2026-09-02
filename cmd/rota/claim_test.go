@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -92,6 +93,9 @@ func TestRemovingSeveralAccountsRefusesBeforeDeletingAny(t *testing.T) {
 // happen still reaches disk: an account whose home is gone must not still be
 // listed as usable.
 func TestAFailedRemovalStillRecordsWhatItRemoved(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a directory cannot be made undeletable by its mode on windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("root can delete from a directory it cannot write")
 	}
