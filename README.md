@@ -22,6 +22,9 @@ curl -fsSL https://raw.githubusercontent.com/professor93/rota/main/install.sh | 
 
 macOS and Linux, arm64 and amd64. The script verifies the release checksum
 and installs `rota` into `/usr/local/bin` (or `~/.local/bin` without sudo).
+On Windows, take `rota-windows-amd64.exe` or `rota-windows-arm64.exe` from
+the [releases page](https://github.com/professor93/rota/releases/latest) and
+put it on your PATH.
 
 From source instead (Go 1.27+):
 

@@ -22,7 +22,8 @@ main() {
 	case "$(uname -s)" in
 	Darwin) os=darwin ;;
 	Linux) os=linux ;;
-	*) fail "unsupported OS $(uname -s): rota releases cover macOS and Linux" ;;
+	MINGW* | MSYS* | CYGWIN*) fail "on Windows, take rota-windows-amd64.exe or rota-windows-arm64.exe from https://github.com/$REPO/releases/latest, or go install github.com/$REPO/cmd/rota@latest" ;;
+	*) fail "unsupported OS $(uname -s): this script covers macOS and Linux; Windows binaries are on the releases page" ;;
 	esac
 	case "$(uname -m)" in
 	arm64 | aarch64) arch=arm64 ;;
