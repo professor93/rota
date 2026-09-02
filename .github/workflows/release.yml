@@ -1,0 +1,54 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  # The consumer suite runs against this exact commit before anything is
+  # published: a release the SDK's own users' tests refuse never ships.
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: rota
+      - uses: actions/checkout@v4
+        with:
+          repository: professor93/rota-sdk-test
+          path: rota-sdk-test
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: rota/go.mod
+      - name: rota's own tests
+        working-directory: rota
+        run: go vet ./... && go test ./...
+      - name: consumer suite against this commit
+        working-directory: rota-sdk-test
+        run: |
+          go work init . ../rota
+          go vet ./...
+          go test ./...
+
+  publish:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: version matches the tag
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          got="$(go run ./cmd/rota --version | awk '{print $2}')"
+          test "$got" = "$want" || { echo "binary says $got, tag says $want"; exit 1; }
+      - name: build
+        run: sh scripts/release.sh
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --title "rota ${GITHUB_REF_NAME#v}" --notes "rota ${GITHUB_REF_NAME#v}" dist/*
