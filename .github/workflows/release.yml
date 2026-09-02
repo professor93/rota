@@ -24,6 +24,9 @@ jobs:
         with:
           go-version-file: rota/go.mod
           cache: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
       - name: rota's own tests
         working-directory: rota
         run: go vet ./... && go test ./...

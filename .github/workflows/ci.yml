@@ -21,6 +21,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
+      # The playground's script is tested by running it in node.
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 26
       - name: format
         run: test -z "$(gofmt -l .)"
       - name: vet
