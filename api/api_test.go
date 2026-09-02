@@ -26,6 +26,9 @@ import (
 // TestMain doubles as the fake vendor CLIs: the test binary is symlinked as
 // `claude` and `codex` into a private PATH, and behaves by its argv[0].
 func TestMain(m *testing.M) {
+	// A fake installed with a spec plays that; the harness's own claude and
+	// codex links carry none and are played below.
+	fakecli.Maybe()
 	switch strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") {
 	case "claude":
 		fakeClaude()
@@ -330,9 +333,11 @@ func TestAnAccountCanBeTiedToAProjectOverHTTP(t *testing.T) {
 		!strings.Contains(string(raw), "credential") {
 		t.Fatalf("%d %s", resp.StatusCode, raw)
 	}
-	// The refusal must not have half-applied.
+	// The refusal must not have half-applied. The path is looked for as
+	// JSON carries it, backslashes escaped.
+	quoted, _ := json.Marshal(config)
 	if resp, raw := h.do("GET", "/v1/accounts", nil); resp.StatusCode != 200 ||
-		!strings.Contains(string(raw), config) {
+		!strings.Contains(string(raw), strings.Trim(string(quoted), `"`)) {
 		t.Fatalf("the rejected change was kept: %d %s", resp.StatusCode, raw)
 	}
 }
@@ -604,7 +609,7 @@ func TestRunCodexMapsFieldsAndReadsLastMessage(t *testing.T) {
 	}
 	for _, want := range []string{"PROMPT=fix it", "ARGS=exec - --json --color never", "-s read-only", "--approve-for-me",
 		"-p work", "-c a=1", "--enable f1", "--disable f2", "--strict-config", "--output-schema ", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
-		"--add-dir " + filepath.Join(h.root, "sub"), "-i ", "/shot.png"} {
+		"--add-dir " + filepath.Join(h.root, "sub"), "-i ", string(os.PathSeparator) + "shot.png"} {
 		if !strings.Contains(out.Result, want) {
 			t.Fatalf("missing %q in %q", want, out.Result)
 		}
@@ -927,15 +932,11 @@ func TestTheServerRecordsTheRunsItStarts(t *testing.T) {
 	// A CLI that announces its session and then takes its time, as the real
 	// ones do: the run has to still be going when the listing is read.
 	bin := t.TempDir()
-	script := "#!/bin/sh\ncat >/dev/null\n" +
-		`printf '{"type":"system","subtype":"init","session_id":"s-server"}\n'` + "\n" +
-		"sleep 1\n" +
-		`printf '{"type":"result","subtype":"success","is_error":false,"session_id":"s-server","result":"ok","total_cost_usd":0.01}\n'` + "\n"
-	if err := os.WriteFile(filepath.Join(bin, "claude"), []byte(script), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	// Prepended rather than replacing: the fake is a shell script and needs
-	// the shell's own tools to be findable.
+	fakecli.Install(t, bin, "claude", fakecli.Lines(
+		`{"type":"system","subtype":"init","session_id":"s-server"}`,
+		"{{sleep:1s}}",
+		`{"type":"result","subtype":"success","is_error":false,"session_id":"s-server","result":"ok","total_cost_usd":0.01}`,
+	))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	// Streaming, because that is when the conversation can be known while the

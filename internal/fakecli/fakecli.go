@@ -22,8 +22,10 @@ import (
 
 // Spec is what the fake does when run. Lines may carry {{stdin}} (what was
 // read, trailing newlines trimmed, the way $(cat) trims), {{args}} (the
-// arguments joined by spaces, like $*), {{env:NAME}} and {{cwd}} (the
-// working directory with symlinks resolved, like pwd -P).
+// arguments joined by spaces, like $*), {{env:NAME}} or {{env:NAME|fallback}},
+// and {{cwd}} (the working directory with symlinks resolved, like pwd -P).
+// Values are escaped as JSON string contents, since that is where they go.
+// A line that is only {{sleep:1s}} pauses instead of printing.
 type Spec struct {
 	Stdout []string `json:"stdout,omitempty"`
 	Stderr []string `json:"stderr,omitempty"`
@@ -147,10 +149,17 @@ func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
 		cwd = resolved
 	}
+	// Every substitution lands inside a JSON string, and a Windows path or
+	// a quoted argument would break the document it sits in; the value is
+	// written the way a JSON string carries it, and read back as itself.
+	quote := func(v string) string {
+		raw, _ := json.Marshal(v)
+		return string(raw[1 : len(raw)-1])
+	}
 	expand := func(line string) string {
-		line = strings.ReplaceAll(line, "{{stdin}}", in)
-		line = strings.ReplaceAll(line, "{{args}}", strings.Join(args, " "))
-		line = strings.ReplaceAll(line, "{{cwd}}", cwd)
+		line = strings.ReplaceAll(line, "{{stdin}}", quote(in))
+		line = strings.ReplaceAll(line, "{{args}}", quote(strings.Join(args, " ")))
+		line = strings.ReplaceAll(line, "{{cwd}}", quote(cwd))
 		for {
 			start := strings.Index(line, "{{env:")
 			if start < 0 {
@@ -170,10 +179,18 @@ func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) in
 			if !set || value == "" {
 				value = fallback
 			}
-			line = line[:start] + value + line[start+end+2:]
+			line = line[:start] + quote(value) + line[start+end+2:]
 		}
 	}
 	for _, l := range spec.Stdout {
+		// A line of the form {{sleep:1s}} is a pause, not output, for a
+		// fake that must still be running when something looks at it.
+		if d, ok := strings.CutPrefix(l, "{{sleep:"); ok {
+			if wait, err := time.ParseDuration(strings.TrimSuffix(d, "}}")); err == nil {
+				time.Sleep(wait)
+			}
+			continue
+		}
 		fmt.Fprintln(stdout, expand(l))
 	}
 	for _, l := range spec.Stderr {

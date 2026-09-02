@@ -404,7 +404,7 @@ func TestRunTakesThePromptHoweverItIsWritten(t *testing.T) {
 	if _, errOut, code := call(t, "run", "1"); code != 0 {
 		t.Fatalf("bare run must open the CLI: %d %q", code, errOut)
 	}
-	if len(*handedTo) == 0 || (*handedTo)[0] != "claude" {
+	if len(*handedTo) == 0 || (*handedTo)[0] != fakecli.Exe("claude") {
 		t.Fatalf("the CLI must be handed the terminal under its own name: %v", *handedTo)
 	}
 }

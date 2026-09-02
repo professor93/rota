@@ -158,6 +158,7 @@ func StageUploads(files []Upload) (dir string, err error) {
 		native := filepath.FromSlash(f.Path)
 		clean := filepath.Clean(native)
 		if f.Path == "" || filepath.IsAbs(native) || filepath.VolumeName(native) != "" ||
+			strings.HasPrefix(native, string(filepath.Separator)) ||
 			strings.HasPrefix(f.Path, "~") || clean != native || strings.HasPrefix(clean, "..") {
 			return dir, rota.Invalid("upload path %q must be a plain relative path", f.Path)
 		}
