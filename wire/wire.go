@@ -232,4 +232,4 @@ func Countdown(w rota.When) string {
 // Version is the applications' release number — the command and the
 // server, which share it. The SDK underneath carries its own (rota.Version);
 // the two move independently now that lib is a module anyone can take.
-const Version = "1.0.0"
+const Version = "1.0.1"
