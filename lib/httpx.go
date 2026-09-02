@@ -18,7 +18,7 @@ import (
 // Version is this SDK's own release number. It names the library, not any
 // program built on it: an application has a version of its own and says so
 // through UserAgent.
-const Version = "1.0.2"
+const Version = "1.0.3"
 
 // UserAgent is what requests identify themselves as when the caller has not
 // said otherwise. Applications set their own — `rota.UserAgent = "myapp/2.1"`
