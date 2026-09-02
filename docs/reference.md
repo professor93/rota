@@ -10,7 +10,8 @@ the first account still under its threshold and moves on to the next when it
 is spent. Name one instead — `rota run 2 …`, `POST /v1/accounts/2/run` — and
 that decision is yours again.
 
-Providers: **claude**, **codex**, **grok**, **kimi**.
+Providers: **claude**, **codex**, **grok**. A fourth, kimi, is built in but
+not offered for login until its service completes a sign-in; see Providers.
 
 One library, and the rest are examples of using it:
 
@@ -147,7 +148,7 @@ rota 2 "summarize this repo"  # ...on account 2
 rota login                    # start a claude login: prints an id and a URL
 rota login codex              # ...for another provider
 rota login <login-id> <code>  # finish it with the code from the page
-rota login <login-id>         # finish a device-code login (kimi)
+rota login <login-id>         # finish a delegated login, which takes no code (grok)
 rota login 2                  # sign account 2 in through its own CLI
 rota list                     # every account, in rotation order, with usage
 rota list --short             # the same, without asking any provider anything
@@ -676,6 +677,11 @@ dropping it silently, and never advertises it.
 | `codex` | OAuth + PKCE, paste redirect URL | none published | `codex` |
 | `grok` | paste an API key, or delegate the login | none published | `grok` |
 | `kimi` | delegated: its own CLI signs in | none published | `kimi` |
+
+`kimi` is hidden from `rota login`, from `POST /v1/login` and from the
+playground's sign-in list: its service has not completed a sign-in for this
+build. The SDK still carries it, the schema marks it `hidden`, and an
+account already on it still runs.
 
 How each credential reaches its CLI:
 
