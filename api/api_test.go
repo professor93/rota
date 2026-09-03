@@ -688,6 +688,28 @@ func TestConcurrencyIsBounded(t *testing.T) {
 	}
 }
 
+// A run waiting for a slot holds nothing: the store stays open to every
+// other request while it queues, so a full server still lists, patches
+// and logs in.
+func TestAQueuedRunHoldsNoLock(t *testing.T) {
+	h := newHarness(t, Options{MaxConcurrent: 1})
+	t.Setenv("FAKE_SLEEP", "1500ms")
+	for range 2 {
+		go h.run(3, map[string]any{"prompt": "p"})
+	}
+	time.Sleep(200 * time.Millisecond) // both runs are in: one running, one queued
+	answered := make(chan int, 1)
+	go func() { resp, _ := h.do("GET", "/v1/accounts", nil); answered <- resp.StatusCode }()
+	select {
+	case code := <-answered:
+		if code != 200 {
+			t.Fatalf("listing while a run is queued: %d", code)
+		}
+	case <-time.After(700 * time.Millisecond):
+		t.Fatal("a queued run held the store lock and the listing waited on it")
+	}
+}
+
 // apiKeyProvider stands in for a provider whose login is a pasted key.
 type apiKeyProvider struct{}
 
@@ -840,8 +862,14 @@ func TestTenBadTokensBlockTheAddressForAnHour(t *testing.T) {
 	if code := bad(); code != 429 {
 		t.Fatalf("11th bad token must be blocked: %d", code)
 	}
-	if resp, _ := h.do("GET", "/v1/accounts", nil); resp.StatusCode != 429 {
-		t.Fatalf("a blocked address stays blocked even with the right token: %d", resp.StatusCode)
+	// The block is for guesses. The right token is not a guess, and an
+	// address shared with an attacker — a proxy, or the loopback a web page
+	// can reach — must not lock the operator out of their own server.
+	if resp, _ := h.do("GET", "/v1/accounts", nil); resp.StatusCode != 200 {
+		t.Fatalf("the right token is admitted while the address is blocked: %d", resp.StatusCode)
+	}
+	if code := bad(); code != 429 {
+		t.Fatalf("and wrong ones stay blocked: %d", code)
 	}
 	if resp, _ := http.Get(h.srv.URL + "/"); resp.StatusCode != 200 {
 		t.Fatal("the root is never blocked: it is what a watchdog reads")

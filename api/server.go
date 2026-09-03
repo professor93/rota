@@ -256,27 +256,33 @@ func (t *trackingWriter) Flush() {
 	}
 }
 
-// auth enforces the bearer token and the brute-force block. The block is
-// checked first, so a flood cannot keep guessing by chance.
+// auth enforces the bearer token and the brute-force block.
+//
+// The block applies to guesses, never to the right token: an address is
+// shared by everyone behind a proxy, and the loopback is reachable from any
+// web page the operator visits, so a block that refused the right token
+// would let a stranger lock the operator out of their own server. Guessing
+// is still throttled — a wrong token from a blocked address answers 429 —
+// and the token itself, 256 random bits, is what makes guessing hopeless.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	const prefix = "Bearer "
 	want := []byte(s.opts.Token)
 	return func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get("Authorization")
+		ok := len(got) > len(prefix) && got[:len(prefix)] == prefix &&
+			subtle.ConstantTimeCompare([]byte(got[len(prefix):]), want) == 1
+		if ok {
+			next(w, r)
+			return
+		}
 		ip := clientIP(r)
 		if s.limit.blocked(ip) {
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many bad tokens; try again later"})
 			return
 		}
-		got := r.Header.Get("Authorization")
-		ok := len(got) > len(prefix) && got[:len(prefix)] == prefix &&
-			subtle.ConstantTimeCompare([]byte(got[len(prefix):]), want) == 1
-		if !ok {
-			s.limit.fail(ip)
-			s.log.Warn("rejected request", "ip", ip, "path", r.URL.Path)
-			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid or missing bearer token"})
-			return
-		}
-		next(w, r)
+		s.limit.fail(ip)
+		s.log.Warn("rejected request", "ip", ip, "path", r.URL.Path)
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid or missing bearer token"})
 	}
 }
 
@@ -411,22 +417,30 @@ func (s *Server) accountSchema(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("refresh")
+	force := q == "1" || q == "true"
+	if force {
+		// A forced refresh goes to the network, so it takes a run slot —
+		// and takes it before the store, so waiting for one holds nothing.
+		if !s.acquire(r.Context()) {
+			return
+		}
+		defer s.release()
+	}
 	st, ok := s.open(w)
 	if !ok {
 		return
 	}
 	defer st.Close()
-	if q := r.URL.Query().Get("refresh"); q == "1" || q == "true" {
+	if force {
 		// A forced refresh skips the quota cache, so left ungoverned it is
 		// a lever any caller can pull to get the account rate-limited by
 		// the provider. One forced read per account per minute is plenty
 		// for a person watching a dashboard.
 		if accounts := s.mayForce(st.Accounts); len(accounts) > 0 {
-			s.withSlot(func() {
-				for _, err := range st.Refresh(r.Context(), true, accounts...) {
-					s.log.Warn("refreshing usage", "err", err)
-				}
-			})
+			for _, err := range st.Refresh(r.Context(), true, accounts...) {
+				s.log.Warn("refreshing usage", "err", err)
+			}
 		}
 	}
 	// Rotation order is the listing's order, so a client that renders the
@@ -671,12 +685,18 @@ func (s *Server) mayForce(accounts []*rota.Account) []*rota.Account {
 	return out
 }
 
-// withSlot runs fn while holding a concurrency slot.
-func (s *Server) withSlot(fn func()) {
-	s.sem <- struct{}{}
-	defer func() { <-s.sem }()
-	fn()
+// acquire takes a run slot, or reports that the caller stopped waiting.
+// A run that gives up in the queue leaves nothing behind.
+func (s *Server) acquire(ctx context.Context) bool {
+	select {
+	case s.sem <- struct{}{}:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
+
+func (s *Server) release() { <-s.sem }
 
 // limiter blocks an address for an hour once it sends failMax bad tokens
 // within an hour. Deliberately tiny: a per-address ring of recent failure

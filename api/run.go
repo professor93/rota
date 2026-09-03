@@ -40,6 +40,14 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "timeout_seconds must not be negative")
 		return
 	}
+	// The slot comes before the store: a run waiting its turn must hold
+	// nothing another request needs. With the order reversed, one queued
+	// run kept the store locked for everyone — every listing, patch and
+	// login, and every rota command on the host — until a slot freed.
+	if !s.acquire(r.Context()) {
+		return
+	}
+	defer s.release()
 	st, ok := s.open(w)
 	if !ok {
 		return
@@ -152,10 +160,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	// the server is stopping — whichever comes first.
 	ctx, cancel := joinContexts(r.Context(), s.ctx)
 	defer cancel()
-	var res *rota.Result
-	s.withSlot(func() {
-		res, err = st.Run(ctx, a, req.Spec, lim, out)
-	})
+	res, err := st.Run(ctx, a, req.Spec, lim, out)
 	s.log.Info("run finished", "account", a.ID, "provider", a.Provider,
 		"stream", streaming, "err", err, "exit", exitOf(res))
 	if streaming {
