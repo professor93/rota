@@ -3,6 +3,13 @@ name: release
 on:
   push:
     tags: ['v*']
+  # By hand, against a tag that already exists: runs only the checks of
+  # what was shipped, never a publish.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'released tag to check, like v1.0.5'
+        required: true
 
 permissions:
   contents: write
@@ -11,6 +18,7 @@ jobs:
   # The consumer suite runs against this exact commit before anything is
   # published: a release the SDK's own users' tests refuse never ships.
   gate:
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -38,6 +46,7 @@ jobs:
           go test ./...
 
   publish:
+    if: github.event_name == 'push'
     needs: gate
     runs-on: ubuntu-latest
     steps:
@@ -57,3 +66,88 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" --title "rota ${GITHUB_REF_NAME#v}" --notes "rota ${GITHUB_REF_NAME#v}" dist/*
+
+  # What shipped, run where it will run: each binary is downloaded from the
+  # release on its own platform and asked to report its version, list an
+  # empty home, and serve its root.
+  smoke:
+    needs: publish
+    if: always() && (needs.publish.result == 'success' || github.event_name == 'workflow_dispatch')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: rota-linux-amd64
+          - os: macos-latest
+            asset: rota-darwin-arm64
+          - os: windows-latest
+            asset: rota-windows-amd64.exe
+    runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      ASSET: ${{ matrix.asset }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: tag is a release tag
+        shell: bash
+        run: echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+      - name: download
+        shell: bash
+        run: gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p "$ASSET" -p checksums.txt -D bin
+      - name: checksum
+        shell: bash
+        run: |
+          cd bin
+          want="$(grep " $ASSET\$" checksums.txt | cut -d' ' -f1)"
+          if command -v sha256sum >/dev/null; then got="$(sha256sum "$ASSET" | cut -d' ' -f1)"; else got="$(shasum -a 256 "$ASSET" | cut -d' ' -f1)"; fi
+          test -n "$want" && test "$got" = "$want" || { echo "checksum: want $want got $got"; exit 1; }
+      - name: runs
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          chmod +x "bin/$ASSET"
+          export ROTA_HOME="$RUNNER_TEMP/home"
+          "bin/$ASSET" --version | grep -qx "rota ${TAG#v}"
+          "bin/$ASSET" list | grep -q "No accounts yet"
+          "bin/$ASSET" serve 127.0.0.1:8787 --token smoke --refresh-every 0 &
+          for i in $(seq 1 50); do curl -fsS http://127.0.0.1:8787/ >root.json 2>/dev/null && break; sleep 0.2; done
+          kill %1
+          grep -q "\"version\":\"${TAG#v}\"" root.json
+      - name: runs
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:ROTA_HOME = Join-Path $env:RUNNER_TEMP 'home'
+          $bin = Join-Path 'bin' $env:ASSET
+          $v = & $bin --version
+          if ($v -ne "rota $($env:TAG.TrimStart('v'))") { throw "version: $v" }
+          $l = & $bin list | Out-String
+          if ($l -notmatch 'No accounts yet') { throw "list: $l" }
+          $p = Start-Process -FilePath $bin -ArgumentList 'serve','127.0.0.1:8787','--token','smoke','--refresh-every','0' -PassThru
+          $root = $null
+          for ($i = 0; $i -lt 50 -and -not $root; $i++) { try { $root = (Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8787/).Content } catch { Start-Sleep -Milliseconds 200 } }
+          Stop-Process -Id $p.Id -Force
+          if ($root -notmatch ('"version":"' + $env:TAG.TrimStart('v') + '"')) { throw "root: $root" }
+
+  # The module as the world fetches it: through the public proxy, by tag.
+  module:
+    needs: publish
+    if: always() && (needs.publish.result == 'success' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+      - name: tag is a release tag
+        run: echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'
+      - name: go install through the proxy
+        env:
+          GOPROXY: https://proxy.golang.org,direct
+          GOFLAGS: -mod=mod
+        run: |
+          go install "github.com/professor93/rota/cmd/rota@$TAG"
+          "$(go env GOPATH)/bin/rota" --version | grep -qx "rota ${TAG#v}"
