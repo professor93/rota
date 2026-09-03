@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	jsonv2 "encoding/json/v2"
@@ -72,7 +73,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		// The conversation may live in a sibling account's home; copy it in
 		// so a resume follows the rotation across accounts.
 		if err := sessions.CopyForResume(st, a, req.Resume); err != nil {
-			fail(w, http.StatusInternalServerError, err.Error())
+			s.report(w, r, err)
 			return
 		}
 	}
@@ -86,7 +87,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 			defer os.RemoveAll(dir)
 		}
 		if err != nil {
-			fail(w, statusFor(err), err.Error())
+			s.report(w, r, err)
 			return
 		}
 		// The upload directory is the server's own, not something the caller
@@ -114,7 +115,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	// account, not just its provider, catches a model that account's plan
 	// does not include.
 	if err := req.CheckFor(a, st.Home(a), lim); err != nil {
-		fail(w, statusFor(err), err.Error())
+		s.report(w, r, err)
 		return
 	}
 
@@ -225,7 +226,10 @@ func decode(w http.ResponseWriter, r *http.Request) (*request, error) {
 		if err := r.ParseMultipartForm(maxMemory); err != nil {
 			return nil, rota.Invalid("bad multipart body: %v", err)
 		}
-		if raw := r.FormValue("request"); raw != "" {
+		// The part, not r.FormValue, which would also read the query string
+		// and put prompts in every access log on the way.
+		if v := r.MultipartForm.Value["request"]; len(v) > 0 && v[0] != "" {
+			raw := v[0]
 			if err := strictJSON(strings.NewReader(raw), req); err != nil {
 				return nil, err
 			}
@@ -257,6 +261,22 @@ func decode(w http.ResponseWriter, r *http.Request) (*request, error) {
 // decodeJSON reads a small optional JSON body, ignoring an empty one.
 func decodeJSON(r *http.Request, v any) error {
 	return rota.DecodeLenient(io.LimitReader(r.Body, maxMemory), v)
+}
+
+// decodeOptional reads a body that may be absent: nothing at all means
+// nothing to set, anything else must decode.
+func decodeOptional(r *http.Request, v any) error {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxMemory))
+	if err != nil {
+		return rota.Invalid("bad request body: %v", err)
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return nil
+	}
+	if err := rota.UnmarshalLenient(raw, v); err != nil {
+		return rota.Invalid("bad request body: %v", err)
+	}
+	return nil
 }
 
 func strictJSON(r io.Reader, v any) error {
@@ -294,10 +314,11 @@ const (
 	// maxMemory is how much of a multipart body is held in memory before
 	// the rest spills to a temp file.
 	maxMemory = 8 << 20
-	// maxUpload bounds one uploaded file.
-	maxUpload = 16 << 20
-	// maxFiles bounds how many may travel with one request.
-	maxFiles = 32
+	// maxUpload bounds one uploaded file, and maxFiles how many may travel
+	// with one request: the staging's own limits, met here before a
+	// multipart part is read into memory.
+	maxUpload = wire.MaxUploadBytes
+	maxFiles  = wire.MaxUploads
 )
 
 // startStream switches the response to Server-Sent Events, or to NDJSON when
@@ -315,7 +336,7 @@ func (s *Server) startStream(w http.ResponseWriter, r *http.Request, init messag
 		h.Set("Content-Type", "text/event-stream")
 		h.Set("Connection", "keep-alive")
 	}
-	h.Set("Cache-Control", "no-cache")
+	h.Set("Cache-Control", "no-store")
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Accel-Buffering", "no") // a proxy must not sit on the events
 	w.WriteHeader(http.StatusOK)

@@ -137,12 +137,29 @@ type Upload struct {
 // StageUploads writes files into a fresh private directory and returns it.
 // The caller adds it to Spec.AddDirs and removes it when the run ends.
 //
+// MaxUploads is how many files may travel with one request, and
+// MaxUploadBytes how large one may be once decoded.
+const (
+	MaxUploads     = 32
+	MaxUploadBytes = 16 << 20
+)
+
 // A path is refused, never quietly rewritten: a caller sending "../id_rsa"
 // is not making a typo, and turning it into "id_rsa" would hide that. The
 // directory is returned even on failure so a caller can still clean up.
 func StageUploads(files []Upload) (dir string, err error) {
 	if len(files) == 0 {
 		return "", nil
+	}
+	// The caps are here, at the one place every route stages through, so
+	// a JSON body meets the same limit as a multipart one.
+	if len(files) > MaxUploads {
+		return "", rota.Invalid("too many files: %d, the limit is %d", len(files), MaxUploads)
+	}
+	for _, f := range files {
+		if base64.StdEncoding.DecodedLen(len(f.Content)) > MaxUploadBytes {
+			return "", rota.Invalid("%q is larger than the %d MB limit", f.Path, MaxUploadBytes>>20)
+		}
 	}
 	dir, err = os.MkdirTemp("", "rota-upload-*")
 	if err != nil {

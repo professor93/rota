@@ -11,6 +11,7 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
@@ -266,11 +267,17 @@ func (t *trackingWriter) Flush() {
 // and the token itself, 256 random bits, is what makes guessing hopeless.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	const prefix = "Bearer "
-	want := []byte(s.opts.Token)
+	// Both sides are hashed first: a plain comparison returns at once on
+	// a length mismatch, and that alone would tell a guesser how long the
+	// token is.
+	want := sha256.Sum256([]byte(s.opts.Token))
 	return func(w http.ResponseWriter, r *http.Request) {
 		got := r.Header.Get("Authorization")
-		ok := len(got) > len(prefix) && got[:len(prefix)] == prefix &&
-			subtle.ConstantTimeCompare([]byte(got[len(prefix):]), want) == 1
+		ok := false
+		if len(got) > len(prefix) && got[:len(prefix)] == prefix {
+			sum := sha256.Sum256([]byte(got[len(prefix):]))
+			ok = subtle.ConstantTimeCompare(sum[:], want[:]) == 1
+		}
 		if ok {
 			next(w, r)
 			return
@@ -286,13 +293,18 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// clientIP is the address the connection came from. Forwarded headers are
-// ignored on purpose: anyone can send them, and trusting them would let a
-// caller shed the rate limit by inventing an address.
+// clientIP is the address the connection came from, as the limiter counts
+// it. Forwarded headers are ignored on purpose: anyone can send them, and
+// trusting them would let a caller shed the rate limit by inventing an
+// address. An IPv6 host holds a whole /64, so that is the unit there —
+// otherwise one host has more addresses than the table has rows.
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 	}
 	return host
 }
@@ -300,6 +312,7 @@ func clientIP(r *http.Request) string {
 func writeJSON(w http.ResponseWriter, code int, doc any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store") // account emails and answers are nobody's to keep
 	w.WriteHeader(code)
 	// v2 does not escape HTML, which is what this always wanted: an authorize
 	// URL stays readable instead of arriving full of \u0026.
@@ -362,7 +375,7 @@ func (s *Server) account(w http.ResponseWriter, r *http.Request, st *store.Store
 	}
 	a, err := rotation.Choose(r.Context(), st, id)
 	if err != nil {
-		fail(w, statusFor(err), err.Error())
+		s.report(w, r, err)
 		return nil, false
 	}
 	return a, true
@@ -596,7 +609,7 @@ func (s *Server) removeAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	view := map[string]any{"id": a.ID, "provider": a.Provider, "email": a.Email}
 	if err := st.Remove(a.ID); err != nil {
-		fail(w, statusFor(err), err.Error())
+		s.report(w, r, err)
 		return
 	}
 	if err := st.Save(); err != nil {
@@ -611,8 +624,12 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Provider string `json:"provider"`
 	}
-	// An empty body is fine: it means the default provider.
-	_ = decodeJSON(r, &body)
+	// An empty body is fine: it means the default provider. A broken one
+	// is not read as empty.
+	if err := decodeOptional(r, &body); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if wire.Hidden(body.Provider) {
 		fail(w, http.StatusBadRequest, body.Provider+" is not offered for login yet")
 		return
@@ -624,7 +641,7 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 	defer st.Close()
 	l, err := st.BeginLogin(r.Context(), body.Provider)
 	if err != nil {
-		fail(w, statusFor(err), err.Error())
+		s.report(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, l)
@@ -635,8 +652,11 @@ func (s *Server) loginFinish(w http.ResponseWriter, r *http.Request) {
 		Code string `json:"code"`
 	}
 	// Device and delegated logins carry no code, so an empty body is
-	// expected here.
-	_ = decodeJSON(r, &body)
+	// expected here. A broken one is still refused.
+	if err := decodeOptional(r, &body); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	st, ok := s.open(w)
 	if !ok {
 		return
@@ -649,7 +669,7 @@ func (s *Server) loginFinish(w http.ResponseWriter, r *http.Request) {
 		// Not a failure: the person has not approved it yet.
 		writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "pending"})
 	case err != nil:
-		fail(w, statusFor(err), err.Error())
+		s.report(w, r, err)
 	default:
 		status := "refreshed"
 		if added {
@@ -752,8 +772,10 @@ func (l *limiter) blocked(ip string) bool {
 	return len(l.recent(ip)) >= failMax
 }
 
-// sweep drops every entry whose failures have all aged out, and starts over
-// if that frees nothing.
+// sweep drops every entry whose failures have all aged out, then evicts
+// the addresses that failed longest ago until the table fits. Dropping
+// everyone would let a flood of forged sources lift every block, its own
+// included.
 func (l *limiter) sweep() {
 	cut := l.now().Add(-failWindow)
 	for ip, times := range l.hits {
@@ -761,8 +783,18 @@ func (l *limiter) sweep() {
 			delete(l.hits, ip)
 		}
 	}
-	if len(l.hits) >= maxTracked {
-		l.hits = make(map[string][]time.Time)
+	// Evict the addresses with the fewest failures first, and among those
+	// the one silent longest: a block already earned outlives a flood of
+	// single failures, which is the flood an attacker can afford.
+	for len(l.hits) >= maxTracked {
+		victim, fewest, at := "", 0, l.now()
+		for ip, times := range l.hits {
+			last := times[len(times)-1]
+			if victim == "" || len(times) < fewest || (len(times) == fewest && last.Before(at)) {
+				victim, fewest, at = ip, len(times), last
+			}
+		}
+		delete(l.hits, victim)
 	}
 }
 

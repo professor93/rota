@@ -20,7 +20,8 @@ func (s *Server) playground(w http.ResponseWriter, _ *http.Request) {
 	// the token the page holds.
 	h.Set("Content-Security-Policy",
 		"default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; "+
-			"connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'")
+			"connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+	h.Set("X-Frame-Options", "DENY") // no framing: the page holds the token
 	h.Set("Referrer-Policy", "no-referrer")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(playgroundHTML)

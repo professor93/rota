@@ -1260,7 +1260,9 @@ function remember(e) {
     ok: e.ok, status: e.status, took: e.took,
     prompt: String(e.body.prompt || "").slice(0, 300),
     model: e.body.model || "",
-    body: e.body,
+    // The files' names, not their bytes: history is for reading back what
+    // was asked, and a browser profile is not a place to keep uploads.
+    body: Object.assign({}, e.body, e.body.files ? { files: e.body.files.map(f => ({ path: f.path })) } : {}),
     res: slim(e.doc),
     // Buffered runs can carry an event log too, and slim drops it; count it
     // here or the pane would not say it existed.
