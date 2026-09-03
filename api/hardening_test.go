@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -138,5 +140,107 @@ func TestRepliesAreNotCachedAndThePageIsNotFramed(t *testing.T) {
 	resp.Body.Close()
 	if resp.Header.Get("X-Frame-Options") != "DENY" || !strings.Contains(resp.Header.Get("Content-Security-Policy"), "frame-ancestors 'none'") {
 		t.Fatalf("frame headers: %q %q", resp.Header.Get("X-Frame-Options"), resp.Header.Get("Content-Security-Policy"))
+	}
+}
+
+// config_dir is where a run stages this account's credential and what a
+// DELETE removes, so a caller may not point it at rota's own directories:
+// the store, or another account's home.
+func TestAConfigDirMayNotBeOneOfRotasOwnDirectories(t *testing.T) {
+	h := newHarness(t, Options{Roots: []string{}}) // unconfined: the store's own rule is what answers
+	for _, dir := range []string{h.dir, filepath.Join(h.dir, "homes", "claude-3")} {
+		resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": dir})
+		if resp.StatusCode != 400 || !strings.Contains(string(raw), "rota's own") {
+			t.Fatalf("%s: %d %s", dir, resp.StatusCode, raw)
+		}
+	}
+}
+
+// With roots, an account cannot be pointed at a config directory the
+// server was told to stay out of — not even through a link inside them.
+func TestAConfigDirIsConfinedToTheRoots(t *testing.T) {
+	h := newHarness(t, Options{})
+	outside := t.TempDir()
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": outside}); resp.StatusCode != 400 ||
+		!strings.Contains(string(raw), "outside") {
+		t.Fatalf("outside the roots: %d %s", resp.StatusCode, raw)
+	}
+	link := filepath.Join(h.root, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": link}); resp.StatusCode != 400 {
+		t.Fatalf("a link leading outside the roots: %d %s", resp.StatusCode, raw)
+	}
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": filepath.Join(h.root, "cfg")}); resp.StatusCode != 200 {
+		t.Fatalf("inside a root: %d %s", resp.StatusCode, raw)
+	}
+}
+
+// Removing an account deletes the home rota made for it, and nothing else:
+// a directory the caller chose holds their memory and skills.
+func TestRemovingAnAccountLeavesAChosenConfigDirInPlace(t *testing.T) {
+	h := newHarness(t, Options{})
+	mine := filepath.Join(h.root, "mine")
+	own := filepath.Join(h.dir, "homes", "claude-3")
+	for _, dir := range []string{mine, own} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("# mine"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": mine}); resp.StatusCode != 200 {
+		t.Fatalf("%d %s", resp.StatusCode, raw)
+	}
+	for _, id := range []string{"1", "3"} {
+		if resp, raw := h.do("DELETE", "/v1/accounts/"+id, nil); resp.StatusCode != 200 {
+			t.Fatalf("%s: %d %s", id, resp.StatusCode, raw)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(mine, "CLAUDE.md")); err != nil {
+		t.Fatalf("the directory the caller chose must survive its account: %v", err)
+	}
+	if _, err := os.Stat(own); !os.IsNotExist(err) {
+		t.Fatalf("rota's own home must go with its account: %v", err)
+	}
+	if _, raw := h.do("GET", "/v1/accounts", nil); strings.Contains(string(raw), `"id": 1`) || strings.Contains(string(raw), `"id": 3`) {
+		t.Fatalf("both accounts must be gone: %s", raw)
+	}
+}
+
+// A resume copies the conversation into the target's home so it can follow
+// the rotation, but only for a run that will happen: a refused request must
+// leave that home exactly as it was.
+func TestARefusedRunCopiesNoTranscript(t *testing.T) {
+	h := newHarness(t, Options{})
+	from, to := filepath.Join(h.root, "cfg1"), filepath.Join(h.root, "cfg3")
+	for id, dir := range map[string]string{"1": from, "3": to} {
+		if resp, raw := h.do("PATCH", "/v1/accounts/"+id, map[string]any{"config_dir": dir}); resp.StatusCode != 200 {
+			t.Fatalf("%d %s", resp.StatusCode, raw)
+		}
+	}
+	id := "01a00000-0000-7000-8000-00000000cafe"
+	rel := filepath.Join("projects", "-tmp-x", id+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(from, rel)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(from, rel), []byte(`{"type":"user","cwd":"/tmp/x"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, raw := h.run(3, map[string]any{"prompt": "p", "resume": id, "permission_mode": "bypassPermissions"})
+	if code != 403 {
+		t.Fatalf("%d %s", code, raw)
+	}
+	if _, err := os.Stat(filepath.Join(to, rel)); !os.IsNotExist(err) {
+		t.Fatalf("the run was refused, yet the transcript was copied: %v", err)
+	}
+	// The same request, allowed, does copy it: that is what a resume is for.
+	if code, _, raw := h.run(3, map[string]any{"prompt": "p", "resume": id}); code != 200 {
+		t.Fatalf("%d %s", code, raw)
+	}
+	if _, err := os.Stat(filepath.Join(to, rel)); err != nil {
+		t.Fatalf("an allowed resume must bring the transcript along: %v", err)
 	}
 }

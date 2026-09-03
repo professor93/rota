@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -112,5 +113,23 @@ func TestTheSettingsDenylistIsTheOperatorsData(t *testing.T) {
 	// ...and with none, the default still stands.
 	if err := (Spec{Prompt: "p", Settings: json.RawMessage(`{"env":{"A":"1"}}`)}).Check("claude", &Limits{}); err == nil {
 		t.Fatal("the default denylist must still bite when the operator says nothing")
+	}
+}
+
+// The default denylist covers every settings key that loads code or servers
+// into the run, not only the ones that set its environment: a plugin or an
+// MCP server enabled from settings is a program of the caller's choosing.
+func TestTheDefaultDenylistCoversWhatLoadsCode(t *testing.T) {
+	for _, key := range []string{"env", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "hooks",
+		"permissions", "otelHeadersHelper", "statusLine", "forceLoginMethod",
+		"enabledPlugins", "extraKnownMarketplaces", "enableAllProjectMcpServers", "enabledMcpjsonServers"} {
+		spec := Spec{Prompt: "p", Settings: json.RawMessage(`{"` + key + `":{}}`)}
+		if err := spec.Check("claude", &Limits{}); !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), key) {
+			t.Fatalf("settings key %q must be refused under limits by name, got %v", key, err)
+		}
+	}
+	// The list the code enforces is the one this test walks.
+	if len(defaultSettingsDenyKeys) != 13 {
+		t.Fatalf("the default denylist changed; update this test and the Limits doc: %v", defaultSettingsDenyKeys)
 	}
 }

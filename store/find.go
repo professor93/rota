@@ -11,8 +11,10 @@ import (
 // Find returns the account with this id, or nil.
 func (s *Store) Find(id int) *rota.Account { return rota.FindID(s.Accounts, id) }
 
-// Remove forgets an account and deletes the private directory holding its
-// staged credentials. Call Save afterwards.
+// Remove forgets an account. The private home rota made for it goes too,
+// staged credentials included; a directory the person chose as its
+// ConfigDir holds their memory and skills and is left alone. Call Save
+// afterwards.
 func (s *Store) Remove(id int) error {
 	for i, a := range s.Accounts {
 		if a.ID != id {
@@ -24,8 +26,10 @@ func (s *Store) Remove(id int) error {
 		if s.Busy(a) {
 			return fmt.Errorf("%w: %s is running; stop it before removing the account", rota.ErrBusy, a)
 		}
-		if err := os.RemoveAll(s.Home(a)); err != nil {
-			return err
+		if s.owns(a) {
+			if err := os.RemoveAll(s.Home(a)); err != nil {
+				return err
+			}
 		}
 		// slices.Delete zeroes the vacated slot, so the removed account —
 		// and the live refresh token it holds — is not left reachable from

@@ -1100,6 +1100,11 @@ func (c *cli) set(args []string) error {
 	if err := want.CheckProject(); err != nil {
 		return err
 	}
+	// Nor may it be rota's own: a sibling's home is where that account's
+	// credential is staged, and the store is where every token is kept.
+	if err := s.CheckHome(&want); err != nil {
+		return usageErr("%v", err)
+	}
 	// The move goes next, before anything is written into the account: a
 	// refusal — up from outside the queue, before an id that is not in it —
 	// must also leave the store as it was.
@@ -1309,7 +1314,9 @@ const serveUsage = `rota serve [address] --token=T
 Serves the HTTP API and its playground. The address may be a bare port,
 which listens on every interface, or a full host:port; it defaults to
 127.0.0.1:8787. The token is mandatory and may come from ROTA_TOKEN
-instead of the command line, which keeps it out of the process table.
+instead of the command line, which keeps it out of the process table:
+--token is visible to every process on this machine, the agents this
+server starts included.
 
 Flags:
 `
@@ -1508,6 +1515,10 @@ func (c *cli) serve(args []string) error {
 	if *token == "" {
 		return usageErr("serve needs --token=... (or ROTA_TOKEN in the environment)")
 	}
+	// Which flags were written, not which have a value: the token has one
+	// either way, and only the command line puts it in the process table.
+	given := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
 	listen, err := listenAddr(addr)
 	if err != nil {
 		return usageErr("%v", err)
@@ -1546,6 +1557,11 @@ func (c *cli) serve(args []string) error {
 		scheme = "https"
 	}
 	fmt.Fprintf(c.err, "rota %s serving on %s://%s\n", wire.Version, scheme, listen)
+	if given["token"] {
+		// The process table is readable by every local process, and the
+		// agents this server starts are local processes with a shell.
+		fmt.Fprintln(c.err, "warning: --token is visible to every process on this machine; put it in ROTA_TOKEN instead")
+	}
 	if len(roots) == 0 {
 		fmt.Fprintln(c.err, "warning: no --root given, so a caller may name any directory on this machine")
 	}

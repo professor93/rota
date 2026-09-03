@@ -165,7 +165,7 @@ rota set 2 --threshold 80     # move on to the next account at 80% usage
 rota set 2                    # what account 2 is set to
 rota set 2 --cwd ~/src/api --config ~/.rota/api-memory
 rota login 6                  # sign in an account whose CLI keeps its own credentials
-rota remove 2 5               # forget accounts and their staged credentials
+rota remove 2 5               # forget accounts, and the homes rota made for them
 rota serve 8787 --token=T     # serve the HTTP API and its playground
 ```
 
@@ -277,7 +277,11 @@ ROTA_TOKEN=T rota serve                          # keeps it out of the process t
 ```
 
 The token is mandatory and is checked in constant time. Ten bad tokens from
-one address within an hour block that address for an hour.
+one address within an hour block that address for an hour. Prefer
+`ROTA_TOKEN` to `--token`: a command line is in the process table, where
+every process on the machine can read it — including the agents this server
+starts, which have a shell. The server warns once at startup when it sees
+the flag.
 
 A running server keeps itself current: every two minutes it rotates any
 access token close to expiring and re-reads the usage whose cached value has
@@ -298,7 +302,7 @@ the command line still refreshes what it is about to use.
 | `POST` | `/v1/run` | run a prompt on whichever account the rotation picks |
 | `POST` | `/v1/accounts/{id}/run` | run a prompt on that account |
 | `PATCH` | `/v1/accounts/{id}` | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api"}` — its place in the rotation, when to move on, and where it belongs |
-| `DELETE` | `/v1/accounts/{id}` | forget it, and delete its staged credentials |
+| `DELETE` | `/v1/accounts/{id}` | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays |
 | `POST` | `/v1/login` | `{"provider":"claude"}` → `{id, url, kind}` |
 | `POST` | `/v1/login/{id}` | `{"code":"..."}` → the account, or `{"status":"pending"}` |
 
@@ -520,9 +524,12 @@ right until an account is meant for one project.
 The two must not be the same directory: the config directory is where a
 credential file is written, and a working directory is a repository someone
 will commit. Both must be absolute — a relative path means a different place
-depending on where the process was started. A server given `--root` still
+depending on where the process was started. Nor may the config directory be
+one of rota's own: another account's home is where that account's credential
+is staged, and the store is where every refresh token is kept, so both `rota
+set` and `PATCH` refuse them, links followed. A server given `--root` still
 wins; an account cannot be pointed somewhere the server was told to stay
-out of.
+out of, and a `config_dir` outside every root is refused when it is set.
 
 ### The playground
 
@@ -592,6 +599,14 @@ file and describes it is an exfiltration primitive. It confines what is
 actually a path, too: grok writes its debug log where it is told, while Claude
 Code's `--debug` takes a category filter and reaches no file at all. Without `--root` a caller
 may name any directory, and the server says so at startup.
+
+What `--root` confines is what a *request* names. It does not confine what
+the agent's own tools read once it is running: an agent with a shell reads
+whatever the server's operating-system user can read, roots or not, and
+`--allow-dangerous` has nothing to do with it — that gate is about the
+agent's permission prompts, not the filesystem. The answer is to run `rota
+serve` as a user that can read only the roots and the store, so that the
+most an agent can reach is what it was given.
 
 `--allow-dangerous` is required before a request may use
 `bypassPermissions`, `dangerously_skip_permissions` or a full-access sandbox;
@@ -856,8 +871,10 @@ remembers a fingerprint of what it staged; a file that differs from both the
 store and that fingerprint was rotated by the CLI and is adopted, while a
 file that merely lags behind a refresh rota did itself is overwritten. A
 fresh login marks the old staged file as superseded, `remove` deletes the
-home outright, and a file naming a different ChatGPT account is never
-adopted. Account ids are never reused, so a home cannot be inherited.
+home outright — when it is one rota made; a `--config` directory is the
+person's own and is left alone — and a file naming a different ChatGPT
+account is never adopted. Account ids are never reused, so a home cannot be
+inherited.
 
 ## Quota
 

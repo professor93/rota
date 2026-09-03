@@ -69,14 +69,6 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	if req.SettingSources == nil && rota.Flavor(a.Provider) == "claude" {
 		req.SettingSources = []string{}
 	}
-	if req.Resume != "" && req.Resume != "last" {
-		// The conversation may live in a sibling account's home; copy it in
-		// so a resume follows the rotation across accounts.
-		if err := sessions.CopyForResume(st, a, req.Resume); err != nil {
-			s.report(w, r, err)
-			return
-		}
-	}
 
 	// Uploads land in a directory private to this request, handed to the
 	// session as an extra readable root and removed when it ends.
@@ -117,6 +109,16 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	if err := req.CheckFor(a, st.Home(a), lim); err != nil {
 		s.report(w, r, err)
 		return
+	}
+	if req.Resume != "" && req.Resume != "last" {
+		// The conversation may live in a sibling account's home; copy it in
+		// so a resume follows the rotation across accounts. Only now that
+		// the request is known to be allowed: a refused one must leave the
+		// target's home as it was.
+		if err := sessions.CopyForResume(st, a, req.Resume); err != nil {
+			s.report(w, r, err)
+			return
+		}
 	}
 
 	// Write down whose run this is. A server is where this matters most: it

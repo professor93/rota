@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"github.com/professor93/rota/internal/fakecli"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -239,6 +240,31 @@ func TestDelegatedLoginTellsYouWhatToRun(t *testing.T) {
 	out, _, code = call(t, "--json", "login", id)
 	if code != 0 || !strings.Contains(out, `"delegated": true`) || !strings.Contains(out, `"loginCommand"`) {
 		t.Fatalf("json finish: %d %q", code, out)
+	}
+}
+
+// A token on the command line is in the process table, where every process
+// on the machine — the agents this server starts included — can read it.
+// The server says so once at startup; ROTA_TOKEN earns no such warning.
+func TestServeWarnsWhenTheTokenIsOnTheCommandLine(t *testing.T) {
+	t.Setenv("ROTA_HOME", t.TempDir())
+	// An address already taken makes serve return at once, after it has
+	// said everything it says at startup.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	addr := l.Addr().String()
+	const warning = "--token is visible to every process on this machine"
+
+	t.Setenv("ROTA_TOKEN", "")
+	if _, stderr, code := call(t, "serve", addr, "--token=t", "--refresh-every=0"); code == 0 || !strings.Contains(stderr, warning) {
+		t.Fatalf("a token on the command line must be warned about: %d %q", code, stderr)
+	}
+	t.Setenv("ROTA_TOKEN", "t")
+	if _, stderr, code := call(t, "serve", addr, "--refresh-every=0"); code == 0 || strings.Contains(stderr, warning) {
+		t.Fatalf("a token from the environment must not be: %d %q", code, stderr)
 	}
 }
 

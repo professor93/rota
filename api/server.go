@@ -557,6 +557,12 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Nor may it be rota's own directory — a sibling's home, the store —
+	// nor, under roots, anywhere the server was told to stay out of.
+	if err := st.CheckHome(&want, s.opts.Roots...); err != nil {
+		s.report(w, r, err)
+		return
+	}
 	// The move is made before anything is written into the account, so a
 	// refused move leaves the store as it was.
 	if body.Order != nil {

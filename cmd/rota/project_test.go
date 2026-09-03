@@ -11,7 +11,8 @@ import (
 // two settings that go wrong quietly rather than storing them and failing
 // on every run afterwards.
 func TestProjectThroughTheCLI(t *testing.T) {
-	t.Setenv("ROTA_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
 	t.Setenv("PATH", t.TempDir()) // no vendor CLI anywhere
 
 	out, _, code := call(t, "login", "t-cli-fake")
@@ -46,6 +47,12 @@ func TestProjectThroughTheCLI(t *testing.T) {
 	if _, err, code := call(t, "set", "1", "--config", project); code == 0 ||
 		!strings.Contains(err, "credential") {
 		t.Fatalf("same directory: %d %q", code, err)
+	}
+	// Nor in rota's own directories: another account's home is where that
+	// account's credential is staged, and what removing it deletes.
+	if _, err, code := call(t, "set", "1", "--config", filepath.Join(home, "homes", "claude-2")); code != 2 ||
+		!strings.Contains(err, "rota's own") {
+		t.Fatalf("a sibling's home: %d %q", code, err)
 	}
 	// The refusal must not have half-applied.
 	if out, _, code := call(t, "set", "1"); code != 0 || !strings.Contains(out, config) {

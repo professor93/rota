@@ -307,7 +307,8 @@ func TestResultCarriesTheAnswerSplitIntoBlocks(t *testing.T) {
 func TestAnAccountCanBeTiedToAProjectOverHTTP(t *testing.T) {
 	h := newHarness(t, Options{})
 	project := t.TempDir()
-	config := t.TempDir()
+	// Inside the server's roots: a config directory outside them is refused.
+	config := filepath.Join(h.root, "config")
 
 	resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"cwd": project, "config_dir": config})
 	if resp.StatusCode != 200 {
@@ -392,7 +393,7 @@ func TestRunClaudeMapsEveryFieldAndFeedsPromptOnStdin(t *testing.T) {
 		"--setting-sources user,project", "--worktree wt1", "--permission-mode plan", "--allowedTools Bash(git *),Edit", "--disallowedTools WebFetch", "--tools Bash,Edit",
 		"--restricted", "--safe-mode", "--disable-slash-commands", "--include-partial-messages", "--include-hook-events", "--forward-subagent-text",
 		"--prompt-suggestions true", "--verbose", "--debug",
-		"--add-dir " + sub} {
+		"--add-dir " + realSub} { // every checked path reaches the CLI resolved
 		if !strings.Contains(out.Result, want) {
 			t.Fatalf("missing %q in %q", want, out.Result)
 		}
@@ -597,6 +598,7 @@ func TestRunCodexMapsFieldsAndReadsLastMessage(t *testing.T) {
 	// config is among the fields checked here, so this server is one that
 	// allows it; the refusal is in the table above.
 	h := newHarness(t, Options{AllowRawFlags: true})
+	realSub, _ := filepath.EvalSymlinks(filepath.Join(h.root, "sub"))
 	code, out, raw := h.run(2, map[string]any{
 		"prompt": "fix it", "sandbox": "read-only", "approve_for_me": true,
 		"profile": "work", "config": map[string]string{"a": "1"}, "enable": []string{"f1"}, "disable": []string{"f2"}, "strict_config": true,
@@ -609,7 +611,7 @@ func TestRunCodexMapsFieldsAndReadsLastMessage(t *testing.T) {
 	}
 	for _, want := range []string{"PROMPT=fix it", "ARGS=exec - --json --color never", "-s read-only", "--approve-for-me",
 		"-p work", "-c a=1", "--enable f1", "--disable f2", "--strict-config", "--output-schema ", "--ephemeral", "--skip-git-repo-check", "--ignore-user-config", "--ignore-rules",
-		"--add-dir " + filepath.Join(h.root, "sub"), "-i ", string(os.PathSeparator) + "shot.png"} {
+		"--add-dir " + realSub, "-i ", string(os.PathSeparator) + "shot.png"} {
 		if !strings.Contains(out.Result, want) {
 			t.Fatalf("missing %q in %q", want, out.Result)
 		}

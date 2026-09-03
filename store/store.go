@@ -18,8 +18,10 @@ package store
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	rota "github.com/professor93/rota/lib"
@@ -99,7 +101,85 @@ func (s *Store) Home(a *rota.Account) string {
 	if a.ConfigDir != "" {
 		return a.ConfigDir
 	}
+	return s.ownHome(a)
+}
+
+// ownHome is the directory rota reserves for an account under HomeRoot.
+func (s *Store) ownHome(a *rota.Account) string {
 	return filepath.Join(s.backend.HomeRoot(), a.Provider+"-"+strconv.Itoa(a.ID))
+}
+
+// owns reports whether an account's home is rota's own to create and delete,
+// rather than a directory the person chose.
+func (s *Store) owns(a *rota.Account) bool {
+	return a.ConfigDir == "" || realDir(a.ConfigDir) == realDir(s.ownHome(a))
+}
+
+// CheckHome refuses a ConfigDir that would put this account inside rota's
+// own directories, and — given roots — one outside all of them.
+//
+// A run stages the account's credential into its ConfigDir, so a caller who
+// could name a sibling's home would have that sibling's credential written
+// over; and the store directory holds every account's refresh token, which
+// is no place to hand a CLI as its home, nor to put inside one. The
+// account's own default home is allowed, being the same place as no
+// ConfigDir at all. Links are followed, so a path that merely points into
+// these directories is refused too.
+func (s *Store) CheckHome(a *rota.Account, roots ...string) error {
+	if a.ConfigDir == "" {
+		return nil
+	}
+	dir := realDir(a.ConfigDir)
+	homes := realDir(s.backend.HomeRoot())
+	if (within(homes, dir) && dir != realDir(s.ownHome(a))) || within(dir, filepath.Dir(homes)) {
+		return rota.Invalid("config_dir %q: that directory is rota's own", a.ConfigDir)
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+	for _, root := range roots {
+		if within(realDir(root), dir) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: config_dir %q", rota.ErrOutsideRoots, a.ConfigDir)
+}
+
+// realDir is where a path leads once every link in it is followed, for as
+// much of it as exists. A directory that is not there yet is still judged by
+// where its nearest existing parent points, so a link into rota's homes
+// cannot be named one component early — nor before the homes exist.
+func realDir(p string) string { return resolveDir(p, 0) }
+
+func resolveDir(p string, hops int) string {
+	p = filepath.Clean(p)
+	rest := ""
+	for {
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(r, rest)
+		}
+		// A link to somewhere that does not exist yet is still a link. It is
+		// followed up to a limit, because a link can lead back to itself.
+		if target, err := os.Readlink(p); err == nil && hops < 40 {
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(p), target)
+			}
+			return resolveDir(filepath.Join(target, rest), hops+1)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return filepath.Join(p, rest)
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
+}
+
+// within reports whether path is root or inside it, without being fooled by
+// a shared name prefix.
+func within(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // Save writes the store through its backend.

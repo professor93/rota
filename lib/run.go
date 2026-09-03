@@ -198,10 +198,12 @@ type Limits struct {
 	// machine anyway. It is off by default because a vendor's flags are not
 	// rota's to keep track of: any gate rota adds has a flag that undoes it.
 	AllowRawFlags bool
-	// SettingsDenyKeys are the settings keys a mediated caller may not send
-	// inline. nil means the built-in default (env, apiKeyHelper,
-	// awsAuthRefresh, awsCredentialExport, hooks); an operator that sets the
-	// field owns the whole policy, replacement rather than extension.
+	// SettingsDenyKeys are the settings keys a mediated caller may not send,
+	// inline or in a file. nil means the built-in default,
+	// defaultSettingsDenyKeys: the keys that set the run's environment, run
+	// a program of the caller's, or load plugins and MCP servers. An
+	// operator that sets the field owns the whole policy, replacement rather
+	// than extension.
 	SettingsDenyKeys []string
 	// MaxBufferedOutput, MaxEventLine, MaxStderr (bytes) and MaxEvents
 	// (count) override the output bounds; zero keeps the defaults (64MB,
@@ -353,12 +355,8 @@ func (s *Spec) planFor(provider string, models []Model, lim *Limits) (*plan, err
 	if err := s.checkSuppliedConfig(mediated, lim, lim.AllowRawFlags); err != nil {
 		return nil, err
 	}
-	if s.ScratchDir != "" {
-		// Resolved at check time and used resolved, so a symlink repointed
-		// between the two cannot move the scratch file outside the roots.
-		if resolved, err := realPath(s.ScratchDir); err == nil {
-			s.ScratchDir = resolved
-		}
+	if err := checkWorktree(s.Worktree); err != nil {
+		return nil, err
 	}
 	model, err := resolveModel(provider, s.Model, models)
 	if err != nil {
@@ -440,6 +438,13 @@ func (s *Spec) checkExtra(mediated, allowRaw bool) error {
 // roots, and insists a directory exists, so a caller cannot reach outside them
 // or fail obscurely later.
 //
+// Each path is written back resolved — absolute, symlinks followed — so the
+// command line carries exactly what was checked. The CLI would otherwise
+// resolve the caller's string itself, against the run's working directory,
+// and a relative path or a repointed link could land it outside the roots
+// the check saw it inside. For the same reason a relative path is resolved
+// here against the run's cwd, which is where the CLI would take it.
+//
 // The list must stay exhaustive, and TestEveryPathFieldIsConfined is what
 // keeps it honest: a field rota forgets here is one a caller can point at
 // the token store, because a coding agent reading a file and describing it
@@ -447,60 +452,108 @@ func (s *Spec) checkExtra(mediated, allowRaw bool) error {
 //
 // It takes the flavor because the same field is not a path everywhere: what
 // grok writes a debug log to, Claude Code reads as a category filter.
-// nonEmpty is a one-or-none list, for optional single paths.
-func nonEmpty(s string) []string {
-	if s == "" {
-		return nil
-	}
-	return []string{s}
-}
-
 func (s *Spec) checkPaths(flavor string, lim *Limits) error {
-	dirs := []struct {
-		what string
-		list []string
-	}{
-		{"cwd", nil}, // handled below, it may be empty
-		{"add_dirs", s.AddDirs},
-		{"plugin_dirs", s.PluginDirs},
-		{"scratch_dir", nonEmpty(s.ScratchDir)},
-	}
+	var err error
+	// cwd first: it is the base for everything the CLI resolves.
 	if s.Cwd != "" {
-		dirs[0].list = []string{s.Cwd}
-	}
-	for _, group := range dirs {
-		for _, d := range group.list {
-			if err := checkDir(group.what, d, lim.Roots); err != nil {
-				return err
-			}
+		if s.Cwd, err = checkDir("cwd", s.Cwd, "", lim.Roots); err != nil {
+			return err
 		}
 	}
-	files := []struct {
-		what string
-		list []string
-	}{
-		{"images", s.Images},
-		{"mcp_config", pathsOf(s.MCPConfig)},
-		{"settings", pathsOf([]json.RawMessage{s.Settings})},
+	base := s.Cwd
+	if s.AddDirs, err = checkDirs("add_dirs", s.AddDirs, base, lim.Roots); err != nil {
+		return err
+	}
+	if s.PluginDirs, err = checkDirs("plugin_dirs", s.PluginDirs, base, lim.Roots); err != nil {
+		return err
+	}
+	// scratch_dir is rota's own: its files are created from this process,
+	// so it is relative to this process, not to the run.
+	if s.ScratchDir != "" {
+		if s.ScratchDir, err = checkDir("scratch_dir", s.ScratchDir, "", lim.Roots); err != nil {
+			return err
+		}
+	}
+	if s.Images, err = checkFiles("images", s.Images, base, lim.Roots); err != nil {
+		return err
+	}
+	if s.MCPConfig, err = checkDocPaths("mcp_config", s.MCPConfig, base, lim.Roots); err != nil {
+		return err
+	}
+	if len(s.Settings) > 0 {
+		docs, err := checkDocPaths("settings", []json.RawMessage{s.Settings}, base, lim.Roots)
+		if err != nil {
+			return err
+		}
+		s.Settings = docs[0]
 	}
 	// grok writes its debug log wherever it is told, which is a write
 	// primitive rather than a read one. Claude Code's --debug is a category
 	// filter and writes to a file only through a flag rota does not model, so
 	// confining it there would refuse a value that names nothing on disk.
 	if flavor == "grok" && s.Debug != "" && s.Debug != "true" {
-		files = append(files, struct {
-			what string
-			list []string
-		}{"debug", []string{s.Debug}})
-	}
-	for _, group := range files {
-		for _, f := range group.list {
-			if err := checkPath(group.what, f, lim.Roots); err != nil {
-				return err
-			}
+		if s.Debug, err = checkPath("debug", s.Debug, base, lim.Roots); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+// checkDirs is checkDir over a list, returning the resolved list. It is a
+// new slice: the caller's Spec is not rewritten under them.
+func checkDirs(what string, list []string, base string, roots []string) ([]string, error) {
+	if list == nil {
+		return nil, nil
+	}
+	out := make([]string, len(list))
+	for i, d := range list {
+		abs, err := checkDir(what, d, base, roots)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = abs
+	}
+	return out, nil
+}
+
+// checkFiles is checkPath over a list, returning the resolved list.
+func checkFiles(what string, list []string, base string, roots []string) ([]string, error) {
+	if list == nil {
+		return nil, nil
+	}
+	out := make([]string, len(list))
+	for i, f := range list {
+		abs, err := checkPath(what, f, base, roots)
+		if err != nil {
+			return nil, err
+		}
+		out[i] = abs
+	}
+	return out, nil
+}
+
+// checkDocPaths checks the values that name a file — the JSON strings —
+// and writes each back as the resolved path; inline documents pass through.
+func checkDocPaths(what string, docs []json.RawMessage, base string, roots []string) ([]json.RawMessage, error) {
+	if docs == nil {
+		return nil, nil
+	}
+	out := make([]json.RawMessage, len(docs))
+	for i, d := range docs {
+		out[i] = d
+		var str string
+		if len(d) == 0 || decodeLenient(d, &str) != nil || str == "" {
+			continue
+		}
+		abs, err := checkPath(what, str, base, roots)
+		if err != nil {
+			return nil, err
+		}
+		if out[i], err = Encode(abs); err != nil {
+			return nil, failf(ErrInvalidRequest, "%s %q: %v", what, str, err)
+		}
+	}
+	return out, nil
 }
 
 // pathsOf picks the JSON values that are plain strings, which is how a
@@ -516,24 +569,38 @@ func pathsOf(docs []json.RawMessage) []string {
 	return out
 }
 
-// checkPath confines a file the same way checkDir confines a directory.
-func checkPath(what, path string, roots []string) error {
+// checkPath confines a file the same way checkDir confines a directory, and
+// returns it resolved.
+func checkPath(what, path, base string, roots []string) (string, error) {
 	if path == "" {
-		return nil
+		return "", nil
 	}
-	abs, err := realPath(path)
+	abs, err := resolveIn(base, path)
 	if err != nil {
-		return failf(ErrInvalidRequest, "%s %q: %v", what, path, err)
+		return "", failf(ErrInvalidRequest, "%s %q: %v", what, path, err)
 	}
 	if len(roots) == 0 {
-		return nil
+		return abs, nil
 	}
 	for _, root := range roots {
 		if r, err := realPath(root); err == nil && within(r, abs) {
-			return nil
+			return abs, nil
 		}
 	}
-	return failf(ErrOutsideRoots, "%s %q is outside the allowed directories", what, path)
+	return "", failf(ErrOutsideRoots, "%s %q is outside the allowed directories", what, path)
+}
+
+// checkWorktree keeps a worktree name a name: the CLI creates the worktree
+// under a directory of its own, and a separator or a dot-dot in the name
+// would put it somewhere else. "true" asks for a generated name.
+func checkWorktree(name string) error {
+	if name == "" || name == "true" {
+		return nil
+	}
+	if strings.ContainsAny(name, `/\`) || name == "." || strings.HasPrefix(name, "..") {
+		return failf(ErrInvalidRequest, "worktree %q is not a name: one path element, without separators or a leading dot-dot", name)
+	}
+	return nil
 }
 
 // checkSuppliedConfig refuses the configuration and code a confined caller
@@ -557,8 +624,7 @@ func (s *Spec) checkSuppliedConfig(mediated bool, lim *Limits, allowRaw bool) er
 	}
 	deny := lim.SettingsDenyKeys
 	if deny == nil {
-		deny = []string{"env", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "hooks",
-			"permissions", "otelHeadersHelper", "statusLine", "forceLoginMethod"}
+		deny = defaultSettingsDenyKeys
 	}
 	vet := func(doc map[string]json.RawMessage) error {
 		for _, key := range deny {
@@ -585,8 +651,13 @@ func (s *Spec) checkSuppliedConfig(mediated bool, lim *Limits, allowRaw bool) er
 		if err := vet(doc); err != nil {
 			return err
 		}
+		// What was vetted is what runs: the CLI gets the document, not the
+		// path it would read again later, after the file could be rewritten.
+		if s.Settings, err = inlineDoc(paths[0], doc); err != nil {
+			return err
+		}
 	}
-	for _, m := range s.MCPConfig {
+	for i, m := range s.MCPConfig {
 		doc := inlineObject(m)
 		if doc == nil {
 			if paths := pathsOf([]json.RawMessage{m}); len(paths) == 1 {
@@ -598,6 +669,10 @@ func (s *Spec) checkSuppliedConfig(mediated bool, lim *Limits, allowRaw bool) er
 				// a command or an environment is a program launch, which is
 				// what this gate exists to keep out of a caller's hands.
 				if err := vetMCPServers(doc); err != nil {
+					return err
+				}
+				// checkPaths left a fresh slice here, so this rewrite is ours.
+				if s.MCPConfig[i], err = inlineDoc(paths[0], doc); err != nil {
 					return err
 				}
 				continue
@@ -641,21 +716,80 @@ func (s *Spec) checkSuppliedConfig(mediated bool, lim *Limits, allowRaw bool) er
 	return nil
 }
 
-// readConfigFile loads a caller-named configuration file for vetting, bounded
-// so a huge file cannot be used to stall the check.
+// defaultSettingsDenyKeys is what a mediated caller may not put in a settings
+// document when the operator has not said otherwise: the keys that set the
+// run's environment, run a program of the caller's, or load plugins and MCP
+// servers — code and servers the operator did not choose.
+var defaultSettingsDenyKeys = []string{"env", "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "hooks",
+	"permissions", "otelHeadersHelper", "statusLine", "forceLoginMethod",
+	"enabledPlugins", "extraKnownMarketplaces", "enableAllProjectMcpServers", "enabledMcpjsonServers"}
+
+// maxConfigFile bounds a caller-named settings or MCP file. No settings
+// document is anywhere near it.
+const maxConfigFile = 1 << 20
+
+// readConfigFile loads a caller-named configuration file for vetting. It is
+// sized and typed before it is opened: a pipe blocks on open until something
+// writes to it, and a huge file is refused unread.
 func readConfigFile(path string) (map[string]json.RawMessage, error) {
-	raw, err := os.ReadFile(path)
+	fi, err := os.Stat(path)
 	if err != nil {
 		return nil, failf(ErrInvalidRequest, "config file %q: %v", path, err)
 	}
-	if len(raw) > 1<<20 {
-		return nil, failf(ErrInvalidRequest, "config file %q is over 1MB, which no settings document is", path)
+	if err := configFileFits(path, fi); err != nil {
+		return nil, err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, failf(ErrInvalidRequest, "config file %q: %v", path, err)
+	}
+	defer f.Close()
+	// Checked again on what was actually opened, and read with a bound, so
+	// a swap or a growth between the two looks is caught rather than read.
+	if fi, err := f.Stat(); err != nil {
+		return nil, failf(ErrInvalidRequest, "config file %q: %v", path, err)
+	} else if err := configFileFits(path, fi); err != nil {
+		return nil, err
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxConfigFile+1))
+	if err != nil {
+		return nil, failf(ErrInvalidRequest, "config file %q: %v", path, err)
+	}
+	if len(raw) > maxConfigFile {
+		return nil, configTooBig(path)
 	}
 	var doc map[string]json.RawMessage
 	if err := decodeLenient(raw, &doc); err != nil {
 		return nil, failf(ErrInvalidRequest, "config file %q: %v", path, err)
 	}
 	return doc, nil
+}
+
+// configFileFits is the one verdict on a config file's shape, for the stat
+// before opening and the one after.
+func configFileFits(path string, fi os.FileInfo) error {
+	if !fi.Mode().IsRegular() {
+		return failf(ErrInvalidRequest, "config file %q is not a regular file", path)
+	}
+	if fi.Size() > maxConfigFile {
+		return configTooBig(path)
+	}
+	return nil
+}
+
+func configTooBig(path string) error {
+	return failf(ErrInvalidRequest, "config file %q is over 1MB, which no settings document is", path)
+}
+
+// inlineDoc is a vetted config document as the CLI will receive it: one
+// compact JSON value, keys in a fixed order, so the command line is the same
+// for the same file.
+func inlineDoc(path string, doc map[string]json.RawMessage) (json.RawMessage, error) {
+	raw, err := jsonv2.Marshal(doc, jsonv2.Deterministic(true))
+	if err != nil {
+		return nil, failf(ErrInvalidRequest, "config file %q: %v", path, err)
+	}
+	return raw, nil
 }
 
 // vetMCPServers refuses any server entry that names a command or an
@@ -690,23 +824,36 @@ func inlineObject(raw json.RawMessage) map[string]json.RawMessage {
 	return doc
 }
 
-func checkDir(what, dir string, roots []string) error {
-	abs, err := realPath(dir)
+// checkDir confines a directory to the roots, insists it exists, and returns
+// it resolved.
+func checkDir(what, dir, base string, roots []string) (string, error) {
+	abs, err := resolveIn(base, dir)
 	if err != nil {
-		return failf(ErrInvalidRequest, "%s %q: %v", what, dir, err)
+		return "", failf(ErrInvalidRequest, "%s %q: %v", what, dir, err)
 	}
 	if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
-		return failf(ErrInvalidRequest, "%s %q is not an existing directory", what, dir)
+		return "", failf(ErrInvalidRequest, "%s %q is not an existing directory", what, dir)
 	}
 	if len(roots) == 0 {
-		return nil
+		return abs, nil
 	}
 	for _, root := range roots {
 		if r, err := realPath(root); err == nil && within(r, abs) {
-			return nil
+			return abs, nil
 		}
 	}
-	return failf(ErrOutsideRoots, "%s %q is outside the allowed directories", what, dir)
+	return "", failf(ErrOutsideRoots, "%s %q is outside the allowed directories", what, dir)
+}
+
+// resolveIn is realPath for a path the CLI will resolve itself: a relative
+// one is taken against base, the run's working directory, the way the CLI
+// will take it. An empty base is this process's own directory, which is
+// where a run without a cwd of its own starts too.
+func resolveIn(base, p string) (string, error) {
+	if base != "" && !filepath.IsAbs(p) {
+		p = filepath.Join(base, p)
+	}
+	return realPath(p)
 }
 
 // realPath resolves a path the way the filesystem will, symlinks included,
@@ -795,21 +942,18 @@ func (s *Spec) claudeArgv(model, effort string, lim *Limits) ([]string, error) {
 	str("--name", s.Name)
 	str("--system-prompt", s.SystemPrompt)
 	str("--append-system-prompt", s.AppendSystemPrompt)
-	raw("--settings", s.Settings)
+	// Claude Code takes either a path or an inline JSON document for
+	// --settings and --mcp-config, so both a JSON string and a JSON object
+	// are accepted and reach it in the form it expects.
+	if len(s.Settings) > 0 {
+		a = append(a, "--settings", docArg(s.Settings))
+	}
 	raw("--agents", s.Agents)
 	str("--agent", s.Agent)
 	if len(s.MCPConfig) > 0 {
-		// Claude Code takes either a path or an inline JSON document here,
-		// so both a JSON string and a JSON object are accepted and reach it
-		// in the form it expects.
 		a = append(a, "--mcp-config")
 		for _, m := range s.MCPConfig {
-			var path string
-			if decodeLenient(m, &path) == nil {
-				a = append(a, path)
-			} else {
-				a = append(a, string(m))
-			}
+			a = append(a, docArg(m))
 		}
 	}
 	flag("--strict-mcp-config", s.StrictMCPConfig)
@@ -871,6 +1015,16 @@ func (s *Spec) claudeArgv(model, effort string, lim *Limits) ([]string, error) {
 	}
 	list("--add-dir", s.AddDirs, false)
 	return append(a, s.Extra...), nil
+}
+
+// docArg is a path-or-document value as one argument: a JSON string is the
+// path itself, unquoted; anything else is the document's text.
+func docArg(m json.RawMessage) string {
+	var path string
+	if decodeLenient(m, &path) == nil {
+		return path
+	}
+	return string(m)
 }
 
 func (s *Spec) codexArgv(model, effort string, lim *Limits) ([]string, error) {
@@ -1242,6 +1396,7 @@ func Run(ctx context.Context, a *Account, home string, cmd *Command, spec Spec, 
 	}
 
 	child := exec.CommandContext(ctx, path, argv...)
+	child.WaitDelay = waitDelay
 	runCmd := cmd
 	if spec.Hermetic {
 		// A fresh config dir per run: the shared home's identity and memory
@@ -1251,21 +1406,13 @@ func Run(ctx context.Context, a *Account, home string, cmd *Command, spec Spec, 
 			return nil, herr
 		}
 		defer os.RemoveAll(hd)
-		hc := *cmd
-		hc.Env = append(append([]string(nil), cmd.Env...), "CLAUDE_CONFIG_DIR="+hd)
-		runCmd = &hc
+		runCmd = hermeticCommand(cmd, hd)
 	}
 	child.Env = Environ(runCmd.BaseEnv, runCmd)
-	// The resolved path, not the one the caller wrote: checkDir validated
-	// where the symlinks led, and handing the kernel the unresolved string
-	// would let one repointed between check and start escape.
-	if spec.Cwd != "" {
-		if resolved, rerr := realPath(spec.Cwd); rerr == nil {
-			child.Dir = resolved
-		} else {
-			child.Dir = spec.Cwd
-		}
-	}
+	// Already resolved by the check: where the symlinks led is what was
+	// validated, and handing the kernel the caller's string would let a link
+	// repointed between check and start escape.
+	child.Dir = spec.Cwd
 	child.Stdin = strings.NewReader(spec.Prompt)
 	stdout, err := child.StdoutPipe()
 	if err != nil {
@@ -1323,6 +1470,28 @@ func Run(ctx context.Context, a *Account, home string, cmd *Command, spec Spec, 
 		return res, waitErr
 	}
 	return res, scanErr
+}
+
+// waitDelay bounds how long a run waits, once its context is done or the
+// CLI has exited, for the CLI's pipes to close. A helper the CLI left
+// behind — a daemonised server still holding its stdout — would otherwise
+// keep the run open for as long as it lives.
+const waitDelay = 5 * time.Second
+
+// hermeticCommand is cmd pointed at a throwaway config directory. An
+// account with a directory of its own already names one, and Environ
+// dedupes only inherited variables, so that entry is dropped here: the
+// child must see exactly one, and Node would take the first.
+func hermeticCommand(cmd *Command, dir string) *Command {
+	hc := *cmd
+	hc.Env = make([]string, 0, len(cmd.Env)+1)
+	for _, e := range cmd.Env {
+		if k, _, _ := strings.Cut(e, "="); k != "CLAUDE_CONFIG_DIR" {
+			hc.Env = append(hc.Env, e)
+		}
+	}
+	hc.Env = append(hc.Env, "CLAUDE_CONFIG_DIR="+dir)
+	return &hc
 }
 
 // readOutput turns whatever the CLI printed into a Result.

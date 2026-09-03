@@ -16,7 +16,7 @@ import (
 func specArgv(s Spec, flavor string, lim *Limits) ([]string, error) { return s.argv(flavor, lim) }
 
 func TestSpecBuildsClaudeArgv(t *testing.T) {
-	pluginDir := t.TempDir()
+	pluginDir := resolved(t, t.TempDir()) // paths reach argv resolved
 	spec := Spec{
 		Prompt: "hi", Model: "opus", Effort: "high", JSONSchema: json.RawMessage(`{"type":"object"}`),
 		SessionID: "sid", ForkSession: true, SystemPrompt: "sys", SettingSources: []string{},
@@ -49,15 +49,16 @@ func TestSpecBuildsClaudeArgv(t *testing.T) {
 }
 
 func TestSpecBuildsCodexArgv(t *testing.T) {
+	img := filepath.Join(resolved(t, t.TempDir()), "a.png") // paths reach argv resolved
 	spec := Spec{Prompt: "p", Model: "gpt-5.6-sol", Effort: "high", Sandbox: "read-only", Config: map[string]string{"a": "1"},
-		Enable: []string{"f"}, Images: []string{"a.png"}, Ephemeral: true, Resume: "t-1"}
+		Enable: []string{"f"}, Images: []string{img}, Ephemeral: true, Resume: "t-1"}
 	argv, err := specArgv(spec, "codex", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := strings.Join(argv, " ")
 	for _, want := range []string{"exec resume t-1 -", "--json", "--color never", "-m gpt-5.6-sol",
-		"-c model_reasoning_effort=high", "-s read-only", "-c a=1", "--enable f", "-i a.png", "--ephemeral"} {
+		"-c model_reasoning_effort=high", "-s read-only", "-c a=1", "--enable f", "-i " + img, "--ephemeral"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("missing %q in %q", want, got)
 		}

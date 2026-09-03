@@ -101,11 +101,14 @@ func TestAFailedRemovalStillRecordsWhatItRemoved(t *testing.T) {
 	}
 	dir := t.TempDir()
 	t.Setenv("ROTA_HOME", dir)
-	// The second account's home sits inside a directory nothing may write to,
-	// so deleting it fails after the first has already gone.
-	locked := filepath.Join(t.TempDir(), "locked")
-	stuck := filepath.Join(locked, "two")
-	if err := os.MkdirAll(stuck, 0o700); err != nil {
+	// The second account's home holds a directory nothing may write into,
+	// so deleting the home fails after the first has already gone. It is
+	// rota's own home: a directory the person chose is never deleted at all.
+	locked := filepath.Join(dir, "homes", "grok-2", "locked")
+	if err := os.MkdirAll(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "keep"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(locked, 0o500); err != nil {
@@ -115,7 +118,7 @@ func TestAFailedRemovalStillRecordsWhatItRemoved(t *testing.T) {
 
 	seedAccounts(t, dir, `{"accounts":[
 		{"id":1,"provider":"grok","delegated":true,"uuid":"g1","order":1},
-		{"id":2,"provider":"grok","delegated":true,"uuid":"g2","order":2,"config_dir":"`+stuck+`"}],
+		{"id":2,"provider":"grok","delegated":true,"uuid":"g2","order":2}],
 		"nextId":3,"ordered":true}`)
 
 	if _, _, code := call(t, "remove", "1", "2"); code == 0 {
