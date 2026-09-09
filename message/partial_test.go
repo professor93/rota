@@ -49,6 +49,7 @@ func TestPartialFragmentsAreDeltasAndTheWholeStillFollows(t *testing.T) {
 		"text+",    // "Hello there, friend"
 		"text+",    // "."
 		"text",     // the whole text block
+		"usage",    // message_delta, with the message's token numbers
 		"usage",    // rate_limit_event
 		"other",    // the CLI's result event
 	}

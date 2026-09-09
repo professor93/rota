@@ -649,6 +649,9 @@ streams the fragments too, as the model writes them: in text mode they are
 printed as they come, and with --json each is its own event marked "delta",
 followed by the whole piece as before. It implies --stream.
 
+--events includes the provider's own events: in "raw" on each streamed one,
+or as a list in a buffered reply. It implies --json.
+
 Conversations carry on: every run has a session id, and --resume <id>
 continues from it. On its own, --resume picks up the most recent
 conversation, which every provider can find without being told its id, and
@@ -835,6 +838,7 @@ func (c *cli) answer(id int, args []string) error {
 		effort     = fs.String("effort", "", "reasoning effort, for providers that have one")
 		stream     = fs.Bool("stream", false, "print events as they happen: text, or one JSON object per line with --json")
 		partial    = fs.Bool("partial", false, "also print each fragment as the model writes it; implies --stream")
+		events     = fs.Bool("events", false, "include the provider's own events: in raw on each streamed one, or as a list in the reply; implies --json")
 		cwd        = fs.String("cwd", "", "working directory for the run")
 		timeout    = fs.Duration("timeout", 0, "give up after this long")
 		mode       = fs.String("permission-mode", "", "how the agent asks before acting")
@@ -877,15 +881,17 @@ func (c *cli) answer(id int, args []string) error {
 	}
 
 	// A fragment is a piece of a stream, so asking for fragments is asking
-	// for the stream they are pieces of.
+	// for the stream they are pieces of; and the provider's own events are
+	// machine output, with nowhere to go but JSON.
 	*stream = *stream || *partial
+	*asJSON = *asJSON || *events
 
 	spec := rota.Spec{
 		Prompt: text, Model: *model, Effort: *effort, Stream: *stream, Cwd: *cwd,
 		PermissionMode: *mode, Sandbox: *sandbox, SystemPrompt: *system,
 		Resume: *resume, Continue: *cont, SessionID: *session,
 		TimeoutSeconds: int(timeout.Seconds()), OneShot: true,
-		IncludePartialMessages: *partial,
+		IncludePartialMessages: *partial, IncludeEvents: *events,
 	}
 	spec.ForkSession = *fork
 	if *schema != "" {
@@ -956,7 +962,7 @@ func (c *cli) answer(id int, args []string) error {
 	// the entry above — while the run is going for a streamed one, and only
 	// at the end for a buffered one, whose CLI prints a single document when
 	// it has finished.
-	watch := newEventStream(c.out, c.json || *asJSON, a.ID, a.Provider)
+	watch := newEventStream(c.out, c.json || *asJSON, a.ID, a.Provider, *events)
 	watch.quiet = !*stream
 	watch.learn = started.Learned
 	var live *eventStream

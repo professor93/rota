@@ -12,6 +12,7 @@ package wire
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -214,7 +215,14 @@ type End struct {
 	Account    int    `json:"account,omitzero"`
 	SessionID  string `json:"session_id,omitempty"`
 	DurationMS int64  `json:"duration_ms,omitzero"`
-	Error      string `json:"error,omitempty"`
+	// NumTurns, CostUSD and Usage are the run's totals, as the buffered
+	// reply carries them: a client watching a run should not need a second
+	// request to learn what it paid for. Usage is the provider's own
+	// accounting, verbatim, as it is there.
+	NumTurns int             `json:"num_turns,omitzero"`
+	CostUSD  float64         `json:"cost_usd,omitzero"`
+	Usage    json.RawMessage `json:"usage,omitzero"`
+	Error    string          `json:"error,omitempty"`
 }
 
 // Ended describes how a run finished, from its result and whatever error
@@ -227,6 +235,7 @@ func Ended(res *rota.Result, err error) End {
 	if res != nil {
 		e.ExitCode, e.SessionID, e.IsError, e.DurationMS = res.ExitCode, res.SessionID, res.IsError, res.DurationMS
 		e.Account = res.Account
+		e.NumTurns, e.CostUSD, e.Usage = res.NumTurns, res.CostUSD, res.Usage
 	}
 	return e
 }

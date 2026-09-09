@@ -1,6 +1,7 @@
 package message
 
 import (
+	"bytes"
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 
@@ -46,15 +47,54 @@ type Event struct {
 	Delta bool `json:"delta,omitzero"`
 
 	// Tool, ToolID and Reason describe a tool call, its result, or the
-	// refusal of it.
-	Tool   string `json:"tool,omitempty"`
-	ToolID string `json:"tool_id,omitempty"`
-	Reason string `json:"reason,omitempty"`
+	// refusal of it. Input is what the tool was asked to do — the file a
+	// Read opened, the command a Bash ran — in the tool's own shape,
+	// verbatim: it is the fact a client wants to show, and it is not the
+	// same fact for any two tools.
+	Tool   string         `json:"tool,omitempty"`
+	ToolID string         `json:"tool_id,omitempty"`
+	Input  jsontext.Value `json:"input,omitzero"`
+	Reason string         `json:"reason,omitempty"`
+
+	// Usage is the token numbers a usage event was made of, when it was
+	// made of any: a limit reading going by has none.
+	Usage *Usage `json:"usage,omitzero"`
 
 	// Raw is the provider's own event, verbatim, for a caller that asked to
 	// see it. Empty by default: the point of this type is that most clients
 	// never need to look.
 	Raw jsontext.Value `json:"raw,omitzero"`
+}
+
+// Usage is a token reading in one vocabulary. The names are the Anthropic
+// API's, which claude's own accounting already uses; codex's
+// cached_input_tokens is the same reading as cache_read_input_tokens and
+// lands there.
+type Usage struct {
+	InputTokens              int `json:"input_tokens,omitzero"`
+	OutputTokens             int `json:"output_tokens,omitzero"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitzero"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitzero"`
+}
+
+// usage is a provider's own token reading, whichever names it used.
+type usage struct {
+	Input         int `json:"input_tokens"`
+	Output        int `json:"output_tokens"`
+	CacheRead     int `json:"cache_read_input_tokens"`
+	CacheCreation int `json:"cache_creation_input_tokens"`
+	Cached        int `json:"cached_input_tokens"` // codex
+}
+
+// event is the reading in rota's vocabulary, or nothing when there was none.
+func (u *usage) event() *Usage {
+	if u == nil {
+		return nil
+	}
+	return &Usage{
+		InputTokens: u.Input, OutputTokens: u.Output,
+		CacheReadInputTokens: u.CacheRead + u.Cached, CacheCreationInputTokens: u.CacheCreation,
+	}
 }
 
 // wire is every field of every provider's vocabulary that rota reads. One
@@ -80,6 +120,8 @@ type wire struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"item"`
+	// Usage is codex's turn accounting.
+	Usage *usage `json:"usage"`
 
 	// grok answers with one object and no type at all
 	GrokText   string `json:"text"`
@@ -95,6 +137,9 @@ type streamEvent struct {
 		Text     string `json:"text"`
 		Thinking string `json:"thinking"`
 	} `json:"delta"`
+	// Usage rides on message_delta: the message's accounting, once it is
+	// complete.
+	Usage *usage `json:"usage"`
 }
 
 // content is what a claude message holds: a list of pieces, each its own
@@ -105,13 +150,14 @@ type content struct {
 
 // piece is one element of a claude message's content.
 type piece struct {
-	Type      string `json:"type"`
-	Text      string `json:"text"`
-	Thinking  string `json:"thinking"`
-	Name      string `json:"name"`
-	ID        string `json:"id"`
-	ToolUseID string `json:"tool_use_id"`
-	Result    string `json:"content"`
+	Type      string         `json:"type"`
+	Text      string         `json:"text"`
+	Thinking  string         `json:"thinking"`
+	Name      string         `json:"name"`
+	ID        string         `json:"id"`
+	Input     jsontext.Value `json:"input"`
+	ToolUseID string         `json:"tool_use_id"`
+	Result    string         `json:"content"`
 }
 
 // Normalize turns one line of a vendor's output into rota's vocabulary. One
@@ -159,7 +205,8 @@ func Normalize(raw []byte) []Event {
 			Reason: why, SessionID: session}}
 
 	case w.Type == "rate_limit_event", w.Type == "turn.completed":
-		return one("usage")
+		// A limit reading has no token numbers; codex's turn does.
+		return []Event{{Type: "usage", Usage: w.Usage.event(), SessionID: session}}
 
 	case w.Type == "result":
 		// claude repeats its final answer here, having already said it as
@@ -209,7 +256,18 @@ func pieces(msg jsontext.Value, session string, one func(piece, string) (Event, 
 // fragment reads one streaming event and returns the delta it carries, if
 // it carries one worth showing. An empty fragment is not a happening.
 func fragment(e *streamEvent, session string) []Event {
-	if e == nil || e.Type != "content_block_delta" {
+	if e == nil {
+		return nil
+	}
+	if e.Type == "message_delta" {
+		// The message is complete, and this is its accounting: the one
+		// token reading a run gives while it is still going.
+		if u := e.Usage.event(); u != nil {
+			return []Event{{Type: "usage", Usage: u, SessionID: session}}
+		}
+		return nil
+	}
+	if e.Type != "content_block_delta" {
 		return nil
 	}
 	var kind, text string
@@ -232,7 +290,8 @@ func assistantPiece(p piece, session string) (Event, bool) {
 	case "thinking":
 		return Event{Type: "thinking", Text: p.Thinking, SessionID: session}, true
 	case "tool_use":
-		return Event{Type: "tool", Tool: p.Name, ToolID: p.ID, SessionID: session}, true
+		// A copy: the line it was read from is a buffer the reader reuses.
+		return Event{Type: "tool", Tool: p.Name, ToolID: p.ID, Input: jsontext.Value(bytes.Clone(p.Input)), SessionID: session}, true
 	}
 	return Event{}, false
 }

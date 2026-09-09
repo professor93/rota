@@ -158,6 +158,7 @@ rota run "summarize this repo"     # ask whichever account the rotation picks
 rota run 2 "summarize this repo"   # ask account 2 instead
 rota run 2 --stateless "2+2?"      # no session, no settings/memory, throwaway claude home (claude, codex)
 rota run 2 "explain it" --partial  # each fragment as it is written, not just each finished piece
+rota run 2 "explain it" --events   # the provider's own events too, as JSON
 rota run 2 -m sonnet -e low "hi"   # every everyday run flag has a short: -m -e -s -c -r -t -S
 rota run                      # open the rotation's account in its own CLI
 rota run 2                    # open account 2's CLI, as it comes
@@ -377,15 +378,23 @@ event vocabularies. A client reading a rota stream learns one:
 | `text` | the agent said something, with `blocks` — see below |
 | `thinking` | it thought something |
 | `text` / `thinking` with `delta` | one fragment of a piece still being written; only when partial messages were asked for — see below |
-| `tool` / `tool_result` | it used a tool, and what came back |
+| `tool` / `tool_result` | it used a tool, with `tool`, `tool_id` and the tool's own `input` — the file a Read opened, the command a Bash ran — and what came back |
 | `blocked` | a tool it wanted was refused, with `tool` and `reason` |
-| `usage` | a limit or token reading went by |
-| `done` / `error` | how the run ended, with the exit status |
+| `usage` | a limit or token reading went by; a token reading carries `usage` with `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` |
+| `done` / `error` | how the run ended, with the exit status, and the totals: `num_turns`, `cost_usd` and the provider's own `usage` |
 | `other` | something rota recognises but has nothing general to say about |
 
 Every event carries a `seq`, so a gap is visible. Nothing is dropped: an
 event type rota has never seen still arrives, as `other`. Set
-`include_events` to get the provider's own event alongside rota's, in `raw`.
+`include_events` (`--events` on the command line) to get the provider's own
+event alongside rota's, in `raw`.
+
+Token readings come when a provider gives them: codex at the end of each
+turn, and claude at the end of each message when partial messages were asked
+for — its `message_delta` is the one reading a claude run gives while it is
+still going. Each is that message's own count, not a running total; the total
+is on `done`. claude's limit reading (`rate_limit_event`) is a `usage` event
+with no numbers.
 
 `init` exists because the CLI's own opening event knows nothing about the
 account, and a caller should not have to wait for a run to end to learn
@@ -412,7 +421,18 @@ transports without changing what reads them.
 ```json
 {"type":"init","seq":1,"account":1,"provider":"claude","model":"claude-opus-5","effort":"high"}
 {"type":"text","seq":4,"account":1,"provider":"claude","session_id":"91ebe527…","text":"ndjson works"}
-{"type":"done","exit_code":0,"is_error":false,"account":1,"session_id":"91ebe527…","duration_ms":3436}
+{"type":"done","exit_code":0,"is_error":false,"account":1,"session_id":"91ebe527…","duration_ms":3436,"num_turns":1,"cost_usd":0.0159,"usage":{"input_tokens":10,"output_tokens":53,…}}
+```
+
+`--events` (`include_events` over HTTP) attaches the provider's own line to
+each event, in `raw`, and in a buffered reply keeps every line the CLI
+printed in `events` — for claude, whose buffered run prints one document,
+that is the one document; the stream is where every line is. It is machine
+output by nature, so it implies `--json`.
+
+```sh
+rota run 1 "..." --stream --events   # every event, with the provider's line in raw
+rota run 1 "..." --events            # one document, with the whole event stream in events
 ```
 
 rota speaks first, before the CLI has done anything, so a reader knows which

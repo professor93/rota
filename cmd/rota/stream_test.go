@@ -132,7 +132,7 @@ func TestWithoutStreamingJSONIsStillOneDocument(t *testing.T) {
 func TestARunLearnsItsSessionWhetherOrNotItPrints(t *testing.T) {
 	for _, quiet := range []bool{false, true} {
 		var learned []string
-		e := newEventStream(io.Discard, true, 1, "claude")
+		e := newEventStream(io.Discard, true, 1, "claude", false)
 		e.quiet = quiet
 		e.learn = func(id string) { learned = append(learned, id) }
 
@@ -149,7 +149,7 @@ func TestARunLearnsItsSessionWhetherOrNotItPrints(t *testing.T) {
 // writes nothing at all, which is what a run without --stream must look like.
 func TestAQuietStreamPrintsNothing(t *testing.T) {
 	var out strings.Builder
-	e := newEventStream(&out, true, 1, "claude")
+	e := newEventStream(&out, true, 1, "claude", false)
 	e.quiet = true
 	if _, err := e.Write([]byte(`{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}` + "\n")); err != nil {
 		t.Fatal(err)
