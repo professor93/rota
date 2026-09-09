@@ -17,11 +17,12 @@ func specArgv(s Spec, flavor string, lim *Limits) ([]string, error) { return s.a
 
 func TestSpecBuildsClaudeArgv(t *testing.T) {
 	pluginDir := resolved(t, t.TempDir()) // paths reach argv resolved
+	mcp := filepath.Join(pluginDir, "m.json")
 	spec := Spec{
 		Prompt: "hi", Model: "opus", Effort: "high", JSONSchema: json.RawMessage(`{"type":"object"}`),
 		SessionID: "sid", ForkSession: true, SystemPrompt: "sys", SettingSources: []string{},
 		PermissionMode: "plan", AllowedTools: []string{"Bash(git *)", "Edit"}, Tools: []string{},
-		PluginDirs: []string{pluginDir}, MCPConfig: []json.RawMessage{json.RawMessage(`"/m.json"`)}, Restricted: true,
+		PluginDirs: []string{pluginDir}, MCPConfig: []json.RawMessage{jsonPath(t, mcp)}, Restricted: true,
 		Worktree: "wt", Debug: "api", Extra: []string{"--x", "1"},
 	}
 	argv, err := specArgv(spec, "claude", nil)
@@ -32,7 +33,7 @@ func TestSpecBuildsClaudeArgv(t *testing.T) {
 	for _, want := range []string{"-p --output-format json", "--setting-sources  ", "--model claude-opus-5", "--effort high",
 		`--json-schema {"type":"object"}`, "--session-id sid", "--fork-session", "--system-prompt sys",
 		"--permission-mode plan", "--allowedTools Bash(git *),Edit", "--tools  ", "--plugin-dir " + pluginDir,
-		"--mcp-config /m.json", "--restricted", "--worktree wt", "--debug api", "--x 1"} {
+		"--mcp-config " + mcp, "--restricted", "--worktree wt", "--debug api", "--x 1"} {
 		if !strings.Contains(got+" ", want) {
 			t.Fatalf("missing %q in %q", want, got)
 		}

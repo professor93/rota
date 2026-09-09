@@ -20,6 +20,18 @@ func resolved(t *testing.T, dir string) string {
 	return r
 }
 
+// jsonPath is a path as a JSON string, the way a request carries one. Quotes
+// concatenated around a Windows path leave its backslashes as escapes, and
+// `C:\Users` is not JSON.
+func jsonPath(t *testing.T, p string) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
+
 // A relative path means what it will mean to the CLI: relative to the run's
 // working directory, not to wherever the server happens to be running. The
 // check used to resolve against the server's cwd and then hand the CLI the
@@ -146,7 +158,7 @@ func TestVettedConfigFilesReachTheCLIInline(t *testing.T) {
 	if err := os.WriteFile(mcp, []byte(`{"mcpServers":{"docs":{"url":"https://docs.example/mcp"}}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	spec := Spec{Prompt: "p", Settings: json.RawMessage(`"` + settings + `"`), MCPConfig: []json.RawMessage{json.RawMessage(`"` + mcp + `"`)}}
+	spec := Spec{Prompt: "p", Settings: jsonPath(t, settings), MCPConfig: []json.RawMessage{jsonPath(t, mcp)}}
 	argv, err := specArgv(spec, "claude", lim)
 	if err != nil {
 		t.Fatal(err)
@@ -173,7 +185,7 @@ func TestVettedConfigFilesReachTheCLIInline(t *testing.T) {
 		t.Fatalf("the rewritten file must be refused on its own merits: %v", err)
 	}
 	// Without limits the caller is trusted, and the path passes as a path.
-	argv, err = specArgv(Spec{Prompt: "p", Settings: json.RawMessage(`"` + settings + `"`)}, "claude", nil)
+	argv, err = specArgv(Spec{Prompt: "p", Settings: jsonPath(t, settings)}, "claude", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +220,7 @@ func TestAnOversizedConfigFileIsRefusedBeforeItIsRead(t *testing.T) {
 	if err := os.WriteFile(big, make([]byte, 2<<20), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := (Spec{Prompt: "p", Settings: json.RawMessage(`"` + big + `"`)}).Check("claude", &Limits{Roots: []string{root}})
+	err := (Spec{Prompt: "p", Settings: jsonPath(t, big)}).Check("claude", &Limits{Roots: []string{root}})
 	if !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), "1MB") {
 		t.Fatalf("a 2MB settings file must be refused for its size, got %v", err)
 	}
@@ -216,7 +228,7 @@ func TestAnOversizedConfigFileIsRefusedBeforeItIsRead(t *testing.T) {
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	err = (Spec{Prompt: "p", Settings: json.RawMessage(`"` + dir + `"`)}).Check("claude", &Limits{Roots: []string{root}})
+	err = (Spec{Prompt: "p", Settings: jsonPath(t, dir)}).Check("claude", &Limits{Roots: []string{root}})
 	if !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), "regular file") {
 		t.Fatalf("a directory is not a settings file, got %v", err)
 	}
