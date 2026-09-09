@@ -118,7 +118,7 @@ type Spec struct {
 	SafeMode bool `json:"safe_mode,omitzero"`
 	// Turn off the skills a prompt can invoke by name, leaving only the plain assistant.
 	DisableSlashCommands bool `json:"disable_slash_commands,omitzero"`
-	// Emit each fragment as the model writes it, rather than whole messages.
+	// Also emit each fragment as the model writes it, marked as a delta, before the whole piece; needs stream.
 	IncludePartialMessages bool `json:"include_partial_messages,omitzero"`
 	// Also emit the lifecycle events of any hooks configured on this machine.
 	IncludeHookEvents bool `json:"include_hook_events,omitzero"`
@@ -590,6 +590,18 @@ func checkPath(what, path, base string, roots []string) (string, error) {
 	return "", failf(ErrOutsideRoots, "%s %q is outside the allowed directories", what, path)
 }
 
+// checkPartial refuses fragments for a run that is not a stream. A fragment
+// is a piece of a stream, and the CLI says as much itself — after the run
+// has started. Saying it here costs nothing and names the field to add,
+// rather than quietly turning the reply into a stream the caller did not
+// ask for.
+func (s *Spec) checkPartial() error {
+	if s.IncludePartialMessages && !s.Stream {
+		return failf(ErrInvalidRequest, "include_partial_messages needs stream: a fragment is a piece of a stream, and there is none in a buffered run")
+	}
+	return nil
+}
+
 // checkWorktree keeps a worktree name a name: the CLI creates the worktree
 // under a directory of its own, and a separator or a dot-dot in the name
 // would put it somewhere else. "true" asks for a generated name.
@@ -997,6 +1009,9 @@ func (s *Spec) claudeArgv(model, effort string, lim *Limits) ([]string, error) {
 	flag("--restricted", s.Restricted)
 	flag("--safe-mode", s.SafeMode)
 	flag("--disable-slash-commands", s.DisableSlashCommands)
+	if err := s.checkPartial(); err != nil {
+		return nil, err
+	}
 	flag("--include-partial-messages", s.IncludePartialMessages)
 	flag("--include-hook-events", s.IncludeHookEvents)
 	flag("--forward-subagent-text", s.ForwardSubagentText)
@@ -1226,6 +1241,9 @@ func (s *Spec) grokArgv(model, effort string, lim *Limits) ([]string, error) {
 	flag("--no-plan", s.NoPlan)
 	flag("--no-subagents", s.NoSubagents)
 	flag("--verbatim", s.Verbatim)
+	if err := s.checkPartial(); err != nil {
+		return nil, err
+	}
 	flag("--include-partial-messages", s.IncludePartialMessages)
 	if s.Worktree != "" {
 		if s.Worktree == "true" {

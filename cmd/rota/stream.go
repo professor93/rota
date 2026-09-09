@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"strings"
 
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
@@ -22,6 +23,10 @@ type eventStream struct {
 
 	stream message.Stream
 	text   bool // whether any prose has been printed, so a newline can close it
+
+	// shown is what has been printed as fragments and not yet arrived whole.
+	// A whole piece that begins it has been seen already, and is skipped.
+	shown string
 
 	// quiet reads the events without printing any of them. A run that was not
 	// asked to stream still has something worth watching go past: the
@@ -53,12 +58,27 @@ func (e *eventStream) send(ev message.Event) error {
 	if e.json {
 		return rota.EncodeTo(e.out, ev)
 	}
-	if ev.Type == "text" && ev.Text != "" {
-		if _, err := fmt.Fprint(e.out, ev.Text); err != nil {
-			return err
-		}
-		e.text = true
+	if ev.Type != "text" || ev.Text == "" {
+		return nil
 	}
+	switch rest, seen := strings.CutPrefix(e.shown, ev.Text); {
+	case ev.Delta:
+		e.shown += ev.Text
+	case seen:
+		// The whole of what the fragments already showed: nothing new to
+		// print, only to stop waiting for it.
+		e.shown = rest
+		return nil
+	default:
+		// A whole piece the fragments did not add up to. Printing it may
+		// repeat some of them, which is better than losing any of it, and
+		// what was pending is not coming.
+		e.shown = ""
+	}
+	if _, err := fmt.Fprint(e.out, ev.Text); err != nil {
+		return err
+	}
+	e.text = true
 	return nil
 }
 

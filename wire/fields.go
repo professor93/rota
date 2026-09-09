@@ -206,7 +206,7 @@ var specFields = []Field{
 
 	// -------------------------------------------------------------- stream
 	{Name: "include_partial_messages", Kind: "bool", Group: "stream", Label: "Token-by-token deltas",
-		Help: "Emit each fragment as the model writes it, rather than whole messages. Streaming only."},
+		Help: "Also emit each fragment as the model writes it, marked delta, before the whole piece. Streaming only."},
 	{Name: "include_hook_events", Kind: "bool", Group: "stream", Label: "Include hook events",
 		Help: "Also emit the lifecycle events of any hooks configured on this machine."},
 	{Name: "forward_subagent_text", Kind: "bool", Group: "stream", Label: "Include subagent text",

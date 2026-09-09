@@ -38,6 +38,12 @@ type Event struct {
 	// code, so a client need not parse markdown to show them differently.
 	Text   string  `json:"text,omitempty"`
 	Blocks []Block `json:"blocks,omitzero"`
+	// Delta marks a text or thinking event that is one fragment of a piece
+	// still being written, sent only when the run asked for partial
+	// messages. The whole piece follows as its own event once it is done, so
+	// a client that ignores deltas still sees everything once, and one that
+	// shows them must skip the whole it has already shown in parts.
+	Delta bool `json:"delta,omitzero"`
 
 	// Tool, ToolID and Reason describe a tool call, its result, or the
 	// refusal of it.
@@ -64,6 +70,9 @@ type wire struct {
 	Message   jsontext.Value `json:"message"`
 	ToolName  string         `json:"tool_name"`
 	ToolUseID string         `json:"tool_use_id"`
+	// Event is the API's own streaming event, which claude relays whole
+	// when partial messages were asked for.
+	Event *streamEvent `json:"event"`
 
 	// codex
 	ThreadID string `json:"thread_id"`
@@ -75,6 +84,17 @@ type wire struct {
 	// grok answers with one object and no type at all
 	GrokText   string `json:"text"`
 	StopReason string `json:"stopReason"`
+}
+
+// streamEvent is one of the API's streaming events: what kind of thing
+// happened to the message, and for a fragment, the fragment.
+type streamEvent struct {
+	Type  string `json:"type"`
+	Delta struct {
+		Type     string `json:"type"`
+		Text     string `json:"text"`
+		Thinking string `json:"thinking"`
+	} `json:"delta"`
 }
 
 // content is what a claude message holds: a list of pieces, each its own
@@ -118,6 +138,16 @@ func Normalize(raw []byte) []Event {
 
 	case w.Type == "user":
 		return pieces(w.Message, session, toolResultPiece)
+
+	case w.Type == "stream_event":
+		// The API's own streaming events, relayed when partial messages
+		// were asked for. A fragment of text or thinking is a delta of the
+		// piece it belongs to, which still arrives whole in an assistant
+		// message afterwards. Everything else here — a message opening, a
+		// block starting or ending, a signature, half a tool call's JSON —
+		// is framing around what that message already says, and nothing a
+		// client could show: no event at all, rather than noise.
+		return fragment(w.Event, session)
 
 	case w.Type == "system" && w.Subtype == "permission_denied":
 		// Headless CLIs do not ask permission; they refuse and tell the
@@ -174,6 +204,25 @@ func pieces(msg jsontext.Value, session string, one func(piece, string) (Event, 
 		return []Event{{Type: "other", SessionID: session}}
 	}
 	return out
+}
+
+// fragment reads one streaming event and returns the delta it carries, if
+// it carries one worth showing. An empty fragment is not a happening.
+func fragment(e *streamEvent, session string) []Event {
+	if e == nil || e.Type != "content_block_delta" {
+		return nil
+	}
+	var kind, text string
+	switch e.Delta.Type {
+	case "text_delta":
+		kind, text = "text", e.Delta.Text
+	case "thinking_delta":
+		kind, text = "thinking", e.Delta.Thinking
+	}
+	if text == "" {
+		return nil
+	}
+	return []Event{{Type: kind, Text: text, Delta: true, SessionID: session}}
 }
 
 func assistantPiece(p piece, session string) (Event, bool) {

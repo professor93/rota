@@ -379,7 +379,9 @@ func TestRunClaudeMapsEveryFieldAndFeedsPromptOnStdin(t *testing.T) {
 		"exclude_dynamic_system_prompt_sections": true, "worktree": "wt1",
 		"setting_sources": []string{"user", "project"}, "permission_mode": "plan", "allowed_tools": []string{"Bash(git *)", "Edit"}, "disallowed_tools": []string{"WebFetch"}, "tools": []string{"Bash", "Edit"},
 		"restricted": true, "safe_mode": true, "disable_slash_commands": true,
-		"include_partial_messages": true, "include_hook_events": true, "forward_subagent_text": true, "prompt_suggestions": true, "verbose": true,
+		// include_partial_messages is checked with the stream it needs, in
+		// TestRunStreamsServerSentEvents: on a buffered run it is refused.
+		"include_hook_events": true, "forward_subagent_text": true, "prompt_suggestions": true, "verbose": true,
 		"add_dirs": []string{sub}, "cwd": sub,
 	})
 	if code != 200 {
@@ -391,7 +393,7 @@ func TestRunClaudeMapsEveryFieldAndFeedsPromptOnStdin(t *testing.T) {
 		"--system-prompt sys", "--append-system-prompt app", `--settings {"a":1}`, `--agents {"r":{"description":"d","prompt":"p"}}`, "--agent r",
 		"--strict-mcp-config", "--plugin-url https://x/p.zip", "--autocompact 200000", "--exclude-dynamic-system-prompt-sections",
 		"--setting-sources user,project", "--worktree wt1", "--permission-mode plan", "--allowedTools Bash(git *),Edit", "--disallowedTools WebFetch", "--tools Bash,Edit",
-		"--restricted", "--safe-mode", "--disable-slash-commands", "--include-partial-messages", "--include-hook-events", "--forward-subagent-text",
+		"--restricted", "--safe-mode", "--disable-slash-commands", "--include-hook-events", "--forward-subagent-text",
 		"--prompt-suggestions true", "--verbose", "--debug",
 		"--add-dir " + realSub} { // every checked path reaches the CLI resolved
 		if !strings.Contains(out.Result, want) {

@@ -644,6 +644,11 @@ form was asked for: prose in text mode, and with --json one complete JSON
 object per line — the same events the HTTP API sends, opening with rota's own
 saying which account, model and effort the run resolved to.
 
+A streamed piece of text or thinking arrives when it is complete. --partial
+streams the fragments too, as the model writes them: in text mode they are
+printed as they come, and with --json each is its own event marked "delta",
+followed by the whole piece as before. It implies --stream.
+
 Conversations carry on: every run has a session id, and --resume <id>
 continues from it. On its own, --resume picks up the most recent
 conversation, which every provider can find without being told its id, and
@@ -652,6 +657,7 @@ conversation, which every provider can find without being told its id, and
   rota run "summarize this repo"     whichever account the rotation picks
   rota run 2 "summarize this repo"   that account
   rota run 2 "and the tests?" --resume 30040947-e103-4d58-8b0d-46417297cb1b
+  rota run 2 "explain the tests" --partial   each fragment as it is written
   rota run                           open the CLI itself, as it comes
   rota run 2 -i                      the same, for a named account
   rota run 2 -- --some-vendor-flag   hand it these arguments untouched
@@ -828,6 +834,7 @@ func (c *cli) answer(id int, args []string) error {
 		model      = fs.String("model", "", "model to use; the provider's default when empty")
 		effort     = fs.String("effort", "", "reasoning effort, for providers that have one")
 		stream     = fs.Bool("stream", false, "print events as they happen: text, or one JSON object per line with --json")
+		partial    = fs.Bool("partial", false, "also print each fragment as the model writes it; implies --stream")
 		cwd        = fs.String("cwd", "", "working directory for the run")
 		timeout    = fs.Duration("timeout", 0, "give up after this long")
 		mode       = fs.String("permission-mode", "", "how the agent asks before acting")
@@ -869,11 +876,16 @@ func (c *cli) answer(id int, args []string) error {
 		text = *altPrompt
 	}
 
+	// A fragment is a piece of a stream, so asking for fragments is asking
+	// for the stream they are pieces of.
+	*stream = *stream || *partial
+
 	spec := rota.Spec{
 		Prompt: text, Model: *model, Effort: *effort, Stream: *stream, Cwd: *cwd,
 		PermissionMode: *mode, Sandbox: *sandbox, SystemPrompt: *system,
 		Resume: *resume, Continue: *cont, SessionID: *session,
 		TimeoutSeconds: int(timeout.Seconds()), OneShot: true,
+		IncludePartialMessages: *partial,
 	}
 	spec.ForkSession = *fork
 	if *schema != "" {

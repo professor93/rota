@@ -184,7 +184,7 @@ func TestSpecBuildsGrokArgv(t *testing.T) {
 	if !strings.Contains(got, "--prompt-file ") {
 		t.Fatalf("the prompt must travel in a file: %q", got)
 	}
-	spec.Stream = false
+	spec.Stream, spec.IncludePartialMessages = false, false // fragments belong to a stream
 	argv, _ = specArgv(spec, "grok", nil)
 	if got = strings.Join(argv, " "); !strings.Contains(got, "--output-format json") {
 		t.Fatalf("buffered runs ask for json: %q", got)

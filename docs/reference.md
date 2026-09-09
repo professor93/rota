@@ -157,6 +157,7 @@ rota list claude -r           # one provider, forcing a quota refresh
 rota run "summarize this repo"     # ask whichever account the rotation picks
 rota run 2 "summarize this repo"   # ask account 2 instead
 rota run 2 --stateless "2+2?"      # no session, no settings/memory, throwaway claude home (claude, codex)
+rota run 2 "explain it" --partial  # each fragment as it is written, not just each finished piece
 rota run 2 -m sonnet -e low "hi"   # every everyday run flag has a short: -m -e -s -c -r -t -S
 rota run                      # open the rotation's account in its own CLI
 rota run 2                    # open account 2's CLI, as it comes
@@ -375,6 +376,7 @@ event vocabularies. A client reading a rota stream learns one:
 | `init` | first, before the CLI starts: which account, provider, model, effort and directory |
 | `text` | the agent said something, with `blocks` — see below |
 | `thinking` | it thought something |
+| `text` / `thinking` with `delta` | one fragment of a piece still being written; only when partial messages were asked for — see below |
 | `tool` / `tool_result` | it used a tool, and what came back |
 | `blocked` | a tool it wanted was refused, with `tool` and `reason` |
 | `usage` | a limit or token reading went by |
@@ -417,6 +419,34 @@ rota speaks first, before the CLI has done anything, so a reader knows which
 account is paying and which model and effort were resolved. Every event after
 that carries its place in the stream, which is a reader's only way to notice a
 gap. The last one says how it ended, whether that was an answer or a failure.
+
+A `text` or `thinking` event arrives when that piece is complete — a
+one-turn answer is one `text` event, near the end — so it is also the sign
+that the piece has ended. `--partial` (`include_partial_messages` over HTTP)
+asks for the fragments too, as the model writes them. In text mode they are
+printed as they come, and the whole piece is not printed again. In JSON mode
+each fragment is its own event, marked `"delta":true`, and the whole piece
+still follows unmarked, so a reader that ignores deltas sees what it always
+saw, and one that shows them skips the whole it has already shown in parts.
+The first delta is when a piece started; the unmarked event is when it ended.
+
+```sh
+rota run 1 "..." --partial          # the prose, fragment by fragment; implies --stream
+rota --json run 1 "..." --partial   # each fragment an event of its own
+```
+
+```json
+{"type":"text","seq":4,"account":1,"provider":"claude","session_id":"91ebe527…","text":"ndjson ","delta":true}
+{"type":"text","seq":5,"account":1,"provider":"claude","session_id":"91ebe527…","text":"works","delta":true}
+{"type":"text","seq":6,"account":1,"provider":"claude","session_id":"91ebe527…","text":"ndjson works","blocks":[{"kind":"text","text":"ndjson works"}]}
+```
+
+Fragments belong to a stream, so `include_partial_messages` without `stream`
+is refused before anything is spent, rather than the reply quietly becoming a
+stream the caller did not ask for. The framing the CLI sends around fragments
+— a message opening, a block starting or ending, a signature — is no event at
+all: it says nothing a client could show that the whole piece does not.
+claude and grok stream fragments; codex and kimi do not have the flag.
 
 Without `--stream`, `--json` is still one indented document, as it always was.
 
