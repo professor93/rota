@@ -131,7 +131,7 @@ func TestAccountLifecycleThroughTheCLI(t *testing.T) {
 		t.Fatalf("same key lands on the same account: %d %q", code, out)
 	}
 	out, _, code = call(t, "list")
-	if code != 0 || !strings.Contains(out, "t-cli-fake") || !strings.Contains(out, "  ok") {
+	if code != 0 || !strings.Contains(out, "t-cli-fake") || !strings.Contains(out, "│ ok ") {
 		t.Fatalf("list: %d %q", code, out)
 	}
 	if !strings.Contains(out, "CHECKED") || !strings.Contains(out, "n/a") {
