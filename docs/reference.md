@@ -935,10 +935,14 @@ last read, and distinguish *not read yet* from *this provider has no limits
 to read*:
 
 ```
-ORDER  ID  PROVIDER  ACCOUNT          USAGE                            UNTIL  CHECKED  STATUS
-1      1   claude    you@example.com  5h 5% (1h 11m)  7d 90% (11h 51m)  100%   2m ago   ok
-2      3   codex     you@example.com  -                                 100%   n/a      ok
+#  ID  CLI     ACCOUNT          USAGE             UNTIL  CHECKED  STATUS
+1  1   claude  you@example.com  5h 5% (1h 11m)    100%   2m ago   ok
+                                7d 90% (11h 51m)
+2  3   codex   you@example.com  -                 100%   n/a      ok
 ```
+
+`#` is the account's place in the rotation, `-` when it is out of it. Each
+usage window has a line of its own under USAGE, most important first.
 
 A spent unscoped window shows as `limited`; a dead credential as `re-auth
 needed`. Model-scoped windows (a separate weekly Fable budget, say) are shown

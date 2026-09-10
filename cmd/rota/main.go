@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -495,31 +496,43 @@ func (c *cli) list(args []string) error {
 		return c.emit(doc)
 	}
 
-	w := tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
+	// The headers give their room to the numbers: "#" is the account's place
+	// in the rotation, and CLI is which one it drives. The table is laid out
+	// in memory so its lines can be written without trailing padding.
+	var buf bytes.Buffer
+	w := tabwriter.NewWriter(&buf, 0, 0, 2, ' ', 0)
 	if short {
 		// The reading's age belongs beside it here more than anywhere else:
 		// --short asks no provider anything, so what it shows may be hours
 		// old and nothing else on the line would say so.
-		fmt.Fprintln(w, "ORDER\tID\tPROVIDER\tACCOUNT\tUSAGE\tCHECKED")
+		fmt.Fprintln(w, "#\tID\tCLI\tACCOUNT\tUSAGE\tCHECKED")
 		for _, a := range shown {
 			fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\n", place(a), a.ID, a.Provider, a.Label(), headline(a), checkedAgo(a))
 		}
 		_ = w.Flush()
+		table(c.out, &buf)
 		if withSessions {
 			c.showSessions(sessions.Scan(s, recent))
 		}
 		return nil
 	}
-	fmt.Fprintln(w, "ORDER\tID\tPROVIDER\tACCOUNT\tUSAGE\tUNTIL\tCHECKED\tSTATUS")
+	fmt.Fprintln(w, "#\tID\tCLI\tACCOUNT\tUSAGE\tUNTIL\tCHECKED\tSTATUS")
 	for _, a := range shown {
 		status := string(a.Status())
 		if a.Status() == rota.StatusReauth {
 			status = "re-auth needed"
 		}
+		// One window per line: the first on the account's own row, the rest
+		// under it in the same column, with nothing else on those lines.
+		usage := windows(a.Quota)
 		fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%d%%\t%s\t%s\n",
-			place(a), a.ID, a.Provider, a.Label(), summarize(a.Quota), rotation.Cutoff(a), checkedAgo(a), status)
+			place(a), a.ID, a.Provider, a.Label(), usage[0], rotation.Cutoff(a), checkedAgo(a), status)
+		for _, more := range usage[1:] {
+			fmt.Fprintf(w, "\t\t\t\t%s\t\t\t\n", more)
+		}
 	}
 	_ = w.Flush()
+	table(c.out, &buf)
 	// UNTIL is the threshold, so say what it decides rather than leaving a
 	// column of percentages to be guessed at.
 	if pick, perr := rotation.Pick(shown); perr == nil {
@@ -1713,18 +1726,29 @@ func headline(a *rota.Account) string {
 	return fmt.Sprintf("%.0f%%", a.Percent())
 }
 
-// summarize renders a quota as one table cell, most important window first.
-func summarize(q *rota.Quota) string {
-	if q == nil || len(q.Windows) == 0 {
-		return "-"
+// table writes a laid-out table without the padding tabwriter leaves after
+// a line's last empty cells: a usage window on a line of its own would
+// otherwise trail a row's worth of spaces.
+func table(out io.Writer, buf *bytes.Buffer) {
+	for line := range strings.SplitSeq(strings.TrimRight(buf.String(), "\n"), "\n") {
+		fmt.Fprintln(out, strings.TrimRight(line, " "))
 	}
-	parts := make([]string, 0, len(q.Windows))
+}
+
+// windows renders a quota one line per window, most important first. A
+// quota with nothing in it is one line saying so, so a row always has
+// something to put in the column.
+func windows(q *rota.Quota) []string {
+	if q == nil || len(q.Windows) == 0 {
+		return []string{"-"}
+	}
+	lines := make([]string, 0, len(q.Windows))
 	for _, w := range q.Windows {
 		s := fmt.Sprintf("%s %.0f%%", w.Name, w.Percent)
 		if in := wire.Countdown(w.ResetsAt); in != "" {
 			s += " (" + in + ")"
 		}
-		parts = append(parts, s)
+		lines = append(lines, s)
 	}
-	return strings.Join(parts, "  ")
+	return lines
 }

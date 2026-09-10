@@ -172,10 +172,10 @@ func TestRendering(t *testing.T) {
 		{Name: "Fable", Percent: 91, ResetsAt: rota.When{Time: time.Now().Add(-time.Minute)}, Scoped: true},
 		{Name: "7d", Percent: 40},
 	}}
-	if got := summarize(q); got != "5h 2% (2h 40m)  Fable 91% (0m)  7d 40%" {
+	if got := strings.Join(windows(q), "|"); got != "5h 2% (2h 40m)|Fable 91% (0m)|7d 40%" {
 		t.Fatalf("%q", got)
 	}
-	if summarize(nil) != "-" || wire.Countdown(rota.When{}) != "" {
+	if got := windows(nil); len(got) != 1 || got[0] != "-" || wire.Countdown(rota.When{}) != "" {
 		t.Fatal("empty cases")
 	}
 	if got := wire.Countdown(rota.When{Time: time.Now().Add(49*time.Hour + 5*time.Minute)}); got != "2d 1h" {

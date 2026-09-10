@@ -292,8 +292,8 @@ func TestListIsSortedByRotationOrder(t *testing.T) {
 	if first < 0 || first > second || second > third {
 		t.Fatalf("the rotation's order is the listing's order, unordered accounts last:\n%s", out)
 	}
-	if !strings.Contains(out, "ORDER") {
-		t.Fatalf("the short list still names the column it is sorted by:\n%s", out)
+	if !strings.HasPrefix(out, "#  ") {
+		t.Fatalf("the short list still leads with the column it is sorted by:\n%s", out)
 	}
 	// --short does not go to the network, so it works with no provider
 	// reachable at all; the full list has the same order.
