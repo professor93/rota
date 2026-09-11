@@ -24,8 +24,9 @@ type Tally struct {
 	Blocked   map[string]int
 	Read      []string
 	Written   []string
-	FirstText time.Duration // zero until the first whole text event
+	FirstText time.Duration // zero until the first text, a fragment counting
 	FirstTool time.Duration // zero until the first tool call
+	Total     time.Duration // from the first event to the end of the stream
 	sawText   bool
 	sawTool   bool
 }
@@ -46,8 +47,13 @@ var (
 	writers = []string{"Edit", "MultiEdit", "Write", "NotebookEdit"}
 )
 
-// add records one event, at a time since the stream began.
+// add records one event, at a time since the stream began. rota's own
+// opening event is the clock's zero, not something the CLI said, so it is
+// not counted.
 func (t *Tally) add(ev Event, at time.Duration) {
+	if ev.Type == "init" {
+		return
+	}
 	t.Events++
 	if t.ByType == nil {
 		t.ByType = map[string]int{}
@@ -58,7 +64,7 @@ func (t *Tally) add(ev Event, at time.Duration) {
 	}
 	switch ev.Type {
 	case "text":
-		if !ev.Delta && !t.sawText {
+		if !t.sawText {
 			t.sawText, t.FirstText = true, at
 		}
 	case "tool":
@@ -199,8 +205,11 @@ func Read(res *rota.Result, w With, src Sources) Readings {
 			}
 		}
 		if w.Timing {
-			r.Timing = &Timing{FirstTextMS: t.FirstText.Milliseconds(), FirstToolMS: t.FirstTool.Milliseconds()}
-			if res != nil {
+			// One clock for all three: from the stream's first event. A
+			// stream that never ended (a buffered run reads its events
+			// through a quiet stream) falls back to the child's duration.
+			r.Timing = &Timing{FirstTextMS: t.FirstText.Milliseconds(), FirstToolMS: t.FirstTool.Milliseconds(), TotalMS: t.Total.Milliseconds()}
+			if r.Timing.TotalMS == 0 && res != nil {
 				r.Timing.TotalMS = res.DurationMS
 			}
 		}

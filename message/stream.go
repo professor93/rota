@@ -65,7 +65,11 @@ func (s *Stream) Write(p []byte) (int, error) {
 func (s *Stream) Rest() error {
 	line := s.buf
 	s.buf = nil
-	return s.line(line)
+	err := s.line(line)
+	if s.Tally != nil && !s.start.IsZero() {
+		s.Tally.Total = time.Since(s.start)
+	}
+	return err
 }
 
 // Seq is how many events have been sent, which is the number the next one

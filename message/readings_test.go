@@ -76,11 +76,19 @@ func TestATallyFollowsTheStream(t *testing.T) {
 	if strings.Join(tally.Read, ",") != "/srv/a.go" || strings.Join(tally.Written, ",") != "/srv/a.go" {
 		t.Fatalf("files once each, read and written apart: %v %v", tally.Read, tally.Written)
 	}
-	if tally.Events != 7 || tally.Fragments != 1 || tally.Bytes == 0 || tally.ByType["tool"] != 3 {
+	// Six the CLI said; rota's own init is the clock's zero, not an event.
+	if tally.Events != 6 || tally.Fragments != 1 || tally.Bytes == 0 || tally.ByType["tool"] != 3 || tally.ByType["init"] != 0 {
 		t.Fatalf("%+v", tally)
 	}
 	if !tally.sawText || !tally.sawTool {
 		t.Fatalf("first text and first tool are noted: %+v", tally)
+	}
+	if tally.Total != 0 {
+		t.Fatalf("the total is known only when the stream ends: %+v", tally)
+	}
+	s.Rest()
+	if tally.Total <= 0 {
+		t.Fatalf("Rest ends the stream and fixes the total: %+v", tally)
 	}
 	for _, ev := range got {
 		if ev.At < 0 {
@@ -91,8 +99,18 @@ func TestATallyFollowsTheStream(t *testing.T) {
 		t.Fatalf("a subagent's text names the call that delegated it: %+v", last)
 	}
 	r := Read(&rota.Result{DurationMS: 42, Truncated: true}, With{Files: true, Tools: true, Stats: true, Timing: true}, Sources{Tally: tally})
-	if r.Files == nil || r.Tools["Read"] != 2 || r.Stats.Events != 7 || !r.Stats.Truncated || r.Timing.TotalMS != 42 {
+	if r.Files == nil || r.Tools["Read"] != 2 || r.Stats.Events != 6 || !r.Stats.Truncated || r.Timing.TotalMS <= 0 {
 		t.Fatalf("%+v", r)
+	}
+}
+
+// A tally whose stream never ended — a buffered run reads its events through
+// a quiet stream that is never closed — reports the child's duration as the
+// total, so timing is never silently zero.
+func TestTimingFallsBackToTheChildsDuration(t *testing.T) {
+	r := Read(&rota.Result{DurationMS: 42}, With{Timing: true}, Sources{Tally: &Tally{}})
+	if r.Timing == nil || r.Timing.TotalMS != 42 {
+		t.Fatalf("%+v", r.Timing)
 	}
 }
 
