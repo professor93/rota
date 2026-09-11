@@ -40,6 +40,10 @@ var (
 	// ErrBusy is returned when an account is already running and cannot
 	// safely run twice at once. See OwnsCredentials.
 	ErrBusy = errors.New("account is already running")
+
+	// ErrClosed: the session's stdin is shut, so nothing more can be sent
+	// into it. A run that has ended, or one the caller closed itself.
+	ErrClosed = errors.New("session is closed")
 )
 
 // verdictError carries a machine-readable kind and a human-readable

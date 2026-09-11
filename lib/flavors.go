@@ -73,6 +73,7 @@ var fieldFlavors = map[string][]string{
 	"dangerously_bypass_approvals_and_sandbox": {"codex"},
 	"dangerously_bypass_hook_trust":            {"codex"},
 	"include_partial_messages":                 {"claude", "grok"},
+	"input":                                    {"claude"},
 	"include_hook_events":                      {"claude"},
 	"forward_subagent_text":                    {"claude"},
 	"prompt_suggestions":                       {"claude"},

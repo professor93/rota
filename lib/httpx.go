@@ -46,6 +46,14 @@ func randB64(n int) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
+// randHex returns n random bytes as hex, for an identifier that travels
+// through JSON and back — a session's message, its interrupt.
+func randHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 // randID is a short, typeable handle for one in-flight login: six hex chars.
 func randID() string {
 	b := make([]byte, 3)

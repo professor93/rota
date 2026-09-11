@@ -9,6 +9,7 @@
 package fakecli
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -39,6 +41,12 @@ type Spec struct {
 	// KeepStdin leaves stdin unread. The default reads it to the end, as
 	// every real CLI does with a piped prompt.
 	KeepStdin bool `json:"keep_stdin,omitempty"`
+	// Echo makes the fake a streaming-input CLI: it reads a message per line
+	// for as long as stdin is open, answers each with an assistant line and a
+	// result, and says how many more are waiting. Stdout is ignored in this
+	// mode, and Sleep is how long a turn takes rather than a pause at the
+	// start.
+	Echo bool `json:"echo,omitempty"`
 }
 
 // Result is a Spec that answers as the claude CLI does in print mode: one
@@ -135,6 +143,9 @@ func Maybe() {
 }
 
 func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if spec.Echo {
+		return echo(spec, stdin, stdout)
+	}
 	in := ""
 	if !spec.KeepStdin {
 		raw, _ := io.ReadAll(stdin)
@@ -200,4 +211,77 @@ func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		_ = os.WriteFile(spec.Touch, nil, 0o600)
 	}
 	return spec.Exit
+}
+
+// echo plays a CLI with a streaming input: one turn per message, for as long
+// as stdin stays open.
+//
+// It is the shape of the real thing rather than an imitation of its wording.
+// A control request is answered at once, whatever the turn is doing, because
+// that is what makes an interrupt an interrupt. Every other line is a message
+// and waits its turn, and each result says how many messages are still
+// waiting — the one number a caller can learn delivery from.
+func echo(spec Spec, stdin io.Reader, stdout io.Writer) int {
+	var mu sync.Mutex
+	say := func(v any) {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		fmt.Fprintln(stdout, string(raw))
+	}
+	var turnTime time.Duration
+	if spec.Sleep != "" {
+		turnTime, _ = time.ParseDuration(spec.Sleep)
+	}
+
+	messages := make(chan string, 1024)
+	go func() {
+		defer close(messages)
+		sc := bufio.NewScanner(stdin)
+		sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
+		for sc.Scan() {
+			var in struct {
+				Type      string `json:"type"`
+				RequestID string `json:"request_id"`
+				Message   struct {
+					Content []struct {
+						Text string `json:"text"`
+					} `json:"content"`
+				} `json:"message"`
+			}
+			if json.Unmarshal(sc.Bytes(), &in) != nil {
+				continue
+			}
+			if in.Type == "control_request" {
+				say(map[string]any{"type": "control_response", "response": map[string]any{
+					"subtype": "success", "request_id": in.RequestID,
+					"response": map[string]any{"still_queued": []string{}},
+				}})
+				continue
+			}
+			text := ""
+			if len(in.Message.Content) > 0 {
+				text = in.Message.Content[0].Text
+			}
+			messages <- text
+		}
+	}()
+
+	turn := 0
+	for text := range messages {
+		if turnTime > 0 {
+			time.Sleep(turnTime)
+		}
+		turn++
+		answer := "echo: " + text
+		say(map[string]any{"type": "assistant", "session_id": "s-fake",
+			"message": map[string]any{"content": []any{map[string]any{"type": "text", "text": answer}}}})
+		say(map[string]any{"type": "result", "subtype": "success", "is_error": false,
+			"session_id": "s-fake", "result": answer, "num_turns": turn,
+			"queued_turn_count": len(messages)})
+	}
+	return 0
 }

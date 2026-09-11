@@ -1058,6 +1058,20 @@ res, _ := rota.Run(ctx, a, home, nil, rota.Spec{Prompt: "hi", Model: "sonnet"}, 
 fmt.Println(res.Result, res.SessionID, res.CostUSD)
 ```
 
+`Run` is one question and one answer. `Start` is the same request left open:
+set `Spec.Input` alongside `Stream` and the CLI keeps its standard input, so
+the run takes more messages after its first answer — the same process, the
+same context, no resume. `Send` delivers one, `Steer` interrupts and then
+sends so the message starts the next turn, `Interrupt` only stops what is
+running, `Close` says there is nothing more, and `Wait` returns the `Result`
+`Run` would have given. `Notices` reports what became of each: `accepted`
+when a message has reached the CLI, `answered` when a turn carrying it has
+finished, `interrupted` when the CLI acknowledges an interrupt, and `idle`
+when nothing is waiting. Claude Code is the only CLI with a streaming input
+today, so every other one refuses `input` by name. Transports for a session
+— the command line, HTTP, WebSocket — come in later phases; for now it is a
+library verb.
+
 Two things still touch the world, unavoidably: the network, and — for codex
 and kimi, whose CLIs read credentials only from a file — a credential staged
 into the account's own directory. `Stage` is the only core verb that writes

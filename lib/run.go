@@ -122,6 +122,8 @@ type Spec struct {
 	DisableSlashCommands bool `json:"disable_slash_commands,omitzero"`
 	// Also emit each fragment as the model writes it, marked as a delta, before the whole piece; needs stream.
 	IncludePartialMessages bool `json:"include_partial_messages,omitzero"`
+	// Keep the CLI open after its first answer, so more messages can be sent into the same run; a Session, not a one-shot Run.
+	Input bool `json:"input,omitzero"`
 	// Also emit the lifecycle events of any hooks configured on this machine.
 	IncludeHookEvents bool `json:"include_hook_events,omitzero"`
 	// Emit what delegated subagents say and think, not only the main thread's own output.
@@ -611,6 +613,17 @@ func (s *Spec) checkPartial() error {
 	return nil
 }
 
+// checkInput refuses a session that is not a stream. The CLI's streaming
+// input format needs its streaming output format, and a run that stays open
+// for more messages has events to report while it does; the field to add is
+// named here rather than left to the CLI to complain about later.
+func (s *Spec) checkInput() error {
+	if s.Input && !s.Stream {
+		return failf(ErrInvalidRequest, "input needs stream: a run that takes more messages is a stream, and there is none in a buffered run")
+	}
+	return nil
+}
+
 // checkWorktree keeps a worktree name a name: the CLI creates the worktree
 // under a directory of its own, and a separator or a dot-dot in the name
 // would put it somewhere else. "true" asks for a generated name.
@@ -913,6 +926,11 @@ func (s *Spec) claudeArgv(model, effort string, lim *Limits) ([]string, error) {
 	} else {
 		a = append(a, "--output-format", "json")
 	}
+	if s.Input {
+		// Messages arrive as JSON lines on stdin for as long as it stays
+		// open, which is what makes a run a session.
+		a = append(a, "--input-format", "stream-json")
+	}
 	// nil leaves the CLI's own settings sources alone; an explicit list —
 	// empty included — is passed through. A server that wants a hermetic
 	// session sets [] itself; that is its policy, not the SDK's.
@@ -1019,6 +1037,9 @@ func (s *Spec) claudeArgv(model, effort string, lim *Limits) ([]string, error) {
 	flag("--safe-mode", s.SafeMode)
 	flag("--disable-slash-commands", s.DisableSlashCommands)
 	if err := s.checkPartial(); err != nil {
+		return nil, err
+	}
+	if err := s.checkInput(); err != nil {
 		return nil, err
 	}
 	flag("--include-partial-messages", s.IncludePartialMessages)
@@ -1377,6 +1398,52 @@ func (s *Spec) cleanup() {
 // applied — and the caller must persist it. Store.Run does that for you.
 func Run(ctx context.Context, a *Account, home string, cmd *Command, spec Spec, lim *Limits, events io.Writer) (*Result, error) {
 	defer spec.cleanup()
+	if spec.Input {
+		return nil, failf(ErrInvalidRequest, "input is a session, not a one-shot run: use Start")
+	}
+	l, err := launch(ctx, a, home, cmd, &spec, lim)
+	if err != nil {
+		return nil, err
+	}
+	defer l.done()
+	defer l.stop()
+	// The prompt travels down stdin, which then closes: a one-shot run has
+	// nothing more to say. It is written from a goroutine because the child
+	// need not read it — kimi takes its prompt as an argument — and a prompt
+	// larger than the pipe would otherwise block the run for ever. A failed
+	// write is the child's business, reported by its exit rather than here.
+	go func() {
+		_, _ = io.WriteString(l.stdin, spec.Prompt)
+		_ = l.stdin.Close()
+	}()
+	scanErr := readOutput(l.stdout, events, spec.Stream, spec.IncludeEvents, l.cp, l.res)
+	return finishRun(l, scanErr)
+}
+
+// launched is one CLI process that has started: the pipes to talk to it, the
+// result it is filling in, and what the caller owes it when it ends.
+type launched struct {
+	ctx    context.Context
+	child  *exec.Cmd
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	stderr *tailBuffer
+	res    *Result
+	cp     caps
+	start  time.Time
+	// stop cancels the kill-on-cancel hook; done releases what the launch
+	// took — the timeout, the hermetic config directory.
+	stop func() bool
+	done func()
+}
+
+// launch checks a spec, builds the command line and starts the CLI. It is
+// everything Run and Start do the same way, which is everything up to the
+// first byte: the two differ only in what they do with stdin afterwards.
+//
+// The spec is taken by pointer because building the command line stages
+// scratch files on it, and the caller is the one that removes them.
+func launch(ctx context.Context, a *Account, home string, cmd *Command, spec *Spec, lim *Limits) (*launched, error) {
 	if cmd == nil {
 		staged, err := Stage(a, home)
 		if err != nil {
@@ -1416,10 +1483,20 @@ func Run(ctx context.Context, a *Account, home string, cmd *Command, spec Spec, 
 	if err != nil {
 		return nil, WrapNoBinary(cmd.Bin, err)
 	}
+	// done is what the caller owes the launch when the run ends. The timeout
+	// must outlive this function, so its cancel goes here rather than into a
+	// defer, and so does the hermetic directory the child is still using.
+	done := func() {}
 	if spec.TimeoutSeconds > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(spec.TimeoutSeconds)*time.Second)
-		defer cancel()
+		done = cancel
+	}
+	// Whatever fails from here on, the launch owes nothing: what was taken is
+	// released before the error goes back.
+	fail := func(err error) (*launched, error) {
+		done()
+		return nil, err
 	}
 
 	child := exec.CommandContext(ctx, path, argv...)
@@ -1430,9 +1507,13 @@ func Run(ctx context.Context, a *Account, home string, cmd *Command, spec Spec, 
 		// cannot reach the context, and nothing of the run outlives it.
 		hd, herr := os.MkdirTemp(spec.ScratchDir, "rota-hermetic-")
 		if herr != nil {
-			return nil, herr
+			return fail(herr)
 		}
-		defer os.RemoveAll(hd)
+		release := done
+		done = func() {
+			os.RemoveAll(hd)
+			release()
+		}
 		runCmd = hermeticCommand(cmd, hd)
 	}
 	child.Env = Environ(runCmd.BaseEnv, runCmd)
@@ -1440,10 +1521,15 @@ func Run(ctx context.Context, a *Account, home string, cmd *Command, spec Spec, 
 	// validated, and handing the kernel the caller's string would let a link
 	// repointed between check and start escape.
 	child.Dir = spec.Cwd
-	child.Stdin = strings.NewReader(spec.Prompt)
+	// A pipe rather than a reader over the prompt: a session writes more into
+	// it later, and a one-shot run closes it after the prompt.
+	stdin, err := child.StdinPipe()
+	if err != nil {
+		return fail(err)
+	}
 	stdout, err := child.StdoutPipe()
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	// A CLI in debug mode can print without limit, and whatever it prints
 	// comes back in the reply. Keep the tail, which is where a failure
@@ -1455,10 +1541,9 @@ func Run(ctx context.Context, a *Account, home string, cmd *Command, spec Spec, 
 	// outlive a cancelled request.
 	setPgid(child)
 	if err := child.Start(); err != nil {
-		return nil, err
+		return fail(err)
 	}
 	stop := context.AfterFunc(ctx, func() { killGroup(child) })
-	defer stop()
 
 	res := &Result{Account: a.ID, Provider: a.Provider, Model: pl.model, Effort: pl.effort}
 	if spec.IncludeArgv {
@@ -1472,29 +1557,37 @@ func Run(ctx context.Context, a *Account, home string, cmd *Command, spec Spec, 
 		}
 		res.EnvDropped = append([]string(nil), runCmd.Drop...)
 	}
-	start := time.Now()
-	scanErr := readOutput(stdout, events, spec.Stream, spec.IncludeEvents, cp, res)
+	return &launched{
+		ctx: ctx, child: child, stdin: stdin, stdout: stdout, stderr: stderr,
+		res: res, cp: cp, start: time.Now(), stop: stop, done: done,
+	}, nil
+}
+
+// finishRun is what a run owes its result once stdout has ended: stop a child
+// nobody is reading any more, wait for it, and turn its exit into a verdict.
+func finishRun(l *launched, scanErr error) (*Result, error) {
+	res, child := l.res, l.child
 	if errors.Is(scanErr, bufio.ErrTooLong) {
 		// One event outgrew the line cap: a bound was hit, not a failure.
 		res.Truncated, scanErr = true, nil
 		killGroup(child)
-		_, _ = io.Copy(io.Discard, stdout)
+		_, _ = io.Copy(io.Discard, l.stdout)
 	} else if scanErr != nil || res.Truncated {
 		// Nobody is reading stdout any more, and a child that fills its
 		// pipe blocks for ever — Wait would never return. Stop it.
 		killGroup(child)
-		_, _ = io.Copy(io.Discard, stdout)
+		_, _ = io.Copy(io.Discard, l.stdout)
 	}
 	waitErr := child.Wait()
-	res.DurationMS = time.Since(start).Milliseconds()
-	res.Stderr = strings.TrimSpace(stderr.String())
-	if stderr.dropped > 0 {
+	res.DurationMS = time.Since(l.start).Milliseconds()
+	res.Stderr = strings.TrimSpace(l.stderr.String())
+	if l.stderr.dropped > 0 {
 		res.Truncated = true // the stderr bound is a bound like the others
 	}
 	res.ExitCode = child.ProcessState.ExitCode()
 
-	if ctx.Err() != nil {
-		return res, ctx.Err()
+	if l.ctx.Err() != nil {
+		return res, l.ctx.Err()
 	}
 	if waitErr != nil {
 		var ee *exec.ExitError

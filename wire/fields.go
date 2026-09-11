@@ -209,6 +209,8 @@ var specFields = []Field{
 	// -------------------------------------------------------------- stream
 	{Name: "include_partial_messages", Kind: "bool", Group: "stream", Label: "Token-by-token deltas",
 		Help: "Also emit each fragment as the model writes it, marked delta, before the whole piece. Streaming only."},
+	{Name: "input", Kind: "bool", Group: "stream", Label: "Keep the run open for more messages",
+		Help: "The CLI stays open after its first answer and takes more messages into the same run. A session, for the transports that can send into one; not usable from a buffered reply."},
 	{Name: "include_hook_events", Kind: "bool", Group: "stream", Label: "Include hook events",
 		Help: "Also emit the lifecycle events of any hooks configured on this machine."},
 	{Name: "forward_subagent_text", Kind: "bool", Group: "stream", Label: "Include subagent text",
