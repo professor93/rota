@@ -3,6 +3,7 @@ package message
 import (
 	"strings"
 	"testing"
+	"time"
 
 	rota "github.com/professor93/rota/lib"
 )
@@ -57,6 +58,10 @@ func TestCodePlainAndLinksAreReadFromTheAnswer(t *testing.T) {
 func TestATallyFollowsTheStream(t *testing.T) {
 	tally := &Tally{}
 	s := &Stream{With: With{Timing: true}, Tally: tally}
+	// A clock that steps by a known amount, so what the tally times is exact
+	// and no platform's tick can make a duration zero.
+	tick := time.Unix(1_000, 0)
+	s.now = func() time.Time { tick = tick.Add(10 * time.Millisecond); return tick }
 	var got []Event
 	s.Emit = func(ev Event) error { got = append(got, ev); return nil }
 	s.Send(Event{Type: "init"})
@@ -83,6 +88,10 @@ func TestATallyFollowsTheStream(t *testing.T) {
 	if !tally.sawText || !tally.sawTool {
 		t.Fatalf("first text and first tool are noted: %+v", tally)
 	}
+	// The clock is known, so the firsts are known: a tool ran before the text.
+	if tally.FirstTool <= 0 || tally.FirstText <= 0 || tally.FirstTool >= tally.FirstText {
+		t.Fatalf("first tool comes before first text, both after the start: %+v", tally)
+	}
 	if tally.Total != 0 {
 		t.Fatalf("the total is known only when the stream ends: %+v", tally)
 	}
@@ -90,9 +99,10 @@ func TestATallyFollowsTheStream(t *testing.T) {
 	if tally.Total <= 0 {
 		t.Fatalf("Rest ends the stream and fixes the total: %+v", tally)
 	}
-	for _, ev := range got {
-		if ev.At < 0 {
-			t.Fatalf("at is measured from the first event: %+v", ev)
+	// At is measured from the first event: zero on it, rising after it.
+	for i, ev := range got {
+		if ev.At < 0 || (i > 0 && ev.At <= 0) || (i > 0 && ev.At < got[i-1].At) {
+			t.Fatalf("at is measured from the first event and never goes back: %+v", got)
 		}
 	}
 	if last := got[len(got)-1]; last.Subagent != "t9" || last.Text != "done" {

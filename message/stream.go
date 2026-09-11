@@ -34,6 +34,19 @@ type Stream struct {
 	seq   int
 	buf   []byte
 	start time.Time // when the first event was sent; at is measured from it
+	// now is the stream's clock. A test needs one that moves by known
+	// steps, since a real clock may read the same twice in a row and make
+	// a duration zero. A nil now is time.Now, which is every real run.
+	now func() time.Time
+}
+
+// clock is the time the stream goes by: the injected one when there is one,
+// the wall clock otherwise.
+func (s *Stream) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // Write takes whatever the CLI printed and turns the whole lines in it into
@@ -67,7 +80,7 @@ func (s *Stream) Rest() error {
 	s.buf = nil
 	err := s.line(line)
 	if s.Tally != nil && !s.start.IsZero() {
-		s.Tally.Total = time.Since(s.start)
+		s.Tally.Total = s.clock().Sub(s.start)
 	}
 	return err
 }
@@ -83,7 +96,7 @@ func (s *Stream) Send(ev Event) error {
 	ev.Seq, ev.Account, ev.Provider = s.seq, s.Account, s.Provider
 	// Time is measured from the first event, which is rota's own init when
 	// there is one: at is how long after the run was announced this came.
-	now := time.Now()
+	now := s.clock()
 	if s.start.IsZero() {
 		s.start = now
 	}
