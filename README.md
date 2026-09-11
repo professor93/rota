@@ -45,6 +45,8 @@ rota 2 "explain this repo"     # ...or name account 2 yourself
 rota run 1 --stateless "2+2?"  # no session saved, no settings or memory read
 rota run 1 "explain it" --with deltas  # stream each fragment as the model writes it
 rota run 1 "explain it" --with blocks,ask  # JSON, with fences split and the question read
+rota run 2 "start here" --input   # keep it open; type more lines, /interrupt, /close
+rota send 7f3c1a5d "and the tests?"  # ...or send into that run from another terminal
 rota run 2                     # open account 2's CLI interactively
 rota set 2 --order first       # put account 2 first; the rest move down
 rota set 2 --order before:5    # ...or right before account 5, or up, down, last, out

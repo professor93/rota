@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"text/tabwriter"
 	"time"
@@ -46,6 +47,8 @@ Usage:
   rota run [id] <prompt>        ask an account and print the answer
   rota run [id]                 open that account's CLI instead
   rota run [id] -- <args...>    hand the CLI these arguments untouched
+  rota run [id] <prompt> --input   keep the run open for more messages
+  rota send <run> "..."         send another message into a run started with --input
   rota set <id> [flags]         where an account sits and what it reads:
                                 --order, --threshold, --cwd, --config
   rota remove <id>...           forget accounts and their staged credentials
@@ -77,6 +80,7 @@ Usage:
   rota login [provider]    add an account, or finish signing one in
   rota list                accounts, usage, health
   rota run [id] [flags]    ask with flags — or open the CLI itself
+  rota send <run> "..."    send more into a run started with --input
   rota set <id> [flags]    order, threshold, cwd, config
   rota remove <id>...      forget accounts
   rota serve [addr]        the HTTP API and its playground
@@ -85,9 +89,16 @@ Usage:
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
+// identify guards the one package variable this command sets.
+var identify sync.Once
+
 type cli struct {
 	json     bool
 	out, err io.Writer
+	// in is where a run that stays open reads its further messages. It is
+	// taken once, at the start, so the goroutine reading it and a caller
+	// replacing it cannot be doing both at the same moment.
+	in io.Reader
 }
 
 // usageError exits with status 2; exitCode carries a vendor CLI's own status.
@@ -103,8 +114,11 @@ func usageErr(format string, a ...any) error { return usageError(fmt.Sprintf(for
 
 // run is the whole program: 0 on success, 1 on failure, 2 on misuse.
 func run(argv []string, stdout, stderr io.Writer) int {
-	rota.UserAgent = "rota/" + wire.Version // this program, not the SDK, is what providers see
-	c := &cli{out: stdout, err: stderr}
+	// This program, not the SDK, is what providers see. Set once: `rota send`
+	// runs while the run it sends into is still going, and two commands in one
+	// process must not both be writing a package variable.
+	identify.Do(func() { rota.UserAgent = "rota/" + wire.Version })
+	c := &cli{out: stdout, err: stderr, in: stdin}
 	for len(argv) > 0 && argv[0] == "--json" {
 		c.json, argv = true, argv[1:]
 	}
@@ -122,6 +136,8 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		err = c.list(args)
 	case "run":
 		err = c.run(args)
+	case "send":
+		err = c.send(args)
 	case "set":
 		err = c.set(args)
 	case "remove", "rm":
@@ -646,6 +662,15 @@ form was asked for: prose in text mode, and with --json one complete JSON
 object per line — the same events the HTTP API sends, opening with rota's own
 saying which account, model and effort the run resolved to.
 
+--input keeps the run open after its first answer and reads more messages
+from rota's own stdin, one per line, while the answers stream out. It implies
+--stream. A line beginning with / is a command rather than a message:
+/interrupt stops the tool the agent is running, /steer <text> interrupts and
+then sends, so the message starts the next turn, and /close says there is
+nothing more — as does the end of stdin. The run prints an id when it starts,
+and ` + "`rota send <id> \"...\"`" + ` sends into it from another terminal. Only Claude
+Code has a streaming input; every other CLI refuses --input by name.
+
 The reply is the answer as the CLI gave it, and nothing read out of it or
 added to it unless asked. --with names what to add beside it — a comma
 list, or the flag repeated, or both. Readings that only exist as JSON imply
@@ -683,6 +708,7 @@ conversation, which every provider can find without being told its id, and
   rota run 2 "and the tests?" --resume 30040947-e103-4d58-8b0d-46417297cb1b
   rota run 2 "explain the tests" --with deltas   each fragment as it is written
   rota run 2 "fix the typo" --with files,code    what it touched, the code it wrote
+  rota run 2 "start here" --input    keep it open; type more lines, /interrupt, /close
   rota run                           open the CLI itself, as it comes
   rota run 2 -i                      the same, for a named account
   rota run 2 -- --some-vendor-flag   hand it these arguments untouched
@@ -859,6 +885,7 @@ func (c *cli) answer(id int, args []string) error {
 		model      = fs.String("model", "", "model to use; the provider's default when empty")
 		effort     = fs.String("effort", "", "reasoning effort, for providers that have one")
 		stream     = fs.Bool("stream", false, "print events as they happen: text, or one JSON object per line with --json")
+		input      = fs.Bool("input", false, "keep the run open and read more messages from stdin; implies --stream")
 		withNames  names
 		cwd        = fs.String("cwd", "", "working directory for the run")
 		timeout    = fs.Duration("timeout", 0, "give up after this long")
@@ -901,6 +928,15 @@ func (c *cli) answer(id int, args []string) error {
 	if text == "" {
 		text = *altPrompt
 	}
+	if *input && text == "" {
+		// A run that reads its messages from stdin takes the first one from
+		// there too, which is what `echo ... | rota run 1 --input` means.
+		first, err := firstLine(c.in)
+		if err != nil {
+			return err
+		}
+		text = first
+	}
 
 	// A fragment is a piece of a stream, so asking for fragments is asking
 	// for the stream they are pieces of; and the provider's own events and
@@ -912,6 +948,9 @@ func (c *cli) answer(id int, args []string) error {
 	}
 	*stream = *stream || with.NeedsStream()
 	*asJSON = *asJSON || with.NeedsJSON()
+	// A run that stays open has events to report while it is open, and the
+	// CLI's streaming input goes with its streaming output.
+	*stream = *stream || *input
 
 	spec := rota.Spec{
 		Prompt: text, Model: *model, Effort: *effort, Stream: *stream, Cwd: *cwd,
@@ -920,6 +959,7 @@ func (c *cli) answer(id int, args []string) error {
 		TimeoutSeconds: int(timeout.Seconds()), OneShot: true,
 	}
 	spec.ForkSession = *fork
+	spec.Input = *input
 	with.Apply(&spec)
 	// Readings made from events need the CLI to print them, whether or not
 	// the reply is printed as they come: the CLI streams, rota reads, and
@@ -997,18 +1037,44 @@ func (c *cli) answer(id int, args []string) error {
 	watch := newEventStream(c.out, c.json || *asJSON, a.ID, a.Provider, with, tally)
 	watch.quiet = !*stream
 	watch.learn = started.Learned
+	// A run that stays open is addressable while it runs, so it needs a name
+	// of its own: the conversation id is the CLI's to decide and arrives too
+	// late to send into.
+	runID := ""
+	var reach *sends
+	if *input {
+		runID = newRunID()
+		// Opened before the id is said, so the first `rota send` after it
+		// appears has something to connect to. A run nobody can reach is
+		// still a run: the warning is all that happens.
+		var lerr error
+		if reach, lerr = listenForSends(s, runID); lerr != nil {
+			fmt.Fprintf(c.err, "rota: send is not available: %v\n", lerr)
+		}
+		defer reach.close()
+	}
 	var live *eventStream
 	if *stream {
 		model, effort, _ := rota.Resolved(a, s.Home(a), spec)
 		live = watch
-		_ = live.stream.Send(message.Event{
-			Type: "init", Model: model, Effort: effort, Cwd: spec.Cwd, SessionID: spec.Resume,
+		_ = live.emit(message.Event{
+			Type: "init", Model: model, Effort: effort, Cwd: spec.Cwd, SessionID: spec.Resume, RunID: runID,
 		})
 	}
 	if *verbose {
 		fmt.Fprintf(c.err, "rota: %s\n", a)
 	}
-	res, err := s.Run(context.Background(), a, spec, nil, watch)
+	if runID != "" {
+		// On stderr whether or not -v was asked for: without the id nobody
+		// can send into this run, and stdout belongs to the answer.
+		fmt.Fprintf(c.err, "rota: run %s — send more with: rota send %s \"…\"\n", runID, runID)
+	}
+	var res *rota.Result
+	if *input {
+		res, err = c.session(s, a, spec, reach, watch, live, *verbose)
+	} else {
+		res, err = s.Run(context.Background(), a, spec, nil, watch)
+	}
 	_ = started.End()
 	// What the readings are read from, beyond the result: the stream's
 	// tally, the account, and a fresh quota reading when one was asked for.

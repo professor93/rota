@@ -267,6 +267,34 @@ func TestASessionRefusesWhatItCannotDo(t *testing.T) {
 	}
 }
 
+// A caller that speaks the CLI's own input vocabulary can write a line
+// itself, and it reaches the agent as any message does. What is not one JSON
+// object never reaches the pipe at all.
+func TestARawLineIsWrittenAsItIsAndOnlyIfItIsAnObject(t *testing.T) {
+	var out bytes.Buffer
+	s := startEcho(t, context.Background(), "t-session-raw", fakecli.Spec{}, Spec{Prompt: "one"}, &out)
+
+	raw := []byte(`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"two"}]}}`)
+	if err := s.SendRaw(raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SendRaw([]byte(`"not an object"`)); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("a raw line must be one JSON object: %v", err)
+	}
+	if err := s.SendRaw([]byte(`{"type":`)); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("and a whole one: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	if got := resultsIn(t, out.String()); !slices.Equal(got, []string{"echo: one", "echo: two"}) {
+		t.Fatalf("the raw line is answered like any message, and the refused ones were never written: %v", got)
+	}
+}
+
 // Cancelling the context ends the session where it stands, however long the
 // CLI meant to take.
 func TestCancellingTheContextEndsTheSession(t *testing.T) {

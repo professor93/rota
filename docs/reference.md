@@ -161,6 +161,8 @@ rota run 2 "explain it" --with deltas  # each fragment as it is written, not jus
 rota run 2 "explain it" --with raw   # the provider's own events too, as JSON
 rota run 2 "explain it" --with blocks,ask   # readings beside the answer: fences split, the question read
 rota run 2 -m sonnet -e low "hi"   # every everyday run flag has a short: -m -e -s -c -r -t -S
+rota run 2 "start here" --input    # keep the run open and type more messages into it
+rota send 7f3c1a5d "and the tests?"  # send into that run from another terminal
 rota run                      # open the rotation's account in its own CLI
 rota run 2                    # open account 2's CLI, as it comes
 rota set 2 --order 1          # put account 2 first in the queue (0 = out of it)
@@ -382,6 +384,9 @@ event vocabularies. A client reading a rota stream learns one:
 | `tool` / `tool_result` | it used a tool, with `tool`, `tool_id` and the tool's own `input` — the file a Read opened, the command a Bash ran — and what came back |
 | `blocked` | a tool it wanted was refused, with `tool` and `reason` |
 | `usage` | a limit or token reading went by; a token reading carries `usage` with `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens` |
+| `input` | what became of a message sent into an open run: `state` is `accepted`, `answered` or `failed`, with its `id`, and `reason` when it failed |
+| `interrupted` | an interrupt the CLI acknowledged, with its `id` |
+| `idle` | every message sent so far has been answered; the run is waiting for more |
 | `done` / `error` | how the run ended, with the exit status, and the totals: `num_turns`, `cost_usd` and the provider's own `usage` |
 | `other` | something rota recognises but has nothing general to say about |
 
@@ -470,6 +475,79 @@ all: it says nothing a client could show that the whole piece does not.
 claude and grok stream fragments; codex and kimi do not have the flag.
 
 Without `--stream`, `--json` is still one indented document, as it always was.
+
+### Talking to a running run
+
+`--input` keeps the run open after its first answer: the CLI keeps its
+standard input, and rota reads more messages from its own — one per line —
+while the answers stream out. It is the same process and the same
+conversation, so there is no resume and nothing to carry across. It implies
+`--stream`, and not `--json`: text mode prints the answers and nothing else,
+as it always does.
+
+```sh
+rota run 1 "start here" --input          # the prose, and more lines to send
+rota --json run 1 "start here" --input   # the same, as events
+echo "just this" | rota run 1 --input    # the first line is the prompt
+```
+
+A line beginning with `/` is a command rather than a message:
+
+| | |
+|---|---|
+| `/interrupt` | stop the tool the agent is running |
+| `/steer <text>` | interrupt, then send, so the message starts the next turn |
+| `/close` | no more messages: the run finishes its turn and exits |
+
+The end of stdin means `/close`. A line that starts with `{` is taken as
+claude's own input vocabulary and written down the pipe as it is, for a
+caller that would rather compose it than have rota compose it.
+
+A run started this way prints an id on stderr, and carries it as `run_id` on
+its opening event. `rota send` reaches it from another terminal, or from a
+script, over a unix socket in `<store>/runs/<id>.sock`:
+
+```sh
+rota send 7f3c1a5d "also check the tests"      # one more message
+rota send 7f3c1a5d "do this instead" --steer   # interrupt first
+rota send 7f3c1a5d --interrupt                 # stop what it is doing
+rota send 7f3c1a5d --close                     # let it finish
+```
+
+It prints `accepted <id>`, `interrupted <id>` or `closed`, and with `--json`
+the reply as it came. The answer itself comes out where the run is printing,
+not where the send was typed. A run whose socket could not be opened — a
+directory that will not take one, a path too long for the platform's limit —
+says so when it starts and goes on running; only sending into it from
+elsewhere is lost.
+
+Three event types say what became of each message, so a client never has to
+guess: `input` with `state` `accepted`, `answered` or `failed`;
+`interrupted`, carrying the interrupt's own id; and `idle`, when everything
+sent has been answered.
+
+```json
+{"type":"init","seq":1,"account":1,"provider":"claude","run_id":"7f3c1a5d2e4b9c10"}
+{"type":"input","seq":5,"account":1,"provider":"claude","id":"a41f9c0d","state":"accepted"}
+{"type":"text","seq":8,"account":1,"provider":"claude","text":"…"}
+{"type":"input","seq":9,"account":1,"provider":"claude","id":"a41f9c0d","state":"answered"}
+{"type":"idle","seq":10,"account":1,"provider":"claude"}
+```
+
+`accepted` and `answered` are two facts, not one said twice. A message sent
+mid-turn is folded in at the agent's next tool boundary and never echoed
+back, so the only thing the CLI says about it is `queued_turn_count` on each
+result: how many messages it has taken but not yet made turns of. At a result
+carrying zero, everything accepted before it has been answered; at a result
+carrying N, the last N are still waiting. That count is what `answered` is
+derived from, and it has one honest limit: a message written in the same
+instant claude prints a result can be reported answered one turn early. It is
+never lost, and never reported answered twice.
+
+Only Claude Code has a streaming input today. Every other CLI refuses
+`--input` by name, before the run costs anything. Over HTTP and WebSocket the
+same run will be reachable in the next phase; for now it is the command line
+and the library.
 
 ### Reading the answer
 
@@ -1067,10 +1145,11 @@ running, `Close` says there is nothing more, and `Wait` returns the `Result`
 `Run` would have given. `Notices` reports what became of each: `accepted`
 when a message has reached the CLI, `answered` when a turn carrying it has
 finished, `interrupted` when the CLI acknowledges an interrupt, and `idle`
-when nothing is waiting. Claude Code is the only CLI with a streaming input
-today, so every other one refuses `input` by name. Transports for a session
-— the command line, HTTP, WebSocket — come in later phases; for now it is a
-library verb.
+when nothing is waiting. `SendRaw` writes a line the caller composed in the
+CLI's own input vocabulary, untracked. Claude Code is the only CLI with a
+streaming input today, so every other one refuses `input` by name. On the
+command line this is `--input` and `rota send` — see "Talking to a running
+run"; over HTTP and WebSocket it comes in the next phase.
 
 Two things still touch the world, unavoidably: the network, and — for codex
 and kimi, whose CLIs read credentials only from a file — a credential staged

@@ -17,9 +17,16 @@ import (
 // the sender attaches when it was asked for and leaves out otherwise.
 type Event struct {
 	// Type is one of: text, thinking, tool, tool_result, blocked, usage,
-	// done, error, other. "other" is an event rota recognises as real but
-	// has nothing general to say about — it is delivered, not dropped,
-	// because a vendor adding an event type must not make one disappear.
+	// input, interrupted, idle, done, error, other. "other" is an event rota
+	// recognises as real but has nothing general to say about — it is
+	// delivered, not dropped, because a vendor adding an event type must not
+	// make one disappear.
+	//
+	// The three about an open run say what became of what was sent into it:
+	// input is one message's progress — state is accepted, answered or
+	// failed, with its id, and reason when it failed; interrupted is an
+	// interrupt the CLI acknowledged, with its id; idle is every message
+	// answered and the run waiting for more.
 	Type string `json:"type"`
 	// Seq, Account and Provider are stamped by whoever sends the stream,
 	// which is the only party that knows them.
@@ -28,6 +35,10 @@ type Event struct {
 	Provider string `json:"provider,omitempty"`
 
 	SessionID string `json:"session_id,omitempty"`
+	// RunID names an open run on the machine rota is on, so another terminal
+	// can send into it. It belongs to the opening event; a run that takes no
+	// more messages has none.
+	RunID string `json:"run_id,omitempty"`
 
 	// Model, Effort and Cwd belong to the opening event: what the run is
 	// about to do, before it has done any of it.
@@ -58,6 +69,12 @@ type Event struct {
 	Input  jsontext.Value `json:"input,omitzero"`
 	Reason string         `json:"reason,omitempty"`
 
+	// ID and State belong to a message sent into an open run: the id Send
+	// gave it, and what became of it — accepted, answered or failed. An
+	// interrupted event carries the interrupt's own id and no state.
+	ID    string `json:"id,omitempty"`
+	State string `json:"state,omitempty"`
+
 	// Usage is the token numbers a usage event was made of, when it was
 	// made of any: a limit reading going by has none.
 	Usage *Usage `json:"usage,omitzero"`
@@ -86,6 +103,27 @@ type Usage struct {
 	OutputTokens             int `json:"output_tokens,omitzero"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitzero"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitzero"`
+}
+
+// FromNotice is what an open run said about one message, as an event.
+//
+// lib reports delivery on a channel, in the session's own words; a stream has
+// one vocabulary for everything that happens in a run, and this is where the
+// two meet. A client watching a run therefore learns what became of each
+// message from the stream it is already reading, rather than from a second
+// shape arriving somewhere else.
+//
+// A kind rota has not seen before is delivered as an input event carrying it,
+// for the same reason an unknown CLI event becomes "other": a new one must
+// not disappear.
+func FromNotice(n rota.Notice) Event {
+	switch n.Kind {
+	case "interrupted":
+		return Event{Type: "interrupted", ID: n.ID}
+	case "idle":
+		return Event{Type: "idle"}
+	}
+	return Event{Type: "input", ID: n.ID, State: n.Kind, Reason: n.Err}
 }
 
 // usage is a provider's own token reading, whichever names it used.

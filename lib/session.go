@@ -3,6 +3,7 @@ package rota
 import (
 	"bytes"
 	"context"
+	"encoding/json/jsontext"
 	"io"
 	"strings"
 	"sync"
@@ -173,6 +174,45 @@ func (s *Session) Send(text string) (string, error) {
 		return "", err
 	}
 	return id, nil
+}
+
+// SendRaw writes one line the caller composed itself, in the CLI's own input
+// vocabulary, for a caller that speaks that shape directly — a transport
+// handing on what its own client wrote, say.
+//
+// Nothing is tracked: the line gets no id and no notices, because rota did
+// not make it and cannot tell what the CLI will consider it. What is checked
+// is only what protects the pipe: one JSON object, and not a huge one. A
+// caller that wants delivery reported sends text through Send.
+func (s *Session) SendRaw(line []byte) error {
+	raw := bytes.TrimSpace(line)
+	if len(raw) > maxMessage {
+		return failf(ErrInvalidRequest, "the line is %d bytes, and one line is capped at %d", len(raw), maxMessage)
+	}
+	if len(raw) == 0 || raw[0] != '{' || !jsontext.Value(raw).IsValid() {
+		return failf(ErrInvalidRequest, "a raw line must be one JSON object in the CLI's own input vocabulary")
+	}
+	out := append(bytes.Clone(raw), '\n')
+
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	s.mu.Lock()
+	if s.closed {
+		err := s.closedErr()
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Unlock()
+	err := s.hand(out)
+	if err == nil {
+		return nil
+	}
+	// As in deliver: a pipe that cannot be written to is a session that is
+	// over, for this caller and for everyone after it.
+	s.mu.Lock()
+	s.closed, s.writeErr = true, err
+	s.mu.Unlock()
+	return failf(ErrClosed, "the session closed: %v", err)
 }
 
 // Steer interrupts whatever the agent is doing and sends a message, which is

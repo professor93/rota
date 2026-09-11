@@ -82,8 +82,52 @@ func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env 
 // refresh token is refused for good by these providers. Refusing costs a
 // caller one retry; not refusing costs the account.
 func (s *Store) Run(ctx context.Context, a *rota.Account, spec rota.Spec, lim *rota.Limits, events io.Writer) (*rota.Result, error) {
+	cmd, release, err := s.ready(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	return rota.Run(ctx, a, s.Home(a), cmd, spec, lim, events)
+}
+
+// Start is Run for a run that stays open: the CLI keeps its standard input
+// and takes more messages until the session is closed. The spec must ask for
+// both Input and Stream, as rota.Start requires, and only Claude Code has a
+// streaming input to ask for.
+//
+// The claim on the account is held until the session ends rather than until
+// this call returns, because the CLI is still running when it returns — so
+// the goroutine that waits for the session is what lets the account go. A
+// caller that never closes the session therefore keeps the account claimed,
+// which is exactly what it is: a run in flight.
+func (s *Store) Start(ctx context.Context, a *rota.Account, spec rota.Spec, lim *rota.Limits, events io.Writer) (*rota.Session, error) {
+	cmd, release, err := s.ready(ctx, a)
+	if err != nil {
+		return nil, err
+	}
+	sess, err := rota.Start(ctx, a, s.Home(a), cmd, spec, lim, events)
+	if err != nil {
+		release() // nothing started, so nothing is holding the home
+		return nil, err
+	}
+	go func() {
+		<-sess.Done()
+		release()
+	}()
+	return sess, nil
+}
+
+// ready does everything that has to happen before an account's CLI starts,
+// and hands back the command to launch and the claim on the account.
+//
+// Run and Start share it whole: the order of these steps is what keeps a
+// credential-owning account alive, and two copies of it would be two chances
+// to get that order wrong. The caller decides only when the claim is released
+// — at the end of the call for a run, at the end of the session for a
+// session.
+func (s *Store) ready(ctx context.Context, a *rota.Account) (*rota.Command, func(), error) {
 	if a.Dead {
-		return nil, rota.WrapReauth(a)
+		return nil, nil, rota.WrapReauth(a)
 	}
 	// Taken before adoption, because adoption reads the very file another
 	// run would be rewriting. Not waited for: the store lock is still held
@@ -91,22 +135,25 @@ func (s *Store) Run(ctx context.Context, a *rota.Account, spec rota.Spec, lim *r
 	// finished.
 	release, ok := s.holdForExec(a)
 	if !ok {
-		return nil, fmt.Errorf("%w: %s keeps its own credential file, and two runs would spend the same refresh token", rota.ErrBusy, a)
+		return nil, nil, fmt.Errorf("%w: %s keeps its own credential file, and two runs would spend the same refresh token", rota.ErrBusy, a)
 	}
-	defer release()
+	fail := func(err error) (*rota.Command, func(), error) {
+		release()
+		return nil, nil, err
+	}
 	// Adopt before refreshing: see rota.Adopt. Doing it the other way round
 	// is how a codex or kimi account is permanently killed.
 	if aerr := rota.Adopt(a, s.Home(a)); aerr != nil {
-		return nil, aerr
+		return fail(aerr)
 	}
 	changed, err := rota.Refresh(ctx, a)
 	if changed {
 		if serr := s.Save(); serr != nil {
-			return nil, errors.Join(err, fmt.Errorf("refusing to run: store not saved after a token change: %w", serr))
+			return fail(errors.Join(err, fmt.Errorf("refusing to run: store not saved after a token change: %w", serr)))
 		}
 	}
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
 	// Staging is the last thing that needs the store: it may adopt a token
 	// the CLI rotated, and that must be on disk before anything runs. Once
@@ -115,16 +162,27 @@ func (s *Store) Run(ctx context.Context, a *rota.Account, spec rota.Spec, lim *r
 	cmd, err := rota.Stage(a, s.Home(a))
 	if err != nil {
 		if serr := s.Save(); serr != nil {
-			return nil, errors.Join(err, fmt.Errorf("the store could not be saved: %w", serr))
+			return fail(errors.Join(err, fmt.Errorf("the store could not be saved: %w", serr)))
 		}
-		return nil, err
+		return fail(err)
 	}
 	if err := s.Save(); err != nil {
-		return nil, fmt.Errorf("refusing to run: the store could not be saved after staging: %w", err)
+		return fail(fmt.Errorf("refusing to run: the store could not be saved after staging: %w", err))
 	}
 	_ = s.Release() // releasing a lock cannot fail in a way a caller can act on
 	cmd.BaseEnv = HostEnv()
-	return rota.Run(ctx, a, s.Home(a), cmd, spec, lim, events)
+	return cmd, release, nil
+}
+
+// RunDir is where a run that stays open puts the socket another terminal
+// sends into: beside the accounts, not inside an account's private home,
+// because an open run belongs to rota rather than to the CLI it launched.
+func (s *Store) RunDir() (string, error) {
+	dir := filepath.Join(filepath.Dir(s.backend.HomeRoot()), "runs")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
 // runLock is held for as long as an account's CLI is running, inside the home

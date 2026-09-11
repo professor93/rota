@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	rota "github.com/professor93/rota/lib"
 )
 
 // The fixture is a real Claude Code run, recorded from the CLI itself: a
@@ -149,5 +151,31 @@ func TestCodexAndGrokReachTheSameVocabulary(t *testing.T) {
 func TestNonsenseIsNotAnEvent(t *testing.T) {
 	if got := Normalize([]byte("not json")); got != nil {
 		t.Fatalf("%+v", got)
+	}
+}
+
+// What a session says about a message reaches a client in the stream's own
+// vocabulary: one event type per kind of news, with the id it was given.
+func TestEveryNoticeBecomesAnEvent(t *testing.T) {
+	cases := []struct {
+		notice rota.Notice
+		want   Event
+	}{
+		{rota.Notice{Kind: "accepted", ID: "a1"}, Event{Type: "input", ID: "a1", State: "accepted"}},
+		{rota.Notice{Kind: "answered", ID: "a1"}, Event{Type: "input", ID: "a1", State: "answered"}},
+		{rota.Notice{Kind: "failed", ID: "a1", Err: "broken pipe"},
+			Event{Type: "input", ID: "a1", State: "failed", Reason: "broken pipe"}},
+		{rota.Notice{Kind: "interrupted", ID: "i1"}, Event{Type: "interrupted", ID: "i1"}},
+		{rota.Notice{Kind: "idle"}, Event{Type: "idle"}},
+	}
+	for _, c := range cases {
+		got := FromNotice(c.notice)
+		if got.Type != c.want.Type || got.ID != c.want.ID || got.State != c.want.State || got.Reason != c.want.Reason {
+			t.Errorf("%+v became %+v, want %+v", c.notice, got, c.want)
+		}
+	}
+	// A kind nobody has seen is still delivered, carrying what it said.
+	if got := FromNotice(rota.Notice{Kind: "moved", ID: "m1"}); got.Type != "input" || got.State != "moved" {
+		t.Errorf("an unknown kind must arrive rather than vanish: %+v", got)
 	}
 }

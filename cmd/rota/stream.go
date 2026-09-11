@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
@@ -20,6 +21,15 @@ import (
 type eventStream struct {
 	out  io.Writer
 	json bool
+
+	// mu guards the stream and the writer under it. A run that takes more
+	// messages has two sources: the CLI's output, read on one goroutine, and
+	// what became of each message sent in, read on another. They would
+	// otherwise interleave halves of a line and race over the sequence
+	// numbers. It is held across message.Stream's own calls, which is why
+	// Stream needs no lock of its own: everything that reaches it comes
+	// through one of the three doors below.
+	mu sync.Mutex
 
 	stream message.Stream
 	text   bool // whether any prose has been printed, so a newline can close it
@@ -47,9 +57,24 @@ func newEventStream(out io.Writer, asJSON bool, account int, provider string, wi
 	return e
 }
 
-func (e *eventStream) Write(p []byte) (int, error) { return e.stream.Write(p) }
+// Write is the first door: whatever the CLI printed, turned into events.
+func (e *eventStream) Write(p []byte) (int, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.stream.Write(p)
+}
 
-// send writes one finished event in whichever form was asked for.
+// emit is the second: an event of rota's own — the opening one, and what
+// became of each message sent into an open run.
+func (e *eventStream) emit(ev message.Event) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.stream.Send(ev)
+}
+
+// send writes one finished event in whichever form was asked for. Every path
+// to it holds mu already: it is message.Stream's Emit, and the stream is only
+// ever entered through the three doors that take the lock.
 func (e *eventStream) send(ev message.Event) error {
 	if ev.SessionID != "" && e.learn != nil {
 		e.learn(ev.SessionID)
@@ -91,6 +116,8 @@ func (e *eventStream) send(ev message.Event) error {
 // been printed — beyond finishing the line, since a CLI that streamed its
 // answer in pieces need not have ended on one.
 func (e *eventStream) end(end any) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	_ = e.stream.Rest() // a last line with no newline after it is still an event
 	if e.json {
 		_ = rota.EncodeTo(e.out, end)
