@@ -159,6 +159,7 @@ rota run 2 "summarize this repo"   # ask account 2 instead
 rota run 2 --stateless "2+2?"      # no session, no settings/memory, throwaway claude home (claude, codex)
 rota run 2 "explain it" --partial  # each fragment as it is written, not just each finished piece
 rota run 2 "explain it" --events   # the provider's own events too, as JSON
+rota run 2 "explain it" --with blocks,ask   # readings beside the answer: fences split, the question read
 rota run 2 -m sonnet -e low "hi"   # every everyday run flag has a short: -m -e -s -c -r -t -S
 rota run                      # open the rotation's account in its own CLI
 rota run 2                    # open account 2's CLI, as it comes
@@ -375,7 +376,7 @@ event vocabularies. A client reading a rota stream learns one:
 | | |
 |---|---|
 | `init` | first, before the CLI starts: which account, provider, model, effort and directory |
-| `text` | the agent said something, with `blocks` — see below |
+| `text` | the agent said something; with `blocks` when asked for — see below |
 | `thinking` | it thought something |
 | `text` / `thinking` with `delta` | one fragment of a piece still being written; only when partial messages were asked for — see below |
 | `tool` / `tool_result` | it used a tool, with `tool`, `tool_id` and the tool's own `input` — the file a Read opened, the command a Bash ran — and what came back |
@@ -458,7 +459,7 @@ rota --json run 1 "..." --partial   # each fragment an event of its own
 ```json
 {"type":"text","seq":4,"account":1,"provider":"claude","session_id":"91ebe527…","text":"ndjson ","delta":true}
 {"type":"text","seq":5,"account":1,"provider":"claude","session_id":"91ebe527…","text":"works","delta":true}
-{"type":"text","seq":6,"account":1,"provider":"claude","session_id":"91ebe527…","text":"ndjson works","blocks":[{"kind":"text","text":"ndjson works"}]}
+{"type":"text","seq":6,"account":1,"provider":"claude","session_id":"91ebe527…","text":"ndjson works"}
 ```
 
 Fragments belong to a stream, so `include_partial_messages` without `stream`
@@ -472,15 +473,31 @@ Without `--stream`, `--json` is still one indented document, as it always was.
 
 ### Reading the answer
 
-An answer is markdown, usually with code in the middle of it. Both JSON
-surfaces — the HTTP reply and `rota run --json` — carry the original text
-and rota's reading of it, never one instead of the other:
+The reply is the answer as the CLI gave it. rota adds nothing to it and
+reads nothing out of it unless asked: someone used to `claude -p` sees what
+`claude -p` says. A reading is asked for by name, with `--with` on the
+command line — a comma list, the flag repeated, or both — and with `"with"`
+over HTTP; a name nobody knows is refused by name before anything is spent.
+`--with` implies `--json`, since a reading has nowhere else to go.
 
-- **`blocks`** splits it into prose and fenced code, each with its language,
-  so a client showing the two differently does not need a markdown parser.
+```sh
+rota run 1 "..." --with blocks,ask          # both readings
+rota run 1 "..." --with ask --with blocks   # the same
+```
+
+```json
+{"prompt": "...", "with": ["blocks", "ask"]}
+```
+
+- **`blocks`** splits the answer at fences into prose and code, each with
+  its language, so a client showing the two differently does not need a
+  markdown parser. On the reply, and on every whole `text` event of a
+  stream; never on a fragment.
 - **`ask`** is there when the run ended by asking something: the question,
   and the options when they were written as a list — with `multiple` when
-  that list was a task list.
+  that list was a task list. On the reply only.
+
+The original text is always there beside a reading, never replaced by it.
 
 `ask` is inference over prose, and worth taking as a hint rather than a
 contract. In an interactive session these arrive as real structures: a

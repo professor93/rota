@@ -23,6 +23,9 @@ type Stream struct {
 	// Raw carries the provider's own line along on each event. It is much
 	// the largest part of one, so it is sent only when asked for.
 	Raw bool
+	// With is what to read out of the text, beyond the text. Only Blocks
+	// applies to a stream: a question is read from a finished answer.
+	With With
 
 	Emit func(Event) error
 
@@ -82,6 +85,11 @@ func (s *Stream) line(line []byte) error {
 		if s.Raw {
 			// A copy, because the buffer under it is reused by the next read.
 			ev.Raw = jsontext.Value(bytes.Clone(bytes.TrimRight(line, "\r")))
+		}
+		// A whole piece of text is split when asked; a fragment never is,
+		// since half a fence is not a fence.
+		if s.With.Blocks && ev.Type == "text" && !ev.Delta && ev.Text != "" {
+			ev.Blocks = Blocks(ev.Text)
 		}
 		if err := s.Send(ev); err != nil {
 			return err

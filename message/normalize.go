@@ -35,8 +35,10 @@ type Event struct {
 	Effort string `json:"effort,omitempty"`
 	Cwd    string `json:"cwd,omitempty"`
 
-	// Text is what was said; Blocks is the same text split into prose and
-	// code, so a client need not parse markdown to show them differently.
+	// Text is what was said. Blocks is the same text split into prose and
+	// code, present only when the reading was asked for (see With), so a
+	// client that wants it need not parse markdown, and one that does not
+	// gets the text alone.
 	Text   string  `json:"text,omitempty"`
 	Blocks []Block `json:"blocks,omitzero"`
 	// Delta marks a text or thinking event that is one fragment of a piece
@@ -215,7 +217,7 @@ func Normalize(raw []byte) []Event {
 		return one("other")
 
 	case w.Type == "item.completed" && w.Item != nil && w.Item.Type == "agent_message":
-		return []Event{{Type: "text", Text: w.Item.Text, Blocks: Blocks(w.Item.Text), SessionID: session}}
+		return []Event{{Type: "text", Text: w.Item.Text, SessionID: session}}
 
 	case w.Type == "turn.failed", w.Type == "error":
 		return one("error")
@@ -225,7 +227,7 @@ func Normalize(raw []byte) []Event {
 		if w.StopReason == "error" {
 			return []Event{{Type: "error", Text: w.GrokText}}
 		}
-		return []Event{{Type: "text", Text: w.GrokText, Blocks: Blocks(w.GrokText)}}
+		return []Event{{Type: "text", Text: w.GrokText}}
 
 	case w.Type == "":
 		return nil
@@ -286,7 +288,7 @@ func fragment(e *streamEvent, session string) []Event {
 func assistantPiece(p piece, session string) (Event, bool) {
 	switch p.Type {
 	case "text":
-		return Event{Type: "text", Text: p.Text, Blocks: Blocks(p.Text), SessionID: session}, true
+		return Event{Type: "text", Text: p.Text, SessionID: session}, true
 	case "thinking":
 		return Event{Type: "thinking", Text: p.Thinking, SessionID: session}, true
 	case "tool_use":

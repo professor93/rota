@@ -62,7 +62,7 @@ func TestPartialFragmentsAreDeltasAndTheWholeStillFollows(t *testing.T) {
 	if deltas[0].Blocks != nil || deltas[0].SessionID == "" {
 		t.Fatalf("a fragment is not split into blocks, but it says which conversation: %+v", deltas[0])
 	}
-	if wholes[0].Text != "Hello there, friend." || len(wholes[0].Blocks) != 1 {
+	if wholes[0].Text != "Hello there, friend." || wholes[0].Blocks != nil {
 		t.Fatalf("the whole piece is unchanged by the deltas before it: %+v", wholes[0])
 	}
 }

@@ -1479,11 +1479,11 @@ func Run(ctx context.Context, a *Account, home string, cmd *Command, spec Spec, 
 	if waitErr != nil {
 		var ee *exec.ExitError
 		if errors.As(waitErr, &ee) {
+			// The CLI ran and failed: that is a result, not a rota error.
+			// Its reason stays in Stderr, where the CLI put it; Result is
+			// the answer or nothing, never something rota moved there.
 			res.IsError = true
-			if res.Result == "" {
-				res.Result = res.Stderr
-			}
-			return res, nil // the CLI ran and failed: that is a result, not a rota error
+			return res, nil
 		}
 		return res, waitErr
 	}

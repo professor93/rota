@@ -76,30 +76,36 @@ func TestABlockedToolSaysWhichToolAndWhy(t *testing.T) {
 	}
 }
 
-func TestATextEventCarriesItsBlocks(t *testing.T) {
-	var text *Event
+// A text event is the text. Asked for blocks, a stream splits each whole
+// text event the way the reply's reading does; Normalize itself never does.
+func TestATextEventCarriesBlocksWhenAsked(t *testing.T) {
+	var plain, split *Event
 	for _, line := range claudeFixture(t) {
 		for _, ev := range Normalize([]byte(line)) {
 			if ev.Type == "text" {
 				e := ev
-				text = &e
+				plain = &e
 			}
 		}
 	}
-	if text == nil {
+	s := &Stream{With: With{Blocks: true}}
+	s.Emit = func(ev Event) error {
+		if ev.Type == "text" {
+			split = &ev
+		}
+		return nil
+	}
+	for _, line := range claudeFixture(t) {
+		s.Write([]byte(line + "\n"))
+	}
+	if plain == nil || split == nil {
 		t.Fatal("the run said nothing")
 	}
-	if !strings.Contains(text.Text, "Blocked") {
-		t.Fatalf("text: %q", text.Text)
+	if !strings.Contains(plain.Text, "Blocked") || plain.Blocks != nil {
+		t.Fatalf("unasked, the text alone: %+v", plain)
 	}
-	var code int
-	for _, b := range text.Blocks {
-		if b.Kind == "code" {
-			code++
-		}
-	}
-	if len(text.Blocks) == 0 {
-		t.Fatal("a text event carries the same split the result does")
+	if split.Text != plain.Text || len(split.Blocks) == 0 {
+		t.Fatalf("asked, the same text with its split beside it: %+v", split)
 	}
 }
 

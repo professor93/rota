@@ -654,6 +654,14 @@ followed by the whole piece as before. It implies --stream.
 --events includes the provider's own events: in "raw" on each streamed one,
 or as a list in a buffered reply. It implies --json.
 
+The reply is the answer as the CLI gave it, and nothing read out of it
+unless asked. --with names readings to add beside it — a comma list, or the
+flag repeated, or both — and implies --json:
+  blocks   the answer split at fences into prose and code, on the reply and
+           on every whole text event
+  ask      the question the answer ends with, and its options when they
+           were written as a list
+
 Conversations carry on: every run has a session id, and --resume <id>
 continues from it. On its own, --resume picks up the most recent
 conversation, which every provider can find without being told its id, and
@@ -841,6 +849,7 @@ func (c *cli) answer(id int, args []string) error {
 		stream     = fs.Bool("stream", false, "print events as they happen: text, or one JSON object per line with --json")
 		partial    = fs.Bool("partial", false, "also print each fragment as the model writes it; implies --stream")
 		events     = fs.Bool("events", false, "include the provider's own events: in raw on each streamed one, or as a list in the reply; implies --json")
+		withNames  names
 		cwd        = fs.String("cwd", "", "working directory for the run")
 		timeout    = fs.Duration("timeout", 0, "give up after this long")
 		mode       = fs.String("permission-mode", "", "how the agent asks before acting")
@@ -856,6 +865,7 @@ func (c *cli) answer(id int, args []string) error {
 		asJSON     = fs.Bool("json", false, "print the whole result — cost, usage, session id, exit status")
 		altPrompt  = fs.String("print", "", "an alias for -p")
 	)
+	fs.Var(&withNames, "with", "readings to add beside the answer: "+strings.Join(message.Readings, ", ")+"; a comma list or repeated; implies --json")
 	// One-letter forms for the everyday flags.
 	fs.StringVar(model, "m", "", "= --model")
 	fs.StringVar(effort, "e", "", "= --effort")
@@ -883,10 +893,15 @@ func (c *cli) answer(id int, args []string) error {
 	}
 
 	// A fragment is a piece of a stream, so asking for fragments is asking
-	// for the stream they are pieces of; and the provider's own events are
-	// machine output, with nowhere to go but JSON.
+	// for the stream they are pieces of; and the provider's own events and
+	// a reading of the answer are machine output, with nowhere to go but
+	// JSON. A reading nobody knows is refused before anything is spent.
+	with, err := message.ParseWith(withNames...)
+	if err != nil {
+		return usageErr("%v", err)
+	}
 	*stream = *stream || *partial
-	*asJSON = *asJSON || *events
+	*asJSON = *asJSON || *events || len(withNames) > 0
 
 	spec := rota.Spec{
 		Prompt: text, Model: *model, Effort: *effort, Stream: *stream, Cwd: *cwd,
@@ -964,7 +979,7 @@ func (c *cli) answer(id int, args []string) error {
 	// the entry above — while the run is going for a streamed one, and only
 	// at the end for a buffered one, whose CLI prints a single document when
 	// it has finished.
-	watch := newEventStream(c.out, c.json || *asJSON, a.ID, a.Provider, *events)
+	watch := newEventStream(c.out, c.json || *asJSON, a.ID, a.Provider, *events, with)
 	watch.quiet = !*stream
 	watch.learn = started.Learned
 	var live *eventStream
@@ -999,13 +1014,10 @@ func (c *cli) answer(id int, args []string) error {
 	// flags. It is not stripped globally for run, because a vendor CLI has
 	// one too and `run <id> -- --json` must still reach it.
 	if c.json || *asJSON {
-		// The same shape the HTTP reply has: the result, and what rota read
-		// out of it. One JSON document means one thing either way in.
-		return c.emit(struct {
-			*rota.Result
-			Blocks []message.Block `json:"blocks,omitzero"`
-			Ask    *message.Ask    `json:"ask,omitzero"`
-		}{res, message.Blocks(res.Result), message.Asked(res.Result)})
+		// The same shape the HTTP reply has: the result, and beside it only
+		// what --with asked to have read out of it. One JSON document means
+		// one thing either way in.
+		return c.emit(message.ReplyFor(res, with))
 	}
 	if !*stream && res.Result != "" {
 		fmt.Fprintln(c.out, res.Result)
@@ -1383,6 +1395,13 @@ func openStore() (*store.Store, error) {
 	rotation.Backfill(s)
 	return s, nil
 }
+
+// names is a flag given more than once, or once with a comma list: both are
+// one list, and whoever reads it splits the commas.
+type names []string
+
+func (n *names) String() string     { return strings.Join(*n, ",") }
+func (n *names) Set(v string) error { *n = append(*n, v); return nil }
 
 func parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 	var positional []string

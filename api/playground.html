@@ -534,6 +534,10 @@ function buildBody() {
   const body = {};
   for (const [k, v] of Object.entries(values)) if (!k.startsWith("__")) body[k] = v;
   if (uploads.length) body.files = uploads;
+  // The page shows the answer split at fences and offers a question's
+  // options as buttons, so it asks for both readings; a reply carries
+  // neither unless asked.
+  body.with = ["blocks", "ask"];
   return body;
 }
 

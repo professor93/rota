@@ -265,13 +265,13 @@ func TestResultReportsTheModelAndEffortThatActuallyRan(t *testing.T) {
 	}
 }
 
-// An answer is markdown with code in the middle of it. The reply carries
-// the original text and rota's split of it, so a client showing code
-// differently from prose does not have to parse markdown itself.
+// An answer is markdown with code in the middle of it. Asked for blocks,
+// the reply carries the original text and rota's split of it, so a client
+// showing code differently from prose does not have to parse markdown.
 func TestResultCarriesTheAnswerSplitIntoBlocks(t *testing.T) {
 	h := newHarness(t, Options{})
 
-	code, _, raw := h.run(1, map[string]any{"prompt": "here:\n```go\nx := 1\n```\ndone"})
+	code, _, raw := h.run(1, map[string]any{"prompt": "here:\n```go\nx := 1\n```\ndone", "with": []string{"blocks"}})
 	if code != 200 {
 		t.Fatalf("%d %s", code, raw)
 	}

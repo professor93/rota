@@ -21,11 +21,15 @@ import (
 	"github.com/professor93/rota/wire"
 )
 
-// request is a Spec plus the one field only a transport knows about: files
-// carried with the request.
+// request is a Spec plus the two fields only a transport knows about: files
+// carried with the request, and the readings to add beside the answer.
 type request struct {
 	rota.Spec
 	Files []wire.Upload `json:"files,omitempty"`
+	// With names readings of the answer — blocks, ask — each entry a name
+	// or a comma list. Nothing is read unless named: the reply is the
+	// answer as the CLI gave it.
+	With []string `json:"with,omitempty"`
 }
 
 // run executes one account's CLI. The account is named in the path and is
@@ -39,6 +43,12 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.TimeoutSeconds < 0 {
 		fail(w, http.StatusBadRequest, "timeout_seconds must not be negative")
+		return
+	}
+	// A reading nobody knows is refused before anything is spent.
+	with, err := message.ParseWith(req.With...)
+	if err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// The slot comes before the store: a run waiting its turn must hold
@@ -146,7 +156,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	// rather than rota's, and worth reading here anyway: it costs one pass
 	// that is already being made, and it is right when it can be.
 	streaming := req.Stream
-	watch := newEventWriter(io.Discard, false, a.ID, a.Provider, false)
+	watch := newEventWriter(io.Discard, false, a.ID, a.Provider, false, message.With{})
 	watch.quiet = true
 	watch.learn = run.Learned
 	out := io.Writer(watch)
@@ -155,7 +165,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		live := s.startStream(w, r, message.Event{
 			Type: "init", Account: a.ID, Provider: a.Provider,
 			Model: model, Effort: effort, Cwd: req.Cwd, SessionID: req.Resume,
-		}, req.IncludeEvents)
+		}, req.IncludeEvents, with)
 		live.learn = run.Learned
 		out = live
 	}
@@ -174,28 +184,10 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.report(w, r, err)
 	case res.IsError || res.ExitCode != 0:
-		writeJSON(w, http.StatusBadGateway, replyFor(res))
+		writeJSON(w, http.StatusBadGateway, message.ReplyFor(res, with))
 	default:
-		writeJSON(w, http.StatusOK, replyFor(res))
+		writeJSON(w, http.StatusOK, message.ReplyFor(res, with))
 	}
-}
-
-// reply is a finished run on the wire: what the SDK produced, and what rota
-// read out of it. The reading lives here rather than in the SDK because it
-// is presentation — how an answer is shown is a client's problem, not the
-// transport's, and lib has no business knowing what markdown is.
-type reply struct {
-	*rota.Result
-	Blocks []message.Block `json:"blocks,omitzero"`
-	// Ask is present when the run ended by asking the user something. It is
-	// rota's reading of prose, not a structure the CLI provided — headless
-	// CLIs do not have one — so it is worth taking as a hint rather than as
-	// a contract. The answer it was read from is right there in result.
-	Ask *message.Ask `json:"ask,omitzero"`
-}
-
-func replyFor(res *rota.Result) *reply {
-	return &reply{Result: res, Blocks: message.Blocks(res.Result), Ask: message.Asked(res.Result)}
 }
 
 // joinContexts returns a context cancelled when either parent is.
@@ -329,7 +321,7 @@ const (
 // answering and with what. A client should not have to wait for the end to
 // learn which model it is paying for, and the CLI's own opening event knows
 // nothing about the account or the rotation's choice of it.
-func (s *Server) startStream(w http.ResponseWriter, r *http.Request, init message.Event, raw bool) *eventWriter {
+func (s *Server) startStream(w http.ResponseWriter, r *http.Request, init message.Event, raw bool, with message.With) *eventWriter {
 	ndjson := wantsNDJSON(r)
 	h := w.Header()
 	if ndjson {
@@ -342,7 +334,7 @@ func (s *Server) startStream(w http.ResponseWriter, r *http.Request, init messag
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Accel-Buffering", "no") // a proxy must not sit on the events
 	w.WriteHeader(http.StatusOK)
-	ev := newEventWriter(w, !ndjson, init.Account, init.Provider, raw)
+	ev := newEventWriter(w, !ndjson, init.Account, init.Provider, raw, with)
 	_ = ev.stream.Send(init)
 	flush(w)
 	return ev
@@ -364,7 +356,7 @@ func flush(w any) {
 // endStream closes the stream with a terminal event, so a client always
 // learns how the run ended even though the status line was sent first.
 func (s *Server) endStream(w http.ResponseWriter, r *http.Request, res *rota.Result, err error) {
-	ev := newEventWriter(w, !wantsNDJSON(r), 0, "", false)
+	ev := newEventWriter(w, !wantsNDJSON(r), 0, "", false, message.With{})
 	end := wire.Ended(res, err)
 	raw, _ := rota.Encode(end)
 	// Nothing can be done if this last write fails: the client is gone.
@@ -399,9 +391,9 @@ type eventWriter struct {
 	stream message.Stream
 }
 
-func newEventWriter(w io.Writer, sse bool, account int, provider string, raw bool) *eventWriter {
+func newEventWriter(w io.Writer, sse bool, account int, provider string, raw bool, with message.With) *eventWriter {
 	e := &eventWriter{w: w, sse: sse}
-	e.stream = message.Stream{Account: account, Provider: provider, Raw: raw, Emit: e.send}
+	e.stream = message.Stream{Account: account, Provider: provider, Raw: raw, With: with, Emit: e.send}
 	return e
 }
 
