@@ -27,14 +27,14 @@ func partialCLI(t *testing.T) {
 	t.Setenv("PATH", bin)
 }
 
-// --partial asks the CLI for each fragment as the model writes it. It is a
+// --with deltas asks the CLI for each fragment as the model writes it. It is a
 // way of streaming, so it streams: the CLI is put in its streaming mode
 // without --stream having to be said as well.
 func TestPartialAsksTheCLIForFragmentsAndStreams(t *testing.T) {
 	oneAccount(t)
 	partialCLI(t)
 
-	out, _, code := call(t, "--json", "run", "1", "hi", "--partial")
+	out, _, code := call(t, "--json", "run", "1", "hi", "--with", "deltas")
 	if code != 0 {
 		t.Fatalf("%d %q", code, out)
 	}
@@ -60,7 +60,7 @@ func TestPartialTextIsPrintedOnce(t *testing.T) {
 	oneAccount(t)
 	partialCLI(t)
 
-	out, _, code := call(t, "run", "1", "hi", "--partial")
+	out, _, code := call(t, "run", "1", "hi", "--with", "deltas")
 	if code != 0 {
 		t.Fatalf("%d %q", code, out)
 	}
@@ -76,7 +76,7 @@ func TestPartialJSONMarksFragmentsAndKeepsTheWhole(t *testing.T) {
 	oneAccount(t)
 	partialCLI(t)
 
-	out, _, code := call(t, "--json", "run", "1", "hi", "--partial")
+	out, _, code := call(t, "--json", "run", "1", "hi", "--with", "deltas")
 	if code != 0 {
 		t.Fatalf("%d %q", code, out)
 	}

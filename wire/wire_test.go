@@ -13,6 +13,7 @@ import (
 	"time"
 
 	rota "github.com/professor93/rota/lib"
+	"github.com/professor93/rota/message"
 )
 
 func TestUploadsLandInAPrivateDirectory(t *testing.T) {
@@ -64,29 +65,29 @@ func TestUploadPathsAreRefusedNotRewritten(t *testing.T) {
 
 func TestTerminalEventDescribesHowARunEnded(t *testing.T) {
 	res := &rota.Result{ExitCode: 3, SessionID: "s1", IsError: true, DurationMS: 42}
-	raw, _ := json.Marshal(Ended(res, nil))
+	raw, _ := json.Marshal(Ended(res, nil, message.With{}, message.Sources{}))
 	var doc map[string]any
 	json.Unmarshal(raw, &doc)
 	if doc["type"] != "done" || doc["exit_code"].(float64) != 3 || doc["session_id"] != "s1" ||
 		doc["is_error"] != true || doc["duration_ms"].(float64) != 42 {
 		t.Fatalf("%s", raw)
 	}
-	raw, _ = json.Marshal(Ended(nil, errors.New("boom")))
+	raw, _ = json.Marshal(Ended(nil, errors.New("boom"), message.With{}, message.Sources{}))
 	json.Unmarshal(raw, &doc)
 	if doc["type"] != "error" || doc["error"] != "boom" {
 		t.Fatalf("%s", raw)
 	}
 	// Success must still say so out loud.
-	raw, _ = json.Marshal(Ended(&rota.Result{}, nil))
+	raw, _ = json.Marshal(Ended(&rota.Result{}, nil, message.With{}, message.Sources{}))
 	if !strings.Contains(string(raw), `"exit_code":0`) || !strings.Contains(string(raw), `"is_error":false`) {
 		t.Fatalf("a clean run must report its zero exit code: %s", raw)
 	}
-	if Ended(res, nil).Type != "done" || Ended(nil, nil).Type != "done" {
+	if Ended(res, nil, message.With{}, message.Sources{}).Type != "done" || Ended(nil, nil, message.With{}, message.Sources{}).Type != "done" {
 		t.Fatal("a run with no result still ends")
 	}
 	// A streaming caller that let the rotation choose learns which account
 	// answered only from this event.
-	if got := Ended(&rota.Result{Account: 7}, nil).Account; got != 7 {
+	if got := Ended(&rota.Result{Account: 7}, nil, message.With{}, message.Sources{}).Account; got != 7 {
 		t.Fatalf("the terminal event must name the account that ran, got %d", got)
 	}
 }

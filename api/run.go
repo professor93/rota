@@ -45,12 +45,16 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "timeout_seconds must not be negative")
 		return
 	}
-	// A reading nobody knows is refused before anything is spent.
+	// A reading nobody knows is refused before anything is spent. The
+	// readings that ask the CLI for more become request fields here; the
+	// fields a caller set directly count as the same asking.
 	with, err := message.ParseWith(req.With...)
 	if err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	with.Apply(&req.Spec)
+	with.Raw = with.Raw || req.IncludeEvents
 	// The slot comes before the store: a run waiting its turn must hold
 	// nothing another request needs. With the order reversed, one queued
 	// run kept the store locked for everyone — every listing, patch and
@@ -156,7 +160,8 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	// rather than rota's, and worth reading here anyway: it costs one pass
 	// that is already being made, and it is right when it can be.
 	streaming := req.Stream
-	watch := newEventWriter(io.Discard, false, a.ID, a.Provider, false, message.With{})
+	tally := &message.Tally{}
+	watch := newEventWriter(io.Discard, false, a.ID, a.Provider, message.With{}, tally)
 	watch.quiet = true
 	watch.learn = run.Learned
 	out := io.Writer(watch)
@@ -165,7 +170,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		live := s.startStream(w, r, message.Event{
 			Type: "init", Account: a.ID, Provider: a.Provider,
 			Model: model, Effort: effort, Cwd: req.Cwd, SessionID: req.Resume,
-		}, req.IncludeEvents, with)
+		}, with, tally)
 		live.learn = run.Learned
 		out = live
 	}
@@ -176,17 +181,26 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	res, err := st.Run(ctx, a, req.Spec, lim, out)
 	s.log.Info("run finished", "account", a.ID, "provider", a.Provider,
 		"stream", streaming, "err", err, "exit", exitOf(res))
+	// What the readings are read from, beyond the result: the stream's
+	// tally, the account, and a fresh quota reading when one was asked for.
+	src := message.Sources{Tally: tally, Account: a, Threshold: rotation.Cutoff(a)}
+	if with.Quota {
+		for _, e := range st.Refresh(ctx, true, a) {
+			s.log.Warn("quota reading failed", "account", a.ID, "err", e)
+		}
+		src.Quota = a.Quota
+	}
 	if streaming {
-		s.endStream(w, r, res, err)
+		s.endStream(w, r, res, err, with, src)
 		return
 	}
 	switch {
 	case err != nil:
 		s.report(w, r, err)
 	case res.IsError || res.ExitCode != 0:
-		writeJSON(w, http.StatusBadGateway, message.ReplyFor(res, with))
+		writeJSON(w, http.StatusBadGateway, message.ReplyFor(res, with, src))
 	default:
-		writeJSON(w, http.StatusOK, message.ReplyFor(res, with))
+		writeJSON(w, http.StatusOK, message.ReplyFor(res, with, src))
 	}
 }
 
@@ -321,7 +335,7 @@ const (
 // answering and with what. A client should not have to wait for the end to
 // learn which model it is paying for, and the CLI's own opening event knows
 // nothing about the account or the rotation's choice of it.
-func (s *Server) startStream(w http.ResponseWriter, r *http.Request, init message.Event, raw bool, with message.With) *eventWriter {
+func (s *Server) startStream(w http.ResponseWriter, r *http.Request, init message.Event, with message.With, tally *message.Tally) *eventWriter {
 	ndjson := wantsNDJSON(r)
 	h := w.Header()
 	if ndjson {
@@ -334,7 +348,7 @@ func (s *Server) startStream(w http.ResponseWriter, r *http.Request, init messag
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Accel-Buffering", "no") // a proxy must not sit on the events
 	w.WriteHeader(http.StatusOK)
-	ev := newEventWriter(w, !ndjson, init.Account, init.Provider, raw, with)
+	ev := newEventWriter(w, !ndjson, init.Account, init.Provider, with, tally)
 	_ = ev.stream.Send(init)
 	flush(w)
 	return ev
@@ -355,9 +369,9 @@ func flush(w any) {
 
 // endStream closes the stream with a terminal event, so a client always
 // learns how the run ended even though the status line was sent first.
-func (s *Server) endStream(w http.ResponseWriter, r *http.Request, res *rota.Result, err error) {
-	ev := newEventWriter(w, !wantsNDJSON(r), 0, "", false, message.With{})
-	end := wire.Ended(res, err)
+func (s *Server) endStream(w http.ResponseWriter, r *http.Request, res *rota.Result, err error, with message.With, src message.Sources) {
+	ev := newEventWriter(w, !wantsNDJSON(r), 0, "", message.With{}, nil)
+	end := wire.Ended(res, err, with, src)
 	raw, _ := rota.Encode(end)
 	// Nothing can be done if this last write fails: the client is gone.
 	_ = ev.emit(end.Type, raw)
@@ -391,9 +405,9 @@ type eventWriter struct {
 	stream message.Stream
 }
 
-func newEventWriter(w io.Writer, sse bool, account int, provider string, raw bool, with message.With) *eventWriter {
+func newEventWriter(w io.Writer, sse bool, account int, provider string, with message.With, tally *message.Tally) *eventWriter {
 	e := &eventWriter{w: w, sse: sse}
-	e.stream = message.Stream{Account: account, Provider: provider, Raw: raw, With: with, Emit: e.send}
+	e.stream = message.Stream{Account: account, Provider: provider, With: with, Tally: tally, Emit: e.send}
 	return e
 }
 

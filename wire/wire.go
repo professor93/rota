@@ -20,6 +20,7 @@ import (
 	"time"
 
 	rota "github.com/professor93/rota/lib"
+	"github.com/professor93/rota/message"
 )
 
 /* ------------------------------------------------------- an account seen -- */
@@ -222,12 +223,19 @@ type End struct {
 	NumTurns int             `json:"num_turns,omitzero"`
 	CostUSD  float64         `json:"cost_usd,omitzero"`
 	Usage    json.RawMessage `json:"usage,omitzero"`
-	Error    string          `json:"error,omitempty"`
+	// Argv, EnvSet and EnvDropped are there when the run recorded them.
+	Argv       []string `json:"argv,omitempty"`
+	EnvSet     []string `json:"env_set,omitempty"`
+	EnvDropped []string `json:"env_dropped,omitempty"`
+	// Readings are what the caller asked to have beside the outcome, the
+	// same ones a buffered reply carries: nothing unless asked.
+	message.Readings
+	Error string `json:"error,omitempty"`
 }
 
 // Ended describes how a run finished, from its result and whatever error
-// stopped it.
-func Ended(res *rota.Result, err error) End {
+// stopped it, with the readings w asked for read out of src.
+func Ended(res *rota.Result, err error, w message.With, src message.Sources) End {
 	if err != nil {
 		return End{Type: "error", Error: err.Error()}
 	}
@@ -236,7 +244,9 @@ func Ended(res *rota.Result, err error) End {
 		e.ExitCode, e.SessionID, e.IsError, e.DurationMS = res.ExitCode, res.SessionID, res.IsError, res.DurationMS
 		e.Account = res.Account
 		e.NumTurns, e.CostUSD, e.Usage = res.NumTurns, res.CostUSD, res.Usage
+		e.Argv, e.EnvSet, e.EnvDropped = res.Argv, res.EnvSet, res.EnvDropped
 	}
+	e.Readings = message.Read(res, w, src)
 	return e
 }
 
@@ -283,4 +293,4 @@ func Countdown(w rota.When) string {
 // Version is the applications' release number — the command and the
 // server, which share it. The SDK underneath carries its own (rota.Version);
 // the two move independently now that lib is a module anyone can take.
-const Version = "2.0.0"
+const Version = "1.1.0"

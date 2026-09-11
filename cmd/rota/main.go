@@ -646,21 +646,32 @@ form was asked for: prose in text mode, and with --json one complete JSON
 object per line — the same events the HTTP API sends, opening with rota's own
 saying which account, model and effort the run resolved to.
 
-A streamed piece of text or thinking arrives when it is complete. --partial
-streams the fragments too, as the model writes them: in text mode they are
-printed as they come, and with --json each is its own event marked "delta",
-followed by the whole piece as before. It implies --stream.
-
---events includes the provider's own events: in "raw" on each streamed one,
-or as a list in a buffered reply. It implies --json.
-
-The reply is the answer as the CLI gave it, and nothing read out of it
-unless asked. --with names readings to add beside it — a comma list, or the
-flag repeated, or both — and implies --json:
-  blocks   the answer split at fences into prose and code, on the reply and
-           on every whole text event
-  ask      the question the answer ends with, and its options when they
-           were written as a list
+The reply is the answer as the CLI gave it, and nothing read out of it or
+added to it unless asked. --with names what to add beside it — a comma
+list, or the flag repeated, or both. Readings that only exist as JSON imply
+--json; deltas implies --stream.
+  blocks       the answer split at fences into prose and code, on the reply
+               and on every whole text event
+  ask          the question the answer ends with, with its options when they
+               were written as a list
+  raw          the provider's own line on each streamed event, or every line
+               it printed in a buffered reply
+  deltas       each fragment as the model writes it, marked "delta", before
+               the whole piece; in text mode printed as they come
+  code         the fenced code alone, in order
+  files        the paths the agent's tools read and wrote
+  timing       "at" on each event; first text, first tool and total
+  quota        the account's usage windows after the run (one usage call)
+  tools        a tally of tool calls, and of the ones refused
+  stats        event counts, fragments, bytes read
+  argv         the command line rota ran, and the names of the variables set
+  plain        the answer with markdown flattened
+  links        the URLs in the answer
+  account      the account's label, place in the rotation and threshold
+  hooks        the CLI's hook lifecycle as events (claude)
+  subagents    what delegated subagents say, marked "subagent" (claude)
+  suggestions  ask the CLI for a predicted follow-up (claude)
+  stderr       on a failed run with no answer, stderr copied into result
 
 Conversations carry on: every run has a session id, and --resume <id>
 continues from it. On its own, --resume picks up the most recent
@@ -670,7 +681,8 @@ conversation, which every provider can find without being told its id, and
   rota run "summarize this repo"     whichever account the rotation picks
   rota run 2 "summarize this repo"   that account
   rota run 2 "and the tests?" --resume 30040947-e103-4d58-8b0d-46417297cb1b
-  rota run 2 "explain the tests" --partial   each fragment as it is written
+  rota run 2 "explain the tests" --with deltas   each fragment as it is written
+  rota run 2 "fix the typo" --with files,code    what it touched, the code it wrote
   rota run                           open the CLI itself, as it comes
   rota run 2 -i                      the same, for a named account
   rota run 2 -- --some-vendor-flag   hand it these arguments untouched
@@ -847,8 +859,6 @@ func (c *cli) answer(id int, args []string) error {
 		model      = fs.String("model", "", "model to use; the provider's default when empty")
 		effort     = fs.String("effort", "", "reasoning effort, for providers that have one")
 		stream     = fs.Bool("stream", false, "print events as they happen: text, or one JSON object per line with --json")
-		partial    = fs.Bool("partial", false, "also print each fragment as the model writes it; implies --stream")
-		events     = fs.Bool("events", false, "include the provider's own events: in raw on each streamed one, or as a list in the reply; implies --json")
 		withNames  names
 		cwd        = fs.String("cwd", "", "working directory for the run")
 		timeout    = fs.Duration("timeout", 0, "give up after this long")
@@ -865,7 +875,7 @@ func (c *cli) answer(id int, args []string) error {
 		asJSON     = fs.Bool("json", false, "print the whole result — cost, usage, session id, exit status")
 		altPrompt  = fs.String("print", "", "an alias for -p")
 	)
-	fs.Var(&withNames, "with", "readings to add beside the answer: "+strings.Join(message.Readings, ", ")+"; a comma list or repeated; implies --json")
+	fs.Var(&withNames, "with", "readings to add beside the answer: "+strings.Join(message.Names, ", ")+"; a comma list or repeated; implies --json")
 	// One-letter forms for the everyday flags.
 	fs.StringVar(model, "m", "", "= --model")
 	fs.StringVar(effort, "e", "", "= --effort")
@@ -900,17 +910,17 @@ func (c *cli) answer(id int, args []string) error {
 	if err != nil {
 		return usageErr("%v", err)
 	}
-	*stream = *stream || *partial
-	*asJSON = *asJSON || *events || len(withNames) > 0
+	*stream = *stream || with.NeedsStream()
+	*asJSON = *asJSON || with.NeedsJSON()
 
 	spec := rota.Spec{
 		Prompt: text, Model: *model, Effort: *effort, Stream: *stream, Cwd: *cwd,
 		PermissionMode: *mode, Sandbox: *sandbox, SystemPrompt: *system,
 		Resume: *resume, Continue: *cont, SessionID: *session,
 		TimeoutSeconds: int(timeout.Seconds()), OneShot: true,
-		IncludePartialMessages: *partial, IncludeEvents: *events,
 	}
 	spec.ForkSession = *fork
+	with.Apply(&spec)
 	if *schema != "" {
 		spec.JSONSchema = json.RawMessage(*schema)
 	}
@@ -979,7 +989,8 @@ func (c *cli) answer(id int, args []string) error {
 	// the entry above — while the run is going for a streamed one, and only
 	// at the end for a buffered one, whose CLI prints a single document when
 	// it has finished.
-	watch := newEventStream(c.out, c.json || *asJSON, a.ID, a.Provider, *events, with)
+	tally := &message.Tally{}
+	watch := newEventStream(c.out, c.json || *asJSON, a.ID, a.Provider, with, tally)
 	watch.quiet = !*stream
 	watch.learn = started.Learned
 	var live *eventStream
@@ -995,10 +1006,19 @@ func (c *cli) answer(id int, args []string) error {
 	}
 	res, err := s.Run(context.Background(), a, spec, nil, watch)
 	_ = started.End()
+	// What the readings are read from, beyond the result: the stream's
+	// tally, the account, and a fresh quota reading when one was asked for.
+	src := message.Sources{Tally: tally, Account: a, Threshold: rotation.Cutoff(a)}
+	if with.Quota {
+		for _, e := range s.Refresh(context.Background(), true, a) {
+			fmt.Fprintf(c.err, "warning: %v\n", e)
+		}
+		src.Quota = a.Quota
+	}
 	if live != nil {
 		// A stream says how it ended in the stream, whichever way it ended,
 		// so a reader never has to guess whether more is coming.
-		live.end(wire.Ended(res, err))
+		live.end(wire.Ended(res, err, with, src))
 		if err != nil {
 			return c.explain(a, s, err)
 		}
@@ -1017,7 +1037,7 @@ func (c *cli) answer(id int, args []string) error {
 		// The same shape the HTTP reply has: the result, and beside it only
 		// what --with asked to have read out of it. One JSON document means
 		// one thing either way in.
-		return c.emit(message.ReplyFor(res, with))
+		return c.emit(message.ReplyFor(res, with, src))
 	}
 	if !*stream && res.Result != "" {
 		fmt.Fprintln(c.out, res.Result)

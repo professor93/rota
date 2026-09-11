@@ -6,14 +6,14 @@ import (
 	"testing"
 )
 
-// --events attaches the provider's own event to each of rota's, the way
+// --with raw attaches the provider's own event to each of rota's, the way
 // include_events does over HTTP. It is machine output by nature, so it
 // implies --json rather than having nowhere to put what it asked for.
 func TestEventsAttachTheProvidersOwnLineToEachStreamedEvent(t *testing.T) {
 	oneAccount(t)
 	streamingCLI(t)
 
-	out, _, code := call(t, "run", "1", "hi", "--stream", "--events")
+	out, _, code := call(t, "run", "1", "hi", "--stream", "--with", "raw")
 	if code != 0 {
 		t.Fatalf("%d %q", code, out)
 	}
@@ -45,7 +45,7 @@ func TestEventsKeepTheWholeStreamInABufferedReply(t *testing.T) {
 	oneAccount(t)
 	streamingCLI(t)
 
-	out, _, code := call(t, "run", "1", "hi", "--events")
+	out, _, code := call(t, "run", "1", "hi", "--with", "raw")
 	if code != 0 {
 		t.Fatalf("%d %q", code, out)
 	}
@@ -54,7 +54,7 @@ func TestEventsKeepTheWholeStreamInABufferedReply(t *testing.T) {
 		Events []map[string]any `json:"events"`
 	}
 	if err := jsonv2.Unmarshal([]byte(out), &doc); err != nil {
-		t.Fatalf("--events implies --json: %v\n%s", err, out)
+		t.Fatalf("--with raw implies --json: %v\n%s", err, out)
 	}
 	if doc.Result != "hello world" || len(doc.Events) != 4 || doc.Events[1]["type"] != "assistant" {
 		t.Fatalf("the answer, and every line the CLI printed: %s", out)

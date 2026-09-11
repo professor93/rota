@@ -62,6 +62,15 @@ type Event struct {
 	// made of any: a limit reading going by has none.
 	Usage *Usage `json:"usage,omitzero"`
 
+	// Subagent names the tool call that delegated this piece, when a
+	// subagent said it rather than the lead. claude sets it only when asked
+	// to forward subagent text; otherwise every event is the lead's.
+	Subagent string `json:"subagent,omitempty"`
+
+	// At is when the event arrived, in milliseconds after the stream's
+	// first event, present only when timing was asked for.
+	At int64 `json:"at,omitzero"`
+
 	// Raw is the provider's own event, verbatim, for a caller that asked to
 	// see it. Empty by default: the point of this type is that most clients
 	// never need to look.
@@ -112,6 +121,9 @@ type wire struct {
 	Message   jsontext.Value `json:"message"`
 	ToolName  string         `json:"tool_name"`
 	ToolUseID string         `json:"tool_use_id"`
+	// ParentToolUseID is set on what a subagent said, naming the call that
+	// delegated to it; the lead's own events have none.
+	ParentToolUseID string `json:"parent_tool_use_id"`
 	// Event is the API's own streaming event, which claude relays whole
 	// when partial messages were asked for.
 	Event *streamEvent `json:"event"`
@@ -179,13 +191,22 @@ func Normalize(raw []byte) []Event {
 		session = w.ThreadID
 	}
 	one := func(kind string) []Event { return []Event{{Type: kind, SessionID: session}} }
+	// A subagent's events are named as such; the lead's carry nothing.
+	said := func(evs []Event) []Event {
+		if w.ParentToolUseID != "" {
+			for i := range evs {
+				evs[i].Subagent = w.ParentToolUseID
+			}
+		}
+		return evs
+	}
 
 	switch {
 	case w.Type == "assistant":
-		return pieces(w.Message, session, assistantPiece)
+		return said(pieces(w.Message, session, assistantPiece))
 
 	case w.Type == "user":
-		return pieces(w.Message, session, toolResultPiece)
+		return said(pieces(w.Message, session, toolResultPiece))
 
 	case w.Type == "stream_event":
 		// The API's own streaming events, relayed when partial messages
@@ -195,7 +216,7 @@ func Normalize(raw []byte) []Event {
 		// block starting or ending, a signature, half a tool call's JSON —
 		// is framing around what that message already says, and nothing a
 		// client could show: no event at all, rather than noise.
-		return fragment(w.Event, session)
+		return said(fragment(w.Event, session))
 
 	case w.Type == "system" && w.Subtype == "permission_denied":
 		// Headless CLIs do not ask permission; they refuse and tell the

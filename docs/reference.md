@@ -157,8 +157,8 @@ rota list claude -r           # one provider, forcing a quota refresh
 rota run "summarize this repo"     # ask whichever account the rotation picks
 rota run 2 "summarize this repo"   # ask account 2 instead
 rota run 2 --stateless "2+2?"      # no session, no settings/memory, throwaway claude home (claude, codex)
-rota run 2 "explain it" --partial  # each fragment as it is written, not just each finished piece
-rota run 2 "explain it" --events   # the provider's own events too, as JSON
+rota run 2 "explain it" --with deltas  # each fragment as it is written, not just each finished piece
+rota run 2 "explain it" --with raw   # the provider's own events too, as JSON
 rota run 2 "explain it" --with blocks,ask   # readings beside the answer: fences split, the question read
 rota run 2 -m sonnet -e low "hi"   # every everyday run flag has a short: -m -e -s -c -r -t -S
 rota run                      # open the rotation's account in its own CLI
@@ -387,7 +387,7 @@ event vocabularies. A client reading a rota stream learns one:
 
 Every event carries a `seq`, so a gap is visible. Nothing is dropped: an
 event type rota has never seen still arrives, as `other`. Set
-`include_events` (`--events` on the command line) to get the provider's own
+`include_events` (`--with raw` on the command line) to get the provider's own
 event alongside rota's, in `raw`.
 
 Token readings come when a provider gives them: codex at the end of each
@@ -425,15 +425,15 @@ transports without changing what reads them.
 {"type":"done","exit_code":0,"is_error":false,"account":1,"session_id":"91ebe527…","duration_ms":3436,"num_turns":1,"cost_usd":0.0159,"usage":{"input_tokens":10,"output_tokens":53,…}}
 ```
 
-`--events` (`include_events` over HTTP) attaches the provider's own line to
+`--with raw` (`include_events` over HTTP) attaches the provider's own line to
 each event, in `raw`, and in a buffered reply keeps every line the CLI
 printed in `events` — for claude, whose buffered run prints one document,
 that is the one document; the stream is where every line is. It is machine
 output by nature, so it implies `--json`.
 
 ```sh
-rota run 1 "..." --stream --events   # every event, with the provider's line in raw
-rota run 1 "..." --events            # one document, with the whole event stream in events
+rota run 1 "..." --stream --with raw   # every event, with the provider's line in raw
+rota run 1 "..." --with raw            # one document, with the whole event stream in events
 ```
 
 rota speaks first, before the CLI has done anything, so a reader knows which
@@ -443,7 +443,7 @@ gap. The last one says how it ended, whether that was an answer or a failure.
 
 A `text` or `thinking` event arrives when that piece is complete — a
 one-turn answer is one `text` event, near the end — so it is also the sign
-that the piece has ended. `--partial` (`include_partial_messages` over HTTP)
+that the piece has ended. `--with deltas` (`include_partial_messages` over HTTP)
 asks for the fragments too, as the model writes them. In text mode they are
 printed as they come, and the whole piece is not printed again. In JSON mode
 each fragment is its own event, marked `"delta":true`, and the whole piece
@@ -452,8 +452,8 @@ saw, and one that shows them skips the whole it has already shown in parts.
 The first delta is when a piece started; the unmarked event is when it ended.
 
 ```sh
-rota run 1 "..." --partial          # the prose, fragment by fragment; implies --stream
-rota --json run 1 "..." --partial   # each fragment an event of its own
+rota run 1 "..." --with deltas          # the prose, fragment by fragment; implies --stream
+rota --json run 1 "..." --with deltas   # each fragment an event of its own
 ```
 
 ```json
@@ -478,7 +478,9 @@ reads nothing out of it unless asked: someone used to `claude -p` sees what
 `claude -p` says. A reading is asked for by name, with `--with` on the
 command line — a comma list, the flag repeated, or both — and with `"with"`
 over HTTP; a name nobody knows is refused by name before anything is spent.
-`--with` implies `--json`, since a reading has nowhere else to go.
+A reading that only exists as JSON implies `--json`; `deltas` implies
+`--stream`; `hooks`, `subagents` and `suggestions` change only what the CLI
+prints, so text mode stays text mode.
 
 ```sh
 rota run 1 "..." --with blocks,ask          # both readings
@@ -496,8 +498,38 @@ rota run 1 "..." --with ask --with blocks   # the same
 - **`ask`** is there when the run ended by asking something: the question,
   and the options when they were written as a list — with `multiple` when
   that list was a task list. On the reply only.
+- **`raw`**: the provider's own line on each streamed event, or every line
+  it printed in a buffered reply, in `events`. The same as `include_events`.
+- **`deltas`**: each fragment as the model writes it, marked `delta`, before
+  the whole piece — see "Watching a run happen". The same as
+  `include_partial_messages`; implies a stream.
+- **`code`**: the fenced code alone, as `{lang, text}` in order.
+- **`files`**: the paths the agent's tools named, `read` and `written`, in
+  first-seen order. Read, Glob and Grep read; Edit, MultiEdit, Write and
+  NotebookEdit write. What a Bash command touched is not seen.
+- **`timing`**: `at` on every streamed event, milliseconds since `init`,
+  and `timing` with `first_text_ms`, `first_tool_ms`, `total_ms`.
+- **`quota`**: the account's usage windows after the run — one usage call,
+  claude only; the store's reading is refreshed by it.
+- **`tools`**: a tally of tool calls by name, and `blocked` for the refused.
+- **`stats`**: `events`, `by_type`, `fragments`, `bytes` read, `truncated`.
+- **`argv`**: the command line rota ran, and `env_set` and `env_dropped`,
+  the names of the variables set for it and kept from it — never values.
+- **`plain`**: the answer with markdown flattened, for a place that will
+  not render it.
+- **`links`**: the URLs in the answer, in order, once each; not from code.
+- **`account`**: `account_label`, `order` and `threshold`.
+- **`hooks`**, **`subagents`**, **`suggestions`**: ask claude for its hook
+  lifecycle, for what delegated subagents say (their events carry
+  `subagent`, the call that delegated), and for a predicted follow-up. The
+  same as `include_hook_events`, `forward_subagent_text` and
+  `prompt_suggestions`.
+- **`stderr`**: on a failed run with no answer, stderr copied into `result`,
+  for a client that reads one field. The one reading that touches `result`.
 
-The original text is always there beside a reading, never replaced by it.
+On a stream, the readings that need the whole run — files, timing, tools,
+stats, quota, account — ride on `done`. The original text is always there
+beside a reading, never replaced by it, except by `stderr` on request.
 
 `ask` is inference over prose, and worth taking as a hint rather than a
 contract. In an interactive session these arrive as real structures: a

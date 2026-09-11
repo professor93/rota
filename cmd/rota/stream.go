@@ -39,11 +39,11 @@ type eventStream struct {
 	learn func(string)
 }
 
-// raw asks for the provider's own line on each event, as --events does;
-// with names the readings --with asked for beside the text.
-func newEventStream(out io.Writer, asJSON bool, account int, provider string, raw bool, with message.With) *eventStream {
+// with names what --with asked to carry on each event; tally, when given,
+// is told every event for the readings that need the whole stream.
+func newEventStream(out io.Writer, asJSON bool, account int, provider string, with message.With, tally *message.Tally) *eventStream {
 	e := &eventStream{out: out, json: asJSON}
-	e.stream = message.Stream{Account: account, Provider: provider, Raw: raw, With: with, Emit: e.send}
+	e.stream = message.Stream{Account: account, Provider: provider, With: with, Tally: tally, Emit: e.send}
 	return e
 }
 

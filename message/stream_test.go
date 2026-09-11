@@ -99,7 +99,7 @@ func TestTheProvidersOwnLineRidesAlongOnlyWhenAsked(t *testing.T) {
 		t.Fatalf("not by default: %s", (*got)[0].Raw)
 	}
 
-	s = &Stream{Raw: true}
+	s = &Stream{With: With{Raw: true}}
 	got = collect(s)
 	s.Write([]byte(line + "\n"))
 	if !strings.Contains(string((*got)[0].Raw), `"assistant"`) {

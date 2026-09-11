@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	rota "github.com/professor93/rota/lib"
+	"github.com/professor93/rota/message"
 )
 
 // The end of a stream says what the run cost, the way a buffered reply
@@ -16,7 +17,7 @@ func TestTheEndOfAStreamCarriesTheTotals(t *testing.T) {
 		ExitCode: 0, SessionID: "s", DurationMS: 12, NumTurns: 2, CostUSD: 0.25,
 		Usage: json.RawMessage(`{"input_tokens":3,"output_tokens":9}`),
 	}
-	end := Ended(res, nil)
+	end := Ended(res, nil, message.With{}, message.Sources{})
 	raw, err := rota.Encode(end)
 	if err != nil {
 		t.Fatal(err)
@@ -28,7 +29,7 @@ func TestTheEndOfAStreamCarriesTheTotals(t *testing.T) {
 	}
 	// A run that never produced a result has no totals to report, and does
 	// not report empty ones.
-	raw, _ = rota.Encode(Ended(nil, nil))
+	raw, _ = rota.Encode(Ended(nil, nil, message.With{}, message.Sources{}))
 	if strings.Contains(string(raw), "cost_usd") || strings.Contains(string(raw), "usage") || strings.Contains(string(raw), "num_turns") {
 		t.Fatalf("nothing to total: %s", raw)
 	}

@@ -43,6 +43,8 @@ type Spec struct {
 	TimeoutSeconds int `json:"timeout_seconds,omitzero"`
 	// Include the CLI's whole event stream in the reply, not just the outcome.
 	IncludeEvents bool `json:"include_events,omitzero"`
+	// Record the command line the CLI was run with, and the names of the environment variables set and dropped for it — never their values.
+	IncludeArgv bool `json:"include_argv,omitzero"`
 	// Passed to the vendor CLI verbatim, for anything rota does not model.
 	Extra []string `json:"args,omitempty"`
 
@@ -240,6 +242,13 @@ type Result struct {
 	ExitCode   int               `json:"exit_code"`
 	Stderr     string            `json:"stderr,omitempty"`
 	Events     []json.RawMessage `json:"events,omitzero"`
+	// Argv, EnvSet and EnvDropped record what the CLI was run with, when
+	// IncludeArgv asked for it: the command line, the names of the variables
+	// set for it, and the names of those kept from it. Names only: the
+	// credential is a value, and values are never here.
+	Argv       []string `json:"argv,omitempty"`
+	EnvSet     []string `json:"env_set,omitempty"`
+	EnvDropped []string `json:"env_dropped,omitempty"`
 }
 
 // Flavored is implemented by a provider that names the CLI vocabulary it
@@ -1452,6 +1461,17 @@ func Run(ctx context.Context, a *Account, home string, cmd *Command, spec Spec, 
 	defer stop()
 
 	res := &Result{Account: a.ID, Provider: a.Provider, Model: pl.model, Effort: pl.effort}
+	if spec.IncludeArgv {
+		// What actually ran, for a caller that asked: the binary as named,
+		// the arguments as built, and the variable names — a value here
+		// would be the credential.
+		res.Argv = append([]string{cmd.Bin}, argv...)
+		for _, kv := range runCmd.Env {
+			name, _, _ := strings.Cut(kv, "=")
+			res.EnvSet = append(res.EnvSet, name)
+		}
+		res.EnvDropped = append([]string(nil), runCmd.Drop...)
+	}
 	start := time.Now()
 	scanErr := readOutput(stdout, events, spec.Stream, spec.IncludeEvents, cp, res)
 	if errors.Is(scanErr, bufio.ErrTooLong) {

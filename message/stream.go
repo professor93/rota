@@ -3,6 +3,7 @@ package message
 import (
 	"bytes"
 	"encoding/json/jsontext"
+	"time"
 )
 
 // Stream turns the lines a vendor CLI prints into rota's own events.
@@ -20,17 +21,19 @@ type Stream struct {
 	Account  int
 	Provider string
 
-	// Raw carries the provider's own line along on each event. It is much
-	// the largest part of one, so it is sent only when asked for.
-	Raw bool
-	// With is what to read out of the text, beyond the text. Only Blocks
-	// applies to a stream: a question is read from a finished answer.
+	// With is what to carry on each event beyond the event: the provider's
+	// own line (Raw), the split of a whole text (Blocks), the time it
+	// arrived (Timing). The rest of With is read from a finished answer.
 	With With
+	// Tally, when given, is told every event, for the readings that need
+	// to have seen the whole stream: files, tools, stats, timing.
+	Tally *Tally
 
 	Emit func(Event) error
 
-	seq int
-	buf []byte
+	seq   int
+	buf   []byte
+	start time.Time // when the first event was sent; at is measured from it
 }
 
 // Write takes whatever the CLI printed and turns the whole lines in it into
@@ -40,6 +43,9 @@ type Stream struct {
 // the remainder is held until its newline arrives. What is left when the run
 // ends belongs to Rest.
 func (s *Stream) Write(p []byte) (int, error) {
+	if s.Tally != nil {
+		s.Tally.Bytes += int64(len(p))
+	}
 	s.buf = append(s.buf, p...)
 	for {
 		i := bytes.IndexByte(s.buf, '\n')
@@ -71,6 +77,19 @@ func (s *Stream) Seq() int { return s.seq }
 func (s *Stream) Send(ev Event) error {
 	s.seq++
 	ev.Seq, ev.Account, ev.Provider = s.seq, s.Account, s.Provider
+	// Time is measured from the first event, which is rota's own init when
+	// there is one: at is how long after the run was announced this came.
+	now := time.Now()
+	if s.start.IsZero() {
+		s.start = now
+	}
+	at := now.Sub(s.start)
+	if s.With.Timing {
+		ev.At = at.Milliseconds()
+	}
+	if s.Tally != nil {
+		s.Tally.add(ev, at)
+	}
 	if s.Emit == nil {
 		return nil
 	}
@@ -82,7 +101,7 @@ func (s *Stream) line(line []byte) error {
 		return nil
 	}
 	for _, ev := range Normalize(line) {
-		if s.Raw {
+		if s.With.Raw {
 			// A copy, because the buffer under it is reused by the next read.
 			ev.Raw = jsontext.Value(bytes.Clone(bytes.TrimRight(line, "\r")))
 		}

@@ -43,7 +43,7 @@ rota list                      # every account, in rotation order, with usage
 rota "explain this repo"       # ask — the rotation picks the account
 rota 2 "explain this repo"     # ...or name account 2 yourself
 rota run 1 --stateless "2+2?"  # no session saved, no settings or memory read
-rota run 1 "explain it" --partial  # stream each fragment as the model writes it
+rota run 1 "explain it" --with deltas  # stream each fragment as the model writes it
 rota run 1 "explain it" --with blocks,ask  # JSON, with fences split and the question read
 rota run 2                     # open account 2's CLI interactively
 rota set 2 --order first       # put account 2 first; the rest move down
