@@ -134,6 +134,11 @@ func (w With) NeedsJSON() bool {
 // cannot arrive in a buffered reply.
 func (w With) NeedsStream() bool { return w.Deltas }
 
+// NeedsEvents reports whether a reading is made from the events a run
+// prints. A buffered claude run prints one document with no events in it,
+// so these ask the CLI to stream even when the reply stays one document.
+func (w With) NeedsEvents() bool { return w.Files || w.Tools || w.Stats || w.Timing }
+
 // Reply is a finished run on the wire, the same shape on the command line
 // and over HTTP: what the SDK produced, and beside it only the readings
 // that were asked for.

@@ -528,7 +528,10 @@ rota run 1 "..." --with ask --with blocks   # the same
   for a client that reads one field. The one reading that touches `result`.
 
 On a stream, the readings that need the whole run — files, timing, tools,
-stats, quota, account — ride on `done`. The original text is always there
+stats, quota, account — ride on `done`. Files, tools, stats and timing are
+made from the events the CLI prints, and a buffered claude run prints one
+document with none in it; asking for them makes rota ask the CLI to stream
+while the reply stays one document. The original text is always there
 beside a reading, never replaced by it, except by `stderr` on request.
 
 `ask` is inference over prose, and worth taking as a hint rather than a

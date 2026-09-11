@@ -88,6 +88,11 @@ func TestEveryReadingLandsBesideTheAnswer(t *testing.T) {
 	if plain, _ := doc["plain"].(string); !strings.HasPrefix(plain, "Fixed it, see the docs (https://example.dev/docs).\nmake test") {
 		t.Fatalf("plain: %q", plain)
 	}
+	// Files and tools are read from events, so the buffered run asked the
+	// CLI to stream while the reply stayed one document.
+	if plain, _ := doc["plain"].(string); !strings.Contains(plain, "--output-format stream-json") {
+		t.Fatalf("readings made from events need the CLI to stream: %q", plain)
+	}
 	if links, _ := doc["links"].([]any); len(links) != 1 || links[0] != "https://example.dev/docs" {
 		t.Fatalf("links: %v", doc["links"])
 	}

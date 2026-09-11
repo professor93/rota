@@ -55,6 +55,11 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	}
 	with.Apply(&req.Spec)
 	with.Raw = with.Raw || req.IncludeEvents
+	// The transport is the caller's stream field as it arrived. Readings
+	// made from events ask the CLI to stream even when the reply stays one
+	// document: the CLI streams, rota reads, the caller sees a document.
+	streaming := req.Stream
+	req.Spec.Stream = req.Stream || with.NeedsEvents()
 	// The slot comes before the store: a run waiting its turn must hold
 	// nothing another request needs. With the order reversed, one queued
 	// run kept the store locked for everyone — every listing, patch and
@@ -159,7 +164,6 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	// arrives as the entry is being taken away. That is the CLIs' shape
 	// rather than rota's, and worth reading here anyway: it costs one pass
 	// that is already being made, and it is right when it can be.
-	streaming := req.Stream
 	tally := &message.Tally{}
 	watch := newEventWriter(io.Discard, false, a.ID, a.Provider, message.With{}, tally)
 	watch.quiet = true

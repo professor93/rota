@@ -75,10 +75,10 @@ var specFields = []Field{
 		Help: "Give up after this long and kill the CLI. Capped by the server's own limit."},
 	{Name: "one_shot", Kind: "bool", Group: "core", Label: "One-shot question",
 		Help: "Ask for an answer rather than work in a directory: rota then picks the defaults that make each CLI answer instead of refusing, such as a read-only sandbox."},
-	{Name: "include_events", Kind: "bool", Group: "core", Label: "Return every event",
-		Help: "Include the CLI's whole event stream in the reply, not just the outcome. Verbose, but it shows every tool call."},
 	{Name: "include_argv", Kind: "bool", Group: "core", Label: "Record the command",
 		Help: "Record the command line the CLI was run with and the names of the variables set and dropped for it. Names only, never values."},
+	{Name: "include_events", Kind: "bool", Group: "core", Label: "Return every event",
+		Help: "Include the CLI's whole event stream in the reply, not just the outcome. Verbose, but it shows every tool call."},
 
 	// ------------------------------------------------------------- session
 	{Name: "session_id", Kind: "string", Group: "session", Label: "New session id",

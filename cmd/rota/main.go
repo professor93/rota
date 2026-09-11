@@ -921,6 +921,10 @@ func (c *cli) answer(id int, args []string) error {
 	}
 	spec.ForkSession = *fork
 	with.Apply(&spec)
+	// Readings made from events need the CLI to print them, whether or not
+	// the reply is printed as they come: the CLI streams, rota reads, and
+	// --stream alone decides what reaches the terminal.
+	spec.Stream = spec.Stream || with.NeedsEvents()
 	if *schema != "" {
 		spec.JSONSchema = json.RawMessage(*schema)
 	}
