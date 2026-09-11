@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -47,6 +48,11 @@ type Spec struct {
 	// mode, and Sleep is how long a turn takes rather than a pause at the
 	// start.
 	Echo bool `json:"echo,omitempty"`
+	// EchoHold holds the first turn, in echo mode, until this many further
+	// lines have arrived on stdin. A test about messages that arrive
+	// mid-turn can then prove what happened to them instead of racing a
+	// timer. Later turns are answered as they come.
+	EchoHold int `json:"echo_hold,omitempty"`
 }
 
 // Result is a Spec that answers as the claude CLI does in print mode: one
@@ -238,8 +244,12 @@ func echo(spec Spec, stdin io.Reader, stdout io.Writer) int {
 	}
 
 	messages := make(chan string, 1024)
+	// done says no further line will ever arrive, so a hold that will never
+	// be satisfied ends instead of waiting for ever.
+	var done atomic.Bool
 	go func() {
 		defer close(messages)
+		defer done.Store(true)
 		sc := bufio.NewScanner(stdin)
 		sc.Buffer(make([]byte, 0, 64*1024), 8<<20)
 		for sc.Scan() {
@@ -274,6 +284,12 @@ func echo(spec Spec, stdin io.Reader, stdout io.Writer) int {
 	for text := range messages {
 		if turnTime > 0 {
 			time.Sleep(turnTime)
+		}
+		// The first turn can be held open until the messages a test means to
+		// send mid-turn are in, which is what makes such a test about the
+		// queue rather than about how fast the machine is.
+		for turn == 0 && len(messages) < spec.EchoHold && !done.Load() {
+			time.Sleep(5 * time.Millisecond)
 		}
 		turn++
 		answer := "echo: " + text

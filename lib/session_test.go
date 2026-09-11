@@ -136,8 +136,12 @@ func TestASessionTakesMoreMessagesIntoOneRun(t *testing.T) {
 // order of the lines: while messages are still queued, none of them has been
 // answered, and each result hands back exactly the ones it got through.
 func TestAnsweredFollowsQueuedTurnCount(t *testing.T) {
+	// The fake holds its first turn until both messages are in, which is the
+	// situation this is about: two messages queued behind a running turn. The
+	// turn time is not what puts them there — the hold is — it only spaces
+	// the turns out, so a count can be read between two of them.
 	s := startEcho(t, context.Background(), "t-session-queued",
-		fakecli.Spec{Sleep: "300ms"}, Spec{Prompt: "slow"}, nil)
+		fakecli.Spec{EchoHold: 2, Sleep: "300ms"}, Spec{Prompt: "slow"}, nil)
 	defer s.Close()
 
 	a, err := s.Send("a")
