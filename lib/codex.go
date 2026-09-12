@@ -160,7 +160,7 @@ func (p codexProvider) Plan(ctx context.Context, a *Account, home string) (*Comm
 		t, err := p.Refresh(ctx, a)
 		switch {
 		case errors.Is(err, ErrDeadToken):
-			a.Dead = true
+			a.Dead, a.DeadReason = true, err.Error()
 			return nil, nil, failf(ErrReauth, "%s: session expired", a)
 		case err != nil:
 			return nil, nil, fmt.Errorf("%s: refresh failed: %w", a, err)

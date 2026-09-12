@@ -103,16 +103,18 @@ func Refresh(ctx context.Context, a *Account) (changed bool, err error) {
 	r, ok := p.(Refresher)
 	switch {
 	case !ok:
-		a.Dead = true
+		a.Dead, a.DeadReason = true, p.Name()+" cannot refresh a credential"
 		return true, failf(ErrReauth, "%s: credential expired and %s cannot refresh one", a, p.Name())
 	case a.Token.Refresh == "":
-		a.Dead = true
+		a.Dead, a.DeadReason = true, "no refresh token"
 		return true, failf(ErrReauth, "%s: no refresh token", a)
 	}
 	t, err := r.Refresh(ctx, a)
 	switch {
 	case errors.Is(err, ErrDeadToken):
-		a.Dead = true
+		// The provider's own refusal, kept: it is the only record of which
+		// of the few causes ended this lineage.
+		a.Dead, a.DeadReason = true, err.Error()
 		return true, failf(ErrReauth, "%s: session expired", a)
 	case err != nil:
 		// Transient: leave the account alone so the next attempt retries.

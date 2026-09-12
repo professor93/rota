@@ -532,6 +532,11 @@ func (c *cli) list(args []string) error {
 		status := string(a.Status())
 		if a.Status() == rota.StatusReauth {
 			status = "re-auth needed"
+			// Why it died, beside the verdict: otherwise a reused refresh
+			// token, a lost reply and a revoked credential all read alike.
+			if a.DeadReason != "" {
+				status += " (" + a.DeadReason + ")"
+			}
 		}
 		// One window per line, all of them in the USAGE cell.
 		g.add(place(a), strconv.Itoa(a.ID), a.Provider, a.Label(), strings.Join(windows(a.Quota), "\n"),

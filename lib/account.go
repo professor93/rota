@@ -17,6 +17,11 @@ type Account struct {
 	// Dead marks a lineage the provider rejected permanently: re-auth is
 	// the only fix, so runs skip it instead of retrying forever.
 	Dead bool `json:"dead,omitzero"`
+	// DeadReason is why the lineage died, in the server's or rota's own
+	// words, kept so a person seeing "re-auth needed" knows which of the
+	// few causes it was — a reused refresh token, a lost reply, a revoked
+	// credential. Empty while the account is alive.
+	DeadReason string `json:"deadReason,omitempty"`
 	// Delegated marks an account whose credential belongs to the vendor CLI
 	// rather than to rota: rota gives it a private directory and the CLI
 	// signs itself in there. There is no token here to expire or refresh.
@@ -106,7 +111,7 @@ func (a *Account) apply(t *Token) {
 	for k, v := range t.Extra {
 		a.setExtra(k, v)
 	}
-	a.Dead = false
+	a.Dead, a.DeadReason = false, ""
 }
 
 func (a *Account) setExtra(k, v string) {

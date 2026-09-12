@@ -35,6 +35,9 @@ type Account struct {
 	Status   rota.Status `json:"status"`
 	Windows  []Window    `json:"windows,omitempty"`
 	Note     string      `json:"note,omitempty"`
+	// DeadReason is why a re-auth status was reached — the refusal in the
+	// server's or rota's own words. Empty unless the lineage is dead.
+	DeadReason string `json:"deadReason,omitempty"`
 	// Order and Threshold are what the store holds. A zero threshold means
 	// whatever the application deciding the rotation says it means, and that
 	// application fills the resolved value in, over Cutoff. Percent
@@ -92,7 +95,7 @@ func LoginProviders() []string {
 func Describe(a *rota.Account) Account {
 	v := Account{ID: a.ID, Provider: a.Provider, Email: a.Email, UUID: a.UUID, Status: a.Status(),
 		Metered: rota.Metered(a.Provider), Order: a.Order, Threshold: a.Threshold, Percent: a.Percent(),
-		Cwd: a.Cwd, ConfigDir: a.ConfigDir}
+		Cwd: a.Cwd, ConfigDir: a.ConfigDir, DeadReason: a.DeadReason}
 	if a.QuotaAt > 0 {
 		t := time.UnixMilli(a.QuotaAt)
 		v.CheckedAt = t.UTC().Format(time.RFC3339)

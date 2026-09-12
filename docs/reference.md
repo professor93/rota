@@ -1098,7 +1098,9 @@ Measured, not assumed — from live accounts:
 rota refreshes a token within five minutes of expiry, and only while running
 a command. A refresh is never retried: if the reply was lost, the retry would
 reuse a rotated token and kill the lineage. Treat `re-auth needed` as normal
-rather than as a fault.
+rather than as a fault. The refusal that ended the lineage is kept: `rota
+list` shows it in parentheses after `re-auth needed` — `re-auth needed
+(invalid_grant: refresh token reused)` — and JSON carries it as `deadReason`.
 
 ## Storage
 

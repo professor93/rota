@@ -40,9 +40,14 @@ type OAuthError struct {
 	Code        string
 	Description string
 	msg         string
+	kind        error // the verdict this refusal is, when it is one
 }
 
 func (e *OAuthError) Error() string { return e.msg }
+
+// Unwrap exposes the verdict a refusal amounts to, so a refused refresh is
+// still ErrDeadToken while keeping the server's own words for a person.
+func (e *OAuthError) Unwrap() error { return e.kind }
 
 // verdict turns a token reply plus its transport error into this package's
 // vocabulary: ErrAuthPending, ErrDeadToken, a typed OAuthError, or nil when
@@ -68,7 +73,10 @@ func (r *oauthTokenResp) verdict(err error, g grant) error {
 		return ErrAuthPending
 	case "invalid_grant", "refresh_token_reused":
 		if g == grantRefresh {
-			return ErrDeadToken
+			// Still the dead-token verdict, but carrying the refusal's own
+			// code and description: that text is all anyone ever learns
+			// about why this lineage ended.
+			return &OAuthError{Code: code, Description: r.ErrorDesc, msg: code + detail(r.ErrorDesc), kind: ErrDeadToken}
 		}
 		return refuse("authorization code was rejected (expired, already used, or mismatched); start a new login" + detail(r.ErrorDesc))
 	case "expired_token":

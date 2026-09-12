@@ -67,12 +67,45 @@ func TestRefreshVerdicts(t *testing.T) {
 	Register(&fakeProvider{name: "t-static"})
 	b := &Account{ID: 1, Provider: "t-static"}
 	b.Token = Token{Access: "key", ExpiresAt: 1}
-	if changed, err := Refresh(context.Background(), b); !changed || err == nil || !b.Dead {
-		t.Fatalf("expired token without a refresher is dead: changed=%v err=%v", changed, err)
+	if changed, err := Refresh(context.Background(), b); !changed || err == nil || !b.Dead ||
+		b.DeadReason != "t-static cannot refresh a credential" {
+		t.Fatalf("expired token without a refresher is dead: changed=%v err=%v reason=%q", changed, err, b.DeadReason)
 	}
 	c := &Account{ID: 1, Provider: "t-fresh"}
 	c.Token = Token{Access: "x", ExpiresAt: 1}
-	if changed, err := Refresh(context.Background(), c); !changed || err == nil || !c.Dead {
-		t.Fatalf("no refresh token is dead: changed=%v err=%v", changed, err)
+	if changed, err := Refresh(context.Background(), c); !changed || err == nil || !c.Dead ||
+		c.DeadReason != "no refresh token" {
+		t.Fatalf("no refresh token is dead: changed=%v err=%v reason=%q", changed, err, c.DeadReason)
+	}
+}
+
+// A refused refresh is the only record of why a lineage ended, so the
+// server's own words are kept on the account until a login revives it.
+func TestADeadAccountKeepsTheRefusalUntilTheNextLogin(t *testing.T) {
+	refusal := (&oauthTokenResp{Error: "invalid_grant", ErrorDesc: "refresh token reused"}).verdict(nil, grantRefresh)
+	if !errors.Is(refusal, ErrDeadToken) {
+		t.Fatalf("a refused refresh is still the dead-token verdict: %v", refusal)
+	}
+	p := &fakeProvider{name: "t-reason", refreshErr: refusal, identity: &Identity{UUID: "u-1"}}
+	Register(fakeRefresher{p})
+	a := &Account{ID: 1, Provider: "t-reason", UUID: "u-1",
+		Token: Token{Access: "old", Refresh: "r1", ExpiresAt: 1}}
+	if changed, err := Refresh(context.Background(), a); !changed || err == nil || !a.Dead {
+		t.Fatalf("changed=%v err=%v dead=%v", changed, err, a.Dead)
+	}
+	if a.DeadReason != "invalid_grant: refresh token reused" {
+		t.Fatalf("the refusal must be kept verbatim, got %q", a.DeadReason)
+	}
+
+	tok, err := p.Complete(context.Background(), "code", map[string]string{"verifier": "v"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := MatchIdentity([]*Account{a}, "t-reason", tok.Identity); got != a {
+		t.Fatalf("a login of the same identity must land on the dead account, got %v", got)
+	}
+	a.Apply(tok)
+	if a.Dead || a.DeadReason != "" {
+		t.Fatalf("a fresh login revives the account: dead=%v reason=%q", a.Dead, a.DeadReason)
 	}
 }

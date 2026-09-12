@@ -94,3 +94,29 @@ func TestShortListWearsTheSameFrame(t *testing.T) {
 		t.Fatalf("one-line rows are not ruled apart:\n%s", out)
 	}
 }
+
+// A dead account says why in the STATUS cell: "re-auth needed" on its own
+// leaves a reused refresh token and a revoked credential looking alike.
+func TestListShowsWhyADeadAccountNeedsReauth(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	writeStore(t, home, fmt.Sprintf(`{"ordered":true,"nextId":2,"accounts":[
+		{"id":1,"provider":"claude","email":"a@x","order":1,"token":{"accessToken":"t"},"quotaAt":%d,
+		 "dead":true,"deadReason":"invalid_grant: refresh token reused"}]}`, time.Now().UnixMilli()))
+
+	out, _, code := call(t, "list")
+	if code != 0 {
+		t.Fatalf("%d %q", code, out)
+	}
+	if !strings.Contains(out, "re-auth needed (invalid_grant: refresh token reused)") {
+		t.Fatalf("the status cell must carry the refusal:\n%s", out)
+	}
+
+	out, _, code = call(t, "--json", "list")
+	if code != 0 {
+		t.Fatalf("%d %q", code, out)
+	}
+	if !strings.Contains(out, `"deadReason"`) || !strings.Contains(out, "invalid_grant: refresh token reused") {
+		t.Fatalf("json carries the reason as its own field:\n%s", out)
+	}
+}
