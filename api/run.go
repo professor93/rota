@@ -13,11 +13,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
 	"github.com/professor93/rota/rotation"
 	"github.com/professor93/rota/sessions"
+	"github.com/professor93/rota/store"
 	"github.com/professor93/rota/wire"
 )
 
@@ -60,6 +62,10 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	// document: the CLI streams, rota reads, the caller sees a document.
 	streaming := req.Stream
 	req.Spec.Stream = req.Stream || with.NeedsEvents()
+	// What this request holds until it returns — unless the run stays open,
+	// in which case the run takes them over.
+	var hold held
+	defer hold.release()
 	// The slot comes before the store: a run waiting its turn must hold
 	// nothing another request needs. With the order reversed, one queued
 	// run kept the store locked for everyone — every listing, patch and
@@ -67,7 +73,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	if !s.acquire(r.Context()) {
 		return
 	}
-	defer s.release()
+	hold.add(s.release)
 	st, ok := s.open(w)
 	if !ok {
 		return
@@ -95,7 +101,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	if len(req.Files) > 0 {
 		dir, err := wire.StageUploads(req.Files)
 		if dir != "" {
-			defer os.RemoveAll(dir)
+			hold.add(func() { os.RemoveAll(dir) })
 		}
 		if err != nil {
 			s.report(w, r, err)
@@ -116,7 +122,14 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	if req.Cwd == "" && len(s.opts.Roots) > 0 {
 		req.Cwd = s.opts.Roots[0]
 	}
-	if max := int(s.opts.Timeout.Seconds()); req.TimeoutSeconds <= 0 || req.TimeoutSeconds > max {
+	// A run that stays open is capped by InputTimeout instead: the two are
+	// asked for different things, and holding a conversation to the one-shot
+	// timeout would kill it between messages.
+	bound := s.opts.Timeout
+	if req.Input {
+		bound = s.opts.InputTimeout
+	}
+	if max := int(bound.Seconds()); req.TimeoutSeconds <= 0 || req.TimeoutSeconds > max {
 		req.TimeoutSeconds = max
 	}
 	lim := &rota.Limits{Roots: roots, AllowDangerous: s.opts.AllowDangerous, AllowRawFlags: s.opts.AllowRawFlags}
@@ -152,7 +165,16 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	if rerr != nil {
 		s.log.Warn("could not record this run", "account", a.ID, "err", rerr)
 	}
-	defer func() { _ = run.End() }()
+	hold.add(func() { _ = run.End() })
+
+	tally := &message.Tally{}
+	if req.Input {
+		// A run that stays open is a different shape of answer: it is streamed
+		// like any other, but it is also addressable while it runs, and it
+		// outlives this request rather than ending with it.
+		s.startInput(w, r, st, a, req, lim, with, tally, run, &hold)
+		return
+	}
 
 	// The events are read whether or not they are sent. Sending them is what
 	// stream asks for; reading them is how the conversation id reaches the
@@ -164,7 +186,6 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	// arrives as the entry is being taken away. That is the CLIs' shape
 	// rather than rota's, and worth reading here anyway: it costs one pass
 	// that is already being made, and it is right when it can be.
-	tally := &message.Tally{}
 	watch := newEventWriter(io.Discard, false, a.ID, a.Provider, message.With{}, tally)
 	watch.quiet = true
 	watch.learn = run.Learned
@@ -206,6 +227,96 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeJSON(w, http.StatusOK, message.ReplyFor(res, with, src))
 	}
+}
+
+// startInput starts a run that stays open and streams it to this request.
+//
+// Two things are deliberately not the request's here. The session's context is
+// the server's, bounded by InputTimeout, never r.Context(): a run that ends
+// when its connection does is exactly what this is not. And what the request
+// took — the slot, the upload directory, the entry saying the run is happening
+// — is handed to the goroutine waiting for the session, because the CLI is
+// still running, still holding the account, when this handler returns.
+func (s *Server) startInput(w http.ResponseWriter, r *http.Request, st *store.Store, a *rota.Account,
+	req *request, lim *rota.Limits, with message.With, tally *message.Tally, entry *sessions.Run, hold *held) {
+	lr := s.newLiveRun(a, with, tally)
+	lr.learn = entry.Learned
+	model, effort, _ := rota.Resolved(a, st.Home(a), req.Spec)
+	// Said before the CLI starts, so it is first in the stream and carries the
+	// id every other endpoint reaches this run by — an id a client needs
+	// before it can send anything into the run it has just asked for.
+	lr.Send(message.Event{
+		Type: "init", Model: model, Effort: effort, Cwd: req.Cwd,
+		SessionID: req.Resume, RunID: lr.id,
+	})
+	ctx, cancel := context.WithTimeout(s.ctx, s.opts.InputTimeout)
+	sess, err := st.Start(ctx, a, req.Spec, lim, lr)
+	if err != nil {
+		cancel()
+		s.report(w, r, err)
+		return
+	}
+	lr.sess = sess
+	s.addRun(lr)
+	handover := hold.take()
+	s.log.Info("run started", "account", a.ID, "provider", a.Provider, "run", lr.id, "input", true)
+
+	// Drained to the end before the run is reported over, so every message's
+	// fate is in the stream before the event that closes it.
+	told := make(chan struct{})
+	go func() {
+		defer close(told)
+		lr.notices()
+	}()
+	go func() {
+		defer cancel()
+		res, err := sess.Wait()
+		<-told
+		// What the readings are read from, beyond the result: the stream's
+		// tally, the account, and a fresh quota reading when one was asked for.
+		src := message.Sources{Tally: tally, Account: a, Threshold: rotation.Cutoff(a)}
+		if with.Quota {
+			for _, e := range st.Refresh(s.ctx, true, a) {
+				s.log.Warn("quota reading failed", "account", a.ID, "err", e)
+			}
+			src.Quota = a.Quota
+		}
+		lr.finish(wire.Ended(res, err, with, src))
+		s.log.Info("run finished", "account", a.ID, "provider", a.Provider,
+			"run", lr.id, "stream", true, "err", err, "exit", exitOf(res))
+		handover()
+		// Kept for a while after it ended, so a reader that reattaches late is
+		// given the tail and the terminal event rather than a 404 it could not
+		// tell from a wrong id.
+		time.AfterFunc(keepEnded, func() { s.dropRun(lr.id) })
+	}()
+	lr.serve(w, r, 0)
+}
+
+// held is what a run holds beyond the request that asked for it: the slot in
+// the concurrency limit, the directory its uploads went to, the entry saying
+// this run is happening. An ordinary run lets go of all three when the handler
+// returns, which is what defer is for. A run that stays open cannot, so it
+// takes them over instead.
+type held struct{ fns []func() }
+
+func (h *held) add(f func()) { h.fns = append(h.fns, f) }
+
+// release lets go of everything, last taken first, as the defers it stands in
+// for would have.
+func (h *held) release() {
+	for i := len(h.fns) - 1; i >= 0; i-- {
+		h.fns[i]()
+	}
+	h.fns = nil
+}
+
+// take hands everything to a new owner and leaves this one holding nothing,
+// so the deferred release becomes a no-op.
+func (h *held) take() func() {
+	taken := &held{fns: h.fns}
+	h.fns = nil
+	return taken.release
 }
 
 // joinContexts returns a context cancelled when either parent is.
@@ -341,6 +452,17 @@ const (
 // nothing about the account or the rotation's choice of it.
 func (s *Server) startStream(w http.ResponseWriter, r *http.Request, init message.Event, with message.With, tally *message.Tally) *eventWriter {
 	ndjson := wantsNDJSON(r)
+	streamHeaders(w, ndjson)
+	ev := newEventWriter(w, !ndjson, init.Account, init.Provider, with, tally)
+	_ = ev.stream.Send(init)
+	flush(w)
+	return ev
+}
+
+// streamHeaders opens a streamed reply in whichever framing was asked for.
+// Both of them stream a run, whether it is this request's own or one it has
+// reattached to, so both say so in the same words.
+func streamHeaders(w http.ResponseWriter, ndjson bool) {
 	h := w.Header()
 	if ndjson {
 		h.Set("Content-Type", "application/x-ndjson")
@@ -352,10 +474,6 @@ func (s *Server) startStream(w http.ResponseWriter, r *http.Request, init messag
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("X-Accel-Buffering", "no") // a proxy must not sit on the events
 	w.WriteHeader(http.StatusOK)
-	ev := newEventWriter(w, !ndjson, init.Account, init.Provider, with, tally)
-	_ = ev.stream.Send(init)
-	flush(w)
-	return ev
 }
 
 func wantsNDJSON(r *http.Request) bool {

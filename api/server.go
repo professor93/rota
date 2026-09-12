@@ -44,6 +44,22 @@ type Options struct {
 	Timeout       time.Duration // hard cap per run (default 10m)
 	MaxConcurrent int           // concurrent child processes (default 8)
 	Log           *slog.Logger  // where requests are recorded (default: discard)
+	// InputTimeout is the hard cap on a run that stays open. It is separate
+	// from Timeout because the two are asked for different things: a one-shot
+	// run should answer in minutes, while a run somebody is talking to is
+	// expected to sit idle between messages. Default one hour.
+	InputTimeout time.Duration
+	// InputGrace is how long an open run survives with nobody reading it
+	// before it is interrupted and closed. A dropped connection is usually a
+	// client about to reconnect, and killing the agent for a broken proxy
+	// would throw away the conversation it is holding. Default 60s; negative
+	// closes the run the moment its reader goes.
+	InputGrace time.Duration
+	// Replay is how many events an open run keeps, so a reader that
+	// reattaches is given what it missed. Default 1000; the oldest are
+	// dropped past it, and a reader that was away longer than that is told
+	// where the stream is rather than everything it did.
+	Replay int
 	// RefreshEvery is how often the server rotates expiring tokens and
 	// re-reads usage on its own, so a request never waits to find out that
 	// its credential expired or that the rotation decided from an hour-old
@@ -66,6 +82,12 @@ type Server struct {
 	cancel context.CancelFunc
 	forced map[int]time.Time
 	forcMu sync.Mutex
+	// runs are the open runs this server is holding, by id: a run that takes
+	// more messages outlives the request that started it, so something has to
+	// know where it is. Ended ones stay a few minutes, for a reader that
+	// reattaches late.
+	runs   map[string]*liveRun
+	runsMu sync.Mutex
 	// keeperDone closes when the background refresher has returned, so Stop
 	// can promise that nothing is still writing to the store afterwards.
 	keeperDone chan struct{}
@@ -85,6 +107,17 @@ func New(opts Options) (*Server, error) {
 	if opts.MaxConcurrent <= 0 {
 		opts.MaxConcurrent = 8
 	}
+	if opts.InputTimeout <= 0 {
+		opts.InputTimeout = time.Hour
+	}
+	if opts.InputGrace == 0 {
+		// Zero is "unset", not "no grace at all": a negative grace is how a
+		// caller says it wants the run gone with its reader.
+		opts.InputGrace = time.Minute
+	}
+	if opts.Replay <= 0 {
+		opts.Replay = 1000
+	}
 	log := opts.Log
 	if log == nil {
 		log = slog.New(discardHandler{})
@@ -96,6 +129,7 @@ func New(opts Options) (*Server, error) {
 	s := &Server{
 		opts: opts, sem: make(chan struct{}, opts.MaxConcurrent), limit: newLimiter(),
 		log: log, ctx: ctx, cancel: cancel, forced: map[int]time.Time{},
+		runs: map[string]*liveRun{},
 	}
 	if opts.RefreshEvery > 0 {
 		s.keeperDone = make(chan struct{})
@@ -195,11 +229,19 @@ func (s *Server) Handler() http.Handler {
 		"GET /v1/accounts/{id}/schema": s.accountSchema,
 		"POST /v1/accounts/{id}/run":   s.run,
 		// The same run, without naming an account: the rotation chooses.
-		"POST /v1/run":             s.run,
-		"PATCH /v1/accounts/{id}":  s.patchAccount,
-		"DELETE /v1/accounts/{id}": s.removeAccount,
-		"POST /v1/login":           s.loginBegin,
-		"POST /v1/login/{id}":      s.loginFinish,
+		"POST /v1/run": s.run,
+		// A run started with "input" stays open, and these reach it by the id
+		// its opening event carried.
+		"GET /v1/runs":                 s.listRuns,
+		"GET /v1/runs/{id}":            s.describeRun,
+		"GET /v1/runs/{id}/events":     s.runEvents,
+		"POST /v1/runs/{id}/messages":  s.runSend,
+		"POST /v1/runs/{id}/interrupt": s.runInterrupt,
+		"POST /v1/runs/{id}/close":     s.runClose,
+		"PATCH /v1/accounts/{id}":      s.patchAccount,
+		"DELETE /v1/accounts/{id}":     s.removeAccount,
+		"POST /v1/login":               s.loginBegin,
+		"POST /v1/login/{id}":          s.loginFinish,
 		// What the same two were called before the API and the CLI agreed on
 		// one word for one act. Kept because a published path that starts
 		// answering 404 breaks whoever was calling it.

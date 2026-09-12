@@ -306,6 +306,12 @@ the command line still refreshes what it is about to use.
 | `GET` | `/v1/accounts/{id}/schema` | the models *that* account may actually use |
 | `POST` | `/v1/run` | run a prompt on whichever account the rotation picks |
 | `POST` | `/v1/accounts/{id}/run` | run a prompt on that account |
+| `GET` | `/v1/runs` | the runs staying open right now, and the ones that have just ended |
+| `GET` | `/v1/runs/{id}` | one of them: its account, state, how many messages are waiting, whether anyone is reading |
+| `GET` | `/v1/runs/{id}/events` | attach to its stream, `?since=N` replaying what was missed |
+| `POST` | `/v1/runs/{id}/messages` | `{"text":"…","steer":false}` — one more message into it |
+| `POST` | `/v1/runs/{id}/interrupt` | stop the tool it is running |
+| `POST` | `/v1/runs/{id}/close` | no more messages: it finishes its turn and exits |
 | `PATCH` | `/v1/accounts/{id}` | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api"}` — its place in the rotation, when to move on, and where it belongs |
 | `DELETE` | `/v1/accounts/{id}` | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays |
 | `POST` | `/v1/login` | `{"provider":"claude"}` → `{id, url, kind}` |
@@ -387,6 +393,7 @@ event vocabularies. A client reading a rota stream learns one:
 | `input` | what became of a message sent into an open run: `state` is `accepted`, `answered` or `failed`, with its `id`, and `reason` when it failed |
 | `interrupted` | an interrupt the CLI acknowledged, with its `id` |
 | `idle` | every message sent so far has been answered; the run is waiting for more |
+| `ping` | a heartbeat on a run that stays open, so a proxy and a client both go on believing it is there. It carries no `seq` — it is not something the run did — and appears on no other run |
 | `done` / `error` | how the run ended, with the exit status, and the totals: `num_turns`, `cost_usd` and the provider's own `usage` |
 | `other` | something rota recognises but has nothing general to say about |
 
@@ -545,9 +552,57 @@ instant claude prints a result can be reported answered one turn early. It is
 never lost, and never reported answered twice.
 
 Only Claude Code has a streaming input today. Every other CLI refuses
-`--input` by name, before the run costs anything. Over HTTP and WebSocket the
-same run will be reachable in the next phase; for now it is the command line
-and the library.
+`--input` by name, before the run costs anything.
+
+The same run is reachable over HTTP. `{"input": true}` on `POST /v1/run` or
+`POST /v1/accounts/{id}/run` starts it and streams it, in SSE or NDJSON as
+usual. It needs `"stream": true`, and is refused by name without it. The
+opening event carries `run_id`, and that id is how everything below reaches
+the run while it runs:
+
+| | |
+|---|---|
+| `POST /v1/runs/{id}/messages` | `{"text":"…","steer":false}` → `202 {"id":"a41f9c0d","state":"accepted"}` |
+| `POST /v1/runs/{id}/interrupt` | → `202 {"id":"6b2e…"}`, the id the acknowledgement will carry |
+| `POST /v1/runs/{id}/close` | → `200 {"ok":true}`, and again the same if said twice |
+| `GET /v1/runs/{id}/events?since=N` | the stream again, from the event after N |
+| `GET /v1/runs/{id}` | `{"id","account","provider","session_id","state","pending","attached","since","events"}` |
+| `GET /v1/runs` | `{"runs":[…]}`, the same shape: what is open now, and what has just ended |
+
+`state` is `running`, `idle` — everything sent has been answered — or `ended`.
+An id nobody knows is `404`; a run that has ended is `409`, whether the
+request was a message or an interrupt; more than a hundred messages waiting
+for an answer is `409` too, and a message with no text, or one over 64 KB, is
+`400`.
+
+```sh
+curl -N -H "authorization: Bearer $T" -H "accept: application/x-ndjson" \
+  -X POST localhost:8787/v1/run -d '{"prompt":"start here","stream":true,"input":true}'
+
+curl -H "authorization: Bearer $T" -X POST localhost:8787/v1/runs/7f3c1a5d/messages \
+  -d '{"text":"also check the tests"}'
+```
+
+The connection is not the run. When a reader drops, the run keeps going for
+`InputGrace` (one minute by default) and is then interrupted and closed, so
+an agent is never left spending for nobody; a negative grace ends it with its
+reader. Reattaching cancels that: `GET /v1/runs/{id}/events`
+replays every kept event after `since` and then goes on live, and a browser's
+own reconnect works the same way — SSE frames carry `id: <seq>`, and the
+`Last-Event-ID` header is read as `since`. A run keeps its last `Replay`
+events (1000 by default) and stays addressable for five minutes after it ends,
+so a reader that comes back late gets the tail and the `done` rather than a
+404. One reader at a time: a new one replaces the old, which is closed.
+
+An idle stream gets `ping` every fifteen seconds — the comment line `: ping`
+on SSE, `{"type":"ping"}` on NDJSON, with no `seq`, since it is not something
+the run did. `InputTimeout` (one hour) is the hard cap on the whole run,
+separate from `--timeout` because a conversation is expected to sit idle
+between messages where a one-shot run is not.
+
+The run slot is held for the life of the run, not the life of the request:
+one open run is one of the `--max-concurrent` agents this server will run at
+once, from the moment it starts to the moment it ends.
 
 ### Reading the answer
 

@@ -64,7 +64,10 @@ conversations `--resume` could pick up.
 `rota serve` exposes accounts at `/v1/accounts`, one-call runs at
 `POST /v1/run` (the rotation picks) or `POST /v1/accounts/{id}/run`, and a
 playground UI at `/playground`. Streaming is SSE, or NDJSON with
-`Accept: application/x-ndjson`. Paths a request names can be confined with
+`Accept: application/x-ndjson`. A run started with `"input": true` stays open
+for more messages: `/v1/runs/{id}/messages`, `interrupt` and `close` reach it
+while it runs, and `/v1/runs/{id}/events` reattaches a reader that dropped.
+Paths a request names can be confined with
 `--root`; everything risky is refused unless the operator allows it.
 
 ## Use it as a library
