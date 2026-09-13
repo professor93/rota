@@ -1303,8 +1303,9 @@ finished, `interrupted` when the CLI acknowledges an interrupt, and `idle`
 when nothing is waiting. `SendRaw` writes a line the caller composed in the
 CLI's own input vocabulary, untracked. Claude Code is the only CLI with a
 streaming input today, so every other one refuses `input` by name. On the
-command line this is `--input` and `rota send` — see "Talking to a running
-run"; over HTTP and WebSocket it comes in the next phase.
+command line this is `--input` and `rota send`; over HTTP it is `"input": true`
+and the `/v1/runs` endpoints; over a WebSocket it is the `/ws` routes — all in
+"Talking to a running run".
 
 Two things still touch the world, unavoidably: the network, and — for codex
 and kimi, whose CLIs read credentials only from a file — a credential staged
