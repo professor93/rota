@@ -140,6 +140,15 @@ header.top {
   display:flex; gap:9px; align-items:center; flex-wrap:wrap;
 }
 
+/* the box that talks back to a run that is still open */
+.talk:not(:empty) {
+  border-top:1px solid var(--line); padding:10px 16px; background:var(--panel);
+  display:flex; gap:9px; align-items:center; flex-wrap:wrap;
+}
+.talk input[type="text"] { flex:1; min-width:140px; padding:7px 10px; border:1px solid var(--line); border-radius:var(--r); background:var(--bg) }
+.talk input[type="text"]:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent) }
+.talk .steer { display:flex; align-items:center; gap:5px; font-size:12px; color:var(--muted) }
+
 /* ================================================================= tabs == */
 .tabs { display:flex; gap:2px; padding:8px 14px 0; border-bottom:1px solid var(--line); background:var(--panel) }
 .tabs button {
@@ -331,6 +340,7 @@ tr.next td { background:var(--accent-soft) }
   <aside class="pane out" aria-label="Output">
     <nav id="ionav" class="tabs"></nav>
     <div id="io" class="pane-body"></div>
+    <div id="talk"></div>
   </aside>
 </div>
 
@@ -387,6 +397,10 @@ let values = {};                 // the request, by field name
 let uploads = [];                // {path, content} pending files
 let fieldsHost = null;           // the part of Ask the filter redraws
 let lastResponse = null, lastEvents = [], lastAnswer = "", streaming = false;
+// live is the run open on a socket right now, if there is one: its connection,
+// where its stream got to, and whether it has ended. Null means there is
+// nothing to talk to, and the box under the output pane is not there.
+let live = null;
 // selected is a run from history being read in the output panes instead of
 // the live request. Null means "show what is about to be sent".
 let selected = null;
@@ -1178,7 +1192,11 @@ async function doRun() {
   const started = Date.now();
   lastEvents = []; lastResponse = null; lastAnswer = ""; streaming = !!body.stream;
   try {
-    if (body.stream) await runStream(id, body, started);
+    // A run that takes more messages is opened over a socket instead: the
+    // same events come out of it, and what is typed back goes in the same
+    // way. Every other run is the fetch it always was.
+    if (body.stream && body.input) await runSocket(id, body, started);
+    else if (body.stream) await runStream(id, body, started);
     else {
       const r = await api("POST", runPath(id), body);
       lastResponse = { status: r.status, ok: r.ok, doc: r.doc };
@@ -1213,6 +1231,7 @@ async function runStream(id, body, started) {
     return;
   }
   setState("streaming…", "busy");
+  const run = { id, endpoint: runPath(id), body, started, status: r.status, seq: 0, tries: 0 };
   const reader = r.body.getReader(), dec = new TextDecoder();
   let buf = "";
   for (;;) {
@@ -1229,23 +1248,131 @@ async function runStream(id, body, started) {
       if (!data) continue;
       let doc = data;
       try { doc = JSON.parse(data); } catch {}
-      lastEvents.push({ name, doc });
-      // The answer arrives mid-stream; the terminal event only says how the
-      // run ended, so keep it here or it would be buried in the log.
-      if (doc && typeof doc === "object") {
-        if (typeof doc.result === "string" && doc.result) lastAnswer = doc.result;
-        else if (doc.item && doc.item.type === "agent_message" && doc.item.text) lastAnswer = doc.item.text;
-      }
-      if (name === "done" || name === "error") {
-        lastResponse = { status: r.status, ok: name === "done" && !doc.is_error, doc };
-        remember({ account: doc.account || id, endpoint: runPath(id), ok: name === "done",
-          status: r.status, took: Date.now() - started, body, events: lastEvents.length,
-          doc: Object.assign({ result: lastAnswer }, doc) });
-        setState(name === "done" ? "done" : "failed", name === "done" ? "ok" : "bad");
-      }
-      if (ioTab === "response") renderIO();
+      runEvent(name, doc, run);
     }
   }
+}
+
+// runEvent shows one event of a run. Both transports carry the same events,
+// so both must show them the same way: this is the only place that knows what
+// an event means, and the socket and the stream only differ in how they get
+// one here.
+function runEvent(name, doc, run) {
+  lastEvents.push({ name, doc });
+  // The answer arrives mid-stream; the terminal event only says how the
+  // run ended, so keep it here or it would be buried in the log.
+  if (doc && typeof doc === "object") {
+    if (typeof doc.result === "string" && doc.result) lastAnswer = doc.result;
+    else if (doc.item && doc.item.type === "agent_message" && doc.item.text) lastAnswer = doc.item.text;
+    // Where the stream got to, so a socket that has to reconnect can ask for
+    // what it missed rather than for everything again.
+    if (typeof doc.seq === "number") run.seq = doc.seq;
+    if (doc.run_id) run.runID = doc.run_id;
+  }
+  if (name === "done" || name === "error") {
+    run.ended = true;
+    lastResponse = { status: run.status, ok: name === "done" && !doc.is_error, doc };
+    remember({ account: doc.account || run.id, endpoint: run.endpoint, ok: name === "done",
+      status: run.status, took: Date.now() - run.started, body: run.body, events: lastEvents.length,
+      doc: Object.assign({ result: lastAnswer }, doc) });
+    setState(name === "done" ? "done" : "failed", name === "done" ? "ok" : "bad");
+    renderTalk();
+  }
+  if (ioTab === "response") renderIO();
+}
+
+/* ================================================================ socket == */
+// A run with input on is opened over a WebSocket: one connection carrying the
+// events out and messages, interrupts and the close back in. It is the same
+// run the endpoints reach, and the same events the stream carries — the box
+// under the output pane is the only thing this transport adds.
+const wsPath = id => (id ? `/v1/accounts/${id}/ws` : "/v1/ws");
+const wsURL = path => location.origin.replace(/^http/, "ws") + path;
+
+async function runSocket(id, body, started) {
+  const run = { id, endpoint: wsPath(id), body, started, status: 101, seq: 0, tries: 0 };
+  await openSocket(wsURL(wsPath(id)), run, sock =>
+    // input and stream are what a socket is: the server forces both, and the
+    // frame says so rather than leaving the form to be read two ways.
+    sock.send(JSON.stringify(Object.assign({ type: "start" }, body, { input: true, stream: true }))));
+}
+
+// openSocket holds one connection until the run is over. A browser cannot put
+// a header on a WebSocket, so the token travels as a subprotocol: the server
+// checks it before the upgrade and echoes only "rota" back.
+function openSocket(url, run, first) {
+  return new Promise(resolve => {
+    let sock;
+    try { sock = new WebSocket(url, ["rota", "bearer." + token]); }
+    catch (e) { setState("no socket: " + e, "bad"); resolve(); return; }
+    run.sock = sock; live = run;
+    sock.onopen = () => { setState("streaming…", "busy"); first(sock); renderTalk(); };
+    sock.onmessage = e => {
+      let doc;
+      try { doc = JSON.parse(e.data); } catch { return; }
+      // An ack answers one frame this page sent. Only a refused one is worth
+      // saying: what became of an accepted message arrives as an event.
+      if (doc && doc.type === "ack") {
+        if (doc.error) setState(doc.error, "bad");
+        return;
+      }
+      runEvent((doc && doc.type) || "message", doc, run);
+    };
+    sock.onerror = () => {};
+    sock.onclose = () => {
+      run.sock = null;
+      // A close before the terminal event is a connection that broke, not a
+      // run that ended: the run keeps going on the server for its grace
+      // period, so ask for it again from where this one got to.
+      if (!run.ended && run.runID && run.tries < 3) {
+        run.tries++;
+        setState("reconnecting…", "busy");
+        setTimeout(() => openSocket(wsURL(`/v1/runs/${run.runID}/ws?since=${run.seq}`), run, () => {}).then(resolve),
+          300 * run.tries);
+        return;
+      }
+      if (!run.ended) setState("the socket closed", "bad");
+      live = null; renderTalk();
+      resolve();
+    };
+  });
+}
+
+// talk sends one frame into the open run, under a ref of its own so the ack
+// that comes back can be matched to it.
+function talk(frame) {
+  if (!live || !live.sock) return setState("no run is open", "bad");
+  live.refs = (live.refs || 0) + 1;
+  frame.ref = "c" + live.refs;
+  try { live.sock.send(JSON.stringify(frame)); }
+  catch (e) { setState("the socket has gone", "bad"); }
+}
+
+// renderTalk is the box that talks back. It lives outside the output pane's
+// own redraw, so an event arriving mid-sentence never destroys what is being
+// typed, and it is there only while there is a run to say it to.
+function renderTalk() {
+  const host = $("#talk");
+  if (!live || !live.sock || live.ended) { host.replaceChildren(); return; }
+  if (host.children.length) return; // already up: leave what is typed alone
+  const box = el("input", { type: "text", placeholder: "Say something to this run…", "aria-label": "Message" });
+  const steer = el("input", { type: "checkbox", id: "steer" });
+  const send = () => {
+    const text = box.value.trim();
+    if (!text) return;
+    talk({ type: "message", text, steer: !!steer.checked });
+    box.value = "";
+  };
+  box.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); send(); } });
+  host.replaceChildren(
+    box,
+    el("button", { class: "btn primary", text: "Send", onclick: send }),
+    el("label", { class: "steer", for: "steer" }, [steer, el("span", { text: "Steer" })]),
+    el("button", { class: "btn tiny", text: "Stop", title: "interrupt the tool it is running",
+      onclick: () => talk({ type: "interrupt" }) }),
+    el("button", { class: "btn tiny", text: "Close", title: "no more messages: it finishes its turn and exits",
+      onclick: () => talk({ type: "close" }) }),
+  );
 }
 
 /* ============================================================== history == */

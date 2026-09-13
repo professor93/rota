@@ -342,11 +342,13 @@ func (lr *liveRun) notices() {
 
 /* -------------------------------------------------------------- readers --- */
 
-// runReader is one HTTP response reading a run: the framing it wanted, and
-// the channel that says it is no longer the one reading.
+// runReader is one reader of a run — an HTTP response or a socket — in the
+// framing it wanted, and the channel that says it is no longer the one
+// reading.
 type runReader struct {
 	w    io.Writer
 	sse  bool
+	ws   *wsConn // set when the reader is a WebSocket: one event, one text frame
 	buf  []byte
 	gone chan struct{}
 	once sync.Once
@@ -356,12 +358,22 @@ func newRunReader(w io.Writer, sse bool) *runReader {
 	return &runReader{w: w, sse: sse, gone: make(chan struct{})}
 }
 
+// newWSReader reads a run onto a socket, where the framing is the protocol's
+// own: each event is one text frame carrying the same JSON the NDJSON stream
+// carries, and nothing is added around it.
+func newWSReader(c *wsConn) *runReader {
+	return &runReader{ws: c, gone: make(chan struct{})}
+}
+
 func (rd *runReader) close() { rd.once.Do(func() { close(rd.gone) }) }
 
 // frame writes one event in this reader's framing. An SSE frame carries the
 // sequence number as its id, so a browser that reconnects on its own says in
 // Last-Event-ID where it got to and is answered from there.
 func (rd *runReader) frame(name string, seq int, raw []byte) error {
+	if rd.ws != nil {
+		return rd.ws.send(opText, raw)
+	}
 	rd.buf = rd.buf[:0]
 	if rd.sse {
 		rd.buf = append(rd.buf, "event: "...)
@@ -384,8 +396,12 @@ func (rd *runReader) frame(name string, seq int, raw []byte) error {
 
 // ping is the heartbeat: an SSE comment, which a client is required to
 // ignore, and on NDJSON an event with no sequence number — a reader counting
-// events must skip it rather than read it as a gap.
+// events must skip it rather than read it as a gap. A socket has a ping of
+// its own, which the peer answers, so it is also how a dead one is noticed.
 func (rd *runReader) ping() error {
+	if rd.ws != nil {
+		return rd.ws.send(opPing, nil)
+	}
 	line := []byte("{\"type\":\"ping\"}\n")
 	if rd.sse {
 		line = []byte(": ping\n\n")
@@ -549,18 +565,28 @@ func (s *Server) runEvents(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	since := 0 // no answer means everything still kept
+	since, ok := sinceOf(w, r)
+	if !ok {
+		return
+	}
+	lr.serve(w, r, since)
+}
+
+// sinceOf is where a reader says it got to. No answer means everything still
+// kept; a browser reconnecting on its own says it in Last-Event-ID instead.
+func sinceOf(w http.ResponseWriter, r *http.Request) (int, bool) {
 	if v := r.URL.Query().Get("since"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 0 {
 			fail(w, http.StatusBadRequest, "since must be a sequence number")
-			return
+			return 0, false
 		}
-		since = n
-	} else if v := r.Header.Get("Last-Event-ID"); v != "" {
+		return n, true
+	}
+	if v := r.Header.Get("Last-Event-ID"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			since = n
+			return n, true
 		}
 	}
-	lr.serve(w, r, since)
+	return 0, true
 }

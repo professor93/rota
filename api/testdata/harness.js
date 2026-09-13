@@ -3,7 +3,7 @@
 // Go project no test touches, and the part most likely to break silently.
 const fs = require('fs');
 const T = process.env.T;
-const { nodes } = require(T + '/dom.js');
+const { nodes, sockets } = require(T + '/dom.js');
 const schema = JSON.parse(fs.readFileSync(T + '/schema.json', 'utf8'));
 const accountsDoc = JSON.parse(fs.readFileSync(T + '/accounts.json', 'utf8'));
 
@@ -391,6 +391,58 @@ const settle = () => new Promise(r => setTimeout(r, 5));
   for (const cls of ['j-key', 'j-num', 'j-str', 'j-bool', 'j-null']) {
     assert(coloured.includes(cls), 'JSON colouring marks ' + cls);
   }
+
+  // 14. a run that takes more messages goes over a socket instead, and the
+  // page can talk back into it. Everything else about a run is unchanged.
+  pg.view = 'ask'; pg.values.__account = '1'; pg.values.prompt = 'talk to me';
+  pg.values.stream = true; pg.values.input = true;
+  pg.render();
+  const before = sockets.length;
+  const open14 = pg.doRun(); // a socket run is not over when it starts
+  const sock = sockets[sockets.length - 1];
+  assert(sockets.length === before + 1, 'input + stream is a socket, not a fetch');
+  assert(sock.url === 'ws://127.0.0.1:8787/v1/accounts/1/ws', 'the socket goes at the account: ' + sock.url);
+  assert(sock.protocols[0] === 'rota' && sock.protocols[1] === 'bearer.playground-token',
+    'a browser cannot set a header, so the token is a subprotocol: ' + sock.protocols);
+  sock.open();
+  const start = JSON.parse(sock.sent[0]);
+  assert(start.type === 'start' && start.prompt === 'talk to me' && start.input === true && start.stream === true,
+    'the first frame is the request: ' + sock.sent[0]);
+  sock.feed({ type: 'init', seq: 1, account: 1, provider: 'claude', run_id: 'r-1' });
+  sock.feed({ type: 'text', seq: 2, account: 1, text: 'SOCKETED' });
+  pg.ioTab = 'response'; pg.renderIO();
+  assert(nodes['#io'].textContent.includes('2 events'), 'a fed frame is an event like any other: ' + nodes['#io'].textContent.slice(0, 200));
+  assert(findAll(nodes['#io'], e => e.classList && e.classList.contains('code')).some(c => c.innerHTML.includes('SOCKETED')),
+    'and it is shown');
+
+  const talk = nodes['#talk'];
+  const box = findAll(talk, e => e.tagName === 'INPUT' && e.attrs.type === 'text')[0];
+  const sendBtn = findAll(talk, e => e.tagName === 'BUTTON' && e.textContent === 'Send')[0];
+  assert(box && sendBtn, 'an open run gets a box to talk into');
+  assert(findAll(talk, e => e.tagName === 'BUTTON').map(b => b.textContent).join(',') === 'Send,Stop,Close',
+    'and the three things to do to a running agent');
+  box.value = 'more please';
+  sendBtn.dispatch('click', { target: sendBtn });
+  const said = JSON.parse(sock.sent[1]);
+  assert(said.type === 'message' && said.text === 'more please' && said.ref,
+    'Send sends a message frame under a ref of its own: ' + sock.sent[1]);
+  assert(box.value === '', 'and empties the box');
+
+  sock.feed({ type: 'ack', ref: said.ref, error: 'run r-1 has ended' });
+  assert(nodes['#state'].textContent.includes('run r-1 has ended'), 'a refused frame is said in the status line');
+
+  sock.feed({ type: 'done', exit_code: 0, is_error: false, account: 1, duration_ms: 7, result: 'SOCKETED' });
+  sock.close();
+  await open14;
+  assert(!nodes['#talk'].children.length, 'the box goes when the run does');
+  const hist3 = JSON.parse(localStorage.getItem('rota.history'));
+  assert(hist3[0].endpoint === '/v1/accounts/1/ws', 'a socket run is remembered by the endpoint it used');
+
+  // a run with input off is the fetch it always was
+  pg.values.input = false; pg.values.stream = false;
+  globalThis.fetch = jsonAPI;
+  await pg.doRun();
+  assert(sockets.length === before + 1, 'a run nobody can talk to opens no socket');
 
   console.log('PLAYGROUND_OK passes=' + passes);
 })().catch(e => { console.error('FAILED:', e.stack); process.exit(1); });

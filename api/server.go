@@ -10,6 +10,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -251,6 +252,17 @@ func (s *Server) Handler() http.Handler {
 	for pattern, h := range guarded {
 		mux.Handle(pattern, s.auth(h))
 	}
+	// The same three doors as a socket: one run, carried both ways. They are
+	// guarded apart because a browser cannot put a header on a WebSocket, so
+	// the token may arrive as a subprotocol instead.
+	sockets := map[string]http.HandlerFunc{
+		"GET /v1/runs/{id}/ws":     s.attachWS,
+		"GET /v1/accounts/{id}/ws": s.startWS,
+		"GET /v1/ws":               s.startWS,
+	}
+	for pattern, h := range sockets {
+		mux.Handle(pattern, s.wsAuth(h))
+	}
 	return s.recover(mux)
 }
 
@@ -299,6 +311,19 @@ func (t *trackingWriter) Flush() {
 	}
 }
 
+// Hijack hands the connection over, which is how a request becomes a
+// WebSocket. Nothing may be written as a response afterwards, so the
+// connection counts as written to: a panic after this must not try to turn it
+// into an error page.
+func (t *trackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := t.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("this connection cannot be taken over")
+	}
+	t.wrote = true
+	return hj.Hijack()
+}
+
 // auth enforces the bearer token and the brute-force block.
 //
 // The block applies to guesses, never to the right token: an address is
@@ -309,30 +334,38 @@ func (t *trackingWriter) Flush() {
 // and the token itself, 256 random bits, is what makes guessing hopeless.
 func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 	const prefix = "Bearer "
-	// Both sides are hashed first: a plain comparison returns at once on
-	// a length mismatch, and that alone would tell a guesser how long the
-	// token is.
-	want := sha256.Sum256([]byte(s.opts.Token))
 	return func(w http.ResponseWriter, r *http.Request) {
 		got := r.Header.Get("Authorization")
-		ok := false
-		if len(got) > len(prefix) && got[:len(prefix)] == prefix {
-			sum := sha256.Sum256([]byte(got[len(prefix):]))
-			ok = subtle.ConstantTimeCompare(sum[:], want[:]) == 1
-		}
-		if ok {
+		if len(got) > len(prefix) && got[:len(prefix)] == prefix && s.tokenOK(got[len(prefix):]) {
 			next(w, r)
 			return
 		}
-		ip := clientIP(r)
-		if s.limit.blocked(ip) {
-			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many bad tokens; try again later"})
-			return
-		}
-		s.limit.fail(ip)
-		s.log.Warn("rejected request", "ip", ip, "path", r.URL.Path)
-		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid or missing bearer token"})
+		s.refuseToken(w, r)
 	}
+}
+
+// tokenOK is the comparison itself. Both sides are hashed first: a plain
+// comparison returns at once on a length mismatch, and that alone would tell
+// a guesser how long the token is.
+func (s *Server) tokenOK(got string) bool {
+	if got == "" {
+		return false
+	}
+	want := sha256.Sum256([]byte(s.opts.Token))
+	sum := sha256.Sum256([]byte(got))
+	return subtle.ConstantTimeCompare(sum[:], want[:]) == 1
+}
+
+// refuseToken is the answer to a guess, and the record of it.
+func (s *Server) refuseToken(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+	if s.limit.blocked(ip) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many bad tokens; try again later"})
+		return
+	}
+	s.limit.fail(ip)
+	s.log.Warn("rejected request", "ip", ip, "path", r.URL.Path)
+	writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid or missing bearer token"})
 }
 
 // clientIP is the address the connection came from, as the limiter counts
@@ -371,6 +404,13 @@ func fail(w http.ResponseWriter, code int, msg string) {
 // leak to whoever is asking.
 func (s *Server) report(w http.ResponseWriter, r *http.Request, err error) {
 	code := statusFor(err)
+	// A refusal this package wrote is always said as it was written: it was
+	// written for whoever is asking, and leaks nothing it did not mean to.
+	var no *refusal
+	if errors.As(err, &no) {
+		fail(w, no.code, no.msg)
+		return
+	}
 	if code >= http.StatusInternalServerError {
 		s.log.Error("request failed", "method", r.Method, "path", r.URL.Path, "err", err)
 		fail(w, code, "internal error")

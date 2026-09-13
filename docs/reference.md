@@ -312,6 +312,9 @@ the command line still refreshes what it is about to use.
 | `POST` | `/v1/runs/{id}/messages` | `{"text":"…","steer":false}` — one more message into it |
 | `POST` | `/v1/runs/{id}/interrupt` | stop the tool it is running |
 | `POST` | `/v1/runs/{id}/close` | no more messages: it finishes its turn and exits |
+| `GET` | `/v1/ws` | a WebSocket that starts a run on whichever account the rotation picks and carries it both ways |
+| `GET` | `/v1/accounts/{id}/ws` | the same, on that account |
+| `GET` | `/v1/runs/{id}/ws` | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
 | `PATCH` | `/v1/accounts/{id}` | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api"}` — its place in the rotation, when to move on, and where it belongs |
 | `DELETE` | `/v1/accounts/{id}` | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays |
 | `POST` | `/v1/login` | `{"provider":"claude"}` → `{id, url, kind}` |
@@ -604,6 +607,92 @@ The run slot is held for the life of the run, not the life of the request:
 one open run is one of the `--max-concurrent` agents this server will run at
 once, from the moment it starts to the moment it ends.
 
+#### Over a WebSocket
+
+The endpoints above are one run reached through many requests. A WebSocket is
+the same run over one connection, carrying both directions: every event out,
+and messages, interrupts and the close back in. Nothing about a run is
+different for having been started this way — the endpoints reach it too, and a
+client may use whichever suits it.
+
+| | |
+|---|---|
+| `GET /v1/ws` | start a run on whichever account the rotation picks |
+| `GET /v1/accounts/{id}/ws` | start one on that account |
+| `GET /v1/runs/{id}/ws?since=N` | attach to a run already going, from the event after N |
+
+On the two that start a run, the **first frame** is the request — the same
+body `POST /v1/run` takes, with `"type":"start"` — and `input` and `stream`
+are true whatever it says, because that is what a socket is. It is checked
+exactly as the body is: an unknown field, a model that account may not use, a
+CLI with no streaming input are all refused by name before anything is spent.
+A refusal is one frame and then a close:
+
+```json
+{"type":"error","error":"unknown field \"prompts\""}
+```
+
+Everything else out is an event, one frame each, carrying the same JSON the
+NDJSON stream carries and no newline after it: the run's own events from
+`init` to the terminal `done` or `error`, which is the last frame before the
+close. Attaching replays what was missed from `since` and then goes on live,
+as `/events` does; a socket replaces whatever was reading the run, HTTP or
+otherwise.
+
+What goes in, after the start, is one of four:
+
+| | |
+|---|---|
+| `{"type":"message","text":"…","steer":false,"ref":"c1"}` | one more message, or a steer: interrupt first, so it starts the next turn |
+| `{"type":"interrupt","ref":"c2"}` | stop the tool it is running |
+| `{"type":"close","ref":"c3"}` | no more messages: it finishes its turn and exits |
+| `{"type":"raw","line":{…},"ref":"c4"}` | one line in the CLI's own input vocabulary, written down the pipe as it is |
+
+Each is answered with an ack, carrying the `ref` it was sent under — `ref` is
+the client's own name for a frame, echoed back, and may be left out. A
+message and an interrupt are acked with the id their events will carry; a
+close and a raw line have none.
+
+```json
+{"type":"ack","ref":"c1","id":"a41f9c0d","state":"accepted"}
+{"type":"ack","ref":"c2","error":"run 7f3c1a5d has ended"}
+```
+
+An ack is a convenience, not the answer: `input`, `interrupted` and `idle`
+still arrive as events, so a client that ignores acks entirely loses nothing.
+
+**The token.** A browser cannot put a header on a WebSocket, so the bearer
+token may travel as a subprotocol instead: `Sec-WebSocket-Protocol: rota,
+bearer.<token>`, of which the server echoes only `rota` back. An
+`Authorization: Bearer` header works too, for a client that can set one. It
+may not travel in the query string, and one sent there is ignored: a URL is
+written to every access log on the way, and a token in a log is a token given
+away. Either way it is checked before the upgrade — a wrong or missing token
+is an ordinary `401`, with no connection taken over, and counts towards the
+same brute-force block every other endpoint is behind.
+
+**The close codes.** `1000` the run ended or the client said goodbye, `1001`
+the server let this socket go — a peer that answered none of three heartbeats,
+or a shutdown — `1002` the framing itself was wrong, `1007` a text frame that
+was not UTF-8, `1008` a frame this server will not act on, including a start
+it refused and anything that is not one JSON object, `1009` a message past the
+1 MB cap, `1011` a start that failed for a reason that was this server's own.
+
+The heartbeat is the protocol's own: a ping every fifteen seconds, and a peer
+that has answered nothing for three of them is dropped and the run left with
+nobody reading it — which starts the same grace period a dropped HTTP reader
+does, so reconnecting to `/v1/runs/{id}/ws?since=<last seq>` picks it up where
+it stopped. Messages are capped at 1 MB, fragmented frames are reassembled,
+and a ping from the client is answered with its own payload.
+
+```js
+const ws = new WebSocket("ws://localhost:8787/v1/accounts/1/ws", ["rota", "bearer." + token]);
+ws.onopen = () => ws.send(JSON.stringify({ type: "start", prompt: "start here" }));
+ws.onmessage = e => console.log(JSON.parse(e.data));
+// later
+ws.send(JSON.stringify({ type: "message", text: "also check the tests", ref: "c1" }));
+```
+
 ### Reading the answer
 
 The reply is the answer as the CLI gave it. rota adds nothing to it and
@@ -802,6 +891,15 @@ would take is marked. A row at 0 is greyed out — still there, still runnable
 by id, never picked. Removing an account is on the row it belongs to. On Ask
 the account selector opens on *Rotation*, and the footer says which account
 that currently means.
+
+A streamed run with **input** on is opened over a WebSocket rather than
+fetched, and a box appears under the output column while it is open: a line
+to send, a Steer checkbox beside it, Stop for the tool it is running and
+Close for the run. Enter sends. The events fill the Response tab exactly as a
+streamed run's do — it is the same stream — and a refused frame says so in the
+status line. If the connection breaks before the run ends the page reconnects
+to it from where it got to, three times, which the run's grace period is long
+enough for. A run with input off is the fetch it always was.
 
 The right column has three tabs. **Response** shows the answer, then the
 run's account, cost, duration and session, then every event — all
@@ -1382,5 +1480,6 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `wire/` | `Upload`, `End`, the account view, and the request vocabulary described for forms. Outside lib on purpose — a library has no opinion about JSON or labels |
 | `message/` | Reading a finished answer: blocks, the normalized event vocabulary, `ask`. Outside lib on purpose — the SDK has no business knowing what markdown is |
 | `api/server.go`, `api/run.go` | Routing, the token, the rate limit, requests and streaming |
+| `api/runs.go`, `api/ws.go` | The runs that stay open, and the WebSocket that carries one both ways |
 | `api/playground.html` | The page served at `/playground` |
 | `cmd/rota/main.go` | The command |

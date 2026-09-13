@@ -43,17 +43,120 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if req.TimeoutSeconds < 0 {
-		fail(w, http.StatusBadRequest, "timeout_seconds must not be negative")
+	// What this request holds until it returns — unless the run stays open,
+	// in which case the run takes them over.
+	var hold held
+	defer hold.release()
+	p, err := s.prepare(r, req, &hold)
+	if err != nil {
+		if errors.Is(err, errGone) {
+			return // the caller stopped waiting; there is nobody to answer
+		}
+		s.report(w, r, err)
 		return
+	}
+	defer p.st.Close()
+	st, a, with, tally := p.st, p.a, p.with, p.tally
+	if req.Input {
+		// A run that stays open is a different shape of answer: it is streamed
+		// like any other, but it is also addressable while it runs, and it
+		// outlives this request rather than ending with it.
+		s.startInput(w, r, p, &hold)
+		return
+	}
+
+	// The events are read whether or not they are sent. Sending them is what
+	// stream asks for; reading them is how the conversation id reaches the
+	// entry above.
+	//
+	// It reaches it while the run is going only for a streamed one. A
+	// buffered run's CLI prints a single document when it is finished, so
+	// there is nothing to read until there is nothing left to say, and the id
+	// arrives as the entry is being taken away. That is the CLIs' shape
+	// rather than rota's, and worth reading here anyway: it costs one pass
+	// that is already being made, and it is right when it can be.
+	watch := newEventWriter(io.Discard, false, a.ID, a.Provider, message.With{}, tally)
+	watch.quiet = true
+	watch.learn = p.entry.Learned
+	out := io.Writer(watch)
+	if p.streaming {
+		model, effort, _ := rota.Resolved(a, st.Home(a), req.Spec)
+		live := s.startStream(w, r, message.Event{
+			Type: "init", Account: a.ID, Provider: a.Provider,
+			Model: model, Effort: effort, Cwd: req.Cwd, SessionID: req.Resume,
+		}, with, tally)
+		live.learn = p.entry.Learned
+		out = live
+	}
+	// The run ends when the caller goes away, when it times out, or when
+	// the server is stopping — whichever comes first.
+	ctx, cancel := joinContexts(r.Context(), s.ctx)
+	defer cancel()
+	res, err := st.Run(ctx, a, req.Spec, p.lim, out)
+	s.log.Info("run finished", "account", a.ID, "provider", a.Provider,
+		"stream", p.streaming, "err", err, "exit", exitOf(res))
+	// What the readings are read from, beyond the result: the stream's
+	// tally, the account, and a fresh quota reading when one was asked for.
+	src := message.Sources{Tally: tally, Account: a, Threshold: rotation.Cutoff(a)}
+	if with.Quota {
+		for _, e := range st.Refresh(ctx, true, a) {
+			s.log.Warn("quota reading failed", "account", a.ID, "err", e)
+		}
+		src.Quota = a.Quota
+	}
+	if p.streaming {
+		s.endStream(w, r, res, err, with, src)
+		return
+	}
+	switch {
+	case err != nil:
+		s.report(w, r, err)
+	case res.IsError || res.ExitCode != 0:
+		writeJSON(w, http.StatusBadGateway, message.ReplyFor(res, with, src))
+	default:
+		writeJSON(w, http.StatusOK, message.ReplyFor(res, with, src))
+	}
+}
+
+// prepared is a run that has been checked and is ready to start: everything
+// needed to spend an account, and nothing about how the answer is carried.
+// The two transports that start runs — a POST and a WebSocket's first frame —
+// ask for the same preparation and differ only afterwards.
+type prepared struct {
+	st    *store.Store
+	a     *rota.Account
+	req   *request
+	lim   *rota.Limits
+	with  message.With
+	tally *message.Tally
+	entry *sessions.Run
+	// streaming is the caller's own stream field as it arrived, which is not
+	// the same question as whether the CLI streams.
+	streaming bool
+}
+
+// errGone is a caller that stopped waiting while its run was queued. Nothing
+// is answered: there is nobody left to answer.
+var errGone = errors.New("the caller went away")
+
+// prepare does everything that happens before an account is spent: the
+// readings resolved, a slot taken, the store opened, the account chosen, the
+// uploads staged and the whole request checked against that account. What it
+// takes on the way — the slot, the upload directory, the entry saying the run
+// is happening — goes into hold, whose owner lets go of it.
+//
+// It answers nothing itself. Every refusal is an error the transport renders,
+// because the two transports render one in different words.
+func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, error) {
+	if req.TimeoutSeconds < 0 {
+		return nil, refuse(http.StatusBadRequest, "timeout_seconds must not be negative")
 	}
 	// A reading nobody knows is refused before anything is spent. The
 	// readings that ask the CLI for more become request fields here; the
 	// fields a caller set directly count as the same asking.
 	with, err := message.ParseWith(req.With...)
 	if err != nil {
-		fail(w, http.StatusBadRequest, err.Error())
-		return
+		return nil, refuse(http.StatusBadRequest, err.Error())
 	}
 	with.Apply(&req.Spec)
 	with.Raw = with.Raw || req.IncludeEvents
@@ -62,30 +165,38 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	// document: the CLI streams, rota reads, the caller sees a document.
 	streaming := req.Stream
 	req.Spec.Stream = req.Stream || with.NeedsEvents()
-	// What this request holds until it returns — unless the run stays open,
-	// in which case the run takes them over.
-	var hold held
-	defer hold.release()
 	// The slot comes before the store: a run waiting its turn must hold
 	// nothing another request needs. With the order reversed, one queued
 	// run kept the store locked for everyone — every listing, patch and
 	// login, and every rota command on the host — until a slot freed.
 	if !s.acquire(r.Context()) {
-		return
+		return nil, errGone
 	}
 	hold.add(s.release)
-	st, ok := s.open(w)
-	if !ok {
-		return
+	st, err := store.Open(s.opts.Dir)
+	if err != nil {
+		s.log.Error("opening the store", "err", err)
+		return nil, refuse(http.StatusInternalServerError, "the account store could not be opened")
 	}
-	defer st.Close()
-	a, ok := s.account(w, r, st)
-	if !ok {
-		return
+	// A store written before rotation existed is numbered here rather than
+	// by the store itself, which has no opinion about queues.
+	rotation.Backfill(st)
+	ok := false
+	defer func() {
+		if !ok {
+			st.Close()
+		}
+	}()
+	id, err := pathID(r)
+	if err != nil {
+		return nil, refuse(http.StatusBadRequest, err.Error())
+	}
+	a, err := rotation.Choose(r.Context(), st, id)
+	if err != nil {
+		return nil, err
 	}
 	if a.Dead {
-		fail(w, http.StatusConflict, "account "+strconv.Itoa(a.ID)+" needs re-auth")
-		return
+		return nil, refuse(http.StatusConflict, "account "+strconv.Itoa(a.ID)+" needs re-auth")
 	}
 	// A server session is hermetic by default: no settings sources unless
 	// the request names them. The server's policy, not the SDK's — nil means
@@ -104,8 +215,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 			hold.add(func() { os.RemoveAll(dir) })
 		}
 		if err != nil {
-			s.report(w, r, err)
-			return
+			return nil, err
 		}
 		// The upload directory is the server's own, not something the caller
 		// named, so it is allowed for this request by construction.
@@ -139,8 +249,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 	// account, not just its provider, catches a model that account's plan
 	// does not include.
 	if err := req.CheckFor(a, st.Home(a), lim); err != nil {
-		s.report(w, r, err)
-		return
+		return nil, err
 	}
 	if req.Resume != "" && req.Resume != "last" {
 		// The conversation may live in a sibling account's home; copy it in
@@ -148,8 +257,7 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		// the request is known to be allowed: a refused one must leave the
 		// target's home as it was.
 		if err := sessions.CopyForResume(st, a, req.Resume); err != nil {
-			s.report(w, r, err)
-			return
+			return nil, err
 		}
 	}
 
@@ -166,79 +274,35 @@ func (s *Server) run(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("could not record this run", "account", a.ID, "err", rerr)
 	}
 	hold.add(func() { _ = run.End() })
-
-	tally := &message.Tally{}
-	if req.Input {
-		// A run that stays open is a different shape of answer: it is streamed
-		// like any other, but it is also addressable while it runs, and it
-		// outlives this request rather than ending with it.
-		s.startInput(w, r, st, a, req, lim, with, tally, run, &hold)
-		return
-	}
-
-	// The events are read whether or not they are sent. Sending them is what
-	// stream asks for; reading them is how the conversation id reaches the
-	// entry above.
-	//
-	// It reaches it while the run is going only for a streamed one. A
-	// buffered run's CLI prints a single document when it is finished, so
-	// there is nothing to read until there is nothing left to say, and the id
-	// arrives as the entry is being taken away. That is the CLIs' shape
-	// rather than rota's, and worth reading here anyway: it costs one pass
-	// that is already being made, and it is right when it can be.
-	watch := newEventWriter(io.Discard, false, a.ID, a.Provider, message.With{}, tally)
-	watch.quiet = true
-	watch.learn = run.Learned
-	out := io.Writer(watch)
-	if streaming {
-		model, effort, _ := rota.Resolved(a, st.Home(a), req.Spec)
-		live := s.startStream(w, r, message.Event{
-			Type: "init", Account: a.ID, Provider: a.Provider,
-			Model: model, Effort: effort, Cwd: req.Cwd, SessionID: req.Resume,
-		}, with, tally)
-		live.learn = run.Learned
-		out = live
-	}
-	// The run ends when the caller goes away, when it times out, or when
-	// the server is stopping — whichever comes first.
-	ctx, cancel := joinContexts(r.Context(), s.ctx)
-	defer cancel()
-	res, err := st.Run(ctx, a, req.Spec, lim, out)
-	s.log.Info("run finished", "account", a.ID, "provider", a.Provider,
-		"stream", streaming, "err", err, "exit", exitOf(res))
-	// What the readings are read from, beyond the result: the stream's
-	// tally, the account, and a fresh quota reading when one was asked for.
-	src := message.Sources{Tally: tally, Account: a, Threshold: rotation.Cutoff(a)}
-	if with.Quota {
-		for _, e := range st.Refresh(ctx, true, a) {
-			s.log.Warn("quota reading failed", "account", a.ID, "err", e)
-		}
-		src.Quota = a.Quota
-	}
-	if streaming {
-		s.endStream(w, r, res, err, with, src)
-		return
-	}
-	switch {
-	case err != nil:
-		s.report(w, r, err)
-	case res.IsError || res.ExitCode != 0:
-		writeJSON(w, http.StatusBadGateway, message.ReplyFor(res, with, src))
-	default:
-		writeJSON(w, http.StatusOK, message.ReplyFor(res, with, src))
-	}
+	ok = true
+	return &prepared{
+		st: st, a: a, req: req, lim: lim, with: with,
+		tally: &message.Tally{}, entry: run, streaming: streaming,
+	}, nil
 }
 
 // startInput starts a run that stays open and streams it to this request.
+func (s *Server) startInput(w http.ResponseWriter, r *http.Request, p *prepared, hold *held) {
+	lr, err := s.beginInput(p, hold)
+	if err != nil {
+		s.report(w, r, err)
+		return
+	}
+	lr.serve(w, r, 0)
+}
+
+// beginInput launches a run that stays open and returns it, with nobody
+// reading it yet: whoever asked for it attaches to it, over a streamed
+// response or over a socket.
 //
 // Two things are deliberately not the request's here. The session's context is
 // the server's, bounded by InputTimeout, never r.Context(): a run that ends
 // when its connection does is exactly what this is not. And what the request
 // took — the slot, the upload directory, the entry saying the run is happening
 // — is handed to the goroutine waiting for the session, because the CLI is
-// still running, still holding the account, when this handler returns.
-func (s *Server) startInput(w http.ResponseWriter, r *http.Request, st *store.Store, a *rota.Account,
-	req *request, lim *rota.Limits, with message.With, tally *message.Tally, entry *sessions.Run, hold *held) {
+// still running, still holding the account, when the handler returns.
+func (s *Server) beginInput(p *prepared, hold *held) (*liveRun, error) {
+	st, a, req, with, tally, entry := p.st, p.a, p.req, p.with, p.tally, p.entry
 	lr := s.newLiveRun(a, with, tally)
 	lr.learn = entry.Learned
 	model, effort, _ := rota.Resolved(a, st.Home(a), req.Spec)
@@ -250,11 +314,10 @@ func (s *Server) startInput(w http.ResponseWriter, r *http.Request, st *store.St
 		SessionID: req.Resume, RunID: lr.id,
 	})
 	ctx, cancel := context.WithTimeout(s.ctx, s.opts.InputTimeout)
-	sess, err := st.Start(ctx, a, req.Spec, lim, lr)
+	sess, err := st.Start(ctx, a, req.Spec, p.lim, lr)
 	if err != nil {
 		cancel()
-		s.report(w, r, err)
-		return
+		return nil, err
 	}
 	lr.sess = sess
 	s.addRun(lr)
@@ -290,7 +353,7 @@ func (s *Server) startInput(w http.ResponseWriter, r *http.Request, st *store.St
 		// tell from a wrong id.
 		time.AfterFunc(keepEnded, func() { s.dropRun(lr.id) })
 	}()
-	lr.serve(w, r, 0)
+	return lr, nil
 }
 
 // held is what a run holds beyond the request that asked for it: the slot in
@@ -571,10 +634,27 @@ func (e *eventWriter) emit(name string, data []byte) error {
 
 func (e *eventWriter) Flush() { flush(e.w) }
 
+// refusal is the server's own no, with the status it is said in: the few
+// refusals that are this package's rather than one of rota's typed kinds.
+// They are errors so that the transports — a JSON response, a socket frame —
+// render one refusal in their own words instead of each writing its own.
+type refusal struct {
+	code int
+	msg  string
+}
+
+func (e *refusal) Error() string { return e.msg }
+
+func refuse(code int, msg string) error { return &refusal{code: code, msg: msg} }
+
 // statusFor maps a library verdict onto HTTP. It matches the typed kinds
 // rota returns, never its wording: an error message is written for a person
 // and may be reworded at any time, while these sentinels are the contract.
 func statusFor(err error) int {
+	var no *refusal
+	if errors.As(err, &no) {
+		return no.code
+	}
 	switch {
 	case err == nil:
 		return http.StatusOK

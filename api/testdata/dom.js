@@ -62,4 +62,18 @@ const mem = () => { const m = {}; return { getItem: k => m[k] ?? null, setItem: 
 globalThis.sessionStorage = mem();
 globalThis.localStorage = mem();
 globalThis.FileReader = class { readAsDataURL() { this.result = "data:,AQI="; this.onload && this.onload(); } };
-module.exports = { doc, nodes, El };
+globalThis.location = { origin: 'http://127.0.0.1:8787' };
+
+// A WebSocket the test drives by hand: it records the URL and the protocols
+// the page asked for and everything the page sent, and open/feed/close are how
+// a test plays the server's side of it.
+const sockets = [];
+class WS {
+  constructor(url, protocols) { this.url = url; this.protocols = protocols; this.sent = []; sockets.push(this); }
+  send(data) { this.sent.push(data); }
+  open() { this.onopen && this.onopen({}); }
+  feed(doc) { this.onmessage && this.onmessage({ data: typeof doc === 'string' ? doc : JSON.stringify(doc) }); }
+  close() { this.onclose && this.onclose({}); }
+}
+globalThis.WebSocket = WS;
+module.exports = { doc, nodes, El, sockets };
