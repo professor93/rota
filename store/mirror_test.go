@@ -18,7 +18,7 @@ import (
 func claudeWorld(t *testing.T) string {
 	t.Helper()
 	src := t.TempDir()
-	for _, name := range []string{"projects", "skills", "plugins", "daemon"} {
+	for _, name := range []string{"projects", "skills", "plugins", "daemon", "sessions"} {
 		if err := os.Mkdir(filepath.Join(src, name), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -111,7 +111,7 @@ func TestAClaudeAccountRunsInAMirrorOfTheSharedWorld(t *testing.T) {
 	// Settings, memory and conversations are shared; the daemon's state, and
 	// a credential store rota has no business in, are not.
 	linksTo(t, filepath.Join(dst, ".claude.json"), filepath.Join(src, ".claude.json"))
-	for _, name := range []string{"daemon", "daemon.lock", "daemon.log", "daemon.status.json", "daemon-auth-cooldown", ".credentials.json", ".DS_Store"} {
+	for _, name := range []string{"daemon", "daemon.lock", "daemon.log", "daemon.status.json", "daemon-auth-cooldown", ".credentials.json", ".DS_Store", "sessions"} {
 		absent(t, filepath.Join(dst, name))
 	}
 }

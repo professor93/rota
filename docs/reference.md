@@ -1156,14 +1156,19 @@ So every claude account gets a configuration directory of its own:
 `~/.rota/homes/claude-<id>`, kept as a mirror of `~/.claude` — or of whatever
 `CLAUDE_CONFIG_DIR` already named — with a symlink to every entry and one to
 `~/.claude.json`, refreshed on every launch.
-Everything is shared except the `daemon*` files and `.credentials.json`, which
-stay the account's own. Claude Code writes through the links, so the account
-keeps your settings, memory, skills, plugins, trust decisions and history,
-files its transcripts where they always went, and sees and resumes the same
-old sessions. What it does not share is the daemon: it starts one for that
-directory, and that one inherits the account's token. `/status` inside it
-reports `Auth token: CLAUDE_CODE_OAUTH_TOKEN`, and `ROTA_ACCOUNT` names the
-account for a status line.
+Everything is shared except the `daemon*` files, `.credentials.json` and
+`sessions/`, which stay the account's own. Claude Code writes through the
+links, so the account keeps your settings, memory, skills, plugins, trust
+decisions and history, files its transcripts where they always went, and
+resumes the same old conversations. What it does not share is the daemon: it
+starts one for that directory, and that one inherits the account's token.
+`/status` inside it reports `Auth token: CLAUDE_CODE_OAUTH_TOKEN`, and
+`ROTA_ACCOUNT` names the account for a status line. `sessions/` is the
+registry of live sessions — each process's socket and the key that opens it
+— and is kept apart for the same reason as the daemon: shared, it would let
+a window of one account attach to a session another account's daemon hosts,
+and pay for it. So the agent view under an account lists that account's
+background sessions, and no other's.
 
 Three things worth knowing:
 

@@ -131,13 +131,22 @@ func (s *Store) mirrorClaude(a *rota.Account) (string, error) {
 // `.credentials.json` is where some platforms keep the CLI's own login, and
 // rota hands credentials to Claude Code through the environment and never
 // through a vendor's credential store: an account must not be reading the
-// person's. `.claude.json` is dealt with on its own, and `.DS_Store` is
-// noise a file manager leaves behind.
+// person's. `sessions/` is the live-session registry and its socket keys,
+// which is how one account would reach another's daemon. `.claude.json` is
+// dealt with on its own, and `.DS_Store` is noise a file manager leaves
+// behind.
 func sharedWithClaude(name string) bool {
 	switch {
 	case strings.HasPrefix(name, "daemon"):
 		return false
 	case name == ".credentials.json", name == ".claude.json", name == ".DS_Store":
+		return false
+	case name == "sessions":
+		// The registry of live sessions: one record per process with its
+		// socket path, and the key that opens it. Shared, it would let a
+		// window of one account attach to a session another account's
+		// daemon is hosting — and pay for it. Conversations themselves live
+		// in projects/, which is shared, so resuming loses nothing.
 		return false
 	}
 	return true
