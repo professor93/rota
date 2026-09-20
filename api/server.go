@@ -594,8 +594,8 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 }
 
 // patchAccount changes what a caller may change about an account: its place
-// in the rotation, the usage at which the rotation moves past it, and its
-// project directories.
+// in the rotation, the usage at which the rotation moves past it, its
+// project directories, and where its conversations live.
 //
 // All are optional, and all are rejected rather than clamped when they cannot
 // mean anything: a threshold of 300 means the caller believes something that
@@ -612,13 +612,14 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		Threshold *int           `json:"threshold"`
 		Cwd       *string        `json:"cwd"`
 		ConfigDir *string        `json:"config_dir"`
+		Sessions  *string        `json:"sessions"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if body.Order == nil && body.Threshold == nil && body.Cwd == nil && body.ConfigDir == nil {
-		fail(w, http.StatusBadRequest, "nothing to change: send order, threshold, cwd or config_dir")
+	if body.Order == nil && body.Threshold == nil && body.Cwd == nil && body.ConfigDir == nil && body.Sessions == nil {
+		fail(w, http.StatusBadRequest, "nothing to change: send order, threshold, cwd, config_dir or sessions")
 		return
 	}
 	var place rotation.Place
@@ -653,6 +654,14 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 	if body.ConfigDir != nil {
 		want.ConfigDir = *body.ConfigDir
 	}
+	if body.Sessions != nil {
+		// The same three answers the command line takes — shared, own, or a
+		// directory — read the same way, and a directory judged by the same
+		// rules as config_dir below: rota creates folders there and links to
+		// them, so a caller who could name one outside them could have rota
+		// write where the server was told not to.
+		want.Sessions = wire.Sessions(*body.Sessions)
+	}
 	if err := want.CheckProject(); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
@@ -671,7 +680,7 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	a.Cwd, a.ConfigDir = want.Cwd, want.ConfigDir
+	a.Cwd, a.ConfigDir, a.Sessions = want.Cwd, want.ConfigDir, want.Sessions
 	if body.Threshold != nil {
 		a.Threshold = *body.Threshold
 	}

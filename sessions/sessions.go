@@ -47,20 +47,34 @@ type Session struct {
 // would mean reading every megabyte of every conversation.
 const maxHeader = 64
 
-// ConfigHome is where an account's CLI keeps its own files, and whether that
-// place is shared with anyone else.
+// ConfigHome is where an account's conversations are, and whether that place
+// is shared with anyone else.
 //
-// An account told where it belongs keeps everything there. One that was not
-// depends on its provider: codex, grok and kimi are always launched with a
-// private CODEX_HOME, GROK_HOME or KIMI_CODE_HOME, so the staged directory is
-// theirs alone. Claude Code is only pointed at one when the account names it,
-// and otherwise reads the person's own — which every other such account reads
-// too, so nothing found there belongs to any single account.
+// A claude account says where they go. One that names a directory keeps them
+// there, wherever its configuration lives — several accounts may name the
+// same one, and a scan reads such a folder once rather than filing the same
+// conversations under each of them. One that keeps them to itself has them
+// in its own home, as real entries among the mirror's links. One that says
+// neither reads the person's own directory, which every other such account
+// reads too, so nothing found there belongs to any single account.
+//
+// Failing all that it is the account's home: an account told where it
+// belongs keeps everything there, and codex, grok and kimi are always
+// launched with a private CODEX_HOME, GROK_HOME or KIMI_CODE_HOME, so the
+// staged directory is theirs alone.
 func ConfigHome(a *rota.Account, staged string) (dir string, shared bool) {
+	claude := rota.Flavor(a.Provider) == "claude"
+	if claude {
+		// Cleaned, so two accounts that name one folder differently still
+		// name one folder, and the scan does not count it twice.
+		if dir := a.SessionsDir(); dir != "" {
+			return filepath.Clean(dir), false
+		}
+	}
 	if a.ConfigDir != "" {
 		return a.ConfigDir, false
 	}
-	if rota.Flavor(a.Provider) != "claude" {
+	if !claude || a.Sessions == rota.SessionsOwn {
 		return staged, false
 	}
 	if own := os.Getenv("CLAUDE_CONFIG_DIR"); own != "" {

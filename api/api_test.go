@@ -353,6 +353,43 @@ func TestAnAccountCanBeTiedToAProjectOverHTTP(t *testing.T) {
 	}
 }
 
+// Where an account's conversations live is set over HTTP the same way and
+// in the same words as on the command line, and comes back in the account.
+func TestWhereConversationsLiveIsSetOverHTTP(t *testing.T) {
+	h := newHarness(t, Options{})
+	read := func(raw []byte) wire.Account {
+		t.Helper()
+		var got wire.Account
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"sessions": "own"})
+	if resp.StatusCode != 200 || read(raw).Sessions != "own" {
+		t.Fatalf("own: %d %s", resp.StatusCode, raw)
+	}
+	folder := filepath.Join(h.root, "threads")
+	resp, raw = h.do("PATCH", "/v1/accounts/1", map[string]any{"sessions": folder})
+	if resp.StatusCode != 200 || read(raw).Sessions != folder {
+		t.Fatalf("a folder: %d %s", resp.StatusCode, raw)
+	}
+	resp, raw = h.do("PATCH", "/v1/accounts/1", map[string]any{"sessions": "shared"})
+	if resp.StatusCode != 200 || read(raw).Sessions != "" {
+		t.Fatalf("shared is the default and stores nothing: %d %s", resp.StatusCode, raw)
+	}
+	// No other CLI keeps its conversations where rota could move them.
+	if resp, raw := h.do("PATCH", "/v1/accounts/2", map[string]any{"sessions": "own"}); resp.StatusCode != 400 ||
+		!strings.Contains(string(raw), "Claude Code") {
+		t.Fatalf("codex: %d %s", resp.StatusCode, raw)
+	}
+	// And an empty body still says what may be sent.
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{}); resp.StatusCode != 400 ||
+		!strings.Contains(string(raw), "sessions") {
+		t.Fatalf("nothing to change: %d %s", resp.StatusCode, raw)
+	}
+}
+
 // A run that names no directory of its own starts in the account's.
 func TestARunStartsInTheAccountsOwnProject(t *testing.T) {
 	h := newHarness(t, Options{})

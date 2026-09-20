@@ -39,6 +39,36 @@ func TestAConfigDirInsideRotasOwnDirectoriesIsRefused(t *testing.T) {
 	}
 }
 
+// A conversation folder is judged by the same rule, and has to be: rota
+// creates directories there and links to them. Its own home is not excused
+// either — the links inside it would point at themselves.
+func TestAConversationFolderInsideRotasOwnDirectoriesIsRefused(t *testing.T) {
+	s := openTemp(t)
+	a := s.add("claude")
+	b := s.add("claude")
+	for _, dir := range []string{s.Home(a), s.Home(b), s.Backend().HomeRoot(), storeDir(s)} {
+		a.Sessions = dir
+		if err := s.CheckHome(a); !errors.Is(err, rota.ErrInvalidRequest) {
+			t.Errorf("%s must be refused as rota's own, got %v", dir, err)
+		}
+	}
+	root := t.TempDir()
+	a.Sessions = filepath.Join(root, "threads")
+	if err := s.CheckHome(a, root); err != nil {
+		t.Fatalf("inside a root: %v", err)
+	}
+	if err := s.CheckHome(a, t.TempDir()); !errors.Is(err, rota.ErrOutsideRoots) {
+		t.Fatalf("outside every root must be refused, got %v", err)
+	}
+	// The words are not paths and are never judged as any.
+	for _, v := range []string{"", rota.SessionsOwn} {
+		a.Sessions = v
+		if err := s.CheckHome(a, root); err != nil {
+			t.Fatalf("%q must be allowed: %v", v, err)
+		}
+	}
+}
+
 // A link is judged by where it points, even when the last part of the path
 // does not exist yet: the sibling's home may not have been created.
 func TestAConfigDirLinkedIntoRotasOwnDirectoriesIsRefused(t *testing.T) {

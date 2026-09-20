@@ -51,8 +51,35 @@ type Account struct {
 	// directory for the CLIs that keep a home, and the person's own
 	// ~/.claude for Claude Code, which is shared until it is told otherwise.
 	ConfigDir string `json:"config_dir,omitempty"`
-	Quota     *Quota `json:"quota,omitempty"`
-	QuotaAt   int64  `json:"quotaAt,omitzero"` // unix ms of last quota fetch
+	// Sessions is where this account's conversations live, for a CLI that
+	// keeps them in its configuration directory. Empty is the default and
+	// means shared — whatever the application already gives the account,
+	// which for Claude Code is the person's own directory. SessionsOwn
+	// keeps them to the account alone, and any other value is the
+	// directory they belong in, which several accounts may name to share
+	// their conversations with each other and nobody else.
+	//
+	// This package does nothing with it. Where transcripts are filed is a
+	// layout of the vendor's the application arranges around the SDK, the
+	// way it arranges the home a credential is staged in; all that is
+	// settled here is what the setting says.
+	Sessions string `json:"sessions,omitempty"`
+	Quota    *Quota `json:"quota,omitempty"`
+	QuotaAt  int64  `json:"quotaAt,omitzero"` // unix ms of last quota fetch
+}
+
+// SessionsOwn is the Sessions value for an account that keeps its
+// conversations to itself rather than sharing them.
+const SessionsOwn = "own"
+
+// SessionsDir is the directory this account was told to keep its
+// conversations in, or "" when it was told no directory — which covers both
+// the shared default and SessionsOwn, neither of which names a place.
+func (a *Account) SessionsDir() string {
+	if a.Sessions == "" || a.Sessions == SessionsOwn {
+		return ""
+	}
+	return a.Sessions
 }
 
 // Label is the account's display name: email, else a uuid prefix, else id.
@@ -138,15 +165,22 @@ const stagedNone = "-"
 
 // CheckProject refuses a project setting that would go wrong quietly.
 //
-// Both directories are resolved by whatever started the process, so a
+// Every directory here is resolved by whatever started the process, so a
 // relative one means a different place depending on where rota was launched
 // from — and for a server, an unpredictable place to keep credentials. The
 // config directory is also where a credential file is written, so it must
 // not be the project itself: a token in a repository is a token in a commit.
+// And a setting no provider but Claude Code has is refused rather than
+// stored: an account that kept it would be told something it cannot obey.
 func (a *Account) CheckProject() error {
+	if a.Sessions != "" && Flavor(a.Provider) != "claude" {
+		return failf(ErrInvalidRequest,
+			"sessions is Claude Code's setting: a %s account keeps its conversations in the home its CLI is given", a.Provider)
+	}
 	for _, d := range []struct{ what, path string }{
 		{"config_dir", a.ConfigDir},
 		{"cwd", a.Cwd},
+		{"sessions", a.SessionsDir()},
 	} {
 		if d.path != "" && !filepath.IsAbs(d.path) {
 			return failf(ErrInvalidRequest, "%s must be an absolute path, got %q", d.what, d.path)

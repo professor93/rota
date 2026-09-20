@@ -122,8 +122,8 @@ func (s *Store) owns(a *rota.Account) bool {
 	return a.ConfigDir == "" || realDir(a.ConfigDir) == realDir(s.ownHome(a))
 }
 
-// CheckHome refuses a ConfigDir that would put this account inside rota's
-// own directories, and — given roots — one outside all of them.
+// CheckHome refuses a directory an account names that would put it inside
+// rota's own directories, and — given roots — one outside all of them.
 //
 // A run stages the account's credential into its ConfigDir, so a caller who
 // could name a sibling's home would have that sibling's credential written
@@ -132,14 +132,35 @@ func (s *Store) owns(a *rota.Account) bool {
 // account's own default home is allowed, being the same place as no
 // ConfigDir at all. Links are followed, so a path that merely points into
 // these directories is refused too.
+//
+// A conversation directory is judged by the same rule, and has to be: rota
+// creates folders there and links to them, so a caller who could name one
+// could make rota write into a home that is not this account's. Its own
+// home is not excused here — the links would then point at themselves.
 func (s *Store) CheckHome(a *rota.Account, roots ...string) error {
-	if a.ConfigDir == "" {
-		return nil
+	for _, d := range []struct {
+		what, path string
+		ownAllowed bool
+	}{
+		{"config_dir", a.ConfigDir, true},
+		{"sessions", a.SessionsDir(), false},
+	} {
+		if d.path == "" {
+			continue
+		}
+		if err := s.checkDir(a, d.what, d.path, d.ownAllowed, roots); err != nil {
+			return err
+		}
 	}
-	dir := realDir(a.ConfigDir)
+	return nil
+}
+
+func (s *Store) checkDir(a *rota.Account, what, path string, ownAllowed bool, roots []string) error {
+	dir := realDir(path)
 	homes := realDir(s.backend.HomeRoot())
-	if (within(homes, dir) && dir != realDir(s.ownHome(a))) || within(dir, filepath.Dir(homes)) {
-		return rota.Invalid("config_dir %q: that directory is rota's own", a.ConfigDir)
+	own := ownAllowed && dir == realDir(s.ownHome(a))
+	if (within(homes, dir) && !own) || within(dir, filepath.Dir(homes)) {
+		return rota.Invalid("%s %q: that directory is rota's own", what, path)
 	}
 	if len(roots) == 0 {
 		return nil
@@ -149,7 +170,7 @@ func (s *Store) CheckHome(a *rota.Account, roots ...string) error {
 			return nil
 		}
 	}
-	return fmt.Errorf("%w: config_dir %q", rota.ErrOutsideRoots, a.ConfigDir)
+	return fmt.Errorf("%w: %s %q", rota.ErrOutsideRoots, what, path)
 }
 
 // realDir is where a path leads once every link in it is followed, for as

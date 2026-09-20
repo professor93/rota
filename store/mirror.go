@@ -6,10 +6,36 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	rota "github.com/professor93/rota/lib"
 )
+
+// conversationState is every entry of a Claude Code directory that a
+// conversation is keyed by or derived from: the transcripts themselves, the
+// file edits, todos and tasks filed under a session id, the environment and
+// jobs a session left behind, the pastes and shell snapshots it referred to,
+// and the prompt history. Moving conversations means moving all of it —
+// transcripts alone would resume into a session whose edits and todos were
+// somewhere else.
+//
+// Everything outside this list is settings, memory, skills and plugins, and
+// follows the general rule instead. Claude Code's own `sessions/` is not
+// here and never will be: it is the registry of live processes and their
+// socket keys, not conversations, and it stays each account's own in every
+// mode. See sharedWithClaude.
+var conversationState = []string{
+	"projects", "file-history", "todos", "session-env", "tasks",
+	"jobs", "teams", "paste-cache", "shell-snapshots", conversationHistory,
+}
+
+// conversationHistory is the one entry of conversationState that is a file
+// rather than a directory.
+const conversationHistory = "history.jsonl"
+
+// keepsConversations reports whether an entry is one of those.
+func keepsConversations(name string) bool { return slices.Contains(conversationState, name) }
 
 // mirrorClaude builds or refreshes an account's own view of the person's
 // Claude Code configuration, and returns the directory to run it in. An
@@ -35,18 +61,34 @@ import (
 // be shared: the `daemon*` files, which are the state this whole exercise
 // separates, and `.credentials.json`, a vendor credential store rota never
 // reads or writes.
+//
+// Where the conversations themselves go is a setting of the account's, and
+// the only part of this that is: shared through the links by default, kept
+// in the account's own home when it says `own`, and in a directory it names
+// when it names one. The refresh converges on whatever the setting says
+// now, so changing it re-points the links on the next launch.
 func (s *Store) mirrorClaude(a *rota.Account) (string, error) {
-	if a.Provider != "claude" || a.ConfigDir != "" {
-		// An account told where its configuration lives was given a world of
-		// its own deliberately, and lib already points the CLI at it. Adding
-		// a mirror would be a second CLAUDE_CONFIG_DIR and a second answer.
+	if a.Provider != "claude" {
 		return "", nil
+	}
+	if a.ConfigDir != "" {
+		// An account told where its configuration lives was given a world of
+		// its own deliberately, and lib already points the CLI at it: a
+		// mirror would be a second CLAUDE_CONFIG_DIR and a second answer.
+		// The one thing still arranged there is a conversation directory the
+		// account was told to keep its transcripts in, which is a choice
+		// about this account rather than about the world it reads.
+		return a.ConfigDir, s.placeConversations(a, a.ConfigDir)
 	}
 	src, srcJSON := claudeConfigSource()
 	dst := s.ownHome(a)
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		return dst, err
 	}
+	// want is the target every name in the mirror should be a link to.
+	// Nothing else may be there, which is what makes a change of setting
+	// take effect: a link the mirror no longer wants is one it removes.
+	want := map[string]string{}
 	// Nothing to mirror is not a failure: Claude Code makes itself a fresh
 	// world in the directory, which is what it would have done in the
 	// missing one. A source that is there but is not a directory is another
@@ -54,79 +96,181 @@ func (s *Store) mirrorClaude(a *rota.Account) (string, error) {
 	// platform: Windows reports reading a file as a directory as "not
 	// found", which would otherwise pass for the harmless case.
 	info, err := os.Stat(src)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return dst, nil
-		}
+	switch {
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
 		return dst, err
-	}
-	if !info.IsDir() {
+	case err == nil && !info.IsDir():
 		return dst, fmt.Errorf("%s is not a directory", src)
+	case err == nil:
+		entries, err := os.ReadDir(src)
+		if err != nil {
+			return dst, err
+		}
+		// Conversations come from the person's directory only while they are
+		// shared. An account keeping its own has no link to them at all, and
+		// Claude Code makes the entries it needs inside the mirror itself.
+		shared := a.Sessions == ""
+		for _, e := range entries {
+			name := e.Name()
+			if !sharedWithClaude(name) || (!shared && keepsConversations(name)) {
+				continue
+			}
+			want[name] = filepath.Join(src, name)
+		}
+		// .claude.json is the one file that does not live inside the
+		// directory unless CLAUDE_CONFIG_DIR says so, and it is the one
+		// holding trust decisions, project history and the identity the CLI
+		// shows.
+		if _, err := os.Stat(srcJSON); err == nil {
+			want[".claude.json"] = srcJSON
+		}
 	}
-	entries, err := os.ReadDir(src)
+	if dir := a.SessionsDir(); dir != "" {
+		if err := makeConversationState(dir); err != nil {
+			return dst, err
+		}
+		for _, name := range conversationState {
+			want[name] = filepath.Join(dir, name)
+		}
+	}
+	blocked, err := relink(dst, want, func(string) bool { return true })
 	if err != nil {
 		return dst, err
 	}
-	have, err := os.ReadDir(dst)
-	if err != nil {
-		return dst, err
+	s.sayConversationsStay(a, dst, blocked)
+	return dst, nil
+}
+
+// placeConversations arranges only the conversation entries of a directory
+// the person chose, for an account that names both a configuration
+// directory and somewhere else to keep its transcripts. Nothing else in
+// there is rota's to touch: it is the account's own world, not a mirror.
+func (s *Store) placeConversations(a *rota.Account, home string) error {
+	dir := a.SessionsDir()
+	if dir == "" {
+		return nil
 	}
-	// What is already here is never replaced, link or not: the account's
-	// staged credential, its run lock, and anything Claude Code wrote here
-	// itself are its own, and a mirror that overwrote them would be handing
-	// one account's files to another.
+	if err := makeConversationState(dir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		return err
+	}
+	want := make(map[string]string, len(conversationState))
+	for _, name := range conversationState {
+		want[name] = filepath.Join(dir, name)
+	}
+	blocked, err := relink(home, want, keepsConversations)
+	if err != nil {
+		return err
+	}
+	s.sayConversationsStay(a, home, blocked)
+	return nil
+}
+
+// sayConversationsStay reports the conversations an account already has of
+// its own where a link was meant to go. They are left exactly as they are:
+// entries rota did not make are the account's, and replacing them would be
+// losing somebody's work to a setting. The person is told which they are, so
+// they can move them aside and mean it.
+func (s *Store) sayConversationsStay(a *rota.Account, dir string, blocked []string) {
+	var mine []string
+	for _, name := range blocked {
+		if keepsConversations(name) {
+			mine = append(mine, name)
+		}
+	}
+	if len(mine) == 0 || s.Warn == nil {
+		return
+	}
+	s.Warn(fmt.Sprintf("%s already has %s of its own in %s, so its conversations stay there; "+
+		"move them aside for the account to read them from elsewhere",
+		a, strings.Join(mine, ", "), dir))
+}
+
+// relink makes the links in dir say what want says, and returns the names it
+// could not because a real entry of the account's own is in the way.
+//
+// Only names governs allows are considered, so a directory rota merely keeps
+// a corner of is not swept. A link there is always rota's own work and
+// answers to want: one pointing somewhere want does not say, or carrying a
+// name want no longer holds at all, goes — a name no longer shared, a file
+// the person deleted, a setting that changed since. A real entry is the
+// account's and is never removed or replaced.
+func relink(dir string, want map[string]string, governs func(string) bool) ([]string, error) {
+	have, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
 	mine := make(map[string]fs.DirEntry, len(have))
 	for _, e := range have {
 		mine[e.Name()] = e
 	}
-	link := func(from, name string) error {
-		if _, ok := mine[name]; ok {
-			return nil
-		}
-		err := os.Symlink(from, filepath.Join(dst, name))
-		if err != nil && errors.Is(err, fs.ErrExist) {
-			// Another run of the same account got there between the listing
-			// and now. It wrote the same link; there is nothing to correct.
-			return nil
-		}
-		return err
-	}
-	for _, e := range entries {
-		if !sharedWithClaude(e.Name()) {
-			continue
-		}
-		if err := link(filepath.Join(src, e.Name()), e.Name()); err != nil {
-			return dst, err
-		}
-	}
-	// .claude.json is the one file that does not live inside the directory
-	// unless CLAUDE_CONFIG_DIR says so, and it is the one holding trust
-	// decisions, project history and the identity the CLI shows.
-	if _, err := os.Stat(srcJSON); err == nil {
-		if err := link(srcJSON, ".claude.json"); err != nil {
-			return dst, err
-		}
-	}
-	// An entry the person deleted from their own directory would linger here
-	// as a link to nothing, which Claude Code reads as a broken file rather
-	// than as an absent one. A link for a name this package has since
-	// stopped sharing would linger too, made by an older rota and still
-	// pointing at the person's file. Both go. Only links are ever removed:
-	// a link here is rota's own work, a real entry is the account's.
 	for name, e := range mine {
-		if e.Type()&fs.ModeSymlink == 0 {
+		if e.Type()&fs.ModeSymlink == 0 || !governs(name) {
 			continue
 		}
-		p := filepath.Join(dst, name)
-		if name != ".claude.json" && !sharedWithClaude(name) {
+		p := filepath.Join(dir, name)
+		target, wanted := want[name]
+		if got, err := os.Readlink(p); !wanted || err != nil || got != target {
 			_ = os.Remove(p)
+			delete(mine, name)
 			continue
 		}
+		// An entry that went away since leaves a link to nothing, which
+		// Claude Code reads as a broken file rather than as an absent one.
 		if _, err := os.Stat(p); errors.Is(err, fs.ErrNotExist) {
 			_ = os.Remove(p)
+			delete(mine, name)
 		}
 	}
-	return dst, nil
+	var blocked []string
+	for name, target := range want {
+		if !governs(name) {
+			continue
+		}
+		if e, ok := mine[name]; ok {
+			if e.Type()&fs.ModeSymlink == 0 {
+				blocked = append(blocked, name)
+			}
+			continue
+		}
+		err := os.Symlink(target, filepath.Join(dir, name))
+		if err != nil && !errors.Is(err, fs.ErrExist) {
+			// fs.ErrExist alone is forgiven: another run of the same account
+			// got there between the listing and now, and wrote the same link.
+			return blocked, err
+		}
+	}
+	slices.Sort(blocked)
+	return blocked, nil
+}
+
+// makeConversationState makes sure a directory an account was told to keep
+// its conversations in is ready to be linked to.
+//
+// The entries have to exist first. A link to nothing is pruned on the next
+// refresh, and Claude Code cannot create a directory through one either: it
+// would file the first conversation of a fresh folder nowhere.
+func makeConversationState(dir string) error {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	for _, name := range conversationState {
+		if name == conversationHistory {
+			continue
+		}
+		if err := os.MkdirAll(filepath.Join(dir, name), 0o700); err != nil {
+			return err
+		}
+	}
+	// O_CREATE without O_TRUNC: a history that is already there is somebody's
+	// prompts, and this runs on every launch.
+	f, err := os.OpenFile(filepath.Join(dir, conversationHistory), os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	return f.Close()
 }
 
 // sharedWithClaude reports whether one entry of the person's Claude Code
@@ -153,7 +297,8 @@ func sharedWithClaude(name string) bool {
 		// socket path, and the key that opens it. Shared, it would let a
 		// window of one account attach to a session another account's
 		// daemon is hosting — and pay for it. Conversations themselves live
-		// in projects/, which is shared, so resuming loses nothing.
+		// in projects/, which is shared unless the account says otherwise,
+		// so resuming loses nothing.
 		return false
 	}
 	return true

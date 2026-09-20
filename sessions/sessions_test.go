@@ -46,6 +46,24 @@ func TestConfigHomeSaysWhoOwnsWhatIsFound(t *testing.T) {
 	if dir != "/rota/homes/codex-3" || shared {
 		t.Fatalf("codex is always given a private home: %q %v", dir, shared)
 	}
+
+	// A claude account keeping its conversations to itself has them in its
+	// own home, among the mirror's links, and owns them.
+	dir, shared = ConfigHome(&rota.Account{ID: 1, Provider: "claude", Sessions: rota.SessionsOwn}, staged)
+	if dir != staged || shared {
+		t.Fatalf("its own home, and nobody else's: %q %v", dir, shared)
+	}
+	// One pointed at a folder has them there, wherever its configuration is.
+	for _, a := range []*rota.Account{
+		{ID: 1, Provider: "claude", Sessions: "/srv/threads/"},
+		{ID: 2, Provider: "claude", Sessions: "/srv/threads", ConfigDir: "/srv/api"},
+	} {
+		// Cleaned, so two accounts naming one folder name one folder and a
+		// scan does not count it twice.
+		if dir, shared = ConfigHome(a, staged); dir != "/srv/threads" || shared {
+			t.Fatalf("#%d: the folder it was pointed at: %q %v", a.ID, dir, shared)
+		}
+	}
 }
 
 // Claude Code keeps one directory per project and one file per conversation.

@@ -48,9 +48,12 @@ type Account struct {
 	Percent   float64 `json:"percent"`
 	// Cwd and ConfigDir are the project this account is tied to, if any:
 	// where its runs start, and where its own memory, skills and credentials
-	// live. Absent means neither has been chosen.
+	// live. Absent means neither has been chosen. Sessions is where its
+	// conversations live — absent means shared, "own" means its home alone,
+	// anything else is the directory they are kept in.
 	Cwd       string `json:"cwd,omitempty"`
 	ConfigDir string `json:"config_dir,omitempty"`
+	Sessions  string `json:"sessions,omitempty"`
 	// Metered says whether this provider publishes a usage endpoint at all.
 	// When it does not, there are no limits to report and no check to make.
 	Metered bool `json:"metered"`
@@ -91,11 +94,30 @@ func LoginProviders() []string {
 	return out
 }
 
+// Sessions reads what somebody said about where an account's conversations
+// go as the value the account stores: `shared` is the default and stores
+// nothing, `own` keeps them to the account, and anything else is the
+// directory itself, returned exactly as it was given.
+//
+// Making a path absolute is deliberately left to the surface that took it.
+// A relative path on a command line means the directory the person is
+// standing in, and over HTTP it means a directory on the server nobody sent
+// it can see, which is why one is resolved and the other refused.
+func Sessions(v string) string {
+	switch v {
+	case "", "shared":
+		return ""
+	case rota.SessionsOwn:
+		return rota.SessionsOwn
+	}
+	return v
+}
+
 // Describe renders an account for display. It does no network calls.
 func Describe(a *rota.Account) Account {
 	v := Account{ID: a.ID, Provider: a.Provider, Email: a.Email, UUID: a.UUID, Status: a.Status(),
 		Metered: rota.Metered(a.Provider), Order: a.Order, Threshold: a.Threshold, Percent: a.Percent(),
-		Cwd: a.Cwd, ConfigDir: a.ConfigDir, DeadReason: a.DeadReason}
+		Cwd: a.Cwd, ConfigDir: a.ConfigDir, Sessions: a.Sessions, DeadReason: a.DeadReason}
 	if a.QuotaAt > 0 {
 		t := time.UnixMilli(a.QuotaAt)
 		v.CheckedAt = t.UTC().Format(time.RFC3339)

@@ -169,6 +169,7 @@ rota set 2 --order 1          # put account 2 first in the queue (0 = out of it)
 rota set 2 --threshold 80     # move on to the next account at 80% usage
 rota set 2                    # what account 2 is set to
 rota set 2 --cwd ~/src/api --config ~/.rota/api-memory
+rota set 2 --sessions own     # its conversations are nobody else's (shared by default)
 rota login 6                  # sign in an account whose CLI keeps its own credentials
 rota remove 2 5               # forget accounts, and the homes rota made for them
 rota serve 8787 --token=T     # serve the HTTP API and its playground
@@ -315,7 +316,7 @@ the command line still refreshes what it is about to use.
 | `GET` | `/v1/ws` | a WebSocket that starts a run on whichever account the rotation picks and carries it both ways |
 | `GET` | `/v1/accounts/{id}/ws` | the same, on that account |
 | `GET` | `/v1/runs/{id}/ws` | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
-| `PATCH` | `/v1/accounts/{id}` | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api"}` — its place in the rotation, when to move on, and where it belongs |
+| `PATCH` | `/v1/accounts/{id}` | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own"}` — its place in the rotation, when to move on, where it belongs, and where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is) |
 | `DELETE` | `/v1/accounts/{id}` | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays |
 | `POST` | `/v1/login` | `{"provider":"claude"}` → `{id, url, kind}` |
 | `POST` | `/v1/login/{id}` | `{"code":"..."}` → the account, or `{"status":"pending"}` |
@@ -844,7 +845,9 @@ skills and settings — and the private home its credentials are staged in.
 Unset, codex, grok and kimi still get a private home of rota's own, and
 Claude Code reads the person's own `~/.claude` through a mirror of it — the
 same files, a daemon of its own — which is right until an account is meant
-for one project.
+for one project. `--sessions shared|own|<dir>` says where a claude account's
+conversations live within all this; see [One Claude world, one daemon per
+account](#one-claude-world-one-daemon-per-account).
 
 The two must not be the same directory: the config directory is where a
 credential file is written, and a working directory is a repository someone
@@ -854,7 +857,10 @@ one of rota's own: another account's home is where that account's credential
 is staged, and the store is where every refresh token is kept, so both `rota
 set` and `PATCH` refuse them, links followed. A server given `--root` still
 wins; an account cannot be pointed somewhere the server was told to stay
-out of, and a `config_dir` outside every root is refused when it is set.
+out of, and a `config_dir` outside every root is refused when it is set. A
+`sessions` directory is judged by both rules and for the same reason: rota
+creates folders there and links to them, so a caller who could name one
+anywhere could have rota writing where the server was told not to.
 
 ### The playground
 
@@ -1157,7 +1163,8 @@ So every claude account gets a configuration directory of its own:
 `CLAUDE_CONFIG_DIR` already named — with a symlink to every entry and one to
 `~/.claude.json`, refreshed on every launch.
 Everything is shared except the `daemon*` files, `.credentials.json` and
-`sessions/`, which stay the account's own. Claude Code writes through the
+`sessions/`, which stay the account's own — and the conversations, which are
+shared until the account says otherwise. Claude Code writes through the
 links, so the account keeps your settings, memory, skills, plugins, trust
 decisions and history, files its transcripts where they always went, and
 resumes the same old conversations. What it does not share is the daemon: it
@@ -1187,6 +1194,58 @@ Three things worth knowing:
   daemon files included, is the account's own and is never linked back. If
   there is no `~/.claude` to mirror yet, the account simply starts with a
   fresh one.
+
+#### Where the conversations live
+
+Sharing the conversations is the useful default and not the only answer, so
+it is a setting:
+
+```sh
+rota set 2 --sessions own          # this account's conversations are its own
+rota set 2 --sessions ~/work/chats # or they live here — as may another account's
+rota set 2 --sessions shared       # back to the default
+```
+
+| `--config` | `--sessions` | where the conversations are |
+| --- | --- | --- |
+| unset | unset | your own Claude Code directory, through the mirror's links: every account sees and resumes every conversation |
+| unset | `own` | the account's own home, as real folders among the links — nobody else reads them |
+| unset | a directory | that directory, linked into the mirror |
+| set | unset or `own` | wherever that directory keeps them, which is Claude Code's own behaviour; rota touches nothing |
+| set | a directory | that directory, linked inside the one you chose |
+
+What moves is a fixed set of entries: `projects`, `file-history`, `todos`,
+`session-env`, `tasks`, `jobs`, `teams`, `paste-cache`, `shell-snapshots`
+and `history.jsonl`. Those are the things a conversation is keyed by or
+derived from — transcripts alone would resume into a session whose edits and
+todos had stayed behind. Everything else in the directory is settings,
+memory, skills and plugins, and goes on being shared whatever this says.
+Claude Code's own `sessions/` is a different thing entirely: the registry of
+live processes and their socket keys, never shared in any mode.
+
+The setting can be changed at any time, and the next launch converges on it:
+links are re-pointed, links the new mode does not want are removed, and a
+directory the account was pointed at is created before anything is linked to
+it. What is never touched is a real entry — conversations an account made
+while keeping them to itself stay exactly where they are, and rota says so
+rather than replacing them:
+
+```
+warning: claude/you@example.com already has projects of its own in
+/Users/you/.rota/homes/claude-2, so its conversations stay there; move them
+aside for the account to read them from elsewhere
+```
+
+Give one directory to several accounts and those accounts share their
+conversations with each other and with nobody else — a team of accounts on
+one project, say, with your own `~/.claude` left out of it. `rota list
+--sessions` reads such a folder once rather than filing the same
+conversations under each account that names it.
+
+One consequence worth stating: `rota remove <id>` deletes the home rota made
+for an account, so an account with `--sessions own` loses its conversations
+with it. The command says so as it goes. A directory you named is yours and
+is left alone, as a `--config` directory is.
 
 ### One run at a time, where the CLI owns the credential
 

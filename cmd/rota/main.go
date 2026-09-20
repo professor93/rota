@@ -1168,7 +1168,8 @@ func (c *cli) set(args []string) error {
 		threshold = fs.Int("threshold", 0, "usage percent at which the rotation moves on")
 		cwd       = fs.String("cwd", "", "where runs on this account start")
 		config    = fs.String("config", "", "this account's own CLI configuration and credentials")
-		clear     = fs.Bool("clear", false, "forget cwd and config, so the account goes back to the defaults")
+		sessions  = fs.String("sessions", "", "where this account's conversations live: shared (default), own, or a directory")
+		clear     = fs.Bool("clear", false, "forget cwd, config and sessions, so the account goes back to the defaults")
 	)
 	if _, err := parseFlags(fs, args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -1212,7 +1213,7 @@ func (c *cli) set(args []string) error {
 	// account exactly as it was rather than half-applied.
 	want := *a
 	if *clear {
-		want.Cwd, want.ConfigDir = "", ""
+		want.Cwd, want.ConfigDir, want.Sessions = "", "", ""
 	}
 	if *cwd != "" {
 		if want.Cwd, err = filepath.Abs(*cwd); err != nil {
@@ -1222,6 +1223,16 @@ func (c *cli) set(args []string) error {
 	if *config != "" {
 		if want.ConfigDir, err = filepath.Abs(*config); err != nil {
 			return err
+		}
+	}
+	if given["sessions"] {
+		// shared and own are words; anything else is a directory, resolved
+		// from where the person is standing exactly as --config is.
+		want.Sessions = wire.Sessions(*sessions)
+		if dir := want.SessionsDir(); dir != "" {
+			if want.Sessions, err = filepath.Abs(dir); err != nil {
+				return err
+			}
 		}
 	}
 	if err := want.CheckProject(); err != nil {
@@ -1241,7 +1252,7 @@ func (c *cli) set(args []string) error {
 			return err
 		}
 	}
-	a.Cwd, a.ConfigDir = want.Cwd, want.ConfigDir
+	a.Cwd, a.ConfigDir, a.Sessions = want.Cwd, want.ConfigDir, want.Sessions
 	if given["threshold"] {
 		a.Threshold = *threshold
 	}
@@ -1347,13 +1358,31 @@ func (c *cli) show(a *rota.Account, home string) error {
 	}
 	fmt.Fprintf(c.out, "#%d %s\n  rotation    %s\n  runs in     %s\n  configured  %s\n",
 		a.ID, a.Label(), place, where, home)
+	if rota.Flavor(a.Provider) == "claude" {
+		fmt.Fprintf(c.out, "  sessions    %s\n", conversations(a))
+	}
 	if a.ConfigDir == "" && rota.Flavor(a.Provider) == "claude" {
 		fmt.Fprintln(c.out, "  memory and skills come from your own ~/.claude until --config names somewhere else")
 	}
 	return nil
 }
 
-const setUsage = `usage: rota set <id> [--order place] [--threshold pct] [--cwd dir] [--config dir] [--clear]
+// conversations is where this account's conversations live, said the way
+// somebody would ask it: shared with everything else, the account's alone,
+// or a directory it was pointed at.
+func conversations(a *rota.Account) string {
+	switch {
+	case a.SessionsDir() != "":
+		return a.SessionsDir() + " (shared with any account pointed at it)"
+	case a.Sessions == rota.SessionsOwn:
+		return "this account's own, in its home"
+	case a.ConfigDir != "":
+		return "wherever its own configuration directory keeps them"
+	}
+	return "shared with your own Claude Code directory"
+}
+
+const setUsage = `usage: rota set <id> [--order place] [--threshold pct] [--cwd dir] [--config dir] [--sessions where] [--clear]
 
 Sets what is a choice about an account rather than a fact about it, in one
 write. With no flags it prints what the account is set to.
@@ -1371,15 +1400,49 @@ the account's own CLI configuration — its memory files, skills and settings �
 and the private home its credentials are staged in, which is why it must not
 be the project directory itself.
 
+--sessions is where a claude account's conversations live. shared is the
+default: every account reads the ones in your own Claude Code directory and
+can resume any of them. own keeps this account's to itself. A directory puts
+them there — give one to several accounts and they share those conversations
+and no others.
+
   rota set 2 --order 1 --threshold 80    first in the queue, moves on at 80%
   rota set 2 --order up                  one place earlier
   rota set 2 --order before:5            right before account 5
   rota set 2 --order out                 out of the rotation
   rota set 2 --cwd ~/src/api --config ~/.rota/api-memory
+  rota set 2 --sessions own              its conversations are nobody else's
+  rota set 2 --sessions ~/work/threads   and its neighbours' if they say so
   rota set 2                             what account 2 is set to
 
 Flags:
 `
+
+// conversationsLost is the transcript directory a remove is about to delete
+// along with the account's home, or "" when there is none to lose.
+//
+// An account keeping its conversations to itself has them as real folders in
+// that home rather than as links to the shared ones, and `remove` deletes
+// the home. That is the right thing — they are the account's, and nobody
+// else can read them — but it is worth saying out loud rather than leaving
+// somebody to discover it. A mirror of the shared world loses only links,
+// and a directory the person chose is not rota's to delete at all.
+func conversationsLost(s *store.Store, a *rota.Account) string {
+	home := s.Home(a)
+	if a.ConfigDir != "" || a.SessionsDir() != "" {
+		return ""
+	}
+	dir := filepath.Join(home, "projects")
+	fi, err := os.Lstat(dir)
+	if err != nil || !fi.IsDir() { // a link is the shared world, not the account's
+		return ""
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) == 0 {
+		return ""
+	}
+	return dir
+}
 
 func (c *cli) remove(args []string) error {
 	if len(args) == 0 {
@@ -1415,6 +1478,9 @@ func (c *cli) remove(args []string) error {
 	var removed []map[string]any
 	for _, id := range ids {
 		a := s.Find(id)
+		// Asked before the home is gone, because afterwards there is nothing
+		// left to count.
+		lost := conversationsLost(s, a)
 		if err := s.Remove(id); err != nil {
 			// Something no check could have foreseen — an account claimed in
 			// the moment since, a home that will not delete. What already
@@ -1425,6 +1491,9 @@ func (c *cli) remove(args []string) error {
 		removed = append(removed, map[string]any{"id": a.ID, "provider": a.Provider, "email": a.Email})
 		if !c.json {
 			fmt.Fprintf(c.out, "Removed %s account %d (%s).\n", a.Provider, a.ID, a.Label())
+			if lost != "" {
+				fmt.Fprintf(c.out, "Its own conversations went with it: the transcripts in %s.\n", lost)
+			}
 		}
 	}
 	if err := s.Save(); err != nil {

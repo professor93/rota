@@ -267,3 +267,189 @@ func TestAStaleLinkForANameNoLongerSharedIsRemoved(t *testing.T) {
 	// And the link that is meant to be there is not mistaken for a stale one.
 	linksTo(t, filepath.Join(dst, ".claude.json"), filepath.Join(src, ".claude.json"))
 }
+
+// Where an account's conversations live is its own setting, and `own` is one
+// half of it: the entries a conversation is keyed by are left out of the
+// mirror, so Claude Code makes them in the account's home and nobody else
+// ever reads them. Everything else — settings, memory, skills — is still
+// the person's own world through the links.
+func TestAnAccountKeepingItsConversationsToItselfIsLinkedToNoneOfThem(t *testing.T) {
+	src := claudeWorld(t)
+	s, a := claudeStore(t)
+	a.Sessions = rota.SessionsOwn
+
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	dst := s.ownHome(a)
+	for _, name := range conversationState {
+		absent(t, filepath.Join(dst, name))
+	}
+	for _, name := range []string{"skills", "plugins", "settings.json", "CLAUDE.md"} {
+		linksTo(t, filepath.Join(dst, name), filepath.Join(src, name))
+	}
+	linksTo(t, filepath.Join(dst, ".claude.json"), filepath.Join(src, ".claude.json"))
+	absent(t, filepath.Join(dst, "sessions"))
+}
+
+// An account told which folder its conversations belong in is linked into
+// that folder, whether or not the person's own directory has anything of the
+// kind. rota makes the folder first: a link to nothing is pruned on the next
+// refresh, and Claude Code cannot create a directory through one.
+func TestAnAccountToldWhereItsConversationsGoIsLinkedIntoThatFolder(t *testing.T) {
+	src := claudeWorld(t)
+	s, a := claudeStore(t)
+	folder := filepath.Join(t.TempDir(), "threads") // not there yet
+	a.Sessions = folder
+
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	dst := s.ownHome(a)
+	for _, name := range conversationState {
+		linksTo(t, filepath.Join(dst, name), filepath.Join(folder, name))
+		fi, err := os.Stat(filepath.Join(folder, name))
+		if err != nil {
+			t.Fatalf("%s must exist to be linked to: %v", name, err)
+		}
+		if want := name != conversationHistory; fi.IsDir() != want {
+			t.Fatalf("%s is %s", name, fi.Mode())
+		}
+	}
+	// The rest of the world is shared exactly as before, and the registry of
+	// live sessions is the account's own in every mode.
+	linksTo(t, filepath.Join(dst, "settings.json"), filepath.Join(src, "settings.json"))
+	linksTo(t, filepath.Join(dst, "skills"), filepath.Join(src, "skills"))
+	absent(t, filepath.Join(dst, "sessions"))
+}
+
+// The setting can be changed, so the refresh converges on whatever it says
+// now rather than only filling in what is missing: a link the mirror no
+// longer wants goes, and one pointing at the wrong place is re-pointed.
+func TestChangingWhereConversationsLiveMovesTheLinks(t *testing.T) {
+	src := claudeWorld(t)
+	s, a := claudeStore(t)
+	dst := s.ownHome(a)
+	folder := filepath.Join(t.TempDir(), "threads")
+
+	// shared, as it starts.
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	linksTo(t, filepath.Join(dst, "projects"), filepath.Join(src, "projects"))
+
+	// shared -> its own: the links to the shared conversations go, the rest
+	// of the mirror stays.
+	a.Sessions = rota.SessionsOwn
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	absent(t, filepath.Join(dst, "projects"))
+	absent(t, filepath.Join(dst, "history.jsonl"))
+	linksTo(t, filepath.Join(dst, "settings.json"), filepath.Join(src, "settings.json"))
+
+	// its own -> a folder.
+	a.Sessions = folder
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	linksTo(t, filepath.Join(dst, "projects"), filepath.Join(folder, "projects"))
+
+	// and back to shared: the folder is left where it is, and the links point
+	// at the person's own directory again.
+	a.Sessions = ""
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	linksTo(t, filepath.Join(dst, "projects"), filepath.Join(src, "projects"))
+	linksTo(t, filepath.Join(dst, "history.jsonl"), filepath.Join(src, "history.jsonl"))
+	if _, err := os.Stat(filepath.Join(folder, "projects")); err != nil {
+		t.Fatalf("the folder somebody named is theirs, not the mirror's: %v", err)
+	}
+}
+
+// Conversations the account already has of its own are never replaced by a
+// link to somebody else's. They are somebody's work, and a setting is not a
+// reason to lose it: they stay, the account goes on reading them, and the
+// person is told which they are so they can move them aside and mean it.
+func TestConversationsAnAccountAlreadyHasOfItsOwnAreKeptAndSaidSo(t *testing.T) {
+	src := claudeWorld(t)
+	s, a := claudeStore(t)
+	dst := s.ownHome(a)
+	a.Sessions = rota.SessionsOwn
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	// Claude Code files a conversation in the home while it is the account's
+	// own to file in.
+	own := filepath.Join(dst, "projects", "-tmp-x")
+	if err := os.MkdirAll(own, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var said []string
+	s.Warn = func(msg string) { said = append(said, msg) }
+	a.Sessions = ""
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(filepath.Join(dst, "projects")); err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("the account's own conversations must survive the change: %v %v", fi, err)
+	}
+	if _, err := os.Stat(own); err != nil {
+		t.Fatalf("and their contents: %v", err)
+	}
+	if len(said) != 1 || !strings.Contains(said[0], dst) || !strings.Contains(said[0], "projects") {
+		t.Fatalf("one warning naming the directory and the entries: %v", said)
+	}
+	// What is not in the way is linked around them.
+	linksTo(t, filepath.Join(dst, "history.jsonl"), filepath.Join(src, "history.jsonl"))
+}
+
+// An account with a directory of its own and a folder for its conversations
+// gets the conversations arranged inside that directory and nothing else:
+// the rest of it is the account's own world, not a mirror of anybody's. And
+// there is still exactly one answer to where Claude Code's configuration is.
+func TestAnOwnDirectoryGetsTheConversationFolderAndNothingElse(t *testing.T) {
+	claudeWorld(t)
+	s, a := claudeStore(t)
+	a.ConfigDir = t.TempDir()
+	folder := filepath.Join(t.TempDir(), "threads")
+	a.Sessions = folder
+
+	cmd, err := s.command(a, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := configDirs(rota.Environ(HostEnv(), cmd)); len(got) != 1 || got[0] != a.ConfigDir {
+		t.Fatalf("the chosen directory is the only one: %v", got)
+	}
+	for _, name := range conversationState {
+		linksTo(t, filepath.Join(a.ConfigDir, name), filepath.Join(folder, name))
+	}
+	for _, name := range []string{"settings.json", "CLAUDE.md", "skills", ".claude.json", "sessions"} {
+		absent(t, filepath.Join(a.ConfigDir, name))
+	}
+}
+
+// With a directory of its own and nothing said about conversations, Claude
+// Code's own behaviour is the answer: they live in that directory, and rota
+// touches none of it.
+func TestAnOwnDirectoryIsLeftAloneWhenNoFolderIsNamed(t *testing.T) {
+	claudeWorld(t)
+	s, a := claudeStore(t)
+	a.ConfigDir = t.TempDir()
+	for _, mode := range []string{"", rota.SessionsOwn} {
+		a.Sessions = mode
+		if _, err := s.command(a, true); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := os.ReadDir(a.ConfigDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("sessions=%q arranged a directory rota was not asked to: %v", mode, entries)
+		}
+	}
+}

@@ -202,9 +202,11 @@ func (s *Store) command(a *rota.Account, mirror bool) (*rota.Command, error) {
 			s.Warn(fmt.Sprintf("could not mirror Claude Code's configuration into %s (%v); "+
 				"running with Claude Code's own directory and daemon", dir, merr))
 		}
-	case dir != "":
+	case dir != "" && a.ConfigDir == "":
 		// Appended rather than replacing: Environ drops every inherited
 		// value a command sets, so the child sees this one and only this one.
+		// An account that named its own configuration directory is already
+		// pointed at it by lib — saying so twice is two answers.
 		cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+dir)
 	}
 	return cmd, nil

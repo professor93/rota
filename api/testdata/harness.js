@@ -340,8 +340,8 @@ const settle = () => new Promise(r => setTimeout(r, 5));
   pg.view = 'accounts'; pg.render();
   await settle();
   const paths = findAll(nodes['#panel'], e => e.classList && e.classList.contains('pathin'));
-  assert(paths.length === accountsDoc.accounts.length * 2,
-    'a working directory and a config directory each: ' + paths.length);
+  assert(paths.length === accountsDoc.accounts.length * 3,
+    'a working directory, a config directory and a conversation setting each: ' + paths.length);
   pg.view = 'ask'; pg.render();
 
   // 15. Running shows what is open and what could be resumed, with the two

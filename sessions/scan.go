@@ -39,7 +39,9 @@ func RegistryFor(st *store.Store) *Registry {
 //
 // A home shared by several accounts is read once. Two Claude Code accounts
 // with no project of their own see the same thousands of transcripts, and
-// listing those under each account would say the work happened twice.
+// listing those under each account would say the work happened twice. The
+// same goes for a conversation folder several accounts were deliberately
+// pointed at: it is read under the first of them and not again.
 func Scan(st *store.Store, recent int) Report {
 	var rep Report
 

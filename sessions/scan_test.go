@@ -1,6 +1,7 @@
 package sessions
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,6 +82,41 @@ func TestScanSaysNothingWhenEveryProviderCanBeRead(t *testing.T) {
 
 	if notes := storeNotes(Scan(s, 0)); len(notes) != 0 {
 		t.Fatalf("nothing to warn about: %q", notes)
+	}
+}
+
+// A scan looks for conversations where the account says they live: in a
+// folder it was pointed at, or in its own home when it keeps them to itself.
+// A folder two accounts were pointed at is read once — it is one folder, and
+// listing it under each of them would say the same work happened twice.
+func TestScanReadsConversationsWhereTheAccountKeepsThem(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir()) // never the person's real one
+	folder := t.TempDir()
+	s, dir := seedStore(t, fmt.Sprintf(`{"accounts":[
+		{"id":1,"provider":"claude","uuid":"c1","order":1,"sessions":%q},
+		{"id":2,"provider":"claude","uuid":"c2","order":2,"sessions":%q},
+		{"id":3,"provider":"claude","uuid":"c3","order":3,"sessions":"own"}],"nextId":4,"ordered":true}`,
+		folder, filepath.Join(folder, "."))) // one folder, spelled two ways
+
+	together := "aaaaaaaa-1111-4111-8111-111111111111"
+	writeLines(t, filepath.Join(folder, "projects", "-tmp-x", together+".jsonl"),
+		`{"type":"user","cwd":"/tmp/x"}`)
+	alone := "bbbbbbbb-2222-4222-8222-222222222222"
+	writeLines(t, filepath.Join(dir, "homes", "claude-3", "projects", "-tmp-y", alone+".jsonl"),
+		`{"type":"user","cwd":"/tmp/y"}`)
+
+	rep := Scan(s, 0)
+	if rep.Shared != nil {
+		t.Fatalf("nobody here reads the person's own directory: %+v", rep.Shared)
+	}
+	if len(rep.Sessions) != 2 {
+		t.Fatalf("one conversation in the folder and one in the account's own home: %+v", rep.Sessions)
+	}
+	for _, got := range rep.Sessions {
+		want := map[string]int{together: 1, alone: 3}[got.ID]
+		if got.Account != want || got.Shared {
+			t.Fatalf("%s belongs to #%d, not to #%d (shared %v)", got.ID, want, got.Account, got.Shared)
+		}
 	}
 }
 

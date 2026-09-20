@@ -177,6 +177,44 @@ func TestAConfigDirIsConfinedToTheRoots(t *testing.T) {
 	}
 }
 
+// A conversation folder is a directory rota creates and links into, so a
+// caller may no more name one of rota's own directories, or one outside the
+// roots, than they may for config_dir. A remote caller who could would have
+// rota writing where the server was told not to.
+func TestAConversationFolderIsConfinedLikeAConfigDir(t *testing.T) {
+	h := newHarness(t, Options{Roots: []string{}}) // unconfined: the store's own rule answers
+	for _, dir := range []string{h.dir, filepath.Join(h.dir, "homes", "claude-1"), filepath.Join(h.dir, "homes", "claude-3")} {
+		resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"sessions": dir})
+		if resp.StatusCode != 400 || !strings.Contains(string(raw), "rota's own") {
+			t.Fatalf("%s: %d %s", dir, resp.StatusCode, raw)
+		}
+	}
+
+	h = newHarness(t, Options{})
+	outside := t.TempDir()
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"sessions": outside}); resp.StatusCode != 400 ||
+		!strings.Contains(string(raw), "outside") {
+		t.Fatalf("outside the roots: %d %s", resp.StatusCode, raw)
+	}
+	link := filepath.Join(h.root, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Fatal(err)
+	}
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"sessions": link}); resp.StatusCode != 400 {
+		t.Fatalf("a link leading outside the roots: %d %s", resp.StatusCode, raw)
+	}
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"sessions": "relative"}); resp.StatusCode != 400 ||
+		!strings.Contains(string(raw), "absolute") {
+		t.Fatalf("a relative path over HTTP means a directory nobody sending it can see: %d %s", resp.StatusCode, raw)
+	}
+	if _, err := os.Stat(filepath.Join(h.root, "threads")); err == nil {
+		t.Fatal("a refused folder must not have been created")
+	}
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"sessions": filepath.Join(h.root, "threads")}); resp.StatusCode != 200 {
+		t.Fatalf("inside a root: %d %s", resp.StatusCode, raw)
+	}
+}
+
 // Removing an account deletes the home rota made for it, and nothing else:
 // a directory the caller chose holds their memory and skills.
 func TestRemovingAnAccountLeavesAChosenConfigDirInPlace(t *testing.T) {
