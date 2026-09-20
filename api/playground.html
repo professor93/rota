@@ -967,7 +967,7 @@ function viewRunning(panel) {
     if (!sessions.length) {
       resume.push(el("p", { class: "help", text: "No conversation rota can read." }));
     } else {
-      const t = el("table", {}, [el("tr", {}, ["account", "provider", "session", "directory", ""]
+      const t = el("table", {}, [el("tr", {}, ["account", "provider", "session", "name", "directory", ""]
         .map(h => el("th", { text: h, scope: "col" })))]);
       for (const x of sessions) {
         // The whole id, not the eight characters shown: --resume takes all of
@@ -978,6 +978,7 @@ function viewRunning(panel) {
           el("td", { text: x.account ? "#" + x.account + " " + (x.label || "") : "shared" }),
           el("td", { text: x.provider || "" }),
           el("td", { text: (x.id || "").slice(0, 8) }),
+          el("td", { text: x.name || "—", title: x.name || "" }),
           el("td", { text: x.dir || "—" }),
           el("td", {}, [copy]),
         ]));

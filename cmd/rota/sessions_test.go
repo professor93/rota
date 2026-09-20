@@ -26,7 +26,8 @@ func TestListSessionsShowsWhatIsRunningAndWhatCanResume(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(transcript, []byte(`{"type":"user","cwd":"/Users/me/src/api"}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(transcript, []byte(`{"type":"user","cwd":"/Users/me/src/api","message":{"role":"user","content":"look at the api"}}`+"\n"+
+		`{"type":"ai-title","aiTitle":"api rotation review"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	lock := filepath.Join(claude, "ide", "1234.lock")
@@ -43,7 +44,9 @@ func TestListSessionsShowsWhatIsRunningAndWhatCanResume(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("%d %q", code, out)
 	}
-	for _, want := range []string{"Running instances:", "GoLand", "Sessions:", "abcdef12", "/Users/me/src/api"} {
+	// A conversation is recognised by what it is about, and resumed by its
+	// id, so the listing shows both.
+	for _, want := range []string{"Running instances:", "GoLand", "Sessions:", "abcdef12", "api rotation review", "/Users/me/src/api"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in:\n%s", want, out)
 		}
@@ -78,7 +81,8 @@ func TestListSessionsInJSONCarriesBothSections(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(p, []byte(`{"type":"user","cwd":"/x"}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(p, []byte(`{"type":"user","cwd":"/x"}`+"\n"+
+		`{"type":"ai-title","aiTitle":"the whole name"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -90,7 +94,7 @@ func TestListSessionsInJSONCarriesBothSections(t *testing.T) {
 	if !strings.Contains(out, full) {
 		t.Fatalf("json must carry the id --resume takes:\n%s", out)
 	}
-	for _, want := range []string{`"sessions"`, `"shared"`, `"instances"`} {
+	for _, want := range []string{`"sessions"`, `"shared"`, `"instances"`, `"name": "the whole name"`} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %s in:\n%s", want, out)
 		}

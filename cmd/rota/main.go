@@ -592,7 +592,10 @@ func (c *cli) showSessions(rep sessions.Report) {
 		if x.Account != 0 {
 			who = fmt.Sprintf("#%d %s", x.Account, x.Label)
 		}
-		fmt.Fprintf(w, "  %s\t%s\t%s\t%s\n", who, x.Provider, short(x.ID), orDash(x.Dir))
+		// The name is what a person recognises a conversation by; the id is
+		// what they resume it with. Both, and neither allowed to push the
+		// row onto a second line.
+		fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\n", who, x.Provider, short(x.ID), clip(x.Name, 44), orDash(x.Dir))
 	}
 	_ = w.Flush()
 	if sh := rep.Shared; sh != nil {
@@ -640,6 +643,19 @@ func short(id string) string {
 func orDash(s string) string {
 	if s == "" {
 		return "-"
+	}
+	return s
+}
+
+// clip is a cell of a table: a dash when there is nothing to say, and never
+// wider than n, so one long name cannot push every other column across the
+// terminal. The whole of it is in --json.
+func clip(s string, n int) string {
+	if s == "" {
+		return "-"
+	}
+	if r := []rune(s); len(r) > n {
+		return strings.TrimRight(string(r[:n-1]), " ") + "…"
 	}
 	return s
 }

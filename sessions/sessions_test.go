@@ -96,6 +96,122 @@ func TestClaudeSessionsComeBackWithTheirRealDirectory(t *testing.T) {
 	}
 }
 
+// named lists one claude conversation written from these records.
+func named(t *testing.T, lines ...string) Session {
+	t.Helper()
+	home := t.TempDir()
+	id := "aaaaaaaa-1111-4111-8111-111111111111"
+	writeLines(t, filepath.Join(home, "projects", "-tmp-x", id+".jsonl"), lines...)
+	got, _, err := In(&rota.Account{ID: 1, Provider: "claude"}, home, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("one conversation, got %+v", got)
+	}
+	return got[0]
+}
+
+// A conversation is shown by the name Claude Code gave it. The title is
+// rewritten on every turn as it learns what the conversation is about, so
+// the last one is the current one — and a conversation named only as an
+// agent is shown by that name.
+func TestAConversationIsShownByTheNameItsCliGaveIt(t *testing.T) {
+	const id = `"sessionId":"aaaaaaaa-1111-4111-8111-111111111111"`
+	got := named(t,
+		`{"type":"user","cwd":"/tmp/x","message":{"role":"user","content":"look at the store"},`+id+`}`,
+		`{"type":"ai-title","aiTitle":"first guess",`+id+`}`,
+		`{"type":"agent-name","agentName":"the agent's name",`+id+`}`,
+		`{"type":"ai-title","aiTitle":"store mirror conversation names",`+id+`}`)
+	if got.Name != "store mirror conversation names" {
+		t.Fatalf("the last title is the current one: %q", got.Name)
+	}
+	if got = named(t,
+		`{"type":"user","cwd":"/tmp/x","message":{"role":"user","content":"hi"},`+id+`}`,
+		`{"type":"agent-name","agentName":"the agent's name",`+id+`}`,
+	); got.Name != "the agent's name" {
+		t.Fatalf("with no title of its own, the agent names it: %q", got.Name)
+	}
+}
+
+// A conversation nobody named is shown by what it was asked first, which is
+// how Claude Code's own picker names one. Plenty of records are shaped like
+// a person speaking without being one — the caveat before a local command,
+// a tool's result fed back, a sidechain a subagent held — and the one thing
+// among them a person would recognise is the slash command they typed.
+func TestAnUnnamedConversationIsShownByWhatItWasAskedFirst(t *testing.T) {
+	const id = `"sessionId":"aaaaaaaa-1111-4111-8111-111111111111"`
+	got := named(t,
+		`{"type":"user","isMeta":true,"cwd":"/tmp/x","message":{"role":"user","content":"<local-command-caveat>Caveat: ...</local-command-caveat>"},`+id+`}`,
+		`{"type":"user","isSidechain":true,"message":{"role":"user","content":"a subagent's own prompt"},`+id+`}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]},`+id+`}`,
+		`{"type":"user","message":{"role":"user","content":[{"type":"text","text":"  read the mirror  \nand the tests"}]},`+id+`}`)
+	if got.Name != "read the mirror" {
+		t.Fatalf("the first line of the first thing said: %q", got.Name)
+	}
+	if got.Dir != "/tmp/x" {
+		t.Fatalf("and the directory is still read: %q", got.Dir)
+	}
+
+	if got = named(t,
+		`{"type":"user","cwd":"/tmp/x","message":{"role":"user","content":"<command-message>statusline</command-message>\n<command-name>/statusline</command-name>"},`+id+`}`,
+	); got.Name != "/statusline" {
+		t.Fatalf("a slash command is what the person typed: %q", got.Name)
+	}
+
+	// Nothing said and nothing named is no name, rather than a guess made
+	// from the file name or the folder.
+	if got = named(t,
+		`{"type":"queue-operation",`+id+`}`,
+		`{"type":"assistant","message":{"role":"assistant","content":"hello"},`+id+`}`,
+	); got.Name != "" {
+		t.Fatalf("nothing to go on means nothing: %q", got.Name)
+	}
+}
+
+// A name is one line of a column and not a paragraph: whitespace collapses
+// and a long one is cut with an ellipsis, so a row stays a row.
+func TestALongNameIsCutToFitARow(t *testing.T) {
+	long := strings.Repeat("dispatch ", 20)
+	got := named(t, `{"type":"ai-title","aiTitle":"`+long+`","sessionId":"aaaaaaaa-1111-4111-8111-111111111111"}`)
+	if r := []rune(got.Name); len(r) != maxName+1 || !strings.HasSuffix(got.Name, "…") {
+		t.Fatalf("%d runes: %q", len(r), got.Name)
+	}
+}
+
+// A transcript is read at its two ends and never in the middle. Conversations
+// reach tens of megabytes and a listing reads one file per row, so the title
+// is looked for in the last stretch of the file and the opening prompt in the
+// first — a title that is in neither is a name not found rather than a
+// listing that reads a gigabyte.
+func TestOnlyTheEndsOfATranscriptAreRead(t *testing.T) {
+	const id = `"sessionId":"aaaaaaaa-1111-4111-8111-111111111111"`
+	padding := func(n int) string {
+		return `{"type":"assistant","message":{"role":"assistant","content":"` + strings.Repeat("x", n) + `"},` + id + `}`
+	}
+	got := named(t,
+		`{"type":"user","cwd":"/tmp/x","message":{"role":"user","content":"the opening prompt"},`+id+`}`,
+		padding(promptWindow),
+		`{"type":"ai-title","aiTitle":"a title nobody will see",`+id+`}`,
+		padding(2*titleWindow),
+		`{"type":"assistant","message":{"role":"assistant","content":"done"},`+id+`}`)
+	if got.Name != "the opening prompt" {
+		t.Fatalf("a title outside both windows is not looked for: %q", got.Name)
+	}
+
+	// The tail window opens in the middle of whatever record spans it, and
+	// half a record is not a record: a fragment that reads like a title is
+	// not one, and the real title after it is.
+	got = named(t,
+		`{"type":"user","cwd":"/tmp/x","message":{"role":"user","content":"the opening prompt"},`+id+`}`,
+		`{"type":"assistant","message":{"role":"assistant","content":"`+strings.Repeat("x", titleWindow)+
+			`{\"type\":\"ai-title\",\"aiTitle\":\"quoted, not written\"}"},`+id+`}`,
+		`{"type":"ai-title","aiTitle":"the real one",`+id+`}`)
+	if got.Name != "the real one" {
+		t.Fatalf("the record that spans the window edge must not be half-read: %q", got.Name)
+	}
+}
+
 // codex files them by date rather than by project, and writes a session_meta
 // record first with the exact directory in it.
 func TestCodexSessionsComeBackWithTheirRealDirectory(t *testing.T) {

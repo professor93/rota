@@ -14,8 +14,10 @@ package sessions
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -28,13 +30,18 @@ import (
 
 // Session is one conversation an account could resume.
 type Session struct {
-	Account  int       `json:"account,omitempty"`
-	Label    string    `json:"label,omitempty"`
-	Provider string    `json:"provider"`
-	ID       string    `json:"id"`
-	Dir      string    `json:"dir,omitempty"`
-	At       time.Time `json:"at"`
-	Shared   bool      `json:"shared,omitempty"`
+	Account  int    `json:"account,omitempty"`
+	Label    string `json:"label,omitempty"`
+	Provider string `json:"provider"`
+	ID       string `json:"id"`
+	// Name is what the conversation is about, in the words its own CLI
+	// keeps: the title Claude Code writes for it, or — for one it never
+	// named — the prompt it opened with. Empty when the CLI records
+	// neither, which is where codex and grok stand.
+	Name   string    `json:"name,omitempty"`
+	Dir    string    `json:"dir,omitempty"`
+	At     time.Time `json:"at"`
+	Shared bool      `json:"shared,omitempty"`
 
 	// path is the transcript this came from, kept so the directory can be
 	// read later and only for what is actually shown.
@@ -46,6 +53,20 @@ type Session struct {
 // by here is one that never will, and reading a whole transcript to find out
 // would mean reading every megabyte of every conversation.
 const maxHeader = 64
+
+// How much of a transcript is read, and how long a name may be.
+//
+// A conversation is a file that grows without limit — tens of megabytes is
+// ordinary — and a listing reads one per row, so neither end may be "as far
+// as it takes". Claude Code writes the title again on every turn, so the
+// current one is at the end: the last titleWindow bytes hold it in any
+// conversation that has had a few turns since. The opening prompt is at the
+// beginning, and is only wanted when there is no title at all.
+const (
+	titleWindow  = 256 << 10
+	promptWindow = 64 << 10
+	maxName      = 60
+)
 
 // ConfigHome is where an account's conversations are, and whether that place
 // is shared with anyone else.
@@ -259,12 +280,192 @@ func grokSessions(home string) ([]Session, error) {
 	return out, nil
 }
 
-// readClaudeHeader fills in where a conversation ran, which Claude Code
-// writes on its records.
+// readClaudeHeader fills in where a conversation ran and what it is called.
+//
+// Both ends of the file are read and nothing in between: the directory and
+// the opening prompt are in the first records, the current title in the
+// last. One open serves both — a listing opens one file per row it shows,
+// and that is the budget.
 func readClaudeHeader(path string, s *Session) {
-	s.Dir = headerField(path, func(rec map[string]jsontext.Value) string {
-		return text(rec["cwd"])
-	})
+	f, err := openTranscript(path)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	dir, prompt := claudeHead(f)
+	s.Dir = dir
+	if title := claudeTitle(f); title != "" {
+		s.Name = clipName(title)
+		return
+	}
+	// A conversation Claude Code never titled is shown by what it was asked
+	// first, which is how its own picker names one.
+	s.Name = clipName(prompt)
+}
+
+// claudeHead reads the opening records for the directory the conversation
+// ran in and the first thing a person actually said in it.
+//
+// It stops at maxHeader records or promptWindow bytes, whichever comes
+// first: a file that has not said by there is one that never will, and a
+// transcript may open with a pasted megabyte.
+func claudeHead(f *os.File) (dir, prompt string) {
+	sc := newScanner(f)
+	for n, read := 0, 0; n < maxHeader && read < promptWindow && sc.Scan(); n++ {
+		line := sc.Bytes()
+		read += len(line) + 1
+		var rec claudeRecord
+		if jsonv2.Unmarshal(line, &rec) != nil {
+			continue
+		}
+		if dir == "" {
+			dir = rec.Cwd
+		}
+		if prompt == "" {
+			prompt = rec.prompt()
+		}
+		if dir != "" && prompt != "" {
+			break
+		}
+	}
+	return dir, prompt
+}
+
+// claudeTitle is the name Claude Code last gave the conversation, read from
+// the end of the file. It writes the title again on every turn, so the last
+// one is the current one; a conversation whose title predates the window is
+// shown by its opening prompt instead, which is the same answer a
+// conversation that was never titled gets.
+func claudeTitle(f *os.File) string {
+	info, err := f.Stat()
+	if err != nil {
+		return ""
+	}
+	from := max(info.Size()-titleWindow, 0)
+	if _, err := f.Seek(from, io.SeekStart); err != nil {
+		return ""
+	}
+	sc := newScanner(f)
+	if from > 0 {
+		sc.Scan() // the window opened mid-record; that half is not a record
+	}
+	var title, agent string
+	for sc.Scan() {
+		line := sc.Bytes()
+		// Parsing every record of a quarter megabyte to find two kinds of
+		// them is work nobody reads the result of.
+		if !bytes.Contains(line, []byte(`"ai-title"`)) && !bytes.Contains(line, []byte(`"agent-name"`)) {
+			continue
+		}
+		var rec claudeRecord
+		if jsonv2.Unmarshal(line, &rec) != nil {
+			continue
+		}
+		switch rec.Type {
+		case "ai-title":
+			title = rec.AITitle
+		case "agent-name":
+			agent = rec.AgentName
+		}
+	}
+	if title != "" {
+		return title
+	}
+	return agent
+}
+
+// claudeRecord is the handful of fields a listing reads out of a transcript
+// record. Claude Code writes many kinds; these are the ones that say where a
+// conversation ran, what it is called, and what it was asked first.
+type claudeRecord struct {
+	Type      string `json:"type"`
+	Cwd       string `json:"cwd"`
+	AITitle   string `json:"aiTitle"`
+	AgentName string `json:"agentName"`
+	IsMeta    bool   `json:"isMeta"`
+	Sidechain bool   `json:"isSidechain"`
+	Message   struct {
+		// Content is a string when a person typed one, and a list of blocks
+		// when the CLI had more than text to carry.
+		Content jsontext.Value `json:"content"`
+	} `json:"message"`
+}
+
+// prompt is what a person said in this record, or "" when it is not a person
+// speaking.
+//
+// Plenty of records are shaped like a user turn without being one: tool
+// results the CLI feeds back, the caveat it prefixes local commands with,
+// the echo of a slash command's own arguments, and whole sidechains a
+// subagent held. A slash command is what the person typed, though, so it is
+// read back as they typed it — `/statusline` rather than nothing.
+func (r *claudeRecord) prompt() string {
+	if r.Type != "user" || r.IsMeta || r.Sidechain {
+		return ""
+	}
+	said := text(r.Message.Content)
+	if said == "" {
+		var blocks []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		}
+		if jsonv2.Unmarshal(r.Message.Content, &blocks) != nil {
+			return ""
+		}
+		for _, b := range blocks {
+			if b.Type == "text" && b.Text != "" {
+				said = b.Text
+				break
+			}
+		}
+	}
+	said = strings.TrimSpace(said)
+	if !strings.HasPrefix(said, "<") {
+		return said
+	}
+	// What is left opens with a tag, so it is the CLI talking to itself: a
+	// caveat, a reminder, the echo of a command's arguments. A slash command
+	// is in there too, spelled as the person typed it, and that is the one
+	// thing here they would recognise as theirs.
+	return strings.TrimSpace(between(said, "<command-name>", "</command-name>"))
+}
+
+// between is what lies between two markers, or "" when they are not both
+// there in that order.
+func between(s, open, close string) string {
+	start := strings.Index(s, open)
+	if start < 0 {
+		return ""
+	}
+	rest := s[start+len(open):]
+	end := strings.Index(rest, close)
+	if end < 0 {
+		return ""
+	}
+	return rest[:end]
+}
+
+// clipName is one line, one space between words, and short enough to sit in
+// a column beside everything else a row says.
+func clipName(s string) string {
+	if i := strings.IndexAny(s, "\r\n"); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.Join(strings.Fields(s), " ")
+	runes := []rune(s)
+	if len(runes) <= maxName {
+		return s
+	}
+	return strings.TrimRight(string(runes[:maxName]), " ") + "…"
+}
+
+// newScanner reads a transcript record by record. Whole conversations live
+// in these files, so one record can be very large; the default 64KB line
+// limit would stop a scan on a long answer.
+func newScanner(r io.Reader) *bufio.Scanner {
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	return sc
 }
 
 // readCodexHeader reads the session_meta record codex writes first, which
@@ -330,10 +531,7 @@ func headerField(path string, pick func(map[string]jsontext.Value) string) strin
 		return ""
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
-	// Transcripts hold whole conversations, so one record can be very large;
-	// the default 64KB line limit would stop the scan on a long answer.
-	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	sc := newScanner(f)
 	for n := 0; n < maxHeader && sc.Scan(); n++ {
 		var rec map[string]jsontext.Value
 		if err := jsonv2.Unmarshal(sc.Bytes(), &rec); err != nil {

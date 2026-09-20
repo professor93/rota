@@ -783,11 +783,25 @@ Running instances:
   ●  GoLand     -                   ~/src/api                    pid 40803
 
 Sessions:
-  #3 you@example.com  codex   01a048be  ~/src/api
-  shared              claude  497f1383  ~/src/api
+  #3 you@example.com  codex   01a048be  -                        ~/src/api
+  shared              claude  497f1383  rota run account resolution  ~/src/api
   ~/.claude holds 2648 conversations across 146 projects, shared by every
   account with no --config of its own.
 ```
+
+A claude conversation is shown by its own name, the one its resume picker
+uses: Claude Code writes a title for a conversation as it learns what it is
+about, rewriting it on every turn, and the newest one is what is shown. One
+it never titled is shown by the prompt it opened with, first line only, and
+a conversation that is neither titled nor asked anything shows a dash.
+`--json` carries the whole name as `name`, untruncated. The name is read
+from the two ends of the transcript and never from the middle — the last
+quarter megabyte for the title, the first 64KB for the opening prompt —
+because these files reach tens of megabytes and a listing reads one per row:
+a title older than that window is a name not found rather than a listing
+that reads a gigabyte. Only the conversations actually shown are opened, so
+the count in the last line costs nothing. codex and grok record no such name
+and show a dash.
 
 Three things are being read, and they know different amounts:
 
