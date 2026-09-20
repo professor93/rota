@@ -35,7 +35,17 @@ func TestMain(m *testing.M) {
 	case "codex":
 		fakeCodex()
 	}
-	os.Exit(m.Run())
+	// A claude run mirrors the Claude Code configuration directory this
+	// process is in. The tests get one of their own, so nothing here depends
+	// on — or reaches into — the directory of whoever runs them.
+	dir, err := os.MkdirTemp("", "rota-claude")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("CLAUDE_CONFIG_DIR", dir)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 func flagValue(args []string, flag string) string {

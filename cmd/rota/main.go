@@ -310,7 +310,7 @@ func (c *cli) login(args []string) error {
 		} else if len(rest) > 0 {
 			return usageError(loginUsage)
 		}
-		s, err := openStore()
+		s, err := c.openStore()
 		if err != nil {
 			return err
 		}
@@ -326,7 +326,7 @@ func (c *cli) login(args []string) error {
 	if n, err := strconv.Atoi(rest[0]); err == nil && n >= 1 {
 		id, numeric = n, true
 	}
-	s, err := openStore()
+	s, err := c.openStore()
 	if err != nil {
 		return err
 	}
@@ -445,7 +445,7 @@ func (c *cli) list(args []string) error {
 	// --short is the listing that costs nothing: what is already known,
 	// in rotation order, and no provider asked anything.
 	short := flags["-s"] || flags["--short"]
-	s, err := openStore()
+	s, err := c.openStore()
 	if err != nil {
 		return err
 	}
@@ -815,7 +815,7 @@ var execProcess = execCLI
 
 // handOver gives the account's CLI the terminal, arguments and all.
 func (c *cli) handOver(id int, args []string) error {
-	s, err := openStore()
+	s, err := c.openStore()
 	if err != nil {
 		return err
 	}
@@ -974,7 +974,7 @@ func (c *cli) answer(id int, args []string) error {
 		spec.JSONSchema = json.RawMessage(*schema)
 	}
 
-	s, err := openStore()
+	s, err := c.openStore()
 	if err != nil {
 		return err
 	}
@@ -1193,7 +1193,7 @@ func (c *cli) set(args []string) error {
 		return usageErr("threshold must be a number from 1 to 100, not %d", *threshold)
 	}
 
-	s, err := openStore()
+	s, err := c.openStore()
 	if err != nil {
 		return err
 	}
@@ -1393,7 +1393,7 @@ func (c *cli) remove(args []string) error {
 		}
 		ids = append(ids, id)
 	}
-	s, err := openStore()
+	s, err := c.openStore()
 	if err != nil {
 		return err
 	}
@@ -1477,16 +1477,20 @@ func bareResume(args []string) []string {
 	return out
 }
 
-// openStore opens the account store and settles its rotation order.
+// openStore opens the account store, settles its rotation order and gives it
+// somewhere to put a warning.
 //
 // Numbering a store written before rotation existed is the rotation
 // package's rule, not the store's, so it happens here — at the one door
-// every command goes through — rather than inside the store on load.
-func openStore() (*store.Store, error) {
+// every command goes through — rather than inside the store on load. The
+// same goes for where a warning lands: stderr, so a redirected stdout
+// carries only what was asked for.
+func (c *cli) openStore() (*store.Store, error) {
 	s, err := store.Open("")
 	if err != nil {
 		return nil, err
 	}
+	s.Warn = func(msg string) { fmt.Fprintf(c.err, "warning: %s\n", msg) }
 	rotation.Backfill(s)
 	return s, nil
 }
@@ -1530,7 +1534,7 @@ func parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 func (c *cli) signIn(id int, extra []string) error {
 	// extra belongs to the vendor's login, which has options rota has no
 	// business knowing about — which region to sign in to, say.
-	s, err := openStore()
+	s, err := c.openStore()
 	if err != nil {
 		return err
 	}
@@ -1579,7 +1583,7 @@ func (c *cli) signIn(id int, extra []string) error {
 	}
 
 	// Take the lock again to write down whose account this now is.
-	s2, err := openStore()
+	s2, err := c.openStore()
 	if err != nil {
 		return err
 	}

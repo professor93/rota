@@ -803,11 +803,11 @@ Three things are being read, and they know different amounts:
   instance is still listed, with a note saying what is missing.
 
 Attribution is exact for codex, grok and kimi, which are always launched with
-a private home of their own. Claude Code is only pointed at one when the
-account names a `--config`, so by default every claude account reads the same
-`~/.claude` — those conversations are marked `shared` and counted once, because
-they belong to no single account and listing them per account would say the
-same work happened twice.
+a private home of their own. A claude account without a `--config` runs in a
+mirror of the person's `~/.claude` — its own directory, the same files — so
+every such account still reads the same conversations: those are marked
+`shared` and counted once, because they belong to no single account and
+listing them per account would say the same work happened twice.
 
 The shared home cuts the other way too: claude injects the identity stored
 there into every session's context, so a model asked "what is my account
@@ -842,8 +842,9 @@ rota set 2 --cwd ~/src/api --config ~/.rota/api-memory
 own. `--config` is the account's own CLI configuration — its memory files,
 skills and settings — and the private home its credentials are staged in.
 Unset, codex, grok and kimi still get a private home of rota's own, and
-Claude Code reads whatever `~/.claude` the person running rota has, which is
-right until an account is meant for one project.
+Claude Code reads the person's own `~/.claude` through a mirror of it — the
+same files, a daemon of its own — which is right until an account is meant
+for one project.
 
 The two must not be the same directory: the config directory is where a
 credential file is written, and a working directory is a repository someone
@@ -1141,6 +1142,44 @@ and `--deny` replace the tool lists — so rota speaks a third vocabulary for
 it. A test feeds a real command line to the real binary and fails if it
 answers with a usage error, which is the only way to know a vendor's flag
 still exists.
+
+### One Claude world, one daemon per account
+
+A session is one conversation and the transcript it leaves behind. The daemon
+is Claude Code's helper — one per configuration directory — and it is what
+hosts background sessions, the agent view, sessions you attach to and the
+`N ⧉` sub-sessions. It logs in on its own. Started outside rota, by a plain
+`claude`, it has no token of rota's and falls back to the keychain login, so
+everything it hosts is billed to that account whichever window you typed in.
+
+So every claude account gets a configuration directory of its own:
+`~/.rota/homes/claude-<id>`, kept as a mirror of `~/.claude` — or of whatever
+`CLAUDE_CONFIG_DIR` already named — with a symlink to every entry and one to
+`~/.claude.json`, refreshed on every launch.
+Everything is shared except the `daemon*` files and `.credentials.json`, which
+stay the account's own. Claude Code writes through the links, so the account
+keeps your settings, memory, skills, plugins, trust decisions and history,
+files its transcripts where they always went, and sees and resumes the same
+old sessions. What it does not share is the daemon: it starts one for that
+directory, and that one inherits the account's token. `/status` inside it
+reports `Auth token: CLAUDE_CODE_OAUTH_TOKEN`, and `ROTA_ACCOUNT` names the
+account for a status line.
+
+Three things worth knowing:
+
+- `rota set <id> --config DIR` opts into a fully separate directory instead:
+  no mirror, and nothing shared with your own.
+- If the mirror cannot be built — symlinks refused on Windows without
+  developer mode, an unwritable home — rota prints a warning and runs Claude
+  Code in its own directory and daemon, as it did before. The run still
+  happens, and the token still decides who pays for it.
+- A daemon already running from a plain `claude` keeps its own login until it
+  exits, so sessions already open under it go on being billed to that login
+  until they are reopened under rota — `rota run 12 -- --resume <session-id>`.
+  Whatever Claude Code creates inside the mirror later, caches and its own
+  daemon files included, is the account's own and is never linked back. If
+  there is no `~/.claude` to mirror yet, the account simply starts with a
+  fresh one.
 
 ### One run at a time, where the CLI owns the credential
 

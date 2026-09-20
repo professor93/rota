@@ -368,7 +368,7 @@ func (c *cli) send(args []string) error {
 		return usageError(sendShort)
 	}
 
-	s, err := openStore()
+	s, err := c.openStore()
 	if err != nil {
 		return err
 	}

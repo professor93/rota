@@ -30,7 +30,18 @@ func TestMain(m *testing.M) {
 	execProcess = func(path string, _, _ []string) error {
 		panic("this test reached the real process handover (" + path + "); call handover(t) to watch it instead")
 	}
-	os.Exit(m.Run())
+	// A claude run mirrors the Claude Code configuration directory this
+	// process is in. The tests get one of their own: the person running them
+	// has files of their own in theirs, and a test that read them would be a
+	// test that answers differently on every machine.
+	dir, err := os.MkdirTemp("", "rota-claude")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("CLAUDE_CONFIG_DIR", dir)
+	code := m.Run()
+	os.RemoveAll(dir)
+	os.Exit(code)
 }
 
 // handover watches the handover instead of being replaced by it, and returns

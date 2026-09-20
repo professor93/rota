@@ -42,6 +42,13 @@ type Store struct {
 	// on every load.
 	Ordered bool `json:"ordered,omitzero"`
 
+	// Warn is told about something that went wrong beside the work rather
+	// than in it — a run that will happen anyway, but not quite as intended.
+	// nil is silence, which is what a program with nowhere to put the
+	// message wants. It is never an error return: the caller asked for a
+	// run, and a run it gets.
+	Warn func(msg string) `json:"-"`
+
 	backend  Backend
 	unlock   func()
 	released bool

@@ -46,7 +46,7 @@ func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env 
 	if err == nil {
 		// Stage may adopt a token the CLI rotated, or mark the account dead
 		// on its way to an error; either way the account must be saved.
-		cmd, err = rota.Stage(a, s.Home(a))
+		cmd, err = s.command(a, true)
 		changed = true
 	}
 	if changed {
@@ -82,7 +82,7 @@ func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env 
 // refresh token is refused for good by these providers. Refusing costs a
 // caller one retry; not refusing costs the account.
 func (s *Store) Run(ctx context.Context, a *rota.Account, spec rota.Spec, lim *rota.Limits, events io.Writer) (*rota.Result, error) {
-	cmd, release, err := s.ready(ctx, a)
+	cmd, release, err := s.ready(ctx, a, !spec.Hermetic)
 	if err != nil {
 		return nil, err
 	}
@@ -101,7 +101,7 @@ func (s *Store) Run(ctx context.Context, a *rota.Account, spec rota.Spec, lim *r
 // caller that never closes the session therefore keeps the account claimed,
 // which is exactly what it is: a run in flight.
 func (s *Store) Start(ctx context.Context, a *rota.Account, spec rota.Spec, lim *rota.Limits, events io.Writer) (*rota.Session, error) {
-	cmd, release, err := s.ready(ctx, a)
+	cmd, release, err := s.ready(ctx, a, !spec.Hermetic)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +125,11 @@ func (s *Store) Start(ctx context.Context, a *rota.Account, spec rota.Spec, lim 
 // to get that order wrong. The caller decides only when the claim is released
 // — at the end of the call for a run, at the end of the session for a
 // session.
-func (s *Store) ready(ctx context.Context, a *rota.Account) (*rota.Command, func(), error) {
+//
+// mirror says whether the account's own Claude Code world is worth building.
+// A hermetic run is given a throwaway configuration directory instead, so
+// building one for it would be work nobody reads.
+func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
 	if a.Dead {
 		return nil, nil, rota.WrapReauth(a)
 	}
@@ -159,7 +163,7 @@ func (s *Store) ready(ctx context.Context, a *rota.Account) (*rota.Command, func
 	// the CLI rotated, and that must be on disk before anything runs. Once
 	// it is saved the lock is released, because the run that follows lasts
 	// as long as the agent does and nothing else may be made to wait for it.
-	cmd, err := rota.Stage(a, s.Home(a))
+	cmd, err := s.command(a, mirror)
 	if err != nil {
 		if serr := s.Save(); serr != nil {
 			return fail(errors.Join(err, fmt.Errorf("the store could not be saved: %w", serr)))
@@ -172,6 +176,38 @@ func (s *Store) ready(ctx context.Context, a *rota.Account) (*rota.Command, func
 	_ = s.Release() // releasing a lock cannot fail in a way a caller can act on
 	cmd.BaseEnv = HostEnv()
 	return cmd, release, nil
+}
+
+// command stages an account's credentials and returns the command that
+// starts its CLI, with the account's own Claude Code world added to the
+// environment when there is one to add.
+//
+// Prepare and ready share it because both must do these two things in this
+// order and neither may do only the first: a handover and a run are the same
+// launch, differing in who waits for it.
+//
+// A mirror that cannot be built is not a reason to refuse the run. The run
+// still works — it is billed correctly, it just shares the person's daemon
+// as every rota run did before — so the environment is left alone and the
+// application is told, if it left somewhere to tell.
+func (s *Store) command(a *rota.Account, mirror bool) (*rota.Command, error) {
+	cmd, err := rota.Stage(a, s.Home(a))
+	if err != nil || !mirror {
+		return cmd, err
+	}
+	dir, merr := s.mirrorClaude(a)
+	switch {
+	case merr != nil:
+		if s.Warn != nil {
+			s.Warn(fmt.Sprintf("could not mirror Claude Code's configuration into %s (%v); "+
+				"running with Claude Code's own directory and daemon", dir, merr))
+		}
+	case dir != "":
+		// Appended rather than replacing: Environ drops every inherited
+		// value a command sets, so the child sees this one and only this one.
+		cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+dir)
+	}
+	return cmd, nil
 }
 
 // RunDir is where a run that stays open puts the socket another terminal
