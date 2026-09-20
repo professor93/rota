@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -46,14 +47,24 @@ func (s *Store) mirrorClaude(a *rota.Account) (string, error) {
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		return dst, err
 	}
-	entries, err := os.ReadDir(src)
+	// Nothing to mirror is not a failure: Claude Code makes itself a fresh
+	// world in the directory, which is what it would have done in the
+	// missing one. A source that is there but is not a directory is another
+	// matter — CLAUDE_CONFIG_DIR naming a file — and is said so on every
+	// platform: Windows reports reading a file as a directory as "not
+	// found", which would otherwise pass for the harmless case.
+	info, err := os.Stat(src)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			// Nothing to mirror is not a failure. Claude Code makes itself a
-			// fresh world in the directory, which is what it would have done
-			// in the missing one.
 			return dst, nil
 		}
+		return dst, err
+	}
+	if !info.IsDir() {
+		return dst, fmt.Errorf("%s is not a directory", src)
+	}
+	entries, err := os.ReadDir(src)
+	if err != nil {
 		return dst, err
 	}
 	have, err := os.ReadDir(dst)
