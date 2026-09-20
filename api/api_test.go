@@ -179,7 +179,45 @@ func newHarness(t testing.TB, opts Options) *harness {
 	handler := s.Handler()
 	h := &harness{t: t, handler: handler, root: root, dir: home, srv: httptest.NewServer(handler), token: opts.Token}
 	t.Cleanup(h.srv.Close)
+	// Registered last, so it runs first: while the server still answers and
+	// before any temporary directory is removed.
+	t.Cleanup(h.endRuns)
 	return h
+}
+
+// endRuns closes every run still alive and waits for each to have ended.
+//
+// A test that returns with a CLI still running leaves it, and the server
+// goroutine behind it, writing into the store while the temporary directory
+// holding that store is removed — and the removal then fails a test that had
+// passed, with "directory not empty". It was always a race; a launch now
+// builds the account's mirror in there as well, so it is lost more often.
+// Ending the runs here covers every test at once instead of each remembering.
+func (h *harness) endRuns() {
+	type run struct {
+		ID    string `json:"id"`
+		State string `json:"state"`
+	}
+	alive := func() []run {
+		_, raw := h.do("GET", "/v1/runs", nil)
+		var doc struct {
+			Runs []run `json:"runs"`
+		}
+		_ = json.Unmarshal(raw, &doc)
+		var out []run
+		for _, r := range doc.Runs {
+			if r.State != "ended" {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	for _, r := range alive() {
+		h.do("POST", "/v1/runs/"+r.ID+"/close", nil)
+	}
+	for deadline := time.Now().Add(5 * time.Second); len(alive()) > 0 && time.Now().Before(deadline); {
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func (h *harness) do(method, path string, body any, hdr ...string) (*http.Response, []byte) {
