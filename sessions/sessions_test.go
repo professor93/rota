@@ -60,7 +60,7 @@ func TestConfigHomeSaysWhoOwnsWhatIsFound(t *testing.T) {
 	} {
 		// Cleaned, so two accounts naming one folder name one folder and a
 		// scan does not count it twice.
-		if dir, shared = ConfigHome(a, staged); dir != "/srv/threads" || shared {
+		if dir, shared = ConfigHome(a, staged); dir != filepath.Clean("/srv/threads") || shared {
 			t.Fatalf("#%d: the folder it was pointed at: %q %v", a.ID, dir, shared)
 		}
 	}

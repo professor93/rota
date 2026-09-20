@@ -260,7 +260,7 @@ func TestAWebSocketStartsARunAndCarriesItBothWays(t *testing.T) {
 	if id == "" {
 		t.Fatalf("a run started over a socket is addressable, so it says its id: %v", init)
 	}
-	t.Cleanup(func() { h.do("POST", "/v1/runs/"+id+"/close", nil) })
+	t.Cleanup(func() { closeRun(t, h, id) })
 
 	c.say(map[string]any{"type": "message", "text": "two", "ref": "c1"})
 	ack := c.ack("c1")
@@ -395,7 +395,7 @@ func TestWebSocketFramesAreRobust(t *testing.T) {
 	c := dialRun(t, h, "/v1/accounts/1/ws")
 	c.say(map[string]any{"type": "start", "prompt": "one"})
 	id, _ := c.waitType("init")["run_id"].(string)
-	t.Cleanup(func() { h.do("POST", "/v1/runs/"+id+"/close", nil) })
+	t.Cleanup(func() { closeRun(t, h, id) })
 
 	c.sayInPieces(`{"type":"mess`, `age","text":"two","ref":"f1"}`)
 	ack := c.ack("f1")
@@ -476,7 +476,7 @@ func TestTheServerPingsAndDropsASilentPeer(t *testing.T) {
 	c := dialRun(t, h, "/v1/accounts/1/ws")
 	c.say(map[string]any{"type": "start", "prompt": "one"})
 	id, _ := c.waitType("init")["run_id"].(string)
-	t.Cleanup(func() { h.do("POST", "/v1/runs/"+id+"/close", nil) })
+	t.Cleanup(func() { closeRun(t, h, id) })
 
 	// Nothing is answered from here on: no pong, no frame of any kind.
 	done := make(chan uint16, 1)
@@ -505,6 +505,22 @@ func TestTheServerPingsAndDropsASilentPeer(t *testing.T) {
 		}
 		if time.Now().After(deadline) {
 			t.Fatalf("the run must be left with nobody reading it: %d %v", code, doc)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// closeRun closes a run and waits until it has ended. Closing is a request,
+// not an event: the CLI exits a moment later, and a test that returns before
+// it has leaves a process holding the temporary directory the test is about
+// to remove — which Windows refuses, failing a test that had passed.
+func closeRun(t *testing.T, h *harness, id string) {
+	t.Helper()
+	h.do("POST", "/v1/runs/"+id+"/close", nil)
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		code, doc := post(t, h, "GET", "/v1/runs/"+id, nil)
+		if code != http.StatusOK || doc["state"] == "ended" {
+			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}

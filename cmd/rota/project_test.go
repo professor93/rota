@@ -110,8 +110,10 @@ func TestSessionsThroughTheCLI(t *testing.T) {
 	}
 
 	// A caller scripting this reads it back whole.
+	// The folder is looked for as JSON writes it: on Windows every separator
+	// in it is escaped, and the path as the shell spells it is not in there.
 	out, _, code := call(t, "--json", "set", "1", "--sessions", folder)
-	if code != 0 || !strings.Contains(out, `"sessions"`) || !strings.Contains(out, folder) {
+	if code != 0 || !strings.Contains(out, `"sessions"`) || !strings.Contains(out, strings.ReplaceAll(folder, `\`, `\\`)) {
 		t.Fatalf("json: %d %q", code, out)
 	}
 
