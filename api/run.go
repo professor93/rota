@@ -173,7 +173,7 @@ func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, 
 		return nil, errGone
 	}
 	hold.add(s.release)
-	st, err := store.Open(s.opts.Dir)
+	st, err := s.openStore()
 	if err != nil {
 		s.log.Error("opening the store", "err", err)
 		return nil, refuse(http.StatusInternalServerError, "the account store could not be opened")

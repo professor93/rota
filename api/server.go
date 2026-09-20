@@ -168,7 +168,7 @@ func (s *Server) maintain() {
 			s.log.Error("panic while refreshing in the background", "panic", v)
 		}
 	}()
-	st, err := store.Open(s.opts.Dir)
+	st, err := s.openStore()
 	if err != nil {
 		s.log.Warn("background refresh: the store could not be opened", "err", err)
 		return
@@ -433,9 +433,27 @@ func pathID(r *http.Request) (int, error) {
 	return id, nil
 }
 
+// openStore takes the store, wherever the server takes it, and gives it
+// somewhere to put a warning.
+//
+// A warning is what the store says when a run will happen anyway but not
+// quite as asked — a Claude Code configuration that could not be mirrored,
+// so the account shares the person's daemon after all. Nobody is refused
+// over it, and the log is the only place a server has to say so. Opening
+// the store is still the caller's failure to report: each of the three has
+// a different way of failing a caller.
+func (s *Server) openStore() (*store.Store, error) {
+	st, err := store.Open(s.opts.Dir)
+	if err != nil {
+		return nil, err
+	}
+	st.Warn = func(msg string) { s.log.Warn(msg) }
+	return st, nil
+}
+
 // open takes the store for one request, reporting the failure itself.
 func (s *Server) open(w http.ResponseWriter) (*store.Store, bool) {
-	st, err := store.Open(s.opts.Dir)
+	st, err := s.openStore()
 	if err != nil {
 		s.log.Error("opening the store", "err", err)
 		fail(w, http.StatusInternalServerError, "the account store could not be opened")
