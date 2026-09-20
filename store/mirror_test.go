@@ -239,3 +239,31 @@ func TestAHermeticRunSkipsTheMirrorAndKeepsItsThrowawayDirectory(t *testing.T) {
 		t.Fatalf("the mirror should not have been built for a hermetic run: %v", err)
 	}
 }
+
+// A mirror built by an older rota may hold a link for a name that is no
+// longer shared — sessions/ was shared once. The next launch removes that
+// link, because a link in the mirror is always rota's own work. A real entry
+// of the same name is the account's and stays.
+func TestAStaleLinkForANameNoLongerSharedIsRemoved(t *testing.T) {
+	src := claudeWorld(t)
+	s, a := claudeStore(t)
+	dst := s.ownHome(a)
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(src, "sessions"), filepath.Join(dst, "sessions")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dst, "daemon"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	absent(t, filepath.Join(dst, "sessions"))
+	if fi, err := os.Lstat(filepath.Join(dst, "daemon")); err != nil || !fi.IsDir() {
+		t.Fatalf("the account's own daemon directory must stay: %v %v", fi, err)
+	}
+	// And the link that is meant to be there is not mistaken for a stale one.
+	linksTo(t, filepath.Join(dst, ".claude.json"), filepath.Join(src, ".claude.json"))
+}

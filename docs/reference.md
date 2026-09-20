@@ -1168,7 +1168,9 @@ registry of live sessions — each process's socket and the key that opens it
 — and is kept apart for the same reason as the daemon: shared, it would let
 a window of one account attach to a session another account's daemon hosts,
 and pay for it. So the agent view under an account lists that account's
-background sessions, and no other's.
+background sessions, and no other's. A mirror built by an earlier rota that
+still links a name no longer shared loses that link on the next launch: a
+link in the mirror is always rota's own, a real entry is the account's.
 
 Three things worth knowing:
 

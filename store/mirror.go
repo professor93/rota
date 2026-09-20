@@ -109,12 +109,19 @@ func (s *Store) mirrorClaude(a *rota.Account) (string, error) {
 	}
 	// An entry the person deleted from their own directory would linger here
 	// as a link to nothing, which Claude Code reads as a broken file rather
-	// than as an absent one. Only links are ever removed.
+	// than as an absent one. A link for a name this package has since
+	// stopped sharing would linger too, made by an older rota and still
+	// pointing at the person's file. Both go. Only links are ever removed:
+	// a link here is rota's own work, a real entry is the account's.
 	for name, e := range mine {
 		if e.Type()&fs.ModeSymlink == 0 {
 			continue
 		}
 		p := filepath.Join(dst, name)
+		if name != ".claude.json" && !sharedWithClaude(name) {
+			_ = os.Remove(p)
+			continue
+		}
 		if _, err := os.Stat(p); errors.Is(err, fs.ErrNotExist) {
 			_ = os.Remove(p)
 		}
