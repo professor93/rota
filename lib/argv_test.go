@@ -34,7 +34,7 @@ func TestARunRecordsItsCommandWhenAsked(t *testing.T) {
 	if len(res.Argv) == 0 || res.Argv[0] != bin || !slices.Contains(res.Argv, "--model") {
 		t.Fatalf("argv is the binary and the arguments as built: %v", res.Argv)
 	}
-	if strings.Join(res.EnvSet, ",") != "CLAUDE_CODE_OAUTH_TOKEN" || !slices.Contains(res.EnvDropped, "ANTHROPIC_API_KEY") {
+	if strings.Join(res.EnvSet, ",") != "CLAUDE_CODE_OAUTH_TOKEN,ROTA_PROVIDER,ROTA_ACCOUNT_ID,ROTA_ACCOUNT" || !slices.Contains(res.EnvDropped, "ANTHROPIC_API_KEY") {
 		t.Fatalf("env is names: set %v dropped %v", res.EnvSet, res.EnvDropped)
 	}
 	if raw, _ := Encode(res); strings.Contains(string(raw), "secret-token") {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"strconv"
 )
 
 // This file is rota's core: values in, values out. Nothing here reads or
@@ -179,7 +180,48 @@ func Stage(a *Account, home string) (*Command, error) {
 			return nil, err
 		}
 	}
-	return p.Launch(a, home)
+	cmd, err := p.Launch(a, home)
+	if err != nil {
+		return nil, err
+	}
+	return identify(a, cmd), nil
+}
+
+// identify tells the child which account it is running as.
+//
+// The credential alone does not say. Claude Code, for one, takes the token
+// from the environment and bills the right account — but its own display,
+// and every status line or hook that reads its shared ~/.claude.json, reports
+// the e-mail of whoever last signed in through the keychain, which is a
+// different account entirely. Nothing else in the child's world contradicts
+// that. These three variables are the truthful answer: the provider, the
+// account's id in the caller's store, and the label a person recognises.
+// Anything that wants to name the account should read them and not the
+// vendor's config file.
+//
+// They are appended after the provider's own variables — a caller that pins
+// Env[0] to the credential keeps it — and they are set for every provider,
+// not only the ones whose CLI is known to be confused, because a status line
+// should not have to ask which vendor it is looking at.
+//
+// The command comes back as a copy, because a provider is free to hand out
+// the same value twice — an Env built once and returned from every Launch is
+// a reasonable thing to write — and staging twice must not leave the second
+// child with two of each.
+func identify(a *Account, cmd *Command) *Command {
+	if cmd == nil {
+		return nil
+	}
+	env := make([]string, 0, len(cmd.Env)+3)
+	env = append(env, cmd.Env...)
+	env = append(env,
+		"ROTA_PROVIDER="+a.Provider,
+		"ROTA_ACCOUNT_ID="+strconv.Itoa(a.ID),
+		"ROTA_ACCOUNT="+a.Label(),
+	)
+	out := *cmd
+	out.Env = env
+	return &out
 }
 
 // OwnsCredentials reports whether the provider's CLI, not rota, owns the
@@ -276,10 +318,17 @@ func StagePlan(ctx context.Context, a *Account, home string) (*Command, []Staged
 		return nil, nil, err
 	}
 	if pl, ok := p.(Planner); ok {
-		return pl.Plan(ctx, a, home)
+		cmd, files, err := pl.Plan(ctx, a, home)
+		if err != nil {
+			return nil, nil, err
+		}
+		return identify(a, cmd), files, nil
 	}
 	cmd, err := p.Launch(a, home)
-	return cmd, nil, err
+	if err != nil {
+		return nil, nil, err
+	}
+	return identify(a, cmd), nil, nil
 }
 
 // FSAdopter is Adopter through a filesystem value, for applications whose

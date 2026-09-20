@@ -1047,6 +1047,18 @@ first, Python the last — so the child only ever sees one. For `claude`,
 `ANTHROPIC_BASE_URL` is dropped too: a stray one would send the OAuth token
 to whatever host it names.
 
+Every child is also told which account it is: `ROTA_PROVIDER` is the
+provider name, `ROTA_ACCOUNT_ID` the account's id as a decimal, and
+`ROTA_ACCOUNT` the label rota itself shows — the e-mail, else the shortened
+UUID, else `account-N`. All three are set for every provider, and an
+inherited one from an outer rota session is replaced, never doubled. They
+exist because the credential alone does not say: Claude Code's `/status`
+does report `Auth token: CLAUDE_CODE_OAUTH_TOKEN`, and the billing lands on
+the right account, but any e-mail it or a status line displays is read from
+the shared `~/.claude.json`, which names whoever last signed in through the
+keychain. A status line, a hook, or anything else that wants to name the
+account should prefer `ROTA_ACCOUNT`.
+
 `codex`: `CODEX_ACCESS_TOKEN` belongs to a separate "Agent Identity" feature
 and a ChatGPT OAuth token placed there is refused, so a staged `auth.json`
 under a private `CODEX_HOME` is the only route that carries a ChatGPT login.
