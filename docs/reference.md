@@ -348,10 +348,10 @@ session_ttl = "12h"         # how long a sign-in on the page lasts
 
 [routes]
 api        = true           # everything under /v1 except the sockets and health
-playground = true           # GET /, GET /playground and the invite landing
+playground = true           # GET / and GET /playground
 websocket  = true           # the /ws routes
 health     = true           # GET /v1/health, open and depending on nothing
-terminal   = false          # the /v1/terminals routes; off until asked for
+terminal   = false          # /v1/terminals, GET /terminal; off until asked for
 
 [terminal]                  # nothing here means anything unless routes.terminal
 shell            = false    # also allow a plain login shell, not only CLIs
@@ -420,7 +420,10 @@ file.
 |---|---|---|
 | `GET` | `/v1/health` | unauthenticated and never rate-limited: `{"ok":true}` and nothing else. Its own group, so it survives switching the page off |
 | `GET` | `/` | unauthenticated: what this is and its version. With the rest of the `playground` group |
-| `GET` | `/playground` | the playground, a single self-contained page |
+| `GET` | `/playground` | the playground, a page over the API |
+| `GET` | `/terminal` | the terminal page. With the `terminal` group, not this one: a server may serve either page without the other |
+| `GET` | `/assets/page.css`, `/assets/page.js` | what both pages are made of in common; present wherever either page is |
+| `GET` | `/assets/xterm/…` | the vendored terminal emulator, with the `terminal` group |
 | `GET` | `/v1/schema` | every provider, its models, efforts, defaults and fields |
 | `GET` | `/v1/accounts` | accounts in rotation order, with usage, status, order, threshold and when limits were read (`?refresh=1`); `default` names the one a bare run would use |
 | `GET` | `/v1/accounts/{id}/schema` | the models *that* account may actually use |
@@ -448,7 +451,7 @@ file.
 | `POST` | `/v1/session` | `{"name":"…","password":"…"}` → the same, and the session cookie |
 | `DELETE` | `/v1/session` | end this session |
 | `POST` | `/v1/invites` | `{"ttl":"10m"}` → `{"url","expires"}` — a single-use link that signs somebody in as a watcher |
-| `GET` | `/invite/{code}` | unauthenticated: spends one of those and lands on the page |
+| `GET` | `/invite/{code}` | unauthenticated: spends one of those and lands on a page — the terminal where there is one, the playground otherwise |
 
 `/v1/auth` and `/v1/auth/{id}` are the same two under their old names, kept
 working for anything already calling them.
@@ -603,7 +606,7 @@ but the code that meant to make it.
 | Method | Path | |
 |---|---|---|
 | `POST` | `/v1/invites` | (`control`) `{"ttl":"10m"}` → `{"url","expires"}`; ten minutes by default, a day at most |
-| `GET` | `/invite/{code}` | unauthenticated; spends the code, signs the visitor in as a watcher, redirects to the page |
+| `GET` | `/invite/{code}` | unauthenticated; spends the code, signs the visitor in as a watcher, redirects to `/terminal` where that group is on and to `/playground` otherwise |
 
 A code is 32 random bytes and one use: spending it is taking it out of the
 table, so two browsers racing the same link cannot both get in. The session
@@ -1327,6 +1330,93 @@ term.onData(d => ws.send(d));                       // binary: what was typed
 term.onResize(({cols, rows}) => ws.send(JSON.stringify({type:"resize", cols, rows})));
 ```
 
+#### The terminal page
+
+`GET /terminal` is where a terminal is watched and typed at. It is in the
+`terminal` group, not the playground's: a server that holds terminals and
+serves no playground has this page, and a server with no terminals does not
+have it at all. It is the same origin and the same sign-in as the playground
+— one cookie, one bearer token in that tab's storage — and each page carries
+a link to the other, shown only where the other one is being served.
+
+Three regions, which stack on a narrow screen.
+
+**The list**, on the left: every terminal this server holds, running ones
+first and ended ones after, each saying what it is, which account is paying
+for it, who holds its keyboard and how many people are watching — or *ended,
+code N*. A control principal also gets **New terminal**: which account (or
+the rotation's choice), a label, arguments, a folder, and a plain shell where
+`terminal.shell` allowed one. Arguments are split the way a shell splits
+them, as far as quoting goes; nothing is expanded. The list is refreshed
+when a terminal is started or killed, when a frame about the open terminal
+arrives, and otherwise every ten seconds while somebody is looking at it.
+
+**The terminal**, in the middle, with one strip above it: whether the socket
+is *connecting*, *live*, *reconnecting in Ns* or *ended, code N*; and the
+keyboard, which has exactly three states —
+
+- you hold it, and may **Release** it;
+- nobody holds it, and you may **Take the keyboard**;
+- somebody else holds it, and you may **Ask for the keyboard**. That sends a
+  `claim`; the page then counts down the same ten seconds the server counts,
+  and offers **Force** when they are up and nobody has answered. Offering it
+  sooner would be a lie: the server refuses it.
+
+The holder's tab shows a request from anybody else as a prompt with **Grant**
+and **Deny**, which are `grant{to}` and `deny{to}` under the asking
+connection's own id. A watcher is shown none of this, only a *watching*
+badge — and a key pressed by somebody who is not holding is not sent to be
+refused: it goes nowhere, and the keyboard control flashes once.
+
+The terminal is fitted to its container for whoever holds the keyboard,
+which sends `resize` when the fitted size changes; for everybody else it is
+set to the session's own `cols`×`rows` and scrolls inside the container
+rather than lying about how wide the terminal on the server is.
+
+**Reconnecting** is the socket's own rules, followed exactly. The page adds
+every binary frame's length to `hello.offset`, so it always knows the offset
+it has actually been shown, and it reattaches with `?since=` that number —
+never with what the server last said. A first attach says nothing, which
+replays the whole scrollback. Close code `1013` is "you fell behind", and it
+goes back at once; anything else waits 1, 2, 4, 8 and then 15 seconds. A
+`gap` frame is written into the terminal itself as a dim line, *… N bytes
+were not kept …*, because a terminal that looked continuous when it was not
+is worse than a visible hole. An `exit` stops all of it. There is never a
+second socket for one terminal, and leaving the page or choosing another
+terminal closes the one there is with a clean `1000`.
+
+**The information**, on the right: the account and its provider, the label,
+the folder, how long ago it started, the size, who holds the keyboard, who
+is watching and as what, whether it is being recorded — and **the login
+inside lapses in …**, from `token_until`, which turns into a warning under
+an hour, because nothing else on the screen shows that the CLI in there will
+stop working at a particular time. A control principal also gets **Kill**,
+behind a confirmation. An ended terminal reads the same way, with *exited,
+code N*, and its scrollback is still replayed for as long as the server
+keeps it.
+
+#### Vendored assets
+
+The emulator is [xterm.js](https://xtermjs.org) — `@xterm/xterm` 5.5.0 and
+`@xterm/addon-fit` 0.10.0, both MIT — carried in the rota binary and served
+from `/assets/xterm/`. Nothing is fetched from another host at run time, by
+this page or any other: rota is usually on a loopback address with no route
+out, and a page that asked a CDN for the code that draws somebody's shell
+would be both broken there and a third party's to change.
+
+Each file was taken from the npm tarball for that exact version after the
+tarball had answered the `dist.integrity` sha512 in the registry's own
+metadata. `api/assets/xterm/README` records the versions, those integrity
+strings, the SHA-256 of every vendored file and the three steps to update;
+a Go test recomputes those SHA-256s from what is embedded, so none of it can
+be edited quietly. The files are served with their right types, `nosniff`
+and a year of caching, under a `?v=` query carrying this server's version —
+so an upgraded rota is a different URL rather than a stale script.
+
+The pages' own Content-Security-Policy admits `'self'` for scripts and
+styles, which is these files and the two shared ones and nothing else: no
+remote host, and no `unsafe-eval`, which the emulator does not need.
+
 #### Limits, the audit log and recording
 
 `max_sessions` caps the terminals running at once; past it, `POST` answers
@@ -1336,7 +1426,9 @@ not from the last keystroke. Stopping the server ends every terminal: each
 one is a CLI in a session of its own, which is exactly what a signal to rota
 does not reach. An ended terminal stays listed for five minutes, with its
 exit code, so a client reattaching a moment late reads the end rather than a
-404 it cannot tell from a wrong id.
+404 it cannot tell from a wrong id. It is then held by nobody: `holder` is
+`null` in the description and in the listing once a terminal has ended,
+because there is no keyboard left to hold.
 
 The audit log is always on, and never carries a keystroke or a line of
 output: `terminal created` (id, kind, account, by), `terminal attached` and
@@ -1353,8 +1445,14 @@ is a transcript of somebody's working session.
 
 ### The playground
 
-`GET /playground` serves a page with no credential of its own. It asks
-`GET /v1/session` first. Signed out, it offers a name and a password, with
+`GET /playground` serves a page with no credential of its own. It is one of
+two: the terminal page is the other, described above, and they share an
+origin, a sign-in, a stylesheet and a script — `/assets/page.css` and
+`/assets/page.js`, which hold the palette, the header strip, the credential,
+the session and the sign-in, so there is one copy of that and not two that
+drift apart. Each page links to the other where the other is served.
+
+It asks `GET /v1/session` first. Signed out, it offers a name and a password, with
 the bearer token underneath it as the way this page has always been used —
 and a token is still proved against `/v1/accounts`, the first thing the page
 needs anyway, so a right one costs no extra round trip. A token is kept in
@@ -1419,12 +1517,14 @@ back to the live request. *Load* puts one into the form instead. Event logs
 are counted rather than stored: they can be larger than everything else put
 together.
 
-Light and dark follow the system, with a toggle that overrides it. The page
-is self-contained: no fonts, scripts or styles from anywhere else, because
-it is usually served on a loopback address with no route out. A test runs
-its actual JavaScript against this server's own schema — typing, toggling,
-filtering, building a schema, running, streaming, reordering the rotation —
-so a changed field or response shape cannot break it silently.
+Light and dark follow the system, with a toggle that overrides it. Both
+pages are self-contained: no fonts, scripts or styles from anywhere but this
+server, because it is usually served on a loopback address with no route
+out. A test runs their actual JavaScript against this server's own schema —
+typing, toggling, filtering, building a schema, running, streaming,
+reordering the rotation; and, on the other page, attaching, replaying,
+taking the keyboard and reconnecting — so a changed field or response shape
+cannot break either of them silently.
 
 ### Safety
 
@@ -2178,6 +2278,9 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `api/server.go`, `api/run.go` | Routing, the token, the rate limit, requests and streaming |
 | `api/runs.go`, `api/ws.go` | The runs that stay open, and the WebSocket that carries one both ways |
 | `api/playground.html` | The page served at `/playground` |
+| `api/terminal.html` | The page served at `/terminal` |
+| `api/assets/page.css`, `api/assets/page.js` | What both pages are made of in common |
+| `api/assets/xterm/` | The vendored terminal emulator, with its licences and its provenance |
 | `api/config.go` | `server.toml`: the schema, its defaults, what it validates, and `--print-config` |
 | `internal/toml/` | The part of TOML that file uses, and a refusal by name for the rest |
 | `docs/server.toml` | The whole schema at its defaults, kept honest by a test |

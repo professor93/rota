@@ -31,10 +31,10 @@ session_ttl = "12h"       # how long a sign-in on the page lasts
 # so its paths answer 404 like any path this server never had.
 [routes]
 api = true         # everything under /v1 except the sockets and /v1/health
-playground = true  # GET /, GET /playground and the invite landing
+playground = true  # GET / and GET /playground
 websocket = true   # the /ws routes, which carry a run that stays open
 health = true      # GET /v1/health, open and depending on nothing
-terminal = false   # the /v1/terminals routes; needs api and websocket
+terminal = false   # /v1/terminals and GET /terminal; needs api and websocket
 
 # A terminal is an account's CLI on a pseudo-terminal that lives in this
 # server: it outlives the browser tab that opened it, several people may
