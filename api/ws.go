@@ -247,10 +247,13 @@ type wsConn struct {
 	r    *bufio.Reader
 	hb   time.Duration
 
-	// held is a message being reassembled, and holding whether there is one.
-	// Both belong to the reading goroutine alone.
+	// held is a message being reassembled, holding whether there is one, and
+	// heldOp which kind it started as — a message is text or binary by its
+	// first frame, and its continuations say nothing about it. All three
+	// belong to the reading goroutine alone.
 	held    []byte
 	holding bool
+	heldOp  byte
 	// late says the peer stopped answering, so the close can say so.
 	late atomic.Bool
 
@@ -338,6 +341,13 @@ func (c *wsConn) sendClose(code uint16, why string) {
 // is drained until it closes, so that goroutine is never left holding a frame
 // nobody will take.
 func (c *wsConn) bye(code uint16, why string, reads <-chan []byte) {
+	farewell(c, code, why, reads)
+}
+
+// farewell is bye's body over whatever a reading goroutine is filling: the
+// run socket carries whole documents and the terminal carries frames with
+// their opcode, and the goodbye is the same either way.
+func farewell[T any](c *wsConn, code uint16, why string, reads <-chan T) {
 	c.sendClose(code, why)
 	if reads == nil {
 		// Nobody else is reading this socket, so the peer's close is read
@@ -430,50 +440,76 @@ func (c *wsConn) frame(wait time.Duration) (op byte, payload []byte, fin bool, e
 	return op, payload, fin, nil
 }
 
-// message reads frames until it has a whole message. A ping is answered where
-// it arrives, carrying the same payload back, because a peer checking that the
-// connection works should not have to wait for a message to be finished first.
+// message reads one whole message as this server's first socket reads them:
+// JSON, whichever framing carried it. A client that sent its document as
+// bytes meant the same thing, so binary is held to the same rule as text.
 func (c *wsConn) message(wait time.Duration) ([]byte, error) {
+	op, payload, err := c.messageOp(wait)
+	if err != nil {
+		return nil, err
+	}
+	if op == opBinary {
+		return whole(payload)
+	}
+	return payload, nil
+}
+
+// messageOp reads frames until it has a whole message, and says which kind
+// of message it was. A ping is answered where it arrives, carrying the same
+// payload back, because a peer checking that the connection works should not
+// have to wait for a message to be finished first.
+//
+// Text is checked here and binary is not: text is JSON by this server's own
+// rule, while binary is whatever it is — the bytes of somebody typing, which
+// are not required to be anybody's idea of a character.
+func (c *wsConn) messageOp(wait time.Duration) (byte, []byte, error) {
 	for {
 		op, payload, fin, err := c.frame(wait)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		switch op {
 		case opPing:
 			if err := c.send(opPong, payload); err != nil {
-				return nil, err
+				return 0, nil, err
 			}
 		case opPong: // the peer is alive, which is all a pong says
 		case opClose:
-			return nil, errPeerClose
+			return 0, nil, errPeerClose
 		case opText, opBinary:
-			// Binary is treated as text: what this server reads is JSON, and a
-			// client that framed it as bytes meant the same thing.
 			if c.holding {
-				return nil, wsFail{wsProtocol, "a message started inside another"}
+				return 0, nil, wsFail{wsProtocol, "a message started inside another"}
 			}
 			if fin {
-				return whole(payload)
+				return op, payload, textIfText(op, payload)
 			}
-			c.held, c.holding = payload, true
+			c.held, c.holding, c.heldOp = payload, true, op
 		case opContinue:
 			if !c.holding {
-				return nil, wsFail{wsProtocol, "a continuation with nothing to continue"}
+				return 0, nil, wsFail{wsProtocol, "a continuation with nothing to continue"}
 			}
 			if len(c.held)+len(payload) > maxWSMessage {
-				return nil, wsFail{wsTooBig, "one message is capped at 1 MB"}
+				return 0, nil, wsFail{wsTooBig, "one message is capped at 1 MB"}
 			}
 			c.held = append(c.held, payload...)
 			if fin {
-				msg := c.held
+				msg, started := c.held, c.heldOp
 				c.held, c.holding = nil, false
-				return whole(msg)
+				return started, msg, textIfText(started, msg)
 			}
 		default:
-			return nil, wsFail{wsProtocol, "unknown opcode"}
+			return 0, nil, wsFail{wsProtocol, "unknown opcode"}
 		}
 	}
+}
+
+// textIfText holds a text message to the one rule text has.
+func textIfText(op byte, payload []byte) error {
+	if op != opText {
+		return nil
+	}
+	_, err := whole(payload)
+	return err
 }
 
 // whole is a finished message, which must be text: everything this server
@@ -493,22 +529,54 @@ func (c *wsConn) readInto(out chan<- []byte) {
 	defer close(out)
 	for {
 		msg, err := c.message(3 * c.hb)
-		if err == nil {
-			select {
-			case out <- msg:
-				continue
-			case <-c.done:
-				return
-			}
+		if err != nil {
+			c.readFailed(err)
+			return
 		}
-		var bad wsFail
-		switch {
-		case errors.As(err, &bad):
-			c.sendClose(bad.code, bad.why)
-		case errors.Is(err, os.ErrDeadlineExceeded):
-			c.late.Store(true)
+		select {
+		case out <- msg:
+		case <-c.done:
+			return
 		}
-		return
+	}
+}
+
+// inFrame is one message with the framing it arrived in, for the socket that
+// reads both: a terminal's input is bytes and everything it is asked is a
+// document, and the two are told apart by the opcode rather than by looking
+// at what is inside.
+type inFrame struct {
+	op   byte
+	data []byte
+}
+
+// readFrames is readInto for that socket.
+func (c *wsConn) readFrames(out chan<- inFrame) {
+	defer close(out)
+	for {
+		op, msg, err := c.messageOp(3 * c.hb)
+		if err != nil {
+			c.readFailed(err)
+			return
+		}
+		select {
+		case out <- inFrame{op: op, data: msg}:
+		case <-c.done:
+			return
+		}
+	}
+}
+
+// readFailed ends a read that cannot go on: a frame the protocol does not
+// allow is named in a close frame, and a peer that stopped answering is
+// remembered so the goodbye can say which of the two it was.
+func (c *wsConn) readFailed(err error) {
+	var bad wsFail
+	switch {
+	case errors.As(err, &bad):
+		c.sendClose(bad.code, bad.why)
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		c.late.Store(true)
 	}
 }
 

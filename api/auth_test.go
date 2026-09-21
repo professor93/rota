@@ -82,7 +82,10 @@ func (p *people) as(token, method, path string, body any, hdr ...string) (*http.
 // and the point of the table is that nobody has to remember which default
 // that was.
 func TestEveryGuardedRouteHasARole(t *testing.T) {
-	s, err := New(Options{Token: "x", Dir: t.TempDir(), RefreshEvery: -1})
+	// Every group on, the terminal included: a route in a group this server
+	// happened to be built without would otherwise never be looked at.
+	s, err := New(Options{Token: "x", Dir: t.TempDir(), RefreshEvery: -1,
+		Routes: &Routes{API: true, Playground: true, WebSocket: true, Health: true, Terminal: true}})
 	if err != nil {
 		t.Fatal(err)
 	}

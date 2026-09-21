@@ -78,6 +78,32 @@ type Options struct {
 	Tokens []TokenPrincipal
 	// SessionTTL is how long a page sign-in lasts. Zero is twelve hours.
 	SessionTTL time.Duration
+	// Terminal is everything about the terminals this server holds. It does
+	// nothing unless Routes.Terminal is on.
+	Terminal Terminal
+}
+
+// Terminal configures the terminals a server may hold: how many, how much of
+// each is remembered, when an unattended one ends, and whether what they
+// printed is kept.
+type Terminal struct {
+	// Shell allows a terminal running the person's login shell rather than
+	// an account's CLI. It is off because those are two different offers: a
+	// CLI on an account is what this feature is for, and a shell is a
+	// general way onto the machine.
+	Shell bool
+	// MaxSessions caps the terminals running at once (default 8), and
+	// Scrollback how many bytes of output each keeps for whoever attaches
+	// (default 2 MiB).
+	MaxSessions int
+	Scrollback  int
+	// IdleTimeout ends a terminal nobody has been attached to for this long
+	// (default 12h). Zero is the default; negative never ends one.
+	IdleTimeout time.Duration
+	// Record keeps each terminal's output — never its input — under the
+	// store, up to RecordMax bytes each (default 50 MiB).
+	Record    bool
+	RecordMax int64
 }
 
 // User is one person who may sign in on the page. Password is the derived
@@ -123,14 +149,21 @@ type token struct {
 // anything without it. Health is one route and depends on nothing, which is
 // what makes it worth having: a probe that goes off with the page is not a
 // probe.
+//
+// Terminal is the exception to "nil is all of them": it is off unless
+// somebody says so, even here. The rest of this server answers questions
+// about accounts and runs; a terminal is a shell prompt on this machine, and
+// a group like that is asked for rather than inherited.
 type Routes struct {
 	API        bool
 	Playground bool
 	WebSocket  bool
 	Health     bool
+	Terminal   bool
 }
 
-// allRoutes is every group on.
+// allRoutes is every group a server had before the terminal existed, which
+// is what a caller with no opinion still gets.
 func allRoutes() Routes {
 	return Routes{API: true, Playground: true, WebSocket: true, Health: true}
 }
@@ -156,6 +189,14 @@ type Server struct {
 	// reattaches late.
 	runs   map[string]*liveRun
 	runsMu sync.Mutex
+	// terms are the terminals this server is holding, by id. They outlive
+	// every connection to them by design, so this is the only thing that
+	// knows where they are. Ended ones stay a few minutes, as runs do.
+	terms   map[string]*termSession
+	termsMu sync.Mutex
+	// clock is what the terminals' waits are measured against, injectable so
+	// a test about ten seconds need not take ten seconds.
+	clock clock
 	// keeperDone closes when the background refresher has returned, so Stop
 	// can promise that nothing is still writing to the store afterwards.
 	keeperDone chan struct{}
@@ -206,6 +247,25 @@ func New(opts Options) (*Server, error) {
 		r := allRoutes()
 		opts.Routes = &r
 	}
+	if opts.Routes.Terminal && (!opts.Routes.API || !opts.Routes.WebSocket) {
+		// Half a terminal is worse than none: the routes would be there and
+		// nothing could attach to one, or the other way round.
+		return nil, errors.New("api: the terminal needs the API and the WebSocket routes")
+	}
+	if opts.Terminal.MaxSessions <= 0 {
+		opts.Terminal.MaxSessions = 8
+	}
+	if opts.Terminal.Scrollback <= 0 {
+		opts.Terminal.Scrollback = defaultScrollback
+	}
+	if opts.Terminal.IdleTimeout == 0 {
+		// Zero is "unset", not "ends at once": a negative timeout is how a
+		// caller says a terminal should outlive everything.
+		opts.Terminal.IdleTimeout = 12 * time.Hour
+	}
+	if opts.Terminal.RecordMax <= 0 {
+		opts.Terminal.RecordMax = 50 << 20
+	}
 	users, err := checkUsers(opts.Users)
 	if err != nil {
 		return nil, err
@@ -219,6 +279,7 @@ func New(opts Options) (*Server, error) {
 		opts: opts, sem: make(chan struct{}, opts.MaxConcurrent), limit: newLimiter(),
 		log: log, ctx: ctx, cancel: cancel, forced: map[int]time.Time{},
 		runs:     map[string]*liveRun{},
+		terms:    map[string]*termSession{},
 		users:    users,
 		tokens:   tokens,
 		decoy:    decoyFor(users),
@@ -228,6 +289,9 @@ func New(opts Options) (*Server, error) {
 	if opts.RefreshEvery > 0 {
 		s.keeperDone = make(chan struct{})
 		go s.keepFresh(opts.RefreshEvery)
+	}
+	if opts.Routes.Terminal {
+		go s.keepTerminals()
 	}
 	return s, nil
 }
@@ -340,6 +404,9 @@ func (s *Server) maintain() {
 // write to it, which is exactly the state a caller thinks it has left behind
 // — and, for a test, is a directory that will not delete.
 func (s *Server) Stop() {
+	// The terminals first, and explicitly: each is a CLI in a session of its
+	// own, which is exactly what a signal to rota does not reach.
+	s.endTerminals()
 	s.cancel()
 	if s.keeperDone == nil {
 		return
@@ -405,7 +472,7 @@ func (s *Server) Handler() http.Handler {
 // be checked against it: a route added here without a row there is a failing
 // test rather than a route that quietly takes control.
 func (s *Server) guarded() map[string]http.HandlerFunc {
-	return map[string]http.HandlerFunc{
+	routes := map[string]http.HandlerFunc{
 		"GET /v1/schema":               s.schema,
 		"GET /v1/accounts":             s.listAccounts,
 		"GET /v1/accounts/{id}/schema": s.accountSchema,
@@ -432,17 +499,30 @@ func (s *Server) guarded() map[string]http.HandlerFunc {
 		// A link for somebody who should see and not touch.
 		"POST /v1/invites": s.makeInvite,
 	}
+	// A group that is off is not registered at all, so its paths answer 404
+	// like any path this server never had.
+	if s.opts.Routes.Terminal {
+		routes["GET /v1/terminals"] = s.listTerminals
+		routes["GET /v1/terminals/{id}"] = s.describeTerminal
+		routes["POST /v1/terminals"] = s.createTerminal
+		routes["DELETE /v1/terminals/{id}"] = s.killTerminal
+	}
+	return routes
 }
 
 // sockets is the same three doors as a WebSocket: one run, carried both
 // ways. They are guarded apart because a browser cannot put a header on a
 // WebSocket, so the credential may arrive as a subprotocol or a cookie.
 func (s *Server) sockets() map[string]http.HandlerFunc {
-	return map[string]http.HandlerFunc{
+	routes := map[string]http.HandlerFunc{
 		"GET /v1/runs/{id}/ws":     s.attachWS,
 		"GET /v1/accounts/{id}/ws": s.startWS,
 		"GET /v1/ws":               s.startWS,
 	}
+	if s.opts.Routes.Terminal {
+		routes["GET /v1/terminals/{id}/ws"] = s.terminalWS
+	}
+	return routes
 }
 
 // recover keeps one panicking request from taking the server down, and

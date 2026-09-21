@@ -267,6 +267,21 @@ func (s *Store) RunDir() (string, error) {
 	return dir, nil
 }
 
+// TerminalDir is where a recorded terminal's output is kept, beside the runs
+// and for the same reason: what a terminal printed belongs to rota rather
+// than to the CLI that printed it, and no CLI should be able to read it.
+//
+// It is made readable by its owner alone. A recording is a transcript of
+// somebody's working session — file names, error messages, whatever scrolled
+// past — and the directory it sits in is the last place to be relaxed about.
+func (s *Store) TerminalDir() (string, error) {
+	dir := filepath.Join(filepath.Dir(s.backend.HomeRoot()), "terminals")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
 // runLock is held for as long as an account's CLI is running, inside the home
 // that CLI owns, so the answer survives across rota processes as well as
 // within one.

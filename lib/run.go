@@ -858,6 +858,21 @@ func inlineObject(raw json.RawMessage) map[string]json.RawMessage {
 	return doc
 }
 
+// CheckCwd confines a working directory exactly as a run's cwd is confined,
+// and returns it resolved.
+//
+// It is exported for the callers that start a process without a Spec — a
+// terminal on the server has a directory and no prompt, so there is no spec
+// to check — and it is a wrapper rather than a copy so that the rule, the
+// wording of the refusal and the following of links stay one thing. nil
+// limits are a caller with no roots, as everywhere else here.
+func CheckCwd(dir string, lim *Limits) (string, error) {
+	if lim == nil {
+		lim = &Limits{}
+	}
+	return checkDir("cwd", dir, "", lim.Roots)
+}
+
 // checkDir confines a directory to the roots, insists it exists, and returns
 // it resolved.
 func checkDir(what, dir, base string, roots []string) (string, error) {

@@ -109,10 +109,46 @@ var roleFor = map[string]Role{
 	"POST /v1/auth/{id}":       RoleControl,
 	// Handing somebody else a way in.
 	"POST /v1/invites": RoleControl,
+	// The terminals. Looking at one is reading; starting one runs a CLI on
+	// this machine, and ending one takes it away from whoever is using it.
+	"GET /v1/terminals":         RoleWatch,
+	"GET /v1/terminals/{id}":    RoleWatch,
+	"POST /v1/terminals":        RoleControl,
+	"DELETE /v1/terminals/{id}": RoleControl,
 	// The sockets. Attaching is reading a run; starting one is running it.
 	"GET /v1/runs/{id}/ws":     RoleWatch,
 	"GET /v1/accounts/{id}/ws": RoleControl,
 	"GET /v1/ws":               RoleControl,
+	// Attaching to a terminal is reading it. What may be sent back into one
+	// is decided per frame, by the table below.
+	"GET /v1/terminals/{id}/ws": RoleWatch,
+}
+
+// termRoleFor is the same table for the frames a terminal's socket takes,
+// and it is here rather than beside the socket for the same reason: the
+// answer to "who may do this?" is read in one screen.
+//
+// "input" is the binary frame — the bytes of somebody typing — which has no
+// type field of its own because a frame that carried keystrokes as JSON
+// would have to escape every one of them. Only ping is watch: a connection
+// that may not change the terminal may still ask whether it is there.
+var termRoleFor = map[string]Role{
+	"input":   RoleControl,
+	"resize":  RoleControl,
+	"claim":   RoleControl,
+	"release": RoleControl,
+	"grant":   RoleControl,
+	"deny":    RoleControl,
+	"ping":    RoleWatch,
+}
+
+// termNeeds is the role one frame takes. A type nobody wrote a row for takes
+// control, for the same reason a route does.
+func termNeeds(kind string) Role {
+	if r, ok := termRoleFor[kind]; ok {
+		return r
+	}
+	return RoleControl
 }
 
 // needs is the role one route takes. A pattern nobody wrote a row for takes
