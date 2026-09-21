@@ -28,6 +28,16 @@ import (
 // main_test.go. A test that means to exercise the handover calls handover(t).
 func TestMain(m *testing.M) {
 	fakecli.Maybe()
+	// One test needs a real rota, in a process of its own, at a real
+	// terminal: sharing is about what happens between a window somebody is
+	// sitting at and the CLI under it, and nothing run inside `go test`
+	// has either. Rather than building a binary — which would need a Go
+	// toolchain wherever the tests run, and they run in a bare container —
+	// this binary answers to rota's own command line when asked to. It is
+	// read after the fake CLI above, so a child that is a fake is a fake.
+	if os.Getenv("ROTA_AS_RUN") == "1" {
+		os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+	}
 	execProcess = func(path string, _, _ []string) error {
 		panic("this test reached the real process handover (" + path + "); call handover(t) to watch it instead")
 	}

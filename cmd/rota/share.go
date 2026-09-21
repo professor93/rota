@@ -327,19 +327,21 @@ type shareLink struct {
 
 	stop   chan struct{}
 	sent   chan struct{} // closed once the exit frame has gone out
+	gone   chan struct{} // closed once nothing of this link is still running
 	closed sync.Once
 	told   sync.Once
 	said   sync.Once
 
-	mu   sync.Mutex
-	conn *share.Conn
-	id   string
+	mu      sync.Mutex
+	conn    *share.Conn
+	id      string
+	running bool
 }
 
 func newShareLink(path string, q *shareQueue, errOut io.Writer, hello func() share.HelloMsg) *shareLink {
 	return &shareLink{
 		path: path, q: q, err: errOut, hello: hello,
-		stop: make(chan struct{}), sent: make(chan struct{}),
+		stop: make(chan struct{}), sent: make(chan struct{}), gone: make(chan struct{}),
 	}
 }
 
@@ -351,7 +353,13 @@ func (l *shareLink) start() (id string, why string) {
 	if c != nil {
 		l.set(c, id)
 	}
-	go l.keep(c, final)
+	l.mu.Lock()
+	l.running = true
+	l.mu.Unlock()
+	go func() {
+		defer close(l.gone)
+		l.keep(c, final)
+	}()
 	return id, why
 }
 
@@ -423,10 +431,20 @@ func (l *shareLink) keep(c *share.Conn, final bool) {
 
 // serve carries one link until it breaks: one goroutine draining the queue
 // into it, one pinging it, and this one reading what the server says.
+//
+// It does not return until both of the others have. A link that is over has
+// to be over completely, or a retry would have two goroutines writing to two
+// sockets for the same terminal.
 func (l *shareLink) serve(c *share.Conn) {
 	done := make(chan struct{})
-	go l.drain(c, done)
-	go l.beat(c, done)
+	var busy sync.WaitGroup
+	busy.Add(2)
+	go func() { defer busy.Done(); l.drain(c, done) }()
+	go func() { defer busy.Done(); l.beat(c, done) }()
+	// In this order on the way out: the socket first, which frees a drain
+	// that is blocked writing to a peer that stopped reading; then the
+	// channel, which frees the two loops; then the wait.
+	defer busy.Wait()
 	defer close(done)
 	defer c.Close()
 	for {
@@ -519,13 +537,22 @@ func (l *shareLink) resized(cols, rows uint16) {
 // answer: there is nothing to answer.
 func (l *shareLink) finished(code int) {
 	l.q.done(code)
-	select {
-	case <-l.sent:
-	case <-time.After(shareFlush):
+	// Only where there is something to wait for. A terminal nobody was
+	// watching must not add a pause to its own exit for a frame that has
+	// nowhere to go.
+	if l.link() != nil {
+		select {
+		case <-l.sent:
+		case <-time.After(shareFlush):
+		}
 	}
 	l.close()
 }
 
+// close ends the link and waits for what it started to have stopped, so that
+// nothing of this terminal is still writing to a socket after the terminal
+// is over. The wait is bounded: a dial that is half way through a connection
+// nobody is going to answer is not worth holding an exit for.
 func (l *shareLink) close() {
 	l.closed.Do(func() {
 		close(l.stop)
@@ -533,6 +560,16 @@ func (l *shareLink) close() {
 			_ = c.Close()
 		}
 	})
+	l.mu.Lock()
+	running := l.running
+	l.mu.Unlock()
+	if !running {
+		return
+	}
+	select {
+	case <-l.gone:
+	case <-time.After(shareFlush):
+	}
 }
 
 func (l *shareLink) set(c *share.Conn, id string) {
