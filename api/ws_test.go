@@ -611,7 +611,7 @@ func TestAWatcherMayNotStartARunOverASocket(t *testing.T) {
 // upgrade authorized by one is held to the same rule as a write.
 func TestASocketOnACookieNeedsItsOwnOrigin(t *testing.T) {
 	h := newHarness(t, Options{
-		Users:      []User{{Name: "driver", Role: RoleControl, Password: cheapHash}},
+		Users:      []User{{Name: "driver", Role: RoleControl, Password: cheapHash()}},
 		SessionTTL: time.Hour,
 	})
 	echoClaude(t)

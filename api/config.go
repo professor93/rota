@@ -223,7 +223,10 @@ func (c *Config) Check() error {
 	// on what it depends on is written beside it. health needs nothing,
 	// which is the whole point of it — a probe that goes off with the page
 	// is not a probe.
-	for _, dep := range []struct{ group, needs, why string; on, has bool }{
+	for _, dep := range []struct {
+		group, needs, why string
+		on, has           bool
+	}{
 		{"playground", "api", "the page has nothing to call without it", c.Routes.Playground, c.Routes.API},
 		{"websocket", "api", "a socket is the same run by another door", c.Routes.WebSocket, c.Routes.API},
 	} {

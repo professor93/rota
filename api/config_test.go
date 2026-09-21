@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -344,16 +345,18 @@ func TestPrintSaysNothingIsSetWhenNothingIs(t *testing.T) {
 	}
 }
 
-// goodHash is one real derived password, made once and reused: every test
-// below that needs a valid entry needs the same valid entry, and deriving
-// one per case is the slowest thing in this package.
-var goodHash = func() string {
+// goodHash is one real derived password at the real cost, made on first use
+// and reused: every test below that needs a valid entry needs the same valid
+// entry. On first use rather than at start-up because this test binary is
+// also the fake vendor CLI, re-executed for every run — six hundred thousand
+// rounds in package initialization would be paid by each of those children.
+var goodHash = sync.OnceValue(func() string {
 	h, err := HashPassword("open sesame")
 	if err != nil {
 		panic(err)
 	}
 	return h
-}()
+})
 
 // shortSalt, cheap and stub are entries wrong in one way each, written out
 // rather than built so that what the file says is what the test reads.
@@ -388,8 +391,8 @@ func TestUsersAndTokensAreCheckedByName(t *testing.T) {
 			`the salt is 4 bytes; rota insists on at least 16`},
 		{"a password with a short hash", user("name = \"a\"\nrole = \"watch\"\npassword = \"pbkdf2-sha256$600000$" + realSalt + "$aGFzaA==\"\n"),
 			`the hash is 4 bytes; a pbkdf2-sha256 hash is 32`},
-		{"two users with one name", user("name = \"a\"\nrole = \"watch\"\npassword = \""+goodHash+"\"\n") +
-			user("name = \"a\"\nrole = \"control\"\npassword = \""+goodHash+"\"\n"),
+		{"two users with one name", user("name = \"a\"\nrole = \"watch\"\npassword = \""+goodHash()+"\"\n") +
+			user("name = \"a\"\nrole = \"control\"\npassword = \""+goodHash()+"\"\n"),
 			`[[users]] "a": there is already a user called "a"`},
 		{"a token with no name", tok("role = \"watch\"\nsha256 = \"" + sum + "\"\n"),
 			`[[tokens]] #1: name is empty`},
@@ -422,14 +425,14 @@ func TestUsersAndTokensAreCheckedByName(t *testing.T) {
 // a report rather than a file.
 func TestPrintMasksEverySecret(t *testing.T) {
 	c := DefaultConfig()
-	c.Users = []UserEntry{{Name: "inoyat", Role: "control", Password: goodHash}}
+	c.Users = []UserEntry{{Name: "inoyat", Role: "control", Password: goodHash()}}
 	c.Tokens = []TokenEntry{{Name: "ci-watch", Role: "watch", SHA256: strings.Repeat("ab", 32)}}
 	var b bytes.Buffer
 	if err := c.Print(&b, "a-real-secret"); err != nil {
 		t.Fatal(err)
 	}
 	out := b.String()
-	for _, gone := range []string{"a-real-secret", goodHash, strings.Repeat("ab", 32)} {
+	for _, gone := range []string{"a-real-secret", goodHash(), strings.Repeat("ab", 32)} {
 		if strings.Contains(out, gone) {
 			t.Fatalf("a secret was printed:\n%s", out)
 		}

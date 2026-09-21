@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -26,14 +27,19 @@ const testPlain = "correct horse"
 // rota allows rather than the figure it writes. The shape is identical and
 // the cost is a sixth: lowering it is exactly what a test may do and a file
 // may not, and a sign-in is otherwise the slowest thing in this package.
-var cheapHash = func() string {
+//
+// It is derived on first use and not at start-up, and that matters more than
+// it looks: this test binary is also the fake vendor CLI, re-executed for
+// every run, and a key derivation in package initialization would be paid by
+// each of those children before they printed a word.
+var cheapHash = sync.OnceValue(func() string {
 	salt := []byte("sixteen bytes!!!")
 	key, err := pbkdf2.Key(sha256.New, testPlain, salt, pwMinIterations, pwKeyLen)
 	if err != nil {
 		panic(err)
 	}
 	return (&password{iterations: pwMinIterations, salt: salt, hash: key}).String()
-}()
+})
 
 // withPeople is a harness whose server knows one watcher and one controller,
 // by password and by token.
@@ -48,8 +54,8 @@ func withPeople(t *testing.T) *people {
 	sum := func(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
 	h := newHarness(t, Options{
 		Users: []User{
-			{Name: "looker", Role: RoleWatch, Password: cheapHash},
-			{Name: "driver", Role: RoleControl, Password: cheapHash},
+			{Name: "looker", Role: RoleWatch, Password: cheapHash()},
+			{Name: "driver", Role: RoleControl, Password: cheapHash()},
 		},
 		Tokens: []TokenPrincipal{
 			{Name: "ci-watch", Role: RoleWatch, SHA256: sum(watchTok)},
@@ -341,7 +347,7 @@ func TestSessionExpires(t *testing.T) {
 }
 
 func TestCookieIsSecureOnlyUnderTLS(t *testing.T) {
-	h := newHarness(t, Options{Users: []User{{Name: "driver", Role: RoleControl, Password: cheapHash}}})
+	h := newHarness(t, Options{Users: []User{{Name: "driver", Role: RoleControl, Password: cheapHash()}}})
 	tls := httptest.NewTLSServer(h.handler)
 	defer tls.Close()
 	c := tls.Client()
