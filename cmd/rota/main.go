@@ -785,8 +785,8 @@ list, or the flag repeated, or both. Readings that only exist as JSON imply
   suggestions  ask the CLI for a predicted follow-up (claude)
   stderr       on a failed run with no answer, stderr copied into result
 
---share opens the CLI here, as the three lines above do, and also offers this
-terminal to a rota server running on this machine, so the same session can be
+--share opens the account's CLI here, as a run with no prompt does, and also
+offers this terminal to a rota server on this machine, so the same session can be
 watched — or typed into — from its terminal page. rota stays above the CLI
 instead of being replaced by it, and nothing about the server can slow the
 terminal you are sitting at: output the server cannot keep up with is dropped
