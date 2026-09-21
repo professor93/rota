@@ -184,10 +184,32 @@ func newHarness(t testing.TB, opts Options) *harness {
 	h := &harness{t: t, handler: handler, root: root, dir: home, srv: httptest.NewServer(handler),
 		token: opts.Token, api: s}
 	t.Cleanup(h.srv.Close)
-	// Registered last, so it runs first: while the server still answers and
+	// Registered last, so they run first: while the server still answers and
 	// before any temporary directory is removed.
 	t.Cleanup(h.endRuns)
+	t.Cleanup(h.endTerminals)
 	return h
+}
+
+// endTerminals ends every terminal still running and waits for each to have
+// gone. A terminal outlives the request that started it on purpose, so
+// nothing else would: a test that returned with one open would leave a CLI
+// on a pseudo-terminal writing into a temporary directory that is being
+// removed.
+func (h *harness) endTerminals() {
+	for _, ts := range h.api.everyTerminal() {
+		ts.kill("the test")
+	}
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		running := false
+		for _, ts := range h.api.everyTerminal() {
+			running = running || !ts.over()
+		}
+		if !running {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // endRuns closes every run still alive and waits for each to have ended.

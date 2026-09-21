@@ -54,6 +54,26 @@ func TestWebSocketOffIsThreeRoutesThatWereNeverThere(t *testing.T) {
 	}
 }
 
+// The terminal is off even when nobody said anything, because "everything a
+// server answered before" did not include a shell prompt on the machine.
+func TestTheTerminalIsOffUntilItIsAskedFor(t *testing.T) {
+	h := newHarness(t, Options{})
+	for _, r := range []struct{ method, path string }{
+		{"GET", "/v1/terminals"},
+		{"GET", "/v1/terminals/t-1"},
+		{"POST", "/v1/terminals"},
+		{"DELETE", "/v1/terminals/t-1"},
+		{"GET", "/v1/terminals/t-1/ws"},
+	} {
+		if resp, _ := h.do(r.method, r.path, nil); resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s %s answered %d, want 404", r.method, r.path, resp.StatusCode)
+		}
+	}
+	if resp, _ := h.do("GET", "/v1/runs", nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("the rest of the API must be untouched: %d", resp.StatusCode)
+	}
+}
+
 func TestAPIOffLeavesNothing(t *testing.T) {
 	h := newHarness(t, Options{Routes: &Routes{}})
 	for _, path := range []string{"/", "/playground", "/v1/schema", "/v1/accounts", "/v1/ws"} {

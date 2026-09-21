@@ -48,6 +48,14 @@ type Spec struct {
 	// mode, and Sleep is how long a turn takes rather than a pause at the
 	// start.
 	Echo bool `json:"echo,omitempty"`
+	// Tty makes the fake an interactive CLI sitting at a terminal, which is
+	// what a session on a pseudo-terminal needs to be tested against: it
+	// says it is ready and how big its window is, answers each line it reads
+	// with a transformed copy — so a test can tell the terminal's own echo
+	// from the program's output — says the new size whenever the window
+	// changes, prints a great deal on "noise" and exits on "bye". Stdout is
+	// ignored in this mode.
+	Tty bool `json:"tty,omitempty"`
 	// EchoHold holds the first turn, in echo mode, until this many further
 	// lines have arrived on stdin. A test about messages that arrive
 	// mid-turn can then prove what happened to them instead of racing a
@@ -149,6 +157,9 @@ func Maybe() {
 }
 
 func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if spec.Tty {
+		return atty(spec, stdin, stdout)
+	}
 	if spec.Echo {
 		return echo(spec, stdin, stdout)
 	}
@@ -215,6 +226,54 @@ func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	}
 	if spec.Touch != "" {
 		_ = os.WriteFile(spec.Touch, nil, 0o600)
+	}
+	return spec.Exit
+}
+
+// atty plays a CLI that is being typed at rather than piped to.
+//
+// It says what a program at a terminal can say and a program on a pipe
+// cannot: how big its window is, and when that changed. Every line it reads
+// comes back transformed, because a terminal echoes what is typed into it
+// all by itself — a test that saw "hello" could not otherwise tell whether
+// the program read it or the kernel bounced it back.
+//
+// Lines end in carriage return and newline, as they do on a terminal in its
+// ordinary mode: a bare newline moves down without returning to the left,
+// and the output staircases across the screen.
+func atty(spec Spec, stdin io.Reader, stdout io.Writer) int {
+	var mu sync.Mutex
+	say := func(format string, a ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		fmt.Fprintf(stdout, format+"\r\n", a...)
+	}
+	size := func(what string) {
+		cols, rows := termSize()
+		say("%s %dx%d", what, cols, rows)
+	}
+	size("ready")
+	watchResize(func() { size("size") })
+
+	sc := bufio.NewScanner(stdin)
+	sc.Buffer(make([]byte, 0, 4096), 1<<20)
+	for sc.Scan() {
+		switch line := strings.TrimRight(sc.Text(), "\r"); line {
+		case "size":
+			size("size")
+		case "noise":
+			// Enough output that a reader which is not reading falls behind:
+			// two hundred kilobytes, and then a line saying it is over.
+			for i := range 1000 {
+				say("noise %03d %s", i, strings.Repeat("x", 190))
+			}
+			say("noise done")
+		case "bye":
+			say("bye")
+			return spec.Exit
+		default:
+			say("got:%s", line)
+		}
 	}
 	return spec.Exit
 }
