@@ -1193,7 +1193,7 @@ background sessions, and no other's. A mirror built by an earlier rota that
 still links a name no longer shared loses that link on the next launch: a
 link in the mirror is always rota's own, a real entry is the account's.
 
-Three things worth knowing:
+Four things worth knowing:
 
 - `rota set <id> --config DIR` opts into a fully separate directory instead:
   no mirror, and nothing shared with your own.
@@ -1208,6 +1208,13 @@ Three things worth knowing:
   daemon files included, is the account's own and is never linked back. If
   there is no `~/.claude` to mirror yet, the account simply starts with a
   fresh one.
+- A link can stop being one. Claude Code writes some files by writing a
+  temporary file and renaming it over the path, and a rename puts a real file
+  where rota's link was: that entry quietly becomes the account's own copy,
+  which it reads and writes while yours is never touched again. The next
+  launch notices every entry that is a real file where a link belongs, names
+  them in a warning and leaves them exactly as they are. Move the file aside
+  and the launch after that links it again.
 
 #### Where the conversations live
 
@@ -1245,10 +1252,18 @@ while keeping them to itself stay exactly where they are, and rota says so
 rather than replacing them:
 
 ```
-warning: claude/you@example.com already has projects of its own in
-/Users/you/.rota/homes/claude-2, so its conversations stay there; move them
-aside for the account to read them from elsewhere
+warning: claude/you@example.com holds its own projects in
+/Users/you/.rota/homes/claude-2, where a link to /Users/you/.claude is
+expected; the account reads these and not yours. Move them aside to share
+again.
 ```
+
+It is the same warning for anything else in the way, which is how a link that
+a rename turned into a real file comes to light: `settings.json` written
+through a temporary file and renamed over the link is a copy of its own from
+then on, and the next launch names it among the rest rather than letting the
+account read a fork nobody knows about. Nothing is moved or replaced either
+way — move the entry aside yourself and the next launch links it again.
 
 Give one directory to several accounts and those accounts share their
 conversations with each other and with nobody else — a team of accounts on

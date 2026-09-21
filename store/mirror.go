@@ -89,6 +89,10 @@ func (s *Store) mirrorClaude(a *rota.Account) (string, error) {
 	// Nothing else may be there, which is what makes a change of setting
 	// take effect: a link the mirror no longer wants is one it removes.
 	want := map[string]string{}
+	// from is the world each name comes from, which is what a person is told
+	// to look in when the link could not be made. It cannot be read back off
+	// the targets: .claude.json lives beside the directory rather than in it.
+	from := map[string]string{}
 	// Nothing to mirror is not a failure: Claude Code makes itself a fresh
 	// world in the directory, which is what it would have done in the
 	// missing one. A source that is there but is not a directory is another
@@ -116,6 +120,7 @@ func (s *Store) mirrorClaude(a *rota.Account) (string, error) {
 				continue
 			}
 			want[name] = filepath.Join(src, name)
+			from[name] = src
 		}
 		// .claude.json is the one file that does not live inside the
 		// directory unless CLAUDE_CONFIG_DIR says so, and it is the one
@@ -123,6 +128,7 @@ func (s *Store) mirrorClaude(a *rota.Account) (string, error) {
 		// shows.
 		if _, err := os.Stat(srcJSON); err == nil {
 			want[".claude.json"] = srcJSON
+			from[".claude.json"] = src
 		}
 	}
 	if dir := a.SessionsDir(); dir != "" {
@@ -131,13 +137,14 @@ func (s *Store) mirrorClaude(a *rota.Account) (string, error) {
 		}
 		for _, name := range conversationState {
 			want[name] = filepath.Join(dir, name)
+			from[name] = dir
 		}
 	}
 	blocked, err := relink(dst, want, func(string) bool { return true })
 	if err != nil {
 		return dst, err
 	}
-	s.sayConversationsStay(a, dst, blocked)
+	s.sayOwnEntriesStay(a, dst, blocked, from)
 	return dst, nil
 }
 
@@ -157,35 +164,52 @@ func (s *Store) placeConversations(a *rota.Account, home string) error {
 		return err
 	}
 	want := make(map[string]string, len(conversationState))
+	from := make(map[string]string, len(conversationState))
 	for _, name := range conversationState {
 		want[name] = filepath.Join(dir, name)
+		from[name] = dir
 	}
 	blocked, err := relink(home, want, keepsConversations)
 	if err != nil {
 		return err
 	}
-	s.sayConversationsStay(a, home, blocked)
+	s.sayOwnEntriesStay(a, home, blocked, from)
 	return nil
 }
 
-// sayConversationsStay reports the conversations an account already has of
-// its own where a link was meant to go. They are left exactly as they are:
-// entries rota did not make are the account's, and replacing them would be
-// losing somebody's work to a setting. The person is told which they are, so
-// they can move them aside and mean it.
-func (s *Store) sayConversationsStay(a *rota.Account, dir string, blocked []string) {
-	var mine []string
-	for _, name := range blocked {
-		if keepsConversations(name) {
-			mine = append(mine, name)
-		}
-	}
-	if len(mine) == 0 || s.Warn == nil {
+// sayOwnEntriesStay reports the entries an account already has of its own
+// where a link was meant to go. They are left exactly as they are: an entry
+// rota did not make is the account's, and replacing one would be losing
+// somebody's work. The person is told which they are, so they can move them
+// aside and mean it.
+//
+// Two rather different things end up here, which is why this reports every
+// name in the way rather than the conversations alone. One is conversations
+// an account made while it was keeping them to itself and the setting has
+// since asked to be shared. The other is quieter: Claude Code writes some
+// files by writing a temporary one and renaming it over the path, and a
+// rename replaces rota's link with a real file. That entry then stops
+// tracking the person's copy altogether — the account reads and writes a
+// fork of its own settings.json, say — and nothing else would ever say so.
+// The files seen so far survive the trip, but there are sixty-odd entries in
+// a Claude Code directory and Claude Code changes.
+//
+// from names the directory each entry would have been linked into, so the
+// person is told where to look rather than only what is in the way.
+func (s *Store) sayOwnEntriesStay(a *rota.Account, dir string, blocked []string, from map[string]string) {
+	if len(blocked) == 0 || s.Warn == nil {
 		return
 	}
-	s.Warn(fmt.Sprintf("%s already has %s of its own in %s, so its conversations stay there; "+
-		"move them aside for the account to read them from elsewhere",
-		a, strings.Join(mine, ", "), dir))
+	var worlds []string
+	for _, name := range blocked {
+		if w := from[name]; w != "" && !slices.Contains(worlds, w) {
+			worlds = append(worlds, w)
+		}
+	}
+	slices.Sort(worlds)
+	s.Warn(fmt.Sprintf("%s holds its own %s in %s, where a link to %s is expected; "+
+		"the account reads these and not yours. Move them aside to share again.",
+		a, strings.Join(blocked, ", "), dir, strings.Join(worlds, " and ")))
 }
 
 // relink makes the links in dir say what want says, and returns the names it

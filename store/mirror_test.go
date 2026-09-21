@@ -453,3 +453,162 @@ func TestAnOwnDirectoryIsLeftAloneWhenNoFolderIsNamed(t *testing.T) {
 		}
 	}
 }
+
+// A link is not forever: Claude Code writes some files by writing a
+// temporary one and renaming it over the path, and a rename leaves a real
+// file where rota's link was. From then on that one entry is a private fork
+// — the account reads and writes its own settings.json and the person's is
+// never touched again — and nothing would say so. The refresh notices, names
+// it, and leaves it exactly where it is.
+func TestALinkThatBecameARealFileIsSaidSo(t *testing.T) {
+	src := claudeWorld(t)
+	s, a := claudeStore(t)
+	dst := s.ownHome(a)
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	own := filepath.Join(dst, "settings.json")
+	if err := os.WriteFile(own, []byte("a fork of its own"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var said []string
+	s.Warn = func(msg string) { said = append(said, msg) }
+
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(said) != 1 || !strings.Contains(said[0], dst) ||
+		!strings.Contains(said[0], "settings.json") || !strings.Contains(said[0], src) {
+		t.Fatalf("one warning naming the mirror, the entry and where the link should point: %v", said)
+	}
+	fi, err := os.Lstat(own)
+	if err != nil || fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("the entry is the account's and must be left alone: %v %v", fi, err)
+	}
+	if body, err := os.ReadFile(own); err != nil || string(body) != "a fork of its own" {
+		t.Fatalf("contents too: %q %v", body, err)
+	}
+	// Everything else is linked around it as usual.
+	linksTo(t, filepath.Join(dst, "CLAUDE.md"), filepath.Join(src, "CLAUDE.md"))
+}
+
+// .claude.json is no different: a real one in the mirror while the person
+// has one of their own is a fork of the trust decisions, the project history
+// and the identity the CLI shows.
+func TestARealClaudeJSONInTheMirrorIsSaidSo(t *testing.T) {
+	claudeWorld(t)
+	s, a := claudeStore(t)
+	dst := s.ownHome(a)
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dst, ".claude.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var said []string
+	s.Warn = func(msg string) { said = append(said, msg) }
+
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(said) != 1 || !strings.Contains(said[0], ".claude.json") {
+		t.Fatalf("one warning naming it: %v", said)
+	}
+}
+
+// What the account made for itself is not a link that went wrong. Caches
+// Claude Code keeps inside the mirror have no counterpart in the person's
+// directory at all, and the daemon's files, the credential store and the
+// live-session registry are never linked in any mode. None of them is
+// anybody's business but the account's, and saying so every launch would be
+// noise that buries the one warning that matters.
+func TestWhatTheAccountMadeForItselfIsNotReported(t *testing.T) {
+	claudeWorld(t)
+	s, a := claudeStore(t)
+	dst := s.ownHome(a)
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"statsig", "sessions"} {
+		if err := os.Mkdir(filepath.Join(dst, name), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range []string{"cache.db", "daemon.lock", "daemon.log", ".credentials.json"} {
+		if err := os.WriteFile(filepath.Join(dst, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var said []string
+	s.Warn = func(msg string) { said = append(said, msg) }
+
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(said) != 0 {
+		t.Fatalf("nothing is in the way of a link here: %v", said)
+	}
+	for _, name := range []string{"statsig", "sessions", "cache.db", "daemon.lock", "daemon.log", ".credentials.json"} {
+		if _, err := os.Lstat(filepath.Join(dst, name)); err != nil {
+			t.Fatalf("%s is the account's and must stay: %v", name, err)
+		}
+	}
+}
+
+// An account keeping its conversations to itself is meant to have real
+// folders where the links would otherwise be. That is the setting working,
+// not a link that went wrong, and there is nothing to say about it.
+func TestConversationsAnAccountIsToldToKeepAreNotReported(t *testing.T) {
+	claudeWorld(t)
+	s, a := claudeStore(t)
+	a.Sessions = rota.SessionsOwn
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	dst := s.ownHome(a)
+	if err := os.MkdirAll(filepath.Join(dst, "projects", "-tmp-x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var said []string
+	s.Warn = func(msg string) { said = append(said, msg) }
+
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(said) != 0 {
+		t.Fatalf("the account was told to keep these: %v", said)
+	}
+}
+
+// However many entries are in the way, they are one warning with the names
+// in order — a launch says this once, and says the same thing every launch
+// until somebody moves them.
+func TestEveryEntryInTheWayIsOneSortedWarning(t *testing.T) {
+	claudeWorld(t)
+	s, a := claudeStore(t)
+	dst := s.ownHome(a)
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"settings.json", "CLAUDE.md", ".claude.json"} {
+		if err := os.WriteFile(filepath.Join(dst, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// A directory in the way is reported exactly as a file is.
+	if err := os.Mkdir(filepath.Join(dst, "skills"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var said []string
+	s.Warn = func(msg string) { said = append(said, msg) }
+
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	if len(said) != 1 {
+		t.Fatalf("one warning for the lot: %v", said)
+	}
+	if want := ".claude.json, CLAUDE.md, settings.json, skills"; !strings.Contains(said[0], want) {
+		t.Fatalf("the names come sorted, %q missing from: %s", want, said[0])
+	}
+}
