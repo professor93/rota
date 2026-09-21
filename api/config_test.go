@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/professor93/rota/internal/pty"
 	"github.com/professor93/rota/internal/toml"
 )
 
@@ -73,6 +74,15 @@ api = true
 playground = false
 websocket = false
 health = false
+terminal = false
+
+[terminal]
+shell = true
+max_sessions = 2
+scrollback_bytes = 4096
+idle_timeout = "90m"
+record = true
+record_max_bytes = 1024
 
 [runs]
 timeout = "30s"
@@ -110,6 +120,10 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 			Timeout: 30 * time.Second, MaxConcurrent: 2, InputTimeout: 5 * time.Minute,
 			InputGrace: -time.Second, Replay: 10, RefreshEvery: 0,
 			Roots: []string{"/tmp"}, AllowDangerous: true, AllowRawFlags: true,
+		},
+		Terminal: TerminalSection{
+			Shell: true, MaxSessions: 2, ScrollbackBytes: 4096,
+			IdleTimeout: 90 * time.Minute, Record: true, RecordMaxBytes: 1024,
 		},
 		Store: StoreSection{Dir: "/srv/rota"},
 		Users: []UserEntry{{Name: "inoyat", Role: "control",
@@ -274,6 +288,19 @@ func TestServeTurnsAConfigIntoOptions(t *testing.T) {
 	c.Runs.Roots = []string{filepath.Join(dir, "nowhere")}
 	if _, _, err := c.Serve(); err == nil || !strings.Contains(err.Error(), "is not an existing directory") {
 		t.Fatalf("a root that is not there: %v", err)
+	}
+}
+
+// A configuration asking for a terminal where there are none is refused at
+// start-up, by name, rather than at the first terminal nobody can open.
+func TestATerminalIsRefusedWherePseudoTerminalsAreNot(t *testing.T) {
+	if pty.Supported {
+		t.Skip("this platform has pseudo-terminals")
+	}
+	_, err := LoadConfig(write(t, "[routes]\nterminal = true\n"))
+	if err == nil || !strings.Contains(err.Error(), "has no pseudo-terminal") ||
+		!strings.Contains(err.Error(), runtime.GOOS) {
+		t.Fatalf("got %v, want a refusal naming %s", err, runtime.GOOS)
 	}
 }
 

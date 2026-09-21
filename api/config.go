@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/professor93/rota/internal/pty"
 	"github.com/professor93/rota/internal/toml"
 )
 
@@ -34,12 +35,13 @@ const ConfigName = "server.toml"
 // rota has no database. The store directory is what persists, and [store]
 // is where it is said.
 type Config struct {
-	Server ServerSection `toml:"server"`
-	TLS    TLSSection    `toml:"tls"`
-	Auth   AuthSection   `toml:"auth"`
-	Routes RoutesSection `toml:"routes"`
-	Runs   RunsSection   `toml:"runs"`
-	Store  StoreSection  `toml:"store"`
+	Server   ServerSection   `toml:"server"`
+	TLS      TLSSection      `toml:"tls"`
+	Auth     AuthSection     `toml:"auth"`
+	Routes   RoutesSection   `toml:"routes"`
+	Runs     RunsSection     `toml:"runs"`
+	Terminal TerminalSection `toml:"terminal"`
+	Store    StoreSection    `toml:"store"`
 	// Users and Tokens are the principals besides the one bearer token: the
 	// people who sign in on the page, and the tokens a script carries. They
 	// are arrays of tables rather than more keys under [auth] because each
@@ -116,6 +118,31 @@ type RoutesSection struct {
 	Playground bool `toml:"playground"`
 	WebSocket  bool `toml:"websocket"`
 	Health     bool `toml:"health"`
+	// Terminal is the one group that is off in the defaults. Whoever can
+	// reach it with a control sign-in runs commands on this machine as the
+	// user the server runs as, which is a thing to turn on deliberately.
+	Terminal bool `toml:"terminal"`
+}
+
+// TerminalSection is everything about the terminals this server holds. None
+// of it means anything unless routes.terminal is on.
+type TerminalSection struct {
+	// Shell allows a terminal running the person's login shell as well as
+	// the accounts' CLIs.
+	Shell bool `toml:"shell"`
+	// MaxSessions is how many terminals may run at once, and
+	// ScrollbackBytes how much of each one's output is kept for whoever
+	// attaches to it.
+	MaxSessions     int `toml:"max_sessions"`
+	ScrollbackBytes int `toml:"scrollback_bytes"`
+	// IdleTimeout ends a terminal nobody has been attached to for this
+	// long, so a CLI left running over a weekend is not still holding an
+	// account on Monday.
+	IdleTimeout time.Duration `toml:"idle_timeout"`
+	// Record keeps what each terminal printed — and never what was typed
+	// into it — under the store, up to RecordMaxBytes each.
+	Record         bool  `toml:"record"`
+	RecordMaxBytes int64 `toml:"record_max_bytes"`
 }
 
 // RunsSection is everything about the CLIs this server starts.
@@ -150,6 +177,10 @@ func DefaultConfig() *Config {
 			InputTimeout: time.Hour, InputGrace: time.Minute,
 			Replay: 1000, RefreshEvery: defaultRefreshEvery,
 			Roots: []string{},
+		},
+		Terminal: TerminalSection{
+			MaxSessions: 8, ScrollbackBytes: defaultScrollback,
+			IdleTimeout: 12 * time.Hour, RecordMaxBytes: 50 << 20,
 		},
 		From: map[string]string{},
 	}
@@ -229,10 +260,15 @@ func (c *Config) Check() error {
 	}{
 		{"playground", "api", "the page has nothing to call without it", c.Routes.Playground, c.Routes.API},
 		{"websocket", "api", "a socket is the same run by another door", c.Routes.WebSocket, c.Routes.API},
+		{"terminal", "api", "a terminal is started and listed over it", c.Routes.Terminal, c.Routes.API},
+		{"terminal", "websocket", "a terminal is carried on a socket and nothing else", c.Routes.Terminal, c.Routes.WebSocket},
 	} {
 		if dep.on && !dep.has {
 			return fmt.Errorf("routes.%s needs routes.%s: %s", dep.group, dep.needs, dep.why)
 		}
+	}
+	if err := c.checkTerminal(); err != nil {
+		return err
 	}
 	if err := c.checkPrincipals(); err != nil {
 		return err
@@ -250,16 +286,74 @@ func (c *Config) Check() error {
 	}
 	for _, n := range []struct {
 		key string
-		val int
-	}{{"runs.max_concurrent", c.Runs.MaxConcurrent}, {"runs.replay", c.Runs.Replay}} {
+		val int64
+	}{
+		{"runs.max_concurrent", int64(c.Runs.MaxConcurrent)},
+		{"runs.replay", int64(c.Runs.Replay)},
+		{"terminal.max_sessions", int64(c.Terminal.MaxSessions)},
+		{"terminal.scrollback_bytes", int64(c.Terminal.ScrollbackBytes)},
+		{"terminal.record_max_bytes", c.Terminal.RecordMaxBytes},
+	} {
 		if n.val <= 0 {
 			return fmt.Errorf("%s must be more than nothing", n.key)
 		}
+	}
+	if c.Terminal.IdleTimeout <= 0 {
+		return errors.New("terminal.idle_timeout must be longer than nothing")
 	}
 	if _, err := ListenAddr(c.Server.Listen); err != nil {
 		return fmt.Errorf("server.listen: %w", err)
 	}
 	return nil
+}
+
+// checkTerminal says what is wrong with a terminal this file asks for, and
+// it is two questions rather than one.
+//
+// The first is whether this machine can: a pseudo-terminal is a Unix device,
+// and a configuration asking for one where there is none should fail while
+// somebody is looking at the start-up rather than at the first terminal
+// nobody can open.
+//
+// The second is who can reach it. Every other route here answers questions
+// about accounts and runs; this one is a shell prompt on the machine, and a
+// control sign-in that travels in clear text over a network is a password
+// given away. So a listen address that is not the loopback is refused
+// without a certificate — not warned about, refused: the cost of being
+// wrong is the machine.
+func (c *Config) checkTerminal() error {
+	if !c.Routes.Terminal {
+		return nil
+	}
+	if !pty.Supported {
+		return fmt.Errorf("routes.terminal is on, but %s has no pseudo-terminal; rota's terminal runs on linux and macOS", runtime.GOOS)
+	}
+	addr, err := ListenAddr(c.Server.Listen)
+	if err != nil {
+		return fmt.Errorf("server.listen: %w", err)
+	}
+	if loopback(addr) || (c.TLS.Cert != "" && c.TLS.Key != "") {
+		return nil
+	}
+	return fmt.Errorf("routes.terminal on %s needs tls.cert and tls.key: "+
+		"whoever reaches this address with a control sign-in runs commands on this machine, "+
+		"and without TLS that sign-in travels in clear text", c.Server.Listen)
+}
+
+// loopback reports whether an address is reachable only from this machine.
+// A host that is not an address at all — a name somebody put in the file —
+// counts as reachable from elsewhere unless it is localhost: what a name
+// resolves to is not this file's to decide.
+func loopback(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // checkPrincipals says what is wrong with the people and the tokens this
@@ -421,7 +515,7 @@ func (c *Config) Serve() (Options, Listener, error) {
 		refresh = -1
 	}
 	routes := Routes{API: c.Routes.API, Playground: c.Routes.Playground,
-		WebSocket: c.Routes.WebSocket, Health: c.Routes.Health}
+		WebSocket: c.Routes.WebSocket, Health: c.Routes.Health, Terminal: c.Routes.Terminal}
 	users := make([]User, 0, len(c.Users))
 	for _, u := range c.Users {
 		users = append(users, User{Name: u.Name, Role: Role(u.Role), Password: u.Password})
@@ -445,6 +539,11 @@ func (c *Config) Serve() (Options, Listener, error) {
 		Replay:         c.Runs.Replay,
 		RefreshEvery:   refresh,
 		Routes:         &routes,
+		Terminal: Terminal{
+			Shell: c.Terminal.Shell, MaxSessions: c.Terminal.MaxSessions,
+			Scrollback: c.Terminal.ScrollbackBytes, IdleTimeout: c.Terminal.IdleTimeout,
+			Record: c.Terminal.Record, RecordMax: c.Terminal.RecordMaxBytes,
+		},
 	}, Listener{Addr: addr, Cert: c.TLS.Cert, Key: c.TLS.Key}, nil
 }
 
@@ -520,6 +619,7 @@ func (c *Config) Print(w io.Writer, token string) error {
 	yes("routes.playground", c.Routes.Playground)
 	yes("routes.websocket", c.Routes.WebSocket)
 	yes("routes.health", c.Routes.Health)
+	yes("routes.terminal", c.Routes.Terminal)
 
 	body.WriteString("\n[runs]\n")
 	span("runs.timeout", c.Runs.Timeout)
@@ -535,6 +635,14 @@ func (c *Config) Print(w io.Writer, token string) error {
 	key("runs.roots", "["+strings.Join(quoted, ", ")+"]")
 	yes("runs.allow_dangerous", c.Runs.AllowDangerous)
 	yes("runs.allow_raw_flags", c.Runs.AllowRawFlags)
+
+	body.WriteString("\n[terminal]\n")
+	yes("terminal.shell", c.Terminal.Shell)
+	num("terminal.max_sessions", c.Terminal.MaxSessions)
+	num("terminal.scrollback_bytes", c.Terminal.ScrollbackBytes)
+	span("terminal.idle_timeout", c.Terminal.IdleTimeout)
+	yes("terminal.record", c.Terminal.Record)
+	key("terminal.record_max_bytes", strconv.FormatInt(c.Terminal.RecordMaxBytes, 10))
 
 	body.WriteString("\n[store]\n")
 	str("store.dir", c.Store.Dir)

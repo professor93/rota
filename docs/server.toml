@@ -34,6 +34,22 @@ api = true         # everything under /v1 except the sockets and /v1/health
 playground = true  # GET /, GET /playground and the invite landing
 websocket = true   # the /ws routes, which carry a run that stays open
 health = true      # GET /v1/health, open and depending on nothing
+terminal = false   # the /v1/terminals routes; needs api and websocket
+
+# A terminal is an account's CLI on a pseudo-terminal that lives in this
+# server: it outlives the browser tab that opened it, several people may
+# watch it, and one of them at a time holds the keyboard. It is off above
+# because a control sign-in on it runs commands on this machine as the user
+# the server runs as — which is also why rota refuses to start with it on, a
+# listen address that is not the loopback, and no certificate. It runs on
+# linux and macOS.
+[terminal]
+shell = false               # also allow a plain login shell, not only accounts' CLIs
+max_sessions = 8            # terminals running at once
+scrollback_bytes = 2097152  # output kept per terminal, for whoever attaches
+idle_timeout = "12h"        # a terminal nobody is attached to ends after this long
+record = false              # keep each terminal's output under <store>/terminals/
+record_max_bytes = 52428800 # how much of one terminal is kept; input never is
 
 [runs]
 timeout = "10m"          # hard cap on one run
