@@ -1,0 +1,5 @@
+# The vendored terminal emulator is somebody else's release, carried byte for
+# byte: a test compares each file with the checksum its README records, and
+# the binary embeds exactly what is here. Git must not rewrite line endings
+# in it at checkout, which on Windows it otherwise does.
+api/assets/xterm/** -text
