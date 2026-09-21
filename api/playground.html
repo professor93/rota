@@ -566,9 +566,21 @@ const matches = f => {
 /* ====================================================== field rendering === */
 function helpNode(f) { return f.help ? el("p", { class: "help", text: f.help }) : null; }
 
+// lockNote says why this server will not take a field, or nothing when it
+// will. The page offers only what the server it is talking to can actually
+// do, and it learns both of these the same way — from /v1/schema.
+function lockNote(f) {
+  if (!schema) return "";
+  if ((f.dangerous || []).length && !schema.allow_dangerous) return "the server was started without --allow-dangerous";
+  // A run that stays open is carried on a WebSocket, so a server with those
+  // routes off has nothing to hold one with.
+  if (f.name === "input" && schema.websocket === false) return "this server answers no WebSocket routes";
+  return "";
+}
+
 function renderField(f) {
   const dangerous = (f.dangerous || []).length > 0;
-  const locked = dangerous && schema && !schema.allow_dangerous;
+  const note = lockNote(f), locked = !!note;
   const id = "f_" + f.name;
 
   if (f.kind === "bool") {
@@ -579,7 +591,7 @@ function renderField(f) {
       el("label", { class: "t-text", for: id }, [
         el("b", { text: f.label || f.name }),
         f.help ? el("span", { text: f.help }) : null,
-        locked ? el("div", { class: "danger-note", text: "the server was started without --allow-dangerous" }) : null,
+        locked ? el("div", { class: "danger-note", text: note }) : null,
       ]),
     ]);
   }
@@ -628,7 +640,7 @@ function renderField(f) {
   }
   return el("div", { class: "field" + (dangerous ? " danger" : "") + (locked ? " locked" : "") }, [
     label, helpNode(f), control,
-    locked ? el("div", { class: "danger-note", text: "the server was started without --allow-dangerous" }) : null,
+    locked ? el("div", { class: "danger-note", text: note }) : null,
   ]);
 }
 
@@ -1200,7 +1212,7 @@ async function doRun() {
     // A run that takes more messages is opened over a socket instead: the
     // same events come out of it, and what is typed back goes in the same
     // way. Every other run is the fetch it always was.
-    if (body.stream && body.input) await runSocket(id, body, started);
+    if (body.stream && body.input && schema.websocket !== false) await runSocket(id, body, started);
     else if (body.stream) await runStream(id, body, started);
     else {
       const r = await api("POST", runPath(id), body);

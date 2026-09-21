@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	nethttp "net/http"
 	"os"
 	"os/exec"
@@ -1631,6 +1630,14 @@ instead of the command line, which keeps it out of the process table:
 --token is visible to every process on this machine, the agents this
 server starts included.
 
+Everything below can also be written down once, in $ROTA_HOME/server.toml
+(or ~/.rota/server.toml), together with the groups of routes this server
+answers; --config reads another file, and --print-config shows what the
+server would use and where each value came from. The file must not be
+readable by anyone but its owner, because it may hold the token.
+A flag beats the environment, the environment beats the file, and the file
+beats the default.
+
 Flags:
 `
 
@@ -1802,8 +1809,13 @@ func (c *cli) serve(args []string) error {
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
 	var (
-		roots     multiFlag
-		token     = fs.String("token", os.Getenv("ROTA_TOKEN"), "bearer token every request must carry")
+		roots multiFlag
+		// The token's default is empty rather than ROTA_TOKEN's value: the
+		// environment is read below, with everything else, and a default
+		// taken from it here would be printed by --help.
+		conf      = fs.String("config", "", "the file to read the rest of this from (default: <store dir>/server.toml)")
+		prConf    = fs.Bool("print-config", false, "print the configuration this would serve with, and where each value came from, then exit")
+		token     = fs.String("token", "", "bearer token every request must carry (default: ROTA_TOKEN)")
 		dangerous = fs.Bool("allow-dangerous", false, "permit permission-bypass and full-access options")
 		rawFlags  = fs.Bool("allow-raw-flags", false, "let callers pass flags straight to the vendor CLI (this undoes every other gate)")
 		timeout   = fs.Duration("timeout", 10*time.Minute, "hard cap on one run")
@@ -1836,70 +1848,103 @@ func (c *cli) serve(args []string) error {
 		}
 		addr, rest = rest[0], rest[1:]
 	}
-	if *token == "" {
-		return usageErr("serve needs --token=... (or ROTA_TOKEN in the environment)")
-	}
-	// Which flags were written, not which have a value: the token has one
-	// either way, and only the command line puts it in the process table.
+	// Which flags were written, not which have a value: a flag beats the
+	// file only when somebody typed it, and a flag's own default is just
+	// another way of saying the default.
 	given := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { given[f.Name] = true })
-	listen, err := listenAddr(addr)
+
+	cfg, err := serverConfig(*conf)
+	if err != nil {
+		return err
+	}
+	if addr != "" {
+		cfg.Server.Listen, cfg.From["server.listen"] = addr, "argument"
+	}
+	set := func(name, key string, apply func()) {
+		if !given[name] {
+			return
+		}
+		apply()
+		cfg.From[key] = "flag --" + name
+	}
+	set("quiet", "server.quiet", func() { cfg.Server.Quiet = *quiet })
+	set("tls-cert", "tls.cert", func() { cfg.TLS.Cert = *certFile })
+	set("tls-key", "tls.key", func() { cfg.TLS.Key = *keyFile })
+	set("allow-dangerous", "runs.allow_dangerous", func() { cfg.Runs.AllowDangerous = *dangerous })
+	set("allow-raw-flags", "runs.allow_raw_flags", func() { cfg.Runs.AllowRawFlags = *rawFlags })
+	set("timeout", "runs.timeout", func() { cfg.Runs.Timeout = *timeout })
+	set("max-concurrent", "runs.max_concurrent", func() { cfg.Runs.MaxConcurrent = *conc })
+	set("refresh-every", "runs.refresh_every", func() { cfg.Runs.RefreshEvery = *keep })
+	set("root", "runs.roots", func() { cfg.Runs.Roots = roots })
+
+	// The environment and the file are the configuration's to read; only
+	// this command knows what was typed, so only it can let a flag win.
+	tok, from, err := cfg.Token()
 	if err != nil {
 		return usageErr("%v", err)
 	}
-	for i, r := range roots {
-		abs, err := filepath.Abs(r)
-		if err != nil {
-			return usageErr("root %q: %v", r, err)
-		}
-		if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
-			return usageErr("root %q is not an existing directory", r)
-		}
-		roots[i] = abs
+	if given["token"] {
+		tok, from = *token, "flag --token"
 	}
-	if (*certFile == "") != (*keyFile == "") {
+	if tok != "" {
+		cfg.From["auth.token"] = from
+	}
+	if *prConf {
+		return cfg.Print(c.out, tok)
+	}
+	if tok == "" {
+		return usageErr("serve needs --token=... (or ROTA_TOKEN in the environment)")
+	}
+	// A pair half given on the command line is the mistake it always was,
+	// and is still refused in the words that were typed; a pair the file
+	// half gives is refused below, in the file's words.
+	if (cfg.TLS.Cert == "" || cfg.TLS.Key == "") && given["tls-cert"] != given["tls-key"] {
 		return usageErr("--tls-cert and --tls-key go together")
 	}
-
-	logger := slog.New(slog.NewTextHandler(c.err, &slog.HandlerOptions{Level: level(*quiet)}))
-	// A flag of zero means "off" to a person, but zero means "the default"
-	// to the option, so say off explicitly.
-	refresh := *keep
-	if refresh <= 0 {
-		refresh = -1
+	opts, listener, err := cfg.Serve()
+	if err != nil {
+		return usageErr("%v", err)
 	}
-	srv, err := api.New(api.Options{
-		Token: *token, Roots: roots, AllowDangerous: *dangerous,
-		Timeout: *timeout, MaxConcurrent: *conc, Log: logger, AllowRawFlags: *rawFlags,
-		RefreshEvery: refresh,
-	})
+	logger := slog.New(slog.NewTextHandler(c.err, &slog.HandlerOptions{Level: level(cfg.Server.Quiet)}))
+	opts.Token, opts.Log = tok, logger
+	srv, err := api.New(opts)
 	if err != nil {
 		return err
 	}
 	scheme := "http"
-	if *certFile != "" {
+	if listener.Cert != "" {
 		scheme = "https"
 	}
-	fmt.Fprintf(c.err, "rota %s serving on %s://%s\n", wire.Version, scheme, listen)
+	fmt.Fprintf(c.err, "rota %s serving on %s://%s\n", wire.Version, scheme, listener.Addr)
 	if given["token"] {
 		// The process table is readable by every local process, and the
 		// agents this server starts are local processes with a shell.
 		fmt.Fprintln(c.err, "warning: --token is visible to every process on this machine; put it in ROTA_TOKEN instead")
 	}
-	if len(roots) == 0 {
+	if len(opts.Roots) == 0 {
 		fmt.Fprintln(c.err, "warning: no --root given, so a caller may name any directory on this machine")
 	}
-	if *certFile == "" && !strings.HasPrefix(listen, "127.0.0.1") && !strings.HasPrefix(listen, "localhost") {
+	if listener.Cert == "" && !strings.HasPrefix(listener.Addr, "127.0.0.1") && !strings.HasPrefix(listener.Addr, "localhost") {
 		fmt.Fprintln(c.err, "warning: no TLS off the loopback address; the bearer token travels in clear text")
 	}
-	if *dangerous {
+	if opts.AllowDangerous {
 		fmt.Fprintln(c.err, "warning: --allow-dangerous is on; callers may bypass every permission check")
 	}
-	if *rawFlags {
+	if opts.AllowRawFlags {
 		fmt.Fprintln(c.err, "warning: --allow-raw-flags is on; a caller can pass any vendor flag, which undoes --root and --allow-dangerous")
 	}
+	if !opts.Routes.Playground {
+		fmt.Fprintln(c.err, "routes: the playground and the version at / are off")
+	}
+	if !opts.Routes.WebSocket {
+		fmt.Fprintln(c.err, "routes: the WebSocket routes are off; a run that stays open is reached over the API instead")
+	}
+	if !opts.Routes.API {
+		fmt.Fprintln(c.err, "routes: the API is off, so this server answers nothing")
+	}
 	server := &nethttp.Server{
-		Addr:    listen,
+		Addr:    listener.Addr,
 		Handler: srv.Handler(),
 		// A slow client must not be able to hold a connection open for
 		// ever. There is no write deadline: a streamed run legitimately
@@ -1917,8 +1962,8 @@ func (c *cli) serve(args []string) error {
 	defer stop()
 	errs := make(chan error, 1)
 	go func() {
-		if *certFile != "" {
-			errs <- server.ListenAndServeTLS(*certFile, *keyFile)
+		if listener.Cert != "" {
+			errs <- server.ListenAndServeTLS(listener.Cert, listener.Key)
 			return
 		}
 		errs <- server.ListenAndServe()
@@ -1932,7 +1977,7 @@ func (c *cli) serve(args []string) error {
 	case <-ctx.Done():
 		stop()
 		fmt.Fprintln(c.err, "\nrota: shutting down; waiting for runs in flight (interrupt again to stop now)")
-		shutdown, cancel := context.WithTimeout(context.Background(), *timeout+10*time.Second)
+		shutdown, cancel := context.WithTimeout(context.Background(), opts.Timeout+10*time.Second)
 		defer cancel()
 		err := server.Shutdown(shutdown)
 		// Shutdown waits for handlers but cannot cancel them, and each
@@ -1946,33 +1991,31 @@ func (c *cli) serve(args []string) error {
 	}
 }
 
+// serverConfig reads the file a server is configured by. The default one is
+// allowed not to exist — a server with no file is the server rota has always
+// been — but a file somebody named has to be there, or naming it was a typo
+// nobody would ever be told about.
+func serverConfig(named string) (*api.Config, error) {
+	if named != "" {
+		return api.LoadConfig(named)
+	}
+	dir, err := store.DefaultDir()
+	if err != nil {
+		return api.DefaultConfig(), nil
+	}
+	path := filepath.Join(dir, api.ConfigName)
+	if _, err := os.Stat(path); err != nil {
+		return api.DefaultConfig(), nil
+	}
+	return api.LoadConfig(path)
+}
+
 // level is how much the server says about itself.
 func level(quiet bool) slog.Level {
 	if quiet {
 		return slog.LevelWarn
 	}
 	return slog.LevelInfo
-}
-
-// listenAddr turns what a person typed into an address net.Listen accepts. A
-// bare port means every interface, because someone who writes "8787" rather
-// than "127.0.0.1:8787" is asking to be reachable from elsewhere.
-func listenAddr(in string) (string, error) {
-	in = strings.TrimSpace(in)
-	switch {
-	case in == "":
-		return "127.0.0.1:8787", nil
-	case !strings.Contains(in, ":"):
-		port, err := strconv.Atoi(in)
-		if err != nil || port < 1 || port > 65535 {
-			return "", fmt.Errorf("%q is not a port or a host:port", in)
-		}
-		return "0.0.0.0:" + in, nil
-	}
-	if _, _, err := net.SplitHostPort(in); err != nil {
-		return "", fmt.Errorf("%q is not a host:port: %w", in, err)
-	}
-	return in, nil
 }
 
 // multiFlag collects a repeatable string flag.

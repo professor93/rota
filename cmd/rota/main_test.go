@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/professor93/rota/api"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/wire"
 )
@@ -208,12 +209,12 @@ func TestServeParsesItsAddressAndDemandsAToken(t *testing.T) {
 		{"localhost:9000", "localhost:9000"},
 	}
 	for _, c := range cases {
-		got, err := listenAddr(c.in)
+		got, err := api.ListenAddr(c.in)
 		if err != nil || got != c.want {
 			t.Fatalf("%q: got %q (%v) want %q", c.in, got, err, c.want)
 		}
 	}
-	if _, err := listenAddr("not:a:port"); err == nil {
+	if _, err := api.ListenAddr("not:a:port"); err == nil {
 		t.Fatal("a nonsense address must be refused")
 	}
 	if _, err, code := call(t, "serve", "9000", "--token=t", "--root", "/definitely/not/here"); code != 2 || !strings.Contains(err, "root") {

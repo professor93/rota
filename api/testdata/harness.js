@@ -63,7 +63,8 @@ const src = fs.readFileSync(T + '/pg.js', 'utf8');
 const pg = new Function(src + `
 ;return {
   connect, render, renderPanel, renderIO, renderIONav, renderFoot, doRun, colorJSON, buildBody, runPath,
-  answerSection, askSection,
+  answerSection, askSection, renderField, providerFields,
+  get schema(){return schema},
   get values(){return values}, set values(v){values=v},
   get view(){return view}, set view(v){view=v},
   get ioTab(){return ioTab}, set ioTab(v){ioTab=v},
@@ -443,6 +444,21 @@ const settle = () => new Promise(r => setTimeout(r, 5));
   globalThis.fetch = jsonAPI;
   await pg.doRun();
   assert(sockets.length === before + 1, 'a run nobody can talk to opens no socket');
+
+  // 15. a server whose WebSocket routes are off says so in its schema, and
+  // the page must then neither offer a run that stays open nor try to open
+  // one: there would be nothing at the other end.
+  pg.schema.websocket = false;
+  const inputField = (pg.providerFields() || []).find(f => f.name === 'input');
+  assert(inputField, 'the schema has an input field to switch off');
+  const offNode = pg.renderField(inputField);
+  assert(offNode.classList.contains('locked'), 'input is locked when there are no sockets');
+  assert(findAll(offNode, e => e.textContent && e.textContent.includes('no WebSocket routes')).length,
+    'and the page says why');
+  pg.values.stream = true; pg.values.input = true;
+  await pg.doRun();
+  assert(sockets.length === before + 1, 'and no socket is opened even so');
+  pg.schema.websocket = true;
 
   console.log('PLAYGROUND_OK passes=' + passes);
 })().catch(e => { console.error('FAILED:', e.stack); process.exit(1); });

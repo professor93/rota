@@ -66,7 +66,28 @@ type Options struct {
 	// its credential expired or that the rotation decided from an hour-old
 	// number. Zero means the default; negative turns it off.
 	RefreshEvery time.Duration
+	// Routes is which groups of routes this server answers. Nil is all of
+	// them, which is what every server answered before there was a way to
+	// ask for fewer.
+	Routes *Routes
 }
+
+// Routes selects the groups of routes a server registers. A group that is
+// off is not registered at all, so its paths answer 404 exactly as a path
+// this server never had would: nothing tells a stranger that a door is
+// there but shut.
+//
+// Playground covers the page and the version at the root; WebSocket covers
+// the three socket routes; API covers everything else under /v1. The other
+// two are the API in another shape, so neither means anything without it.
+type Routes struct {
+	API        bool
+	Playground bool
+	WebSocket  bool
+}
+
+// allRoutes is every group on.
+func allRoutes() Routes { return Routes{API: true, Playground: true, WebSocket: true} }
 
 // defaultRefreshEvery is a little under the quota cache's lifetime, so a
 // reading is renewed shortly after it goes stale rather than a whole period
@@ -125,6 +146,10 @@ func New(opts Options) (*Server, error) {
 	}
 	if opts.RefreshEvery == 0 {
 		opts.RefreshEvery = defaultRefreshEvery
+	}
+	if opts.Routes == nil {
+		r := allRoutes()
+		opts.Routes = &r
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
@@ -219,10 +244,12 @@ func (s *Server) Handler() http.Handler {
 	// the same thing is a second thing to keep true, and this one is
 	// unauthenticated and outside the rate limiter, which is everything a
 	// watchdog needs.
-	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]any{"success": true, "version": wire.Version})
-	})
-	mux.HandleFunc("GET /playground", s.playground)
+	if s.opts.Routes.Playground {
+		mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, http.StatusOK, map[string]any{"success": true, "version": wire.Version})
+		})
+		mux.HandleFunc("GET /playground", s.playground)
+	}
 
 	guarded := map[string]http.HandlerFunc{
 		"GET /v1/schema":               s.schema,
@@ -249,8 +276,10 @@ func (s *Server) Handler() http.Handler {
 		"POST /v1/auth":      s.loginBegin,
 		"POST /v1/auth/{id}": s.loginFinish,
 	}
-	for pattern, h := range guarded {
-		mux.Handle(pattern, s.auth(h))
+	if s.opts.Routes.API {
+		for pattern, h := range guarded {
+			mux.Handle(pattern, s.auth(h))
+		}
 	}
 	// The same three doors as a socket: one run, carried both ways. They are
 	// guarded apart because a browser cannot put a header on a WebSocket, so
@@ -260,8 +289,10 @@ func (s *Server) Handler() http.Handler {
 		"GET /v1/accounts/{id}/ws": s.startWS,
 		"GET /v1/ws":               s.startWS,
 	}
-	for pattern, h := range sockets {
-		mux.Handle(pattern, s.wsAuth(h))
+	if s.opts.Routes.WebSocket {
+		for pattern, h := range sockets {
+			mux.Handle(pattern, s.wsAuth(h))
+		}
 	}
 	return s.recover(mux)
 }
@@ -505,6 +536,9 @@ func (s *Server) schema(w http.ResponseWriter, _ *http.Request) {
 		"allow_dangerous": s.opts.AllowDangerous,
 		"allow_raw_flags": s.opts.AllowRawFlags,
 		"roots":           s.opts.Roots,
+		// A run that stays open is carried on a socket, so a page that is
+		// told there are none knows not to offer one.
+		"websocket": s.opts.Routes.WebSocket,
 	})
 }
 
