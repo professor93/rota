@@ -1199,6 +1199,7 @@ scrollback_bytes = 2097152  # output kept per terminal, for whoever attaches
 idle_timeout     = "12h"    # a terminal nobody is attached to ends after this
 record           = false    # keep each terminal's output under <store>/terminals/
 record_max_bytes = 52428800
+share            = true     # take terminals offered by `rota run --share` here
 ```
 
 **And it needs TLS off the loopback.** With `routes.terminal` on and a listen
@@ -1439,7 +1440,9 @@ The audit log is always on, and never carries a keystroke or a line of
 output: `terminal created` (id, kind, account, by), `terminal attached` and
 `terminal detached` (id, name, role), `keyboard taken`, `keyboard released`,
 `keyboard granted` and `keyboard forced` (id, from, to), `terminal killed`
-(id, by) and `terminal ended` (id, exit).
+(id, by) and `terminal ended` (id, exit) — and, for one that was offered from
+a local terminal, `terminal shared` (id, account, label, pid, mode) and
+`terminal unshared` (id, exit) beside the last of those.
 
 With `record = true`, what each terminal **printed** is appended to
 `<store>/terminals/<id>.out`, up to `record_max_bytes`, with the description
@@ -1447,6 +1450,95 @@ above written beside it as `<id>.json` when it ends. Input is never recorded
 — what reaches the file is the same bytes every attached client was sent, and
 nothing else. The files are mode `0600` and the directory `0700`: a recording
 is a transcript of somebody's working session.
+
+### Sharing the terminal you are sitting at
+
+The terminals above are the server's own: it started the CLI and it holds the
+pseudo-terminal. This is the other direction. You are at a terminal, you run
+the CLI there as you always did, and the same session also appears on the
+page — to be watched, or to be typed into from a browser while you keep
+typing at your desk.
+
+```sh
+rota run 1 --share                  # the CLI as it comes, and watchable
+rota run --share=watch --label api  # offered to be read, under that name
+rota run 1 --share -- --some-flag   # with the CLI's own arguments
+```
+
+**What it does not change.** `rota run <id>` with no prompt hands the terminal
+over by replacing rota with the CLI; `--share` prepares the account in exactly
+the same way — the token refreshed or the long-lived one used, the credential
+staged, the account's own Claude world mirrored, the instance recorded — and
+then runs the CLI on a pseudo-terminal with rota still above it, copying both
+ways. The CLI's exit code is rota's. `SIGWINCH` resizes it, `SIGHUP` and
+`SIGTERM` hang it up, and the terminal's modes are put back on every path out
+— a normal exit, a signal, a panic. Without `--share`, nothing whatever
+changes: the exec handover is still the exec handover.
+
+**Sharing never blocks or slows the terminal.** This is the rule the rest
+follows from. What you type goes straight into the CLI and is never carried
+near the link. What the CLI prints is written to your screen first and offered
+to the server afterwards, into a bounded queue — a few mebibytes — that drops
+rather than waits. A server that is slow, that went away, or that was never
+started costs you nothing: the bytes it missed are counted and announced to
+whoever is watching as a `gap`, and the page writes that hole into the
+terminal rather than pretending the output was continuous.
+
+**The socket.** A server with `[routes] terminal = true` and `[terminal]
+share = true` — the default — listens on `<store>/terminals/share.sock`, mode
+`0600` inside a directory that is `0700`. **Who may share a terminal is
+decided by the filesystem**: the only process that can connect is one run by
+the user the server runs as. There is no token, because a token would be a
+second secret protecting something the kernel already protects. A stale
+socket left by a killed server is replaced at start-up; one removed on
+shutdown.
+
+The sharer dials it, and if nobody is listening it keeps running and retries
+every few seconds — quietly, because sharing is an extra and not a condition
+for running. Before the CLI takes the screen rota prints one line saying
+which of the two happened: *shared to the rota server on this machine as
+terminal `<id>`*, or *no rota server is listening at `<path>`; sharing begins
+when one is*. A server that refuses — a protocol version that does not match,
+or `max_sessions` already reached — says so in a sentence rota prints once.
+
+The protocol is length-prefixed frames, four bytes big-endian and a type
+byte. Sharer to server: `hello` (version, account, label, folder, size, pid,
+mode), `output` (bytes), `resized`, `gap` (how much never left), `exit`.
+Server to sharer: `welcome` (the terminal's id) or `refused` (a sentence, and
+whether it is worth coming back), `input` (bytes), `kill`. `ping` and `pong`
+go both ways. One comment in `internal/share` is the whole of it.
+
+**On the page** a shared terminal is a terminal like any other — the same
+list, the same socket, the same replay with absolute offsets, the same
+one-holder keyboard among web connections, the same `?since=`, the same
+`1013` for a reader that falls behind, the same audit lines. It is
+`kind: "shared"` and carries `pid` and `mode`, and it says *shared from a
+local terminal*.
+
+Two things about it are different, and both are facts about where it is:
+
+- **Its size follows the window it was started in.** A `resize` from the page
+  is answered with `{"type":"error","message":"this terminal's size follows
+  the window it was started in"}` and changes nothing; the page draws it at
+  the session's `cols`×`rows` and follows `resized`, even for the holder.
+- **The person at the terminal can always type**, because their keystrokes
+  never pass through the server at all. With `--share=watch` nobody on the
+  page ever can: `claim` and input are refused with *this terminal is shared
+  to be watched only*, whatever role the sign-in has, and the page shows no
+  keyboard controls to anybody.
+
+**Ending it.** The CLI exiting sends `exit` with its code. `DELETE
+/v1/terminals/{id}` sends `kill`, and the sharer hangs up its child and
+insists three seconds later. The link breaking without an `exit` is the third
+ending: the terminal ends with code `-1`, `lost: true`, and the description
+says *the sharing process went away*. Shared terminals count against
+`max_sessions` like the rest.
+
+It runs on **linux and macOS**, and is refused by name anywhere else:
+`--share` needs a pseudo-terminal for the CLI, a raw mode for the window you
+are at, and a signal when that window is dragged. Standard input that is not
+a terminal is refused too, with *--share needs a terminal to share* — there
+would be nothing to share.
 
 ### The playground
 
