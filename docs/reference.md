@@ -288,7 +288,9 @@ rota serve --config /etc/rota/server.toml        # or write it all down once
 ```
 
 The token is mandatory and is checked in constant time. Ten bad tokens from
-one address within an hour block that address for an hour. Prefer
+one address within an hour block that address for an hour. It is one
+principal among several — see *Who is asking* below for the people and the
+other tokens a file may name, each with a role. Prefer
 `ROTA_TOKEN` to `--token`: a command line is in the process table, where
 every process on the machine can read it — including the agents this server
 starts, which have a shell. The server warns once at startup when it sees
@@ -339,14 +341,16 @@ cert = ""                   # cert and key go together or not at all
 key  = ""
 
 [auth]
-token      = ""             # the bearer token, if you keep it here
-token_file = ""             # or a file holding it, same permission rule
-token_env  = "ROTA_TOKEN"   # or the name of the variable that holds it
+token       = ""            # the bearer token, if you keep it here
+token_file  = ""            # or a file holding it, same permission rule
+token_env   = "ROTA_TOKEN"  # or the name of the variable that holds it
+session_ttl = "12h"         # how long a sign-in on the page lasts
 
 [routes]
-api        = true           # everything under /v1 except the sockets
-playground = true           # GET / and GET /playground
+api        = true           # everything under /v1 except the sockets and health
+playground = true           # GET /, GET /playground and the invite landing
 websocket  = true           # the /ws routes
+health     = true           # GET /v1/health, open and depending on nothing
 
 [runs]
 timeout         = "10m"     # hard cap on one run
@@ -369,18 +373,29 @@ library until now.
 
 `[routes]` switches whole groups on and off. A group that is off is not
 registered, so its paths answer `404` exactly as a path this server never
-had would: nothing tells a stranger that a door is there but shut. The page
-and the sockets are the API in another shape, so neither means anything
-without it, and asking for one without `api` is refused by name. With
+had would: nothing tells a stranger that a door is there but shut. What each
+group needs is a table rather than a chain of conditions, so a group added
+later is a row in it:
+
+| group | needs | because |
+|---|---|---|
+| `api` | — | |
+| `playground` | `api` | the page has nothing to call without it |
+| `websocket` | `api` | a socket is the same run by another door |
+| `health` | — | a probe that goes off with the page is not a probe |
+
+Asking for one of the middle two without `api` is refused by name. With
 `websocket = false` the playground is told so by `/v1/schema` and stops
 offering a run that stays open, rather than opening a socket at nothing.
 
 `rota serve --print-config` prints the whole schema as TOML and exits
 without serving, each line saying where its value came from — `# default`,
-`# file`, `# env ROTA_TOKEN`, `# flag --timeout`, `# argument`. The token is
-never printed, only whether there is one (`"(set)"`), so the output can be
-pasted where the file itself could not; it is otherwise a file rota reads
-back.
+`# file`, `# env ROTA_TOKEN`, `# flag --timeout`, `# argument`. No secret is
+printed, only whether there is one: every field the schema marks `secret` —
+the token, a user's password, a token entry's digest — comes out as
+`"(set)"`, so the output can be pasted where the file itself could not. With
+nothing secret set it is a file rota reads straight back; with something set
+it says at the top that it is a report and not a file to load.
 
 rota has no database, and this file configures none. What persists is the
 store directory: the accounts, the homes rota stages for them and, now, this
@@ -388,7 +403,8 @@ file.
 
 | Method | Path | |
 |---|---|---|
-| `GET` | `/` | unauthenticated and never rate-limited: what this is, its version, and where the page is. The only liveness answer — what a watchdog reads. With the rest of the `playground` group |
+| `GET` | `/v1/health` | unauthenticated and never rate-limited: `{"ok":true}` and nothing else. Its own group, so it survives switching the page off |
+| `GET` | `/` | unauthenticated: what this is and its version. With the rest of the `playground` group |
 | `GET` | `/playground` | the playground, a single self-contained page |
 | `GET` | `/v1/schema` | every provider, its models, efforts, defaults and fields |
 | `GET` | `/v1/accounts` | accounts in rotation order, with usage, status, order, threshold and when limits were read (`?refresh=1`); `default` names the one a bare run would use |
@@ -408,6 +424,11 @@ file.
 | `DELETE` | `/v1/accounts/{id}` | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays |
 | `POST` | `/v1/login` | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead |
 | `POST` | `/v1/login/{id}` | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"status":"long","long_until":"..."}` |
+| `GET` | `/v1/session` | who this request is: `{name, role, via, expires}`, or `401` |
+| `POST` | `/v1/session` | `{"name":"…","password":"…"}` → the same, and the session cookie |
+| `DELETE` | `/v1/session` | end this session |
+| `POST` | `/v1/invites` | `{"ttl":"10m"}` → `{"url","expires"}` — a single-use link that signs somebody in as a watcher |
+| `GET` | `/invite/{code}` | unauthenticated: spends one of those and lands on the page |
 
 `/v1/auth` and `/v1/auth/{id}` are the same two under their old names, kept
 working for anything already calling them.
@@ -437,6 +458,159 @@ Files can travel with the request — either `"files": [{"path":"a.txt",
 "content":"<base64>"}]` or a multipart body whose `request` part is that same
 JSON. They land in a directory private to the request, which is added to the
 session and deleted afterwards.
+
+### Who is asking, and what they may do
+
+Every request is made by a **principal**: a name to put in the log, a role
+that decides what it may ask for, and how it arrived. A request is resolved
+to one in that order — a bearer token first, then the session cookie — and a
+request with neither is `401` in the words it has always been.
+
+There are two roles and there is no third. `watch` may read everything and
+change nothing; `control` may do anything this server does, which includes
+running a coding agent on this machine with a shell. A role between them
+would have to be decided route by route, which is what the table below is
+instead of.
+
+| | `watch` | `control` |
+|---|---|---|
+| every `GET` under `/v1` — accounts, usage, the runs, a run's event stream | yes | yes |
+| attach to a run over a WebSocket, read-only | yes | yes |
+| the page | yes, read-only | yes |
+| start a run, over HTTP or a socket | no | yes |
+| message, steer, interrupt, close a run | no | yes |
+| `PATCH` and `DELETE` an account, sign one in | no | yes |
+| make an invite | no | yes |
+
+That is one table in the code as well — route to role, consulted by the
+middleware, checked against the routes actually registered by a test — so
+the terminal, when it arrives, is rows in it rather than checks scattered
+through handlers. A route nobody wrote a row for takes `control`.
+
+A principal whose role does not cover what it asked for gets `403` and the
+sentence *this sign-in may only watch; nothing here can be changed from it*.
+It is not `401`, because there is nothing to try again with, and it is not
+counted as a guess: somebody who proved who they are and clicked the wrong
+thing must not cost their address its access.
+
+#### The principals
+
+The token `rota serve` is started with — `--token`, `ROTA_TOKEN`,
+`[auth] token`, `token_file`, `token_env` — is the principal `token`, with
+the role `control`. Nothing about it has changed.
+
+Beside it the file may name people and more tokens:
+
+```toml
+[[users]]
+name     = "inoyat"
+role     = "control"
+password = "pbkdf2-sha256$600000$<salt, base64>$<hash, base64>"
+
+[[tokens]]
+name   = "ci-watch"
+role   = "watch"
+sha256 = "<hex of sha256(the token)>"
+```
+
+Names are unique within each table and non-empty; a role is one of the two
+words; a password must parse, with at least 100 000 iterations, a salt of at
+least 16 bytes and a 32-byte hash; a digest is 64 hexadecimal characters.
+Every refusal names the entry — `[[users]] "inoyat": password: …` — because
+whoever reads it is looking at a file with several of them in it.
+
+**rota never writes this file.** A program that edits a file somebody else
+also edits has to merge, and a merge of the file that decides who may reach
+a server is a class of bug nobody needs. Three commands print instead:
+
+```sh
+rota serve passwd inoyat --role control   # asks twice, echoes nothing, prints [[users]]
+rota serve token ci-watch --role watch    # prints the token once, and [[tokens]]
+rota serve invite --ttl 10m               # asks a running server for a watcher's link
+```
+
+`serve passwd` turns the terminal's echo off with one `ioctl` — `TCGETS` on
+Linux, `TIOCGETA` on the BSDs and macOS, in two small build-tagged files,
+because the standard library is the whole dependency list. Where it cannot,
+it says so before asking rather than silently showing what is typed. With
+standard input redirected it reads one line, which is how a script uses it.
+
+`serve token` prints the token once and nowhere else: the file holds only
+its SHA-256, so a `server.toml` somebody reads gives them nothing to send. A
+lost token is replaced, not recovered.
+
+#### Signing in on the page
+
+| Method | Path | |
+|---|---|---|
+| `GET` | `/v1/session` | the current principal `{name, role, via, expires}`, or `401`. The page asks this first |
+| `POST` | `/v1/session` | `{"name":"…","password":"…"}` → the same, and the cookie |
+| `DELETE` | `/v1/session` | ends the session and clears the cookie |
+
+The cookie is `rota_session`: `HttpOnly`, `SameSite=Strict`, `Path=/`, and
+`Secure` exactly when the request that earned it arrived over TLS — marking
+it `Secure` on a plain `http` server would mean the browser never sent it
+back. Its value is 32 random bytes and never appears in a response body.
+
+Sessions live in memory and **die with the server**. That is a decision, not
+a gap: rota has no database, the alternative is a file of live credentials
+on disk, and a server that restarts has usually just been upgraded or
+reconfigured. Expiry is absolute, `auth.session_ttl` from the moment of
+signing in, and expired rows are dropped as they are passed rather than by a
+sweeper nobody is paying for.
+
+A sign-in that fails answers one sentence — *that name and password do not go
+together* — whether the name is unknown or the password is wrong, and costs
+the same PBKDF2 derivation either way: an unknown name is checked against a
+decoy at the same cost, so the time an answer takes cannot be read as "that
+name exists". Failures go through the same per-address block as bad tokens:
+ten within an hour and that address gets `429` for an hour, the right
+password included, because the alternative is an unlimited password oracle.
+
+**Cross-site.** A request that changes something and is authorized by a
+cookie must carry an `Origin` — or, failing that, a `Referer` — whose host is
+this server's own, or it is `403` with *a request from another site cannot
+use this session*. `SameSite=Strict` already stops the cases browsers agree
+on; this is the second lock, and it costs nothing because a browser puts
+`Origin` on every request that is not a plain navigation. A WebSocket
+upgrade authorized by a cookie is held to the same rule: any page on the
+internet may open one, and the browser would attach the cookie. Requests
+authorized by a bearer token are exempt — nothing attaches one to a request
+but the code that meant to make it.
+
+#### Invite links
+
+| Method | Path | |
+|---|---|---|
+| `POST` | `/v1/invites` | (`control`) `{"ttl":"10m"}` → `{"url","expires"}`; ten minutes by default, a day at most |
+| `GET` | `/invite/{code}` | unauthenticated; spends the code, signs the visitor in as a watcher, redirects to the page |
+
+A code is 32 random bytes and one use: spending it is taking it out of the
+table, so two browsers racing the same link cannot both get in. The session
+it makes is `watch`, named `invite-` and six characters of the spent code —
+enough to tell one visit from another in the log, and not enough to be the
+code. A link that has been used, has expired, or was invented answers `404`
+as a plain page and counts as a guess, because guessing one is the only way
+in that needs no password. The code itself is never logged.
+
+`rota serve invite` is a client, not a server: it reads the same
+configuration the server did to find the address, the TLS settings and a
+control token, calls `POST /v1/invites` on whatever is listening there, and
+prints the URL. With no control token configured it says so and stops.
+
+#### Health
+
+`GET /v1/health` answers `{"ok":true}` to anybody, with no rate limit, and
+says nothing else — not even a version, because whoever can reach it has
+proved nothing. It is its own route group so that a server with its page
+switched off, which takes `GET /` with it, still has something a watchdog
+can read.
+
+#### What is written down
+
+One line each for a sign-in, a sign-out, an invite made, an invite used and
+a refusal by role, with the name, the role and the address. Never a
+password, a token, an invite code or a cookie value.
 
 ### One field per thing
 
@@ -966,9 +1140,20 @@ anywhere could have rota writing where the server was told not to.
 
 ### The playground
 
-`GET /playground` serves a page with no token of its own: it asks for one,
-proves it against `/v1/accounts` — the first thing the page needs anyway, so
-a right token costs no extra round trip — and keeps it only in that browser.
+`GET /playground` serves a page with no credential of its own. It asks
+`GET /v1/session` first. Signed out, it offers a name and a password, with
+the bearer token underneath it as the way this page has always been used —
+and a token is still proved against `/v1/accounts`, the first thing the page
+needs anyway, so a right one costs no extra round trip. A token is kept in
+that tab and nowhere else; a sign-in is a cookie the page never sees.
+
+Signed in, the header says who and as what, with a way out. A `watch`
+principal — somebody who signed in with that role, a watch token, or a
+visitor who followed an invite — gets the same page with the run button, the
+message box and every account control disabled, and one sentence saying
+*watching: this sign-in cannot change anything*. Lists, usage and a run's
+stream work as they always did. The server refuses those acts regardless;
+the page is so that nobody has to find that out by being refused.
 
 Five sections down the left, reachable by their number keys: **Ask**,
 **Accounts**, **Running**, **Sign in**, **Console**. That is the whole page — one rail,
@@ -1030,8 +1215,16 @@ so a changed field or response shape cannot break it silently.
 
 ### Safety
 
-The server assumes its caller holds the token but is **not** trusted with the
-machine. That assumption is what the following exist for.
+The server assumes its caller holds a credential but is **not** trusted with
+the machine. That assumption is what the following exist for.
+
+Two things about credentials, before the rest. **Without TLS a password
+travels in clear text exactly as the token does** — the server warns at start
+when `[[users]]` are configured, no certificate is given and the address is
+not the loopback. And **`control` is the power to run commands on this
+machine**: the agents this server starts have a shell, so handing somebody
+that role is handing them the machine, and `watch` exists so that showing
+somebody what is happening does not have to be.
 
 `--root` (repeatable) confines every path a request names — the working
 directory, uploads, extra directories, plugin directories, images, a debug
