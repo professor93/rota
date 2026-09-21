@@ -846,13 +846,20 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 	}
 	data, at := ts.ring.read(from)
 	gap := at > from
-	tc.say(map[string]any{
+	hello := map[string]any{
 		"type": "hello", "id": ts.id, "kind": ts.kind,
 		"cols": ts.cols, "rows": ts.rows, "offset": at,
 		"holder":  nameOrNil(ts.heldBy()),
 		"you":     map[string]any{"name": tc.name, "role": tc.role, "conn": tc.id},
 		"viewers": ts.viewers(),
-	})
+	}
+	if ts.kind == termKindShared {
+		// In the first frame, and not only in the description, because the
+		// page has to know before it draws anything that this terminal's
+		// size is not its to set and may not be its to type into.
+		hello["mode"] = ts.shareMode()
+	}
+	tc.say(hello)
 	if gap {
 		tc.say(map[string]any{"type": "gap", "from": from, "to": at})
 	}

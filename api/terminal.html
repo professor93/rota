@@ -137,6 +137,8 @@ let termView = null;         // the emulator adapter
 let termSeen = false;        // a hello has arrived for this terminal
 let termOffset = 0;          // the absolute offset of the next byte
 let termCols = 80, termRows = 24;
+let termKind = null;         // "account", "shell", or "shared"
+let termMode = null;         // for a shared one: "control" or "watch"
 let termHolder = null;       // who holds the keyboard, null for nobody
 let termYou = null;          // {name, role, conn} from hello
 let termViewers = [];
@@ -154,10 +156,17 @@ const CLAIM_WAIT = 10000;    // the server's own wait before a force is allowed
 const TERM_BACKOFF = [1, 2, 4, 8, 15];
 
 const termWatcher = () => !!termYou && termYou.role === "watch";
+// A shared terminal is one somebody is sitting at, offered to this server by
+// the rota running it. Two things follow, and both are facts about that
+// terminal rather than about this page: its size belongs to the window it is
+// on, and it may have been offered to be read and never typed into.
+const termShared = () => termKind === "shared";
+const termLookOnly = () => termShared() && termMode === "watch";
 // termIHold: the keyboard is held by a name, and hello said which name this
 // connection has. Two sockets of one principal share a name, which is as
 // close as the server gets to "you" — and either way it is one person.
-const termIHold = () => !!termYou && !termWatcher() && termEnded === null && termHolder === termYou.name;
+const termIHold = () => !!termYou && !termWatcher() && !termLookOnly() &&
+  termEnded === null && termHolder === termYou.name;
 
 /* ============================================================== the page == */
 // enterTerminal is this page once there is a credential: ask what there is,
@@ -215,10 +224,17 @@ function renderTermList() {
     ]));
   }
   for (const t of terms) {
-    const acct = t.account ? `#${t.account.id} ${t.account.label || t.account.provider}` : "a plain shell";
+    const shared = t.kind === "shared";
+    const who = t.account
+      ? `#${t.account.id} ${t.account.label || t.account.provider}`
+      : (shared ? "" : "a plain shell");
+    const acct = shared ? [who, termSharedNote(t)].filter(Boolean).join(" · ") : who;
     const sub = t.ended
-      ? `ended, code ${t.exit}`
-      : [t.holder ? `${t.holder} has the keyboard` : "keyboard free",
+      // A shared terminal has a second way of ending, and it has no code:
+      // the rota holding it stopped answering.
+      ? (t.lost ? (t.ending || "the sharing process went away") : `ended, code ${t.exit}`)
+      : [t.holder ? `${t.holder} has the keyboard`
+                  : (shared && t.mode === "watch" ? "no keyboard" : "keyboard free"),
          `${(t.viewers || []).length} watching`].join(" · ");
     kids.push(el("button", {
       class: "trow" + (t.ended ? " over" : ""), "data-id": t.id,
@@ -233,6 +249,11 @@ function renderTermList() {
   }
   host.replaceChildren(...kids);
 }
+
+// termSharedNote is what a shared terminal is, in the words the list and the
+// panel both use: where it came from, and whether anybody here may type.
+const termSharedNote = t =>
+  "shared from a local terminal" + (t.mode === "watch" ? ", to watch" : "");
 
 // splitArgs splits a line the way a shell would, as far as quoting goes:
 // whitespace separates, and either quote keeps a run together. It is not a
@@ -320,6 +341,7 @@ async function termSelect(id) {
   termHolder = null; termYou = null; termViewers = []; termEnded = null;
   termAsking = null; termClaimAt = null; termNote = "";
   termCols = 80; termRows = 24;
+  termKind = null; termMode = null;
   termStatus = id ? "connecting" : "idle";
   renderTerm();
   if (!id) return;
@@ -433,6 +455,7 @@ function termFrame(doc) {
     case "hello":
       termSeen = true; termTries = 0; termWait = 0;
       termOffset = doc.offset || 0;
+      termKind = doc.kind || null; termMode = doc.mode || null;
       termCols = doc.cols || termCols; termRows = doc.rows || termRows;
       termHolder = doc.holder || null;
       termYou = doc.you || null;
@@ -444,7 +467,10 @@ function termFrame(doc) {
     case "gap":
       // Output that was not kept is said, never papered over: a terminal
       // that looked continuous when it was not is worse than a gap.
-      termMark("… " + ((doc.to || 0) - (doc.from || 0)) + " bytes were not kept …");
+      // Two kinds of hole, said the same way: output the scrollback no
+      // longer has, and output a sharer could not get to this server at all.
+      // The second carries its own count, because no offset moved for it.
+      termMark("… " + (doc.bytes || ((doc.to || 0) - (doc.from || 0))) + " bytes were not kept …");
       break;
     case "keyboard":
       termHolder = doc.holder || null;
@@ -463,7 +489,7 @@ function termFrame(doc) {
       // Somebody else's size is shown as it is: this page scrolls inside its
       // container rather than telling a comfortable lie about how wide the
       // terminal on the server is.
-      if (!termIHold() && termView) termView.resize(termCols, termRows);
+      if ((termShared() || !termIHold()) && termView) termView.resize(termCols, termRows);
       renderTermStrip(); renderTermInfo();
       break;
     case "viewers":
@@ -503,7 +529,11 @@ let termWantSize = null, termSizeTimer = false;
 // the truth, and it belongs to whoever is typing.
 function termFit() {
   if (!termView) return;
-  if (!termIHold()) { termView.resize(termCols, termRows); return; }
+  // A shared terminal is never fitted, even by whoever holds its keyboard:
+  // its size is the size of a window somebody is sitting at, and this page
+  // cannot reach across and drag that. It is drawn at that size and scrolls
+  // inside its container, which is what everybody but a holder always got.
+  if (termShared() || !termIHold()) { termView.resize(termCols, termRows); return; }
   const size = termView.fit();
   if (!size || !size.cols || !size.rows) return;
   if (size.cols === termCols && size.rows === termRows) return;
@@ -517,7 +547,7 @@ function termSendSize(size) {
   termLater(() => {
     termSizeTimer = false;
     const s = termWantSize; termWantSize = null;
-    if (!s || !termSock || !termIHold()) return;
+    if (!s || !termSock || !termIHold() || termShared()) return;
     try { termSock.send(JSON.stringify({ type: "resize", cols: s.cols, rows: s.rows })); } catch {}
   }, 150);
 }
@@ -558,7 +588,10 @@ function renderTermStrip() {
   if (!host) return;
   if (!termId) { host.replaceChildren(el("span", { class: "pill", text: "no terminal chosen" })); return; }
   const kids = [el("span", { class: "pill" + termStatePill(), text: termStateText() })];
-  if (termWatcher()) kids.push(el("span", { class: "badge", text: "watching" }));
+  // A terminal shared to be watched has no keyboard for anybody, so nobody
+  // is shown one: the controls would be there only to be refused.
+  if (termLookOnly()) kids.push(el("span", { class: "badge", text: "shared to be watched only" }));
+  else if (termWatcher()) kids.push(el("span", { class: "badge", text: "watching" }));
   else if (termEnded === null) kids.push(termKeyboardBox());
   if (termAsking && termIHold()) {
     kids.push(el("span", { class: "kbd" }, [
@@ -647,10 +680,15 @@ function renderTermInfo() {
     row("Folder", d.cwd || "—"),
     row("Started", termAgo(d.started)),
     row("Size", termCols + "×" + termRows),
-    row("Keyboard", termEnded !== null ? "nobody" : (termHolder || "free")),
+    row("Keyboard", termEnded !== null ? "nobody"
+      : (d.kind === "shared" && d.mode === "watch" ? "shared to be watched only" : (termHolder || "free"))),
+    d.kind === "shared" ? row("Shared", termSharedNote(d)) : null,
+    d.kind === "shared" && d.pid ? row("Its process", String(d.pid)) : null,
     row("Recording", d.recording ? "on" : "off"),
     termLapse(d.token_until, row),
-    termEnded !== null ? row("Ended", "exited, code " + termEnded) : null,
+    termEnded !== null
+      ? row("Ended", d.lost ? (d.ending || "the sharing process went away") : "exited, code " + termEnded)
+      : null,
   ])];
   kids.push(el("h4", { text: "Watching" }));
   if (!termViewers.length) kids.push(el("p", { class: "help", text: "nobody else" }));

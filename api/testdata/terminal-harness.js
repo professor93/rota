@@ -325,7 +325,72 @@ const screen = () => fakes[fakes.length - 1];
   fire();
   assert(sockets.length === after16, 'and nothing reconnects to a terminal that is over');
 
-  // 17. a watcher sees all of it and may touch none of it.
+  // 17. a terminal somebody is sitting at, offered to this server: it says
+  // where it came from, and its size is that window's and not this one's.
+  terminalsDoc.terminals.push({
+    id: 't-shared', kind: 'shared', label: 'api', cwd: '/src/api',
+    started: new Date(clock - 60000).toISOString(), cols: 90, rows: 25,
+    holder: null, viewers: [], offset: 0, ended: false, recording: false,
+    mode: 'control', pid: 4242, account: { id: 1, label: 'a@x', provider: 'claude' },
+  });
+  terminalsDoc.terminals.push({
+    id: 't-look', kind: 'shared', label: 'demo', cwd: '/src/demo',
+    started: new Date(clock - 60000).toISOString(), cols: 80, rows: 24,
+    holder: null, viewers: [], offset: 0, ended: false, recording: false,
+    mode: 'watch', pid: 4243,
+  });
+  await tp.refreshTerminals();
+  const rowFor = id => rows().find(r => r.attrs['data-id'] === id);
+  assert(rowFor('t-shared').textContent.includes('shared from a local terminal'),
+    'the list says which terminals are somebody else\'s: ' + rowFor('t-shared').textContent);
+  assert(rowFor('t-look').textContent.includes('shared from a local terminal, to watch'),
+    'and which of those may not be typed into: ' + rowFor('t-look').textContent);
+  assert(rowFor('t-shared').textContent.includes('#1 a@x'),
+    'while still saying who is paying for it: ' + rowFor('t-shared').textContent);
+
+  await tp.termSelect('t-shared');
+  const ssock = lastSock();
+  ssock.open();
+  ssock.feed({ type: 'hello', id: 't-shared', kind: 'shared', mode: 'control', cols: 90, rows: 25,
+    offset: 0, holder: 'driver', you: { name: 'driver', role: 'control', conn: 'c-6' }, viewers: [] });
+  await settle();
+  const fitsBefore = screen().fits;
+  tp.termFit();
+  assert(screen().fits === fitsBefore, 'a shared terminal is never fitted, even by its holder');
+  assert(JSON.stringify(screen().sizes[screen().sizes.length - 1]) === '[90,25]',
+    'it is drawn at the size of the window it is on: ' + JSON.stringify(screen().sizes));
+  assert(!ssock.sent.some(f => typeof f === 'string' && f.includes('resize')),
+    'and no resize is ever sent for it: ' + JSON.stringify(ssock.sent.filter(f => typeof f === 'string')));
+  assert(strip().textContent.includes('hold the keyboard'), 'the keyboard still works: ' + strip().textContent);
+  screen().data('ls\r');
+  assert(ssock.sent[ssock.sent.length - 1] instanceof Uint8Array, 'and what is typed still goes');
+  assert(info().includes('shared from a local terminal'), 'the panel says what it is: ' + info());
+  assert(info().includes('4242'), 'and which process answers for it: ' + info());
+  ssock.feed({ type: 'resized', cols: 120, rows: 40 });
+  assert(JSON.stringify(screen().sizes[screen().sizes.length - 1]) === '[120,40]',
+    'and the window being dragged there is followed here: ' + JSON.stringify(screen().sizes));
+  // Output the sharer could not send says how much, having moved no offset.
+  ssock.feed({ type: 'gap', from: 0, to: 0, bytes: 8192 });
+  assert(screen().text().includes('8192 bytes were not kept'),
+    'a gap at the sharer is a hole here too: ' + JSON.stringify(screen().text().slice(-60)));
+
+  // 18. one offered to be watched has no keyboard for anybody.
+  await tp.termSelect('t-look');
+  const lsock = lastSock();
+  lsock.open();
+  lsock.feed({ type: 'hello', id: 't-look', kind: 'shared', mode: 'watch', cols: 80, rows: 24,
+    offset: 0, holder: null, you: { name: 'driver', role: 'control', conn: 'c-7' }, viewers: [] });
+  await settle();
+  assert(strip().textContent.includes('shared to be watched only'),
+    'a control principal is told why there is no keyboard: ' + strip().textContent);
+  assert(!btn(strip(), 'Take the keyboard') && !btn(strip(), 'Ask for the keyboard') && !btn(strip(), 'Release'),
+    'and is offered none of it');
+  const lsent = lsock.sent.length;
+  screen().data('x');
+  assert(lsock.sent.length === lsent, 'and a keystroke goes nowhere');
+  assert(info().includes('shared to be watched only'), 'the panel says the same: ' + info());
+
+  // 19. a watcher sees all of it and may touch none of it.
   signInRole = 'watch';
   await tp.signOut();
   assert(nodes['#termshell'].hidden === true, 'signing out puts the sign-in back');
