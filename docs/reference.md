@@ -351,6 +351,15 @@ api        = true           # everything under /v1 except the sockets and health
 playground = true           # GET /, GET /playground and the invite landing
 websocket  = true           # the /ws routes
 health     = true           # GET /v1/health, open and depending on nothing
+terminal   = false          # the /v1/terminals routes; off until asked for
+
+[terminal]                  # nothing here means anything unless routes.terminal
+shell            = false    # also allow a plain login shell, not only CLIs
+max_sessions     = 8
+scrollback_bytes = 2097152  # output kept per terminal, for whoever attaches
+idle_timeout     = "12h"    # a terminal nobody is attached to ends after this
+record           = false    # keep each terminal's output under <store>/terminals/
+record_max_bytes = 52428800
 
 [runs]
 timeout         = "10m"     # hard cap on one run
@@ -383,6 +392,12 @@ later is a row in it:
 | `playground` | `api` | the page has nothing to call without it |
 | `websocket` | `api` | a socket is the same run by another door |
 | `health` | — | a probe that goes off with the page is not a probe |
+| `terminal` | `api`, `websocket` | a terminal is started over the one and carried on the other |
+
+`terminal` is the one group that is off in the defaults, and the one with a
+rule about the address: with it on and a listen address that is not the
+loopback, `tls.cert` and `tls.key` are required, because a control sign-in on
+that port runs commands on this machine. See *A terminal on the server*.
 
 Asking for one of the middle two without `api` is refused by name. With
 `websocket = false` the playground is told so by `/v1/schema` and stops
@@ -420,6 +435,11 @@ file.
 | `GET` | `/v1/ws` | a WebSocket that starts a run on whichever account the rotation picks and carries it both ways |
 | `GET` | `/v1/accounts/{id}/ws` | the same, on that account |
 | `GET` | `/v1/runs/{id}/ws` | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
+| `GET` | `/v1/terminals` | the terminals running right now, and the ones that have just ended |
+| `GET` | `/v1/terminals/{id}` | one of them: what it runs, who is watching, who holds the keyboard |
+| `POST` | `/v1/terminals` | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one |
+| `DELETE` | `/v1/terminals/{id}` | end one: a hangup, then a kill three seconds later |
+| `GET` | `/v1/terminals/{id}/ws` | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard |
 | `PATCH` | `/v1/accounts/{id}` | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays |
 | `POST` | `/v1/login` | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead |
@@ -1137,6 +1157,199 @@ out of, and a `config_dir` outside every root is refused when it is set. A
 `sessions` directory is judged by both rules and for the same reason: rota
 creates folders there and links to them, so a caller who could name one
 anywhere could have rota writing where the server was told not to.
+
+### A terminal on the server
+
+A terminal is an account's CLI running on a pseudo-terminal that lives in the
+server: the interactive `claude` you would get from `rota run 1`, started
+once, kept when the browser tab closes, and attachable by anyone the roles
+allow. Several people may watch the same one; exactly one of them at a time
+holds the keyboard.
+
+It is not a general remote shell. What it runs is an account's CLI, launched
+exactly as the handover launches it — the token refreshed or the long-lived
+one used, the credential staged, the account's own Claude world mirrored —
+with `TERM=xterm-256color` and `COLORTERM=truecolor` added and the request's
+`args` appended verbatim. A plain login shell is available, and only if the
+file says so.
+
+It runs on **linux and macOS**. A pseudo-terminal is a Unix device; a server
+asked for one anywhere else refuses to start, naming the platform, rather
+than failing at the first terminal somebody opens.
+
+**It is off.** Not "off in the sample file" — off in the defaults, which is
+the one route group that is. Turning it on takes two lines:
+
+```toml
+[routes]
+terminal = true   # needs api and websocket
+
+[terminal]
+shell            = false    # also allow a plain login shell
+max_sessions     = 8
+scrollback_bytes = 2097152  # output kept per terminal, for whoever attaches
+idle_timeout     = "12h"    # a terminal nobody is attached to ends after this
+record           = false    # keep each terminal's output under <store>/terminals/
+record_max_bytes = 52428800
+```
+
+**And it needs TLS off the loopback.** With `routes.terminal` on and a listen
+address that is not `127.0.0.1` or `localhost`, `tls.cert` and `tls.key` are
+required and the server refuses to start without them. The reason is the
+sentence worth saying plainly: *a control sign-in on this port runs commands
+on this machine, as the user the server runs as.* Everything else rota serves
+answers questions about accounts and runs; this one is a shell prompt. A
+sign-in that travels in clear text is a sign-in given away.
+
+#### Roles, and the keyboard
+
+The two roles mean here what they mean everywhere: **watch** may look at
+anything and change nothing, **control** may do anything this server does. A
+watcher may attach to a terminal and is sent every byte it prints — and its
+own bytes never reach the CLI. That is enforced in the one function that
+writes to the terminal, by the identity of the connection and the role behind
+it, not by what the page chose to draw.
+
+Among the people who may type, one holds the keyboard:
+
+- A control principal attaching takes it if nobody has it. `?mode=watch` asks
+  to look without taking it, which is how you read over somebody's shoulder.
+- `{"type":"claim"}` takes it if it is free. If somebody has it, they get
+  `claim_request` and may answer `grant` or `deny`.
+- A claim nobody has answered for ten seconds may be repeated with
+  `{"type":"claim","force":true}`, which takes it. Forcing earlier is refused
+  with how long is left; forcing without having asked is refused too.
+- `{"type":"release"}` frees it.
+- When the holder's socket drops the keyboard stays theirs for five seconds,
+  so a reconnect by the same person gets it back rather than finding somebody
+  else typing. After that it is free.
+- Every change is broadcast as `{"type":"keyboard","holder":"alice"|null}`.
+
+Anything a non-holder sends inward — bytes, or a resize — is answered with
+`{"type":"error","message":"you are not holding the keyboard"}` and changes
+nothing at all.
+
+#### The routes
+
+| | |
+|---|---|
+| `GET /v1/terminals` | every terminal, running and recently ended (watch) |
+| `GET /v1/terminals/{id}` | one of them (watch) |
+| `GET /v1/terminals/{id}/ws?since=N&mode=…` | attach (watch) |
+| `POST /v1/terminals` | start one (control) |
+| `DELETE /v1/terminals/{id}` | end one: a hangup, then a kill three seconds later (control) |
+
+```bash
+curl -X POST localhost:8787/v1/terminals -H "Authorization: Bearer $ROTA_TOKEN" \
+  -d '{"account":1,"args":["--resume","af7fda4d"],"cols":120,"rows":40,"label":"fintech"}'
+```
+
+`account` left out lets the rotation choose, as a run does. `kind:"shell"`
+runs `$SHELL -l` (or `/bin/sh`) with the server's environment instead, and is
+refused with a plain sentence unless `terminal.shell` is true. `cwd` is
+resolved and confined by the same rule, and refused in the same words, as a
+run's working directory.
+
+The answer is the description, which is also what `GET` returns and what the
+page's information panel is built from:
+
+```json
+{"id":"9a4c1e77b2d05f31","kind":"account","account":{"id":1,"label":"you@example.com","provider":"claude"},
+ "label":"fintech","cwd":"/srv/work","started":"2026-09-21T10:11:12+05:00","cols":120,"rows":40,
+ "holder":"alice","viewers":[{"name":"alice","role":"control","since":"2026-09-21T10:11:14+05:00"}],
+ "offset":20418,"ended":false,"recording":false,"token_until":"2027-03-04T00:00:00Z"}
+```
+
+`token_until` is when the login inside will lapse — the long-lived token's
+date where the account has one, the access token's expiry otherwise — so
+somebody looking at a terminal that has been open all day can see it coming.
+`offset` is how many bytes it has printed altogether, which is what `since`
+is measured in.
+
+#### The socket
+
+One connection carries both directions, and the framing is what tells the two
+kinds of traffic apart: **binary frames are the terminal's bytes**, text
+frames are documents. The token travels as it does on every other socket here
+— `Sec-WebSocket-Protocol: rota, bearer.<token>`, an `Authorization` header,
+or, for a page whose person has signed in, the session cookie, which is held
+to the same Origin rule.
+
+Out:
+
+| | |
+|---|---|
+| *binary* | output: write it to the terminal emulator as it arrives |
+| `hello{id,kind,cols,rows,offset,holder,you:{name,role,conn},viewers}` | the first frame, always |
+| `keyboard{holder}` | who holds it now, `null` for nobody |
+| `claim_request{by,id}` | somebody is asking the holder for it |
+| `resized{cols,rows}` | the terminal is a different size now |
+| `viewers{list}` | who is attached: name, role and since — never an address |
+| `gap{from,to}` | `since` was older than the scrollback; these bytes are gone |
+| `exit{code}` | the CLI ended |
+| `error{message}` | a frame that was read and will not be acted on |
+| `pong` | the answer to `ping` |
+
+In:
+
+| | |
+|---|---|
+| *binary* | input: the bytes of somebody typing, control characters and all |
+| `resize{cols,rows}` | holder only |
+| `claim{force?}` / `release` | ask for the keyboard, or let it go |
+| `grant{to}` / `deny{to}` | the holder answering a `claim_request`, by its `id` |
+| `ping` | the one thing a watcher may send |
+
+Which role each of those takes is one table in the server beside the table of
+routes, so "who may do this?" is still read in one screen.
+
+**Replay.** `hello.offset` is the absolute offset of the first byte you will
+be sent; add the length of every binary frame to it and you have the number
+to reconnect with. `?since=N` gives you everything from there; saying nothing
+gives you the whole scrollback, which is what a page opening a terminal for
+the first time wants. If `N` is older than `scrollback_bytes`, a `gap` frame
+comes first and says exactly which bytes were lost.
+
+**Falling behind.** Each connection has a bounded queue and the terminal
+never waits for one: a reader that stops reading is closed with `1013` and
+reattaches with `since`. One slow watcher cannot stall the CLI or anybody
+else watching it.
+
+```js
+const ws = new WebSocket(`wss://host/v1/terminals/${id}/ws`);
+ws.binaryType = "arraybuffer";
+ws.onmessage = e => {
+  if (typeof e.data === "string") return onDocument(JSON.parse(e.data));
+  offset += e.data.byteLength;
+  term.write(new Uint8Array(e.data));
+};
+term.onData(d => ws.send(d));                       // binary: what was typed
+term.onResize(({cols, rows}) => ws.send(JSON.stringify({type:"resize", cols, rows})));
+```
+
+#### Limits, the audit log and recording
+
+`max_sessions` caps the terminals running at once; past it, `POST` answers
+`409` and says which setting it was. `idle_timeout` ends a terminal nobody
+has been attached to for that long — measured from the last person leaving,
+not from the last keystroke. Stopping the server ends every terminal: each
+one is a CLI in a session of its own, which is exactly what a signal to rota
+does not reach. An ended terminal stays listed for five minutes, with its
+exit code, so a client reattaching a moment late reads the end rather than a
+404 it cannot tell from a wrong id.
+
+The audit log is always on, and never carries a keystroke or a line of
+output: `terminal created` (id, kind, account, by), `terminal attached` and
+`terminal detached` (id, name, role), `keyboard taken`, `keyboard released`,
+`keyboard granted` and `keyboard forced` (id, from, to), `terminal killed`
+(id, by) and `terminal ended` (id, exit).
+
+With `record = true`, what each terminal **printed** is appended to
+`<store>/terminals/<id>.out`, up to `record_max_bytes`, with the description
+above written beside it as `<id>.json` when it ends. Input is never recorded
+— what reaches the file is the same bytes every attached client was sent, and
+nothing else. The files are mode `0600` and the directory `0700`: a recording
+is a transcript of somebody's working session.
 
 ### The playground
 
