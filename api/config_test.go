@@ -83,6 +83,7 @@ scrollback_bytes = 4096
 idle_timeout = "90m"
 record = true
 record_max_bytes = 1024
+share = false
 
 [runs]
 timeout = "30s"
@@ -123,7 +124,7 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 		},
 		Terminal: TerminalSection{
 			Shell: true, MaxSessions: 2, ScrollbackBytes: 4096,
-			IdleTimeout: 90 * time.Minute, Record: true, RecordMaxBytes: 1024,
+			IdleTimeout: 90 * time.Minute, Record: true, RecordMaxBytes: 1024, Share: false,
 		},
 		Store: StoreSection{Dir: "/srv/rota"},
 		Users: []UserEntry{{Name: "inoyat", Role: "control",

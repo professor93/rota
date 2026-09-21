@@ -143,6 +143,12 @@ type TerminalSection struct {
 	// into it — under the store, up to RecordMaxBytes each.
 	Record         bool  `toml:"record"`
 	RecordMaxBytes int64 `toml:"record_max_bytes"`
+	// Share lets somebody sitting at a terminal on this machine offer it to
+	// this server with `rota run --share`, over a socket in the store. It
+	// is on with the terminal group, because the socket is inside a
+	// directory only the user this server runs as can enter: it offers
+	// somebody their own terminal, not a way onto the machine.
+	Share bool `toml:"share"`
 }
 
 // RunsSection is everything about the CLIs this server starts.
@@ -180,7 +186,7 @@ func DefaultConfig() *Config {
 		},
 		Terminal: TerminalSection{
 			MaxSessions: 8, ScrollbackBytes: defaultScrollback,
-			IdleTimeout: 12 * time.Hour, RecordMaxBytes: 50 << 20,
+			IdleTimeout: 12 * time.Hour, RecordMaxBytes: 50 << 20, Share: true,
 		},
 		From: map[string]string{},
 	}
@@ -520,6 +526,9 @@ func (c *Config) Serve() (Options, Listener, error) {
 	for _, u := range c.Users {
 		users = append(users, User{Name: u.Name, Role: Role(u.Role), Password: u.Password})
 	}
+	// Taken into a variable of its own because the option is a pointer: the
+	// file always has an answer, and nil there means "nobody said".
+	share := c.Terminal.Share
 	tokens := make([]TokenPrincipal, 0, len(c.Tokens))
 	for _, t := range c.Tokens {
 		tokens = append(tokens, TokenPrincipal{Name: t.Name, Role: Role(t.Role), SHA256: t.SHA256})
@@ -543,6 +552,7 @@ func (c *Config) Serve() (Options, Listener, error) {
 			Shell: c.Terminal.Shell, MaxSessions: c.Terminal.MaxSessions,
 			Scrollback: c.Terminal.ScrollbackBytes, IdleTimeout: c.Terminal.IdleTimeout,
 			Record: c.Terminal.Record, RecordMax: c.Terminal.RecordMaxBytes,
+			Share: &share,
 		},
 	}, Listener{Addr: addr, Cert: c.TLS.Cert, Key: c.TLS.Key}, nil
 }
@@ -643,6 +653,7 @@ func (c *Config) Print(w io.Writer, token string) error {
 	span("terminal.idle_timeout", c.Terminal.IdleTimeout)
 	yes("terminal.record", c.Terminal.Record)
 	key("terminal.record_max_bytes", strconv.FormatInt(c.Terminal.RecordMaxBytes, 10))
+	yes("terminal.share", c.Terminal.Share)
 
 	body.WriteString("\n[store]\n")
 	str("store.dir", c.Store.Dir)

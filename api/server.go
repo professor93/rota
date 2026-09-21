@@ -104,7 +104,20 @@ type Terminal struct {
 	// store, up to RecordMax bytes each (default 50 MiB).
 	Record    bool
 	RecordMax int64
+	// Share lets somebody sitting at a terminal on this machine offer it
+	// here, with `rota run --share`, so it can be watched on the page.
+	//
+	// It is nil for the default, which is on wherever the terminal group is
+	// on — a pointer for the same reason Routes is one: false and "not
+	// said" are different answers, and the default here is the true one.
+	// The socket it listens on is inside the store, which only the user
+	// this server runs as can enter, so it opens nothing that a person with
+	// that account did not already have.
+	Share *bool
 }
+
+// sharing reports whether a local terminal may be offered to this server.
+func (t Terminal) sharing() bool { return t.Share == nil || *t.Share }
 
 // User is one person who may sign in on the page. Password is the derived
 // form `rota serve passwd` prints; the plain password is never here, and
@@ -194,6 +207,9 @@ type Server struct {
 	// knows where they are. Ended ones stay a few minutes, as runs do.
 	terms   map[string]*termSession
 	termsMu sync.Mutex
+	// share is the socket a terminal somebody is sitting at is offered
+	// over, or nil where the file said not to hold one.
+	share *shareSocket
 	// clock is what the terminals' waits are measured against, injectable so
 	// a test about ten seconds need not take ten seconds.
 	clock clock
@@ -292,6 +308,10 @@ func New(opts Options) (*Server, error) {
 	}
 	if opts.Routes.Terminal {
 		go s.keepTerminals()
+		// Before anything is served: a terminal somebody is sitting at can
+		// be offered the moment this returns, and a socket opened later
+		// would refuse the sharer that was already waiting.
+		s.listenForShares()
 	}
 	return s, nil
 }
@@ -404,7 +424,12 @@ func (s *Server) maintain() {
 // write to it, which is exactly the state a caller thinks it has left behind
 // — and, for a test, is a directory that will not delete.
 func (s *Server) Stop() {
-	// The terminals first, and explicitly: each is a CLI in a session of its
+	// The socket first, so nothing new is offered to a server that is
+	// stopping, and the file it left behind goes with it.
+	if s.share != nil {
+		s.share.close()
+	}
+	// The terminals then, and explicitly: each is a CLI in a session of its
 	// own, which is exactly what a signal to rota does not reach.
 	s.endTerminals()
 	s.cancel()

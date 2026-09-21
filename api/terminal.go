@@ -997,6 +997,12 @@ func (ts *termSession) finish(code int) {
 	ts.mu.Unlock()
 
 	ts.audit("terminal ended", "exit", code)
+	if ts.kind == termKindShared {
+		// Beside it rather than instead of it: a shared terminal ends like
+		// any other, and this is the other half of the line that said it
+		// had been offered.
+		ts.audit("terminal unshared", "exit", code)
+	}
 	// The pump has returned, so everything this terminal printed is in the
 	// ring and in the recording; both are finished with here.
 	if ts.rec != nil {

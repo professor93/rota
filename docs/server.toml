@@ -50,6 +50,7 @@ scrollback_bytes = 2097152  # output kept per terminal, for whoever attaches
 idle_timeout = "12h"        # a terminal nobody is attached to ends after this long
 record = false              # keep each terminal's output under <store>/terminals/
 record_max_bytes = 52428800 # how much of one terminal is kept; input never is
+share = true                # take terminals offered by `rota run --share` on this machine
 
 [runs]
 timeout = "10m"          # hard cap on one run
