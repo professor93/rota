@@ -180,7 +180,11 @@ func (sh *shareSession) run() int {
 	defer close(done)
 
 	// What is typed here goes into the CLI, and nowhere else, by the
-	// shortest path there is.
+	// shortest path there is: one read and one write, with no lock, queue or
+	// socket on the way. It is the one goroutine here with no way out, and
+	// deliberately — a keystroke must not wait behind a check of whether
+	// this is still going on, and a read of the terminal that is still
+	// outstanding when the CLI ends ends with the process a moment later.
 	go shareTyped(sh.lo, sh.child)
 	go sh.follow(done)
 	go sh.listen(done)
