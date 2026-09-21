@@ -1638,6 +1638,14 @@ readable by anyone but its owner, because it may hold the token.
 A flag beats the environment, the environment beats the file, and the file
 beats the default.
 
+That file can also name people who may sign in on the page and tokens with
+a role of their own. rota never writes it; these three print what to paste,
+or ask a running server for a link:
+
+  rota serve passwd <name> [--role control|watch]   a [[users]] block
+  rota serve token  <name> [--role control|watch]   a token and its [[tokens]] block
+  rota serve invite [--ttl 10m]                     a single-use watcher's link
+
 Flags:
 `
 
@@ -1805,6 +1813,20 @@ func init() { store.HideFromAgents("ROTA_TOKEN") }
 // serve runs the HTTP API and its playground. The token is mandatory: an
 // account runner anyone can reach is not something to start by accident.
 func (c *cli) serve(args []string) error {
+	// Three of serve's words are not a server at all: two print a block to
+	// paste into its file, and one asks a server already running for a link.
+	// They live under serve because that is what they are about, and they
+	// are matched before the flags because none of them is an address.
+	if len(args) > 0 {
+		switch args[0] {
+		case "passwd":
+			return c.servePasswd(args[1:])
+		case "token":
+			return c.serveToken(args[1:])
+		case "invite":
+			return c.serveInvite(args[1:])
+		}
+	}
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	fs.Usage = func() {}
@@ -1925,8 +1947,15 @@ func (c *cli) serve(args []string) error {
 	if len(opts.Roots) == 0 {
 		fmt.Fprintln(c.err, "warning: no --root given, so a caller may name any directory on this machine")
 	}
-	if listener.Cert == "" && !strings.HasPrefix(listener.Addr, "127.0.0.1") && !strings.HasPrefix(listener.Addr, "localhost") {
+	loopback := strings.HasPrefix(listener.Addr, "127.0.0.1") || strings.HasPrefix(listener.Addr, "localhost")
+	if listener.Cert == "" && !loopback {
 		fmt.Fprintln(c.err, "warning: no TLS off the loopback address; the bearer token travels in clear text")
+		if len(opts.Users) > 0 {
+			// A password is worse than a token in the clear: it is typed
+			// again elsewhere, and it is the one credential rota cannot
+			// replace for whoever chose it.
+			fmt.Fprintln(c.err, "warning: [[users]] are configured without TLS; every password typed on the page travels in clear text too")
+		}
 	}
 	if opts.AllowDangerous {
 		fmt.Fprintln(c.err, "warning: --allow-dangerous is on; callers may bypass every permission check")
@@ -1939,6 +1968,9 @@ func (c *cli) serve(args []string) error {
 	}
 	if !opts.Routes.WebSocket {
 		fmt.Fprintln(c.err, "routes: the WebSocket routes are off; a run that stays open is reached over the API instead")
+	}
+	if !opts.Routes.Health {
+		fmt.Fprintln(c.err, "routes: /v1/health is off; nothing here answers without a credential")
 	}
 	if !opts.Routes.API {
 		fmt.Fprintln(c.err, "routes: the API is off, so this server answers nothing")
