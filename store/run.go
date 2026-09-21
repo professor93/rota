@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 
 	rota "github.com/professor93/rota/lib"
 )
@@ -25,8 +26,8 @@ import (
 // that CLI, and the claim has to outlive the replacing — a caller that does
 // not go through with the handover calls release instead.
 func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env []string, release func(), err error) {
-	if a.Dead {
-		return "", nil, nil, rota.WrapReauth(a)
+	if err := s.mayLaunch(a); err != nil {
+		return "", nil, nil, err
 	}
 	release, ok := s.holdForExec(a)
 	if !ok {
@@ -40,7 +41,7 @@ func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env 
 	// last run, and refreshing from rota's older copy would present a spent
 	// one — which these providers reject for good.
 	adopted := rota.Adopt(a, s.Home(a)) == nil
-	changed, err := rota.Refresh(ctx, a)
+	changed, err := refreshForLaunch(ctx, a)
 	changed = changed || adopted
 	var cmd *rota.Command
 	if err == nil {
@@ -62,6 +63,49 @@ func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env 
 		return fail(fmt.Errorf("%s not found in PATH: %w", cmd.Bin, err))
 	}
 	return path, rota.Environ(HostEnv(), cmd), release, nil
+}
+
+// refreshForLaunch rotates the ordinary token, unless the launch is not going
+// to use it.
+//
+// An account holding a long-lived token launches with that one, and the
+// refresh lineage has nothing to do with the run: rotating it first would be
+// work the run does not need, and a provider refusing it — a spent refresh
+// token, a network that is down — would stop a run that had a perfectly good
+// credential in hand. Usage still wants a fresh token, and still refreshes
+// for itself: `rota list` and the server's background sweep are untouched.
+func refreshForLaunch(ctx context.Context, a *rota.Account) (bool, error) {
+	if a.LongValid() {
+		return false, nil
+	}
+	return rota.Refresh(ctx, a)
+}
+
+// mayLaunch decides whether a run may start on this account, and says out
+// loud what a person should know about it if it may.
+//
+// A dead lineage is refused as it always was, with one exception: an account
+// holding a long-lived token can still run, because that token is not part
+// of the lineage that died. The rotation never reaches here with a dead
+// account — it skips them — so this only ever lets through one somebody
+// named by id, which is the whole rule: you may run the account you asked
+// for, and you are told what it can no longer tell you.
+func (s *Store) mayLaunch(a *rota.Account) error {
+	if !a.Dead {
+		return nil
+	}
+	if !a.LongValid() {
+		return rota.WrapReauth(a)
+	}
+	if s.Warn != nil {
+		why := a.DeadReason
+		if why == "" {
+			why = "the provider refused its refresh token"
+		}
+		s.Warn(fmt.Sprintf("%s: its login is dead (%s), so usage is unknown and the rotation skips it; "+
+			"running on its long-lived token, good until %s", a, why, a.LongUntil().Format(time.DateOnly)))
+	}
+	return nil
 }
 
 // Run starts an account's CLI and waits for it.
@@ -130,8 +174,8 @@ func (s *Store) Start(ctx context.Context, a *rota.Account, spec rota.Spec, lim 
 // A hermetic run is given a throwaway configuration directory instead, so
 // building one for it would be work nobody reads.
 func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
-	if a.Dead {
-		return nil, nil, rota.WrapReauth(a)
+	if err := s.mayLaunch(a); err != nil {
+		return nil, nil, err
 	}
 	// Taken before adoption, because adoption reads the very file another
 	// run would be rewriting. Not waited for: the store lock is still held
@@ -150,7 +194,7 @@ func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.
 	if aerr := rota.Adopt(a, s.Home(a)); aerr != nil {
 		return fail(aerr)
 	}
-	changed, err := rota.Refresh(ctx, a)
+	changed, err := refreshForLaunch(ctx, a)
 	if changed {
 		if serr := s.Save(); serr != nil {
 			return fail(errors.Join(err, fmt.Errorf("refusing to run: store not saved after a token change: %w", serr)))

@@ -45,6 +45,28 @@ type Identifier interface {
 	Identify(ctx context.Context, accessToken string) (*Identity, error)
 }
 
+// LongLived is a provider that can issue a second credential for the same
+// account: an access token good for months rather than hours, with no
+// refresh behind it. It exists because a token handed to a CLI in its
+// environment cannot be replaced while that CLI runs — a window, a daemon or
+// a long session simply stops when the short one expires.
+//
+// An optional interface rather than a marker inside the login state, because
+// that is how everything only some providers can do is said here — Refresher,
+// Identifier, Meter — and because both halves of the flow really do differ:
+// a narrower scope going out, a longer life asked for in the exchange. A
+// provider that has no such token to give does not implement it, and Begin
+// refuses on its behalf rather than each provider remembering to.
+type LongLived interface {
+	// BeginLong starts a login whose token is meant to outlive the ordinary
+	// one. The state it returns is CompleteLong's.
+	BeginLong(ctx context.Context) (url string, state map[string]string, err error)
+	// CompleteLong exchanges what the user pasted for that token. What comes
+	// back carries no refresh worth keeping, and the provider may have
+	// narrowed what it is allowed to do.
+	CompleteLong(ctx context.Context, code string, state map[string]string) (*Token, error)
+}
+
 // Delegator is implemented by a provider whose CLI can sign itself in and
 // keep its own credentials. rota then holds no token at all — it supplies
 // only the private directory the CLI stores them in, which is what keeps one

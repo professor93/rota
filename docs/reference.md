@@ -147,6 +147,7 @@ rota 2 "summarize this repo"  # ...on account 2
 
 rota login                    # start a claude login: prints an id and a URL
 rota login codex              # ...for another provider
+rota login --long             # a year-long token for an account already here
 rota login <login-id> <code>  # finish it with the code from the page
 rota login <login-id>         # finish a delegated login, which takes no code (grok)
 rota login 2                  # sign account 2 in through its own CLI
@@ -170,6 +171,7 @@ rota set 2 --threshold 80     # move on to the next account at 80% usage
 rota set 2                    # what account 2 is set to
 rota set 2 --cwd ~/src/api --config ~/.rota/api-memory
 rota set 2 --sessions own     # its conversations are nobody else's (shared by default)
+rota set 2 --long forget      # throw away its long-lived token
 rota login 6                  # sign in an account whose CLI keeps its own credentials
 rota remove 2 5               # forget accounts, and the homes rota made for them
 rota serve 8787 --token=T     # serve the HTTP API and its playground
@@ -316,10 +318,10 @@ the command line still refreshes what it is about to use.
 | `GET` | `/v1/ws` | a WebSocket that starts a run on whichever account the rotation picks and carries it both ways |
 | `GET` | `/v1/accounts/{id}/ws` | the same, on that account |
 | `GET` | `/v1/runs/{id}/ws` | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
-| `PATCH` | `/v1/accounts/{id}` | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own"}` — its place in the rotation, when to move on, where it belongs, and where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is) |
+| `PATCH` | `/v1/accounts/{id}` | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays |
-| `POST` | `/v1/login` | `{"provider":"claude"}` → `{id, url, kind}` |
-| `POST` | `/v1/login/{id}` | `{"code":"..."}` → the account, or `{"status":"pending"}` |
+| `POST` | `/v1/login` | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead |
+| `POST` | `/v1/login/{id}` | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"status":"long","long_until":"..."}` |
 
 `/v1/auth` and `/v1/auth/{id}` are the same two under their old names, kept
 working for anything already calling them.
@@ -1400,6 +1402,61 @@ reuse a rotated token and kill the lineage. Treat `re-auth needed` as normal
 rather than as a fault. The refusal that ended the lineage is kept: `rota
 list` shows it in parentheses after `re-auth needed` — `re-auth needed
 (invalid_grant: refresh token reused)` — and JSON carries it as `deadReason`.
+
+### A token that outlives the window
+
+Eight hours is fine for a command and wrong for everything else. rota hands
+Claude Code the access token in `CLAUDE_CODE_OAUTH_TOKEN`, and a process that
+is already running keeps the value it started with: Claude Code refuses by
+design to adopt another after a 401 on a token it was given that way. So a
+window left open overnight, a daemon, or one long session ends at `Please run
+/login · 401` however diligently rota refreshes its own copy. Nothing rota
+can do to the store reaches a process that already has the old one.
+
+The answer is a second credential for the same account, good for a year:
+
+```sh
+rota login --long             # prints a login id and a URL
+                              # approve in the browser AS THAT ACCOUNT
+rota login <login-id> <code>  # finish it
+```
+
+```
+long-lived token stored for #12 claude/manager.ican@gmail.com, good until 2027-09-21; every launch uses it from now on.
+```
+
+Every launch then uses it — `rota run`, a handover, a server request, a
+session — and nothing else does. Usage, rotation and identity stay with the
+ordinary login, which is the one that can read them: by the provider's own
+design a long-lived token is inference-only, so it can drive Claude Code and
+cannot read a profile or a usage endpoint. It is not a replacement for
+`rota login claude`; it is a second key to the same door.
+
+Because it is a credential of its own, a launch that has one does not refresh
+first — a provider that refuses a spent refresh token no longer stops a run
+that never needed it. That also softens the dead-account rule in one narrow
+place: an account whose ordinary login has died still runs **when you name
+it** — `rota run 12`, a handover, an HTTP request with an account id — and
+rota says once, on stderr or in the server log, that usage is unknown, why
+the login died, and when the long token runs out. The rotation still skips
+dead accounts: naming one is a decision, being handed one is not.
+
+Which account the token belongs to is never guessed. The exchange says who
+approved, and that identity must match an account rota already holds;
+approving as anybody else is refused and nothing is stored, as is a reply
+that names no account at all. So log the account in normally first.
+
+`rota list` says nothing about the token for eleven months, then one line
+while it is within thirty days of expiry, and one more if it lapses — after
+which every launch is quietly back on the eight-hour token. `--json` and
+`GET /v1/accounts` carry `long_until` (RFC 3339); the token itself is never
+printed, logged or sent anywhere. `rota set <id> --long forget` throws it
+away, leaving the ordinary login alone.
+
+One risk, plainly: a year-long credential sitting in `~/.rota/accounts.json`
+is worth far more to a thief than an eight-hour one. If that file ever
+leaves your machine, revoke the token from the provider's account settings —
+and treat the file the way you treat a private key.
 
 ## Storage
 

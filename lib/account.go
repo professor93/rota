@@ -64,8 +64,33 @@ type Account struct {
 	// way it arranges the home a credential is staged in; all that is
 	// settled here is what the setting says.
 	Sessions string `json:"sessions,omitempty"`
-	Quota    *Quota `json:"quota,omitempty"`
-	QuotaAt  int64  `json:"quotaAt,omitzero"` // unix ms of last quota fetch
+	// Long is a second credential for this same account, kept beside the
+	// ordinary one and never replacing it: an access token the provider
+	// issues for a year, with no refresh behind it and, by that provider's
+	// design, permission to run the CLI and nothing else.
+	//
+	// It is here because the ordinary token cannot be given to a process
+	// that has already started. Eight hours in, a window or a daemon still
+	// holds the value it was launched with, the provider refuses it, and
+	// nothing rota does to its own copy reaches that process. A token that
+	// outlasts the session is the only answer that does not involve
+	// restarting the session.
+	//
+	// Everything else stays with the ordinary login: usage, rotation, the
+	// account's name. This is a key to the door, not a description of who
+	// lives there.
+	Long    *LongToken `json:"long,omitempty"`
+	Quota   *Quota     `json:"quota,omitempty"`
+	QuotaAt int64      `json:"quotaAt,omitzero"` // unix ms of last quota fetch
+}
+
+// LongToken is a credential that outlives the run it was made for: the
+// token and when it stops working, and deliberately nothing else. There is
+// no refresh to keep — the provider issues none worth using — and no
+// identity, because the account it sits on already is the identity.
+type LongToken struct {
+	Access    string `json:"accessToken"`
+	ExpiresAt int64  `json:"expiresAt,omitzero"` // unix ms; 0 means "never"
 }
 
 // SessionsOwn is the Sessions value for an account that keeps its
@@ -108,6 +133,52 @@ func (a *Account) Expired() bool {
 		return false // the CLI owns the credential and its expiry
 	}
 	return a.Token.ExpiresAt != 0 && nowMS()+ExpiryBuffer.Milliseconds() >= a.Token.ExpiresAt
+}
+
+// LongLeeway is how much of a long-lived token's last stretch counts as
+// already gone. A day, because the thing this token exists for is a process
+// that runs for hours: one starting now with an hour left on the credential
+// would fail in exactly the way the token was obtained to prevent. A
+// variable, like ExpiryBuffer, because how much margin a deployment wants is
+// its own call.
+var LongLeeway = 24 * time.Hour
+
+// LongValid reports whether this account holds a long-lived token still
+// worth launching with. A token with no expiry never expires.
+func (a *Account) LongValid() bool {
+	if a.Long == nil || a.Long.Access == "" {
+		return false
+	}
+	return a.Long.ExpiresAt == 0 || Now().Add(LongLeeway).UnixMilli() < a.Long.ExpiresAt
+}
+
+// LongAccess is the long-lived token to launch with, or "" when there is
+// none or it is too close to its end to hand a process that may run for
+// hours. Nothing else in this package reads the field directly: one answer
+// to "may this be used" is one place to change it.
+func (a *Account) LongAccess() string {
+	if !a.LongValid() {
+		return ""
+	}
+	return a.Long.Access
+}
+
+// LongUntil is when the long-lived token stops working, or the zero time
+// when the account has none or it never expires. This is the only public
+// half of the credential; the token itself is never shown.
+func (a *Account) LongUntil() time.Time {
+	if a.Long == nil || a.Long.ExpiresAt == 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(a.Long.ExpiresAt)
+}
+
+// ApplyLong stores a long-lived credential beside the ordinary one, which it
+// never touches. Only the token and its expiry are kept: whose account this
+// is was settled before the call, and a refresh token the provider may have
+// sent belongs to a lineage nothing here will ever rotate.
+func (a *Account) ApplyLong(t *Token) {
+	a.Long = &LongToken{Access: t.Access, ExpiresAt: t.ExpiresAt}
 }
 
 // apply folds a provider's token response into the account. An absent

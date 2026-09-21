@@ -40,6 +40,7 @@ Usage:
   rota <id> "<prompt>"          ask that account instead
 
   rota login [provider]         start a new account: prints a login id and a URL
+  rota login --long             ...ask instead for a token that lasts a year
   rota login <login-id> [code]  finish that login (no code for device flows)
   rota login <account-id>       sign an existing account in through its own CLI
   rota list [provider] [-r]     accounts with usage (-r forces a quota refresh)
@@ -50,7 +51,7 @@ Usage:
   rota run [id] <prompt> --input   keep the run open for more messages
   rota send <run> "..."         send another message into a run started with --input
   rota set <id> [flags]         where an account sits and what it reads:
-                                --order, --threshold, --cwd, --config
+                                --order, --threshold, --cwd, --config, --long
   rota remove <id>...           forget accounts and their staged credentials
   rota serve [addr] --token=T   serve the HTTP API and its playground
 
@@ -81,7 +82,7 @@ Usage:
   rota list                accounts, usage, health
   rota run [id] [flags]    ask with flags — or open the CLI itself
   rota send <run> "..."    send more into a run started with --input
-  rota set <id> [flags]    order, threshold, cwd, config
+  rota set <id> [flags]    order, threshold, cwd, config, long token
   rota remove <id>...      forget accounts
   rota serve [addr]        the HTTP API and its playground
 
@@ -290,6 +291,7 @@ func looksLikeLoginID(s string) bool {
 //
 //	rota login                   start a new account on the default provider
 //	rota login codex             start one there instead
+//	rota login --long            ask for a year-long token for an account already here
 //	rota login 4f2a1b [code]     finish the login with that id
 //	rota login 2 [options]       hand account 2 to its own CLI's login
 //
@@ -304,7 +306,11 @@ func (c *cli) login(args []string) error {
 	if wire.Hidden(name) {
 		return usageErr("%s is not offered for login yet; providers: %s", name, strings.Join(wire.LoginProviders(), ", "))
 	}
-	if name != "" || len(rest) == 0 {
+	// --long is taken out first because it decides which login is started,
+	// not which account is named: `rota login --long` with nothing else is
+	// still a beginning, and would otherwise read as a login id.
+	rest, long := takeLong(rest)
+	if name != "" || long || len(rest) == 0 {
 		if rest, _, err := splitFlags(rest); err != nil {
 			return err
 		} else if len(rest) > 0 {
@@ -315,7 +321,7 @@ func (c *cli) login(args []string) error {
 			return err
 		}
 		defer s.Close()
-		return c.begin(s, name)
+		return c.begin(s, name, long)
 	}
 
 	// Otherwise the first argument names something that already exists. An
@@ -353,18 +359,44 @@ func (c *cli) login(args []string) error {
 }
 
 const loginUsage = `usage: rota login [provider]             start a new account there
+       rota login --long                 a year-long token for an account already here
        rota login <login-id> [code]      finish that login
        rota login <account-id> [options] sign it in through its own CLI
 
 `
 
-func (c *cli) begin(s *store.Store, provider string) error {
-	l, err := s.BeginLogin(context.Background(), provider)
+// takeLong pulls --long out of the arguments, wherever it was written.
+func takeLong(args []string) (rest []string, long bool) {
+	for _, a := range args {
+		if a == "--long" || a == "-long" {
+			long = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	return rest, long
+}
+
+func (c *cli) begin(s *store.Store, provider string, long bool) error {
+	beginning := s.BeginLogin
+	if long {
+		beginning = s.BeginLongLogin
+	}
+	l, err := beginning(context.Background(), provider)
 	if err != nil {
 		return err
 	}
 	if c.json {
 		return c.emit(l)
+	}
+	if long {
+		// Which account is approved is the whole of this flow: the token is
+		// attached to the account that approved it and to no other, and a
+		// login that is not here yet is refused rather than created.
+		fmt.Fprintf(c.out, "Open this and approve as the %s account the token is for — it must already be in `rota list`:\n\n  %s\n\n", l.Provider, l.URL)
+		fmt.Fprintf(c.out, "Then: rota login %s <code>\n"+
+			"  — stores a token that lasts a year, so a window or a daemon outlives the 8-hour one.\n", l.ID)
+		return nil
 	}
 	fmt.Fprintf(c.out, "Open this and approve access as your %s account:\n\n  %s\n\n", l.Provider, l.URL)
 	switch l.Kind {
@@ -386,6 +418,14 @@ func (c *cli) begin(s *store.Store, provider string) error {
 }
 
 func (c *cli) finish(s *store.Store, id, code string) error {
+	// What kind of login this is was settled when it began; the person
+	// finishing it says nothing but the code, so the answer they get has to
+	// be looked up rather than asked for.
+	pending, err := s.PendingLogin(id)
+	if err != nil {
+		return err
+	}
+	long := pending != nil && pending.Long
 	a, added, err := s.FinishLogin(context.Background(), id, code)
 	if errors.Is(err, rota.ErrAuthPending) {
 		if c.json {
@@ -396,6 +436,15 @@ func (c *cli) finish(s *store.Store, id, code string) error {
 	}
 	if err != nil {
 		return err
+	}
+	if long {
+		if c.json {
+			return c.emit(map[string]any{"id": a.ID, "provider": a.Provider, "email": a.Email,
+				"uuid": a.UUID, "status": "long", "long_until": a.LongUntil().UTC().Format(time.RFC3339)})
+		}
+		fmt.Fprintf(c.out, "long-lived token stored for #%d %s, good until %s; every launch uses it from now on.\n",
+			a.ID, a, a.LongUntil().Format(time.DateOnly))
+		return nil
 	}
 	status, verb := "refreshed", "Refreshed"
 	if added {
@@ -522,6 +571,7 @@ func (c *cli) list(args []string) error {
 			g.add(place(a), strconv.Itoa(a.ID), a.Provider, a.Label(), headline(a), checkedAgo(a))
 		}
 		g.render(c.out)
+		c.sayLongNotes(shown)
 		if withSessions {
 			c.showSessions(sessions.Scan(s, recent))
 		}
@@ -555,6 +605,7 @@ func (c *cli) list(args []string) error {
 			fmt.Fprintf(c.out, "\n%s: %s\n", a, a.Quota.Note)
 		}
 	}
+	c.sayLongNotes(shown)
 	if withSessions {
 		c.showSessions(sessions.Scan(s, recent))
 	}
@@ -562,6 +613,22 @@ func (c *cli) list(args []string) error {
 		fmt.Fprintf(c.err, "warning: %v\n", e)
 	}
 	return nil
+}
+
+// sayLongNotes is what a listing has to add about long-lived tokens: nothing
+// at all for most of a year, and then one line for an account whose token is
+// nearly over or already gone.
+//
+// Both listings say it, the short one included. --short is the listing that
+// asks no provider anything, and this asks nothing either — while the day a
+// year-long credential lapses is the last day anybody wants to be told about
+// by a run that stopped working.
+func (c *cli) sayLongNotes(shown []*rota.Account) {
+	for _, a := range shown {
+		if note := wire.LongNote(a); note != "" {
+			fmt.Fprintf(c.out, "\n%s: %s\n", a, note)
+		}
+	}
 }
 
 // showSessions prints what the CLIs are doing: what is running now, and what
@@ -1185,6 +1252,7 @@ func (c *cli) set(args []string) error {
 		cwd       = fs.String("cwd", "", "where runs on this account start")
 		config    = fs.String("config", "", "this account's own CLI configuration and credentials")
 		sessions  = fs.String("sessions", "", "where this account's conversations live: shared (default), own, or a directory")
+		long      = fs.String("long", "", "forget: throw away this account's long-lived token")
 		clear     = fs.Bool("clear", false, "forget cwd, config and sessions, so the account goes back to the defaults")
 	)
 	if _, err := parseFlags(fs, args); err != nil {
@@ -1208,6 +1276,11 @@ func (c *cli) set(args []string) error {
 	}
 	if given["threshold"] && (*threshold < 1 || *threshold > 100) {
 		return usageErr("threshold must be a number from 1 to 100, not %d", *threshold)
+	}
+	// forget is the only thing that can be said about a long-lived token
+	// here: one is obtained by approving in a browser, never by typing it.
+	if given["long"] && *long != "forget" {
+		return usageErr("--long takes forget and nothing else; `rota login --long` is how one is obtained")
 	}
 
 	s, err := c.openStore()
@@ -1271,6 +1344,12 @@ func (c *cli) set(args []string) error {
 	a.Cwd, a.ConfigDir, a.Sessions = want.Cwd, want.ConfigDir, want.Sessions
 	if given["threshold"] {
 		a.Threshold = *threshold
+	}
+	// Not part of --clear: that forgets directories, which can be named
+	// again in a second. A credential is approved in a browser, and throwing
+	// one away has to be asked for on its own.
+	if given["long"] {
+		a.Long = nil
 	}
 	if given["order"] || given["threshold"] {
 		// Any deliberate choice about the rotation settles it for this store,
@@ -1377,10 +1456,26 @@ func (c *cli) show(a *rota.Account, home string) error {
 	if rota.Flavor(a.Provider) == "claude" {
 		fmt.Fprintf(c.out, "  sessions    %s\n", conversations(a))
 	}
+	if a.Long != nil {
+		fmt.Fprintf(c.out, "  long token  %s\n", longLine(a))
+	}
 	if a.ConfigDir == "" && rota.Flavor(a.Provider) == "claude" {
 		fmt.Fprintln(c.out, "  memory and skills come from your own ~/.claude until --config names somewhere else")
 	}
 	return nil
+}
+
+// longLine is what the account's long-lived token is worth right now: the
+// date it runs out, and whether launches are still using it.
+func longLine(a *rota.Account) string {
+	until := a.LongUntil()
+	switch {
+	case until.IsZero():
+		return "stored, with no expiry"
+	case a.LongValid():
+		return "good until " + until.Format(time.DateOnly) + "; every launch uses it"
+	}
+	return "expired " + until.Format(time.DateOnly) + "; launches are back on the 8-hour token"
 }
 
 // conversations is where this account's conversations live, said the way
@@ -1398,7 +1493,7 @@ func conversations(a *rota.Account) string {
 	return "shared with your own Claude Code directory"
 }
 
-const setUsage = `usage: rota set <id> [--order place] [--threshold pct] [--cwd dir] [--config dir] [--sessions where] [--clear]
+const setUsage = `usage: rota set <id> [--order place] [--threshold pct] [--cwd dir] [--config dir] [--sessions where] [--long forget] [--clear]
 
 Sets what is a choice about an account rather than a fact about it, in one
 write. With no flags it prints what the account is set to.
@@ -1416,6 +1511,11 @@ the account's own CLI configuration — its memory files, skills and settings �
 and the private home its credentials are staged in, which is why it must not
 be the project directory itself.
 
+--long forget throws away the account's long-lived token, so every launch
+goes back to the ordinary 8-hour one. It is the only value the flag takes: a
+long-lived token is obtained by approving one in a browser, with
+rota login --long, and never by typing it here.
+
 --sessions is where a claude account's conversations live. shared is the
 default: every account reads the ones in your own Claude Code directory and
 can resume any of them. own keeps this account's to itself. A directory puts
@@ -1429,6 +1529,7 @@ and no others.
   rota set 2 --cwd ~/src/api --config ~/.rota/api-memory
   rota set 2 --sessions own              its conversations are nobody else's
   rota set 2 --sessions ~/work/threads   and its neighbours' if they say so
+  rota set 2 --long forget               throw away its long-lived token
   rota set 2                             what account 2 is set to
 
 Flags:

@@ -613,13 +613,21 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		Cwd       *string        `json:"cwd"`
 		ConfigDir *string        `json:"config_dir"`
 		Sessions  *string        `json:"sessions"`
+		Long      *string        `json:"long"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if body.Order == nil && body.Threshold == nil && body.Cwd == nil && body.ConfigDir == nil && body.Sessions == nil {
-		fail(w, http.StatusBadRequest, "nothing to change: send order, threshold, cwd, config_dir or sessions")
+	if body.Order == nil && body.Threshold == nil && body.Cwd == nil && body.ConfigDir == nil && body.Sessions == nil && body.Long == nil {
+		fail(w, http.StatusBadRequest, "nothing to change: send order, threshold, cwd, config_dir, sessions or long")
+		return
+	}
+	// forget is all this field ever says. A long-lived token arrives by
+	// somebody approving it in a browser, never in a request body, so the
+	// only thing a caller can do to one here is throw it away.
+	if body.Long != nil && *body.Long != "forget" {
+		fail(w, http.StatusBadRequest, `long takes "forget" and nothing else`)
 		return
 	}
 	var place rotation.Place
@@ -684,6 +692,9 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 	if body.Threshold != nil {
 		a.Threshold = *body.Threshold
 	}
+	if body.Long != nil {
+		a.Long = nil
+	}
 	// A deliberate choice settles the rotation for this store, so a later
 	// load never renumbers what was chosen here.
 	st.Ordered = true
@@ -738,6 +749,11 @@ func (s *Server) removeAccount(w http.ResponseWriter, r *http.Request) {
 func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Provider string `json:"provider"`
+		// Long asks for a credential that outlives an ordinary token, the
+		// same one the command line asks for with --long. It is finished at
+		// the same endpoint with the same code: which login this is was
+		// settled here and is remembered with it.
+		Long bool `json:"long"`
 	}
 	// An empty body is fine: it means the default provider. A broken one
 	// is not read as empty.
@@ -754,7 +770,11 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer st.Close()
-	l, err := st.BeginLogin(r.Context(), body.Provider)
+	beginning := st.BeginLogin
+	if body.Long {
+		beginning = st.BeginLongLogin
+	}
+	l, err := beginning(r.Context(), body.Provider)
 	if err != nil {
 		s.report(w, r, err)
 		return
@@ -778,6 +798,10 @@ func (s *Server) loginFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	defer st.Close()
 	id := r.PathValue("id")
+	// Which login this is has to be read before it is finished: afterwards
+	// the parked state is gone, and a long login ends in a different answer.
+	pending, _ := st.PendingLogin(id)
+	long := pending != nil && pending.Long
 	a, added, err := st.FinishLogin(r.Context(), id, body.Code)
 	switch {
 	case errors.Is(err, rota.ErrAuthPending):
@@ -785,6 +809,11 @@ func (s *Server) loginFinish(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "pending"})
 	case err != nil:
 		s.report(w, r, err)
+	case long:
+		s.log.Info("long-lived token stored", "account", a.ID, "provider", a.Provider,
+			"until", a.LongUntil().UTC().Format(time.RFC3339))
+		writeJSON(w, http.StatusOK, map[string]any{"id": a.ID, "provider": a.Provider, "email": a.Email,
+			"uuid": a.UUID, "status": "long", "long_until": a.LongUntil().UTC().Format(time.RFC3339)})
 	default:
 		status := "refreshed"
 		if added {

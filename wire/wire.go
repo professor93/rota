@@ -54,6 +54,11 @@ type Account struct {
 	Cwd       string `json:"cwd,omitempty"`
 	ConfigDir string `json:"config_dir,omitempty"`
 	Sessions  string `json:"sessions,omitempty"`
+	// LongUntil is when this account's long-lived token stops working, RFC
+	// 3339, and absent when it has none. The token itself is never here and
+	// never anywhere else a person or a program can read: its date is the
+	// only part of it anybody outside the store needs.
+	LongUntil string `json:"long_until,omitempty"`
 	// Metered says whether this provider publishes a usage endpoint at all.
 	// When it does not, there are no limits to report and no check to make.
 	Metered bool `json:"metered"`
@@ -118,6 +123,9 @@ func Describe(a *rota.Account) Account {
 	v := Account{ID: a.ID, Provider: a.Provider, Email: a.Email, UUID: a.UUID, Status: a.Status(),
 		Metered: rota.Metered(a.Provider), Order: a.Order, Threshold: a.Threshold, Percent: a.Percent(),
 		Cwd: a.Cwd, ConfigDir: a.ConfigDir, Sessions: a.Sessions, DeadReason: a.DeadReason}
+	if t := a.LongUntil(); !t.IsZero() {
+		v.LongUntil = t.UTC().Format(time.RFC3339)
+	}
 	if a.QuotaAt > 0 {
 		t := time.UnixMilli(a.QuotaAt)
 		v.CheckedAt = t.UTC().Format(time.RFC3339)
@@ -135,6 +143,35 @@ func Describe(a *rota.Account) Account {
 		}
 	}
 	return v
+}
+
+// LongSoon is how close to its end a long-lived token has to be before a
+// listing mentions it. A month, because getting another one means sitting at
+// a browser and approving as the right account, and that is not something to
+// discover on the morning it stopped working.
+const LongSoon = 30 * 24 * time.Hour
+
+// LongNote is what a listing should say about an account's long-lived token,
+// or "" when there is nothing worth saying — which is the usual case: a token
+// with most of its year left is doing its job and needs no comment.
+//
+// An expired one is said out loud rather than quietly dropped. Every launch
+// went back to the eight-hour token the moment it lapsed, and that is
+// precisely the difference somebody would otherwise spend an afternoon
+// explaining to themselves.
+func LongNote(a *rota.Account) string {
+	t := a.LongUntil()
+	if a.Long == nil || t.IsZero() {
+		return ""
+	}
+	day := t.Format(time.DateOnly)
+	switch left := time.Until(t); {
+	case left <= 0:
+		return "its long-lived token expired on " + day + "; launches are back on the 8-hour token — `rota login --long` for another"
+	case left <= LongSoon:
+		return fmt.Sprintf("its long-lived token expires on %s, in %d days; `rota login --long` for another", day, int(left/(24*time.Hour)))
+	}
+	return ""
 }
 
 // Since renders how long ago an instant was, for someone reading a list.

@@ -33,6 +33,18 @@ var claudeScopes = []string{
 	"user:sessions:claude_code", "user:mcp_servers", "user:file_upload",
 }
 
+// claudeLongScopes is all a long-lived token asks for, and it is the whole
+// difference at the authorize step: permission to run inference, and none of
+// the rest. That is the provider's own design — the token it hands back can
+// drive Claude Code and cannot read the profile or the usage endpoint — and
+// it is read from Claude Code's `setup-token`, not chosen here.
+var claudeLongScopes = []string{"user:inference"}
+
+// claudeLongSeconds is the life the exchange asks for: one year, as a JSON
+// number, which is the other half of the difference. The ordinary exchange
+// asks for nothing and is given eight hours.
+const claudeLongSeconds = 31536000
+
 type claudeProvider struct{}
 
 func init() { Register(claudeProvider{}) }
@@ -40,6 +52,17 @@ func init() { Register(claudeProvider{}) }
 func (claudeProvider) Name() string { return "claude" }
 
 func (claudeProvider) Begin(_ context.Context) (string, map[string]string, error) {
+	return claudeBegin(claudeScopes)
+}
+
+// BeginLong is the same login asking to be allowed less: inference only, so
+// what comes back is a token that runs the CLI and can do nothing else with
+// the account.
+func (claudeProvider) BeginLong(_ context.Context) (string, map[string]string, error) {
+	return claudeBegin(claudeLongScopes)
+}
+
+func claudeBegin(scopes []string) (string, map[string]string, error) {
 	verifier, challenge := pkce()
 	state := randB64(24)
 	q := url.Values{}
@@ -47,7 +70,7 @@ func (claudeProvider) Begin(_ context.Context) (string, map[string]string, error
 	q.Set("client_id", claudeClientID)
 	q.Set("response_type", "code")
 	q.Set("redirect_uri", claudeRedirectURI)
-	q.Set("scope", strings.Join(claudeScopes, " "))
+	q.Set("scope", strings.Join(scopes, " "))
 	q.Set("code_challenge", challenge)
 	q.Set("code_challenge_method", "S256")
 	q.Set("state", state)
@@ -76,17 +99,50 @@ func (r *claudeTokenResp) token() *Token {
 	return t
 }
 
-func (claudeProvider) Complete(ctx context.Context, code string, state map[string]string) (*Token, error) {
+func (p claudeProvider) Complete(ctx context.Context, code string, state map[string]string) (*Token, error) {
+	return p.exchange(ctx, code, state, nil)
+}
+
+// CompleteLong finishes a long login. One field more than the ordinary
+// exchange — the life asked for — and what comes back is a token good for
+// that long with no refresh anyone should keep.
+func (p claudeProvider) CompleteLong(ctx context.Context, code string, state map[string]string) (*Token, error) {
+	t, err := p.exchange(ctx, code, state, map[string]any{"expires_in": claudeLongSeconds})
+	if err != nil {
+		return nil, err
+	}
+	// The reply need not echo the life it granted. What was asked for is the
+	// honest fallback: it is what the token was issued as, and an expiry
+	// guessed too early only costs a token that still worked.
+	if t.ExpiresAt == 0 {
+		t.ExpiresAt = nowMS() + claudeLongSeconds*1000
+	}
+	// Dropped rather than stored: a refresh here belongs to a lineage
+	// nothing will ever rotate, and a secret kept for no reason is a secret
+	// that can leak for no reason.
+	t.Refresh = ""
+	return t, nil
+}
+
+// exchange is the authorization-code request both logins make. The body is
+// map[string]any only because one caller adds a number to it; everything a
+// provider sends is still written out in one place, where the shape of the
+// request can be read at a glance.
+func (claudeProvider) exchange(ctx context.Context, code string, state map[string]string, extra map[string]any) (*Token, error) {
 	st := state["state"]
 	// The callback page renders the code as "code#state"; accept either.
 	if c, s, ok := strings.Cut(code, "#"); ok {
 		code, st = c, s
 	}
-	var r claudeTokenResp
-	err := postJSON(ctx, ClaudeEndpoints.Token, map[string]string{
+	body := map[string]any{
 		"grant_type": "authorization_code", "code": code, "redirect_uri": claudeRedirectURI,
 		"client_id": claudeClientID, "code_verifier": state["verifier"], "state": st,
-	}, &r, nil)
+	}
+	for k, v := range extra {
+		body[k] = v
+	}
+	var r claudeTokenResp
+	err := postJSON(ctx, ClaudeEndpoints.Token, body, &r, nil)
 	if err := r.verdict(err, grantCode); err != nil {
 		return nil, err
 	}
@@ -185,7 +241,17 @@ func (claudeProvider) Quota(ctx context.Context, access string) (*Quota, error) 
 // that would outrank it — or redirect it to another host — is dropped: a
 // stray ANTHROPIC_BASE_URL would send this OAuth token to a third party.
 func (claudeProvider) Launch(a *Account, home string) (*Command, error) {
-	env := []string{"CLAUDE_CODE_OAUTH_TOKEN=" + a.Token.Access}
+	// A long-lived token wins whenever the account has one worth using. The
+	// ordinary token lasts eight hours and cannot be replaced inside a
+	// process that already holds it — Claude Code refuses by design to adopt
+	// another after a 401 on an environment token — so a window or a daemon
+	// launched with the short one simply stops when it expires. The long one
+	// is the same account by a different key.
+	access := a.Token.Access
+	if long := a.LongAccess(); long != "" {
+		access = long
+	}
+	env := []string{"CLAUDE_CODE_OAUTH_TOKEN=" + access}
 	if a.ConfigDir != "" {
 		// Claude Code keeps memory, skills and settings here. Unset, it
 		// finds the person's own — which is right until an account is meant

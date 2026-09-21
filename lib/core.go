@@ -35,6 +35,12 @@ type Login struct {
 	// inside the private directory rota gives it. Such a login is finished
 	// with no code at all.
 	Delegated bool `json:"delegated,omitzero"`
+	// Long marks a login for a long-lived credential rather than the usual
+	// one. It is remembered here because the two halves of a login are
+	// often two processes: whoever finishes it reads this rather than being
+	// told again, and cannot finish a long login as an ordinary one by
+	// forgetting to say so.
+	Long bool `json:"long,omitzero"`
 	// CreatedAt is unix ms, for callers that expire old logins.
 	CreatedAt int64 `json:"createdAt"`
 }
@@ -42,15 +48,41 @@ type Login struct {
 // Begin starts a login with a provider ("" for DefaultProvider). It returns
 // the URL the user must approve and the state Complete needs.
 func Begin(ctx context.Context, provider string) (*Login, error) {
+	return begin(ctx, provider, false)
+}
+
+// BeginLong starts a login for a long-lived credential — a second key to an
+// account that is already logged in, for processes that outlive an ordinary
+// token. A provider that issues no such token is refused by name.
+//
+// It is a second function rather than an argument to Begin because Begin is
+// published API, and a signature is somebody else's build.
+func BeginLong(ctx context.Context, provider string) (*Login, error) {
+	return begin(ctx, provider, true)
+}
+
+func begin(ctx context.Context, provider string, long bool) (*Login, error) {
 	p, err := Lookup(provider)
 	if err != nil {
 		return nil, err
 	}
-	url, state, err := p.Begin(ctx)
+	var (
+		url   string
+		state map[string]string
+	)
+	if long {
+		lp, ok := p.(LongLived)
+		if !ok {
+			return nil, failf(ErrInvalidRequest, "%s issues no long-lived token", p.Name())
+		}
+		url, state, err = lp.BeginLong(ctx)
+	} else {
+		url, state, err = p.Begin(ctx)
+	}
 	if err != nil {
 		return nil, err
 	}
-	l := &Login{ID: randID(), Provider: p.Name(), URL: url, Kind: "code", State: state, CreatedAt: nowMS()}
+	l := &Login{ID: randID(), Provider: p.Name(), URL: url, Kind: "code", State: state, Long: long, CreatedAt: nowMS()}
 	if k := state["kind"]; k != "" {
 		l.Kind = k
 	}
@@ -66,19 +98,34 @@ func (l *Login) Complete(ctx context.Context, code string) (*Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	t, err := p.Complete(ctx, trimSpace(code), l.State)
+	t, err := l.exchange(ctx, p, code)
 	if err != nil {
 		return nil, err
 	}
 	if t.Access == "" && !t.Delegated {
 		return nil, failf(ErrInvalidRequest, "%s returned no access token", l.Provider)
 	}
-	if t.Identity == nil {
+	// A long token is never asked whose it is. It is issued for inference
+	// and nothing else, so the profile endpoint would refuse it; the
+	// identity the exchange itself carried is the only one there is, and
+	// the caller decides what to do when there is none.
+	if t.Identity == nil && !l.Long {
 		if ip, ok := p.(Identifier); ok {
 			t.Identity, _ = ip.Identify(ctx, t.Access) // a nicety, never required
 		}
 	}
 	return t, nil
+}
+
+func (l *Login) exchange(ctx context.Context, p Provider, code string) (*Token, error) {
+	if !l.Long {
+		return p.Complete(ctx, trimSpace(code), l.State)
+	}
+	lp, ok := p.(LongLived)
+	if !ok {
+		return nil, failf(ErrInvalidRequest, "%s issues no long-lived token", l.Provider)
+	}
+	return lp.CompleteLong(ctx, trimSpace(code), l.State)
 }
 
 // NewAccount builds an account from a finished login. The id is the
@@ -168,8 +215,8 @@ func Metered(provider string) bool {
 // than falling back to the working directory, which would scatter live
 // tokens wherever the process happened to be started.
 func Stage(a *Account, home string) (*Command, error) {
-	if a.Dead {
-		return nil, failf(ErrReauth, "%s: log in again", a)
+	if err := launchable(a); err != nil {
+		return nil, err
 	}
 	p, err := Lookup(a.Provider)
 	if err != nil {
@@ -185,6 +232,23 @@ func Stage(a *Account, home string) (*Command, error) {
 		return nil, err
 	}
 	return identify(a, cmd), nil
+}
+
+// launchable refuses an account nothing can be launched with.
+//
+// A dead lineage is normally exactly that: the refresh token is spent and
+// only a fresh login revives it. A long-lived token is the one exception,
+// and a narrow one — it is a credential of its own, owing nothing to the
+// lineage that died, so the CLI starts and the provider bills the right
+// account. What stays lost is everything the ordinary login gives: usage, a
+// place in the rotation, the account's name. An application that lets such a
+// run happen should say so; refusing it outright would be refusing something
+// that works.
+func launchable(a *Account) error {
+	if a.Dead && a.LongAccess() == "" {
+		return WrapReauth(a)
+	}
+	return nil
 }
 
 // identify tells the child which account it is running as.
@@ -310,8 +374,8 @@ type Planner interface {
 // home — exactly as it is before Stage. A provider that stages nothing
 // returns its command and no files.
 func StagePlan(ctx context.Context, a *Account, home string) (*Command, []StagedFile, error) {
-	if a.Dead {
-		return nil, nil, failf(ErrReauth, "%s: log in again", a)
+	if err := launchable(a); err != nil {
+		return nil, nil, err
 	}
 	p, err := Lookup(a.Provider)
 	if err != nil {
