@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -40,6 +41,12 @@ const (
 	termKindAccount = "account"
 	termKindShell   = "shell"
 
+	// termQueue is how many frames one connection may fall behind by. A
+	// terminal fans out to everyone attached, and a reader that has stopped
+	// reading must not be able to hold up the terminal or anybody else: past
+	// this it is closed and told to come back with an offset.
+	termQueue = 256
+
 	// termJoin is how much output one frame may grow to by taking in what is
 	// queued behind it. It is a burst rather than a screen: past this the
 	// frame goes out and the rest waits for the next one.
@@ -72,13 +79,17 @@ var (
 	// termSweep is how often terminals nobody is attached to are measured
 	// against the idle timeout.
 	termSweep = 30 * time.Second
-	// termQueue is how many frames one connection may fall behind by. A
-	// terminal fans out to everyone attached, and a reader that has stopped
-	// reading must not be able to hold up the terminal or anybody else: past
-	// this it is closed and told to come back with an offset. A variable, so
-	// a test about falling behind need not print a megabyte first.
-	termQueue = 256
 )
+
+// termQueueFor is how deep one connection's queue is, given who is behind it
+// and whether it attached to watch.
+//
+// It is a variable, and it takes the connection rather than nothing, so that
+// a test about a reader which cannot keep up can make exactly that reader
+// shallow. A knob that made every queue shallow would make such a test about
+// how promptly the test itself gets round to reading, and the reader it
+// needs to go on working would be the one dropped.
+var termQueueFor = func(*Principal, bool) int { return termQueue }
 
 // The two refusals a connection is given for trying to type. They are
 // constants because they are part of what this server answers, and a test
@@ -212,7 +223,11 @@ type termConn struct {
 	c    *wsConn
 	out  chan termFrame
 	gone chan struct{}
-	once sync.Once
+	// drained closes once the writing goroutine has finished with the
+	// queue, so nothing says goodbye over the top of a frame still waiting
+	// to go out.
+	drained chan struct{}
+	once    sync.Once
 	// pending is a document that turned up while output was being joined
 	// together, kept to be sent next so nothing overtakes anything. It
 	// belongs to the writing goroutine alone.
@@ -223,9 +238,14 @@ type termConn struct {
 }
 
 func newTermConn(c *wsConn, p *Principal, watch bool, at time.Time) *termConn {
+	depth := termQueueFor(p, watch)
+	if depth < 1 {
+		depth = 1
+	}
 	return &termConn{
 		id: runID(), name: p.Name, role: p.Role, watch: watch, since: at,
-		c: c, out: make(chan termFrame, termQueue), gone: make(chan struct{}),
+		c: c, out: make(chan termFrame, depth),
+		gone: make(chan struct{}), drained: make(chan struct{}),
 	}
 }
 
@@ -260,6 +280,7 @@ func (tc *termConn) stop() { tc.once.Do(func() { close(tc.gone) }) }
 // drains what is already queued first, so the exit frame that was pushed
 // just before the close still arrives.
 func (tc *termConn) write() {
+	defer close(tc.drained)
 	for {
 		var f termFrame
 		switch {
@@ -288,6 +309,19 @@ func (tc *termConn) write() {
 			tc.stop()
 			return
 		}
+	}
+}
+
+// settle ends this connection and waits for what is already queued to have
+// gone out, so a goodbye never overtakes the frame it is the goodbye for —
+// the exit frame, most of all. The wait is bounded by how long one write may
+// take: a peer that has stopped reading altogether must not hold up the
+// goroutine that is saying goodbye to it.
+func (tc *termConn) settle() {
+	tc.stop()
+	select {
+	case <-tc.drained:
+	case <-time.After(wsWriteWait):
 	}
 }
 
@@ -739,6 +773,12 @@ func (ts *termSession) audit(msg string, args ...any) {
 
 // pump reads the terminal and gives what it read to everyone at once. It is
 // the only reader of the master.
+//
+// Any error ends it, and none of them is worth a line in the log: a master
+// whose child has gone reads as EIO on Linux and as an end of file on macOS,
+// and both mean the same thing — there is no more output. Whatever came back
+// with the error is kept first, because a read may hand over the last of the
+// output and the end of it at the same time.
 func (ts *termSession) pump() {
 	buf := make([]byte, termRead)
 	for {
@@ -747,8 +787,6 @@ func (ts *termSession) pump() {
 			ts.output(buf[:n])
 		}
 		if err != nil {
-			// A master whose child has gone reads as an error rather than as
-			// an end on Linux. Both mean the same thing here.
 			return
 		}
 	}
@@ -781,10 +819,35 @@ func (ts *termSession) over() bool {
 	return ts.ended
 }
 
+// run is the whole of a terminal after it has started, and the one place it
+// ends.
+//
+// The order here is fixed, and it is deliberately not the order in which the
+// two things that end a terminal are noticed. On Linux a read of the master
+// fails the moment the child's side of it is closed, while on macOS it hands
+// back what is left and then reports the end, so "the output has stopped"
+// and "the process has exited" arrive in either order depending on the
+// platform. Everything that follows from the ending — the exit frame, the
+// recording, the account, the sockets — happens after both, once, here.
+func (ts *termSession) run(cmd *exec.Cmd) {
+	ts.pump()      // returns when the master has nothing more to give
+	_ = cmd.Wait() // and only then is there an exit code to report
+	code := -1
+	if cmd.ProcessState != nil {
+		code = cmd.ProcessState.ExitCode()
+	}
+	ts.finish(code)
+}
+
 // finish is the process having gone: everyone is told how, the account is
 // let go of, and the terminal stays listed for a while so a client that
 // reattaches a moment too late reads the exit rather than a 404 it cannot
 // tell from a wrong id.
+//
+// The exit frame is queued to every connection before anything is closed,
+// and each connection is then settled rather than simply stopped — it has to
+// have written that frame before its socket is allowed to say goodbye, or a
+// client learns that the terminal is over without ever learning how.
 func (ts *termSession) finish(code int) {
 	ts.mu.Lock()
 	if ts.ended {
@@ -797,6 +860,8 @@ func (ts *termSession) finish(code int) {
 	ts.mu.Unlock()
 
 	ts.audit("terminal ended", "exit", code)
+	// The pump has returned, so everything this terminal printed is in the
+	// ring and in the recording; both are finished with here.
 	if ts.rec != nil {
 		ts.rec.close(ts.view())
 	}
@@ -805,7 +870,7 @@ func (ts *termSession) finish(code int) {
 	}
 	ts.master.Close()
 	for _, tc := range conns {
-		tc.stop()
+		tc.settle()
 	}
 	time.AfterFunc(keepEnded, func() { ts.s.dropTerminal(ts.id) })
 }

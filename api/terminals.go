@@ -172,17 +172,7 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 	}
 	s.addTerminal(ts)
 	ts.audit("terminal created", "kind", kind, "account", plan.account, "by", who(r).Name)
-	go func() {
-		// The pump returns when the terminal is finished with, which is after
-		// the child has gone and everything it printed has been read.
-		ts.pump()
-		_ = cmd.Wait()
-		code := -1
-		if cmd.ProcessState != nil {
-			code = cmd.ProcessState.ExitCode()
-		}
-		ts.finish(code)
-	}()
+	go ts.run(cmd)
 	return ts, nil
 }
 
@@ -381,7 +371,7 @@ func (s *Server) serveTerminal(c *wsConn, ts *termSession, p *Principal, watch b
 				// The client went away, or said something the protocol does
 				// not allow.
 				ts.detach(tc)
-				tc.stop()
+				tc.settle()
 				code := uint16(wsNormal)
 				if c.late.Load() {
 					code = wsGoing
@@ -391,14 +381,17 @@ func (s *Server) serveTerminal(c *wsConn, ts *termSession, p *Principal, watch b
 			}
 			if err := s.onTerm(ts, tc, f); err != nil {
 				ts.detach(tc)
-				tc.stop()
+				tc.settle()
 				farewell(c, wsPolicy, err.Error(), reads)
 				return
 			}
 		case <-tc.gone:
 			// The terminal ended, or this connection fell too far behind to
-			// be worth keeping.
+			// be worth keeping. Either way whatever was queued goes out
+			// before the goodbye does: the last frame of a terminal that has
+			// ended is the one that says how.
 			ts.detach(tc)
+			tc.settle()
 			if tc.slow.Load() {
 				farewell(c, wsTooSlow, "this connection could not keep up; reattach with since", reads)
 				return
@@ -407,7 +400,7 @@ func (s *Server) serveTerminal(c *wsConn, ts *termSession, p *Principal, watch b
 			return
 		case <-s.ctx.Done():
 			ts.detach(tc)
-			tc.stop()
+			tc.settle()
 			farewell(c, wsGoing, "the server is stopping", reads)
 			return
 		case <-t.C:
