@@ -153,7 +153,15 @@ func newHarness(t testing.TB, opts Options) *harness {
 	t.Setenv("FAKE_EXIT", "")
 	t.Setenv("FAKE_SLEEP", "")
 
-	home := t.TempDir()
+	// Short on purpose, rather than t.TempDir. A unix socket's address is a
+	// hundred-odd bytes on both kernels, the store holds one — the door a
+	// local terminal is shared through — and a per-test temporary directory
+	// is named after the test, which on macOS is already most of the room.
+	home, err := os.MkdirTemp("", "rota")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(home) })
 	store := `{"accounts":[
 	 {"id":1,"provider":"claude","email":"a@x","token":{"accessToken":"tok-1"}},
 	 {"id":2,"provider":"codex","email":"c@x","token":{"accessToken":"tok-2","refreshToken":"r2"},"extra":{"id_token":"idt","account_id":"acct"},"staged":"-"},
@@ -183,6 +191,9 @@ func newHarness(t testing.TB, opts Options) *harness {
 	handler := s.Handler()
 	h := &harness{t: t, handler: handler, root: root, dir: home, srv: httptest.NewServer(handler),
 		token: opts.Token, api: s}
+	// Last of all, so nothing this server opened outlives the test: the
+	// socket a terminal would be shared through, most of all.
+	t.Cleanup(s.Stop)
 	t.Cleanup(h.srv.Close)
 	// Registered last, so they run first: while the server still answers and
 	// before any temporary directory is removed.
