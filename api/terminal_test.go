@@ -781,6 +781,47 @@ func TestTheExitIsBroadcastAndTheTerminalStaysListed(t *testing.T) {
 	t.Fatal("the terminal never reported itself ended")
 }
 
+// And it is then held by nobody: the keyboard went with the process, so a
+// listing that still named the last person to type would be describing a
+// terminal somebody is sitting at.
+func TestAnEndedTerminalNamesNoHolder(t *testing.T) {
+	p := withTerminals(t)
+	id := p.start(nil)["id"].(string)
+	alice := p.attach(id, p.alice, "")
+	alice.waitOut("ready ")
+	if got := p.describe(id)["holder"]; got != "alice" {
+		t.Fatalf("while it is running the holder is %v", got)
+	}
+
+	alice.typeIn("bye\n")
+	alice.waitType("exit")
+	for range 200 {
+		got := p.describe(id)
+		if got["ended"] != true {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if got["holder"] != nil {
+			t.Fatalf("an ended terminal is still held by %v", got["holder"])
+		}
+		// The listing says the same thing: it is the same description.
+		_, raw := p.do("GET", "/v1/terminals", nil)
+		var list struct {
+			Terminals []map[string]any `json:"terminals"`
+		}
+		if err := json.Unmarshal(raw, &list); err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range list.Terminals {
+			if row["id"] == id && row["holder"] != nil {
+				t.Fatalf("the listing still holds it for %v", row["holder"])
+			}
+		}
+		return
+	}
+	t.Fatal("the terminal never reported itself ended")
+}
+
 // Deleting one ends it, and says who did.
 func TestDeletingATerminalEndsIt(t *testing.T) {
 	p := withTerminals(t)

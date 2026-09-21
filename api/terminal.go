@@ -505,7 +505,14 @@ func (ts *termSession) letGo() {
 // heldBy is the name to show, or "" for nobody. Called with mu held, and
 // deliberately without letting a lapsed grace go: describing a terminal must
 // not change it.
+//
+// A terminal that has ended is held by nobody. There is no keyboard left to
+// hold — every claim is refused from here on — and a listing that went on
+// naming the last person to type would read as though they still were.
 func (ts *termSession) heldBy() string {
+	if ts.ended {
+		return ""
+	}
 	if ts.holder != nil {
 		return ts.holder.name
 	}
