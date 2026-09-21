@@ -253,10 +253,15 @@ Two escape hatches remain for when rota's vocabulary is not what you want:
 rota run 1                        # no prompt: open the CLI itself, as it comes
 rota run 1 -i                     # the same, said explicitly
 rota run 1 -- --any --vendor-flag # hand it these arguments, untouched
+rota run 1 --share                # the same, and watchable from this machine's page
 ```
 
 The id is a number rather than a name so that it can never be mistaken for
 one of a CLI's own flags, which is not true of any short alias.
+
+`--share` is the same handover with rota left standing above it, so that the
+terminal can also be watched from a rota server on this machine — see
+*Sharing the terminal you are sitting at*.
 
 `run` never calls a usage endpoint — it only refreshes the token when one is
 about to expire — so a scripted run stays fast and cannot exhaust the

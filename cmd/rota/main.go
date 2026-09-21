@@ -785,6 +785,15 @@ list, or the flag repeated, or both. Readings that only exist as JSON imply
   suggestions  ask the CLI for a predicted follow-up (claude)
   stderr       on a failed run with no answer, stderr copied into result
 
+--share opens the CLI here, as the three lines above do, and also offers this
+terminal to a rota server running on this machine, so the same session can be
+watched — or typed into — from its terminal page. rota stays above the CLI
+instead of being replaced by it, and nothing about the server can slow the
+terminal you are sitting at: output the server cannot keep up with is dropped
+for the server alone and announced as a gap. --share=watch offers it to be
+read and never typed into, whatever role the person on the page has. --label
+names it in the listing; without one it is the folder's name. linux and macOS.
+
 Conversations carry on: every run has a session id, and --resume <id>
 continues from it. On its own, --resume picks up the most recent
 conversation, which every provider can find without being told its id, and
@@ -799,6 +808,8 @@ conversation, which every provider can find without being told its id, and
   rota run                           open the CLI itself, as it comes
   rota run 2 -i                      the same, for a named account
   rota run 2 -- --some-vendor-flag   hand it these arguments untouched
+  rota run 2 --share                 the same, watchable on this machine's page
+  rota run --share=watch --label api offered to be read, under that name
 
 Flags:
 `
@@ -828,18 +839,31 @@ func (c *cli) run(args []string) error {
 		rest = rest[1:]
 	}
 
+	// --share and --label are rota's own and belong to the handover, so they
+	// are taken out here rather than in the flag set a question is parsed
+	// with: two of the three ways to open a CLI never reach one.
+	rest, ask, err := takeShareFlags(rest)
+	if err != nil {
+		return err
+	}
+
 	// Two ways to say "not rota's vocabulary": -- for the arguments that
 	// follow, -i for the CLI's own session.
 	if len(rest) > 0 && rest[0] == "--" {
-		return c.handOver(id, rest[1:])
+		return c.handOver(id, rest[1:], ask)
 	}
 	if i := slices.IndexFunc(rest, func(a string) bool { return a == "-i" || a == "--interactive" }); i >= 0 {
-		return c.handOver(id, slices.Delete(slices.Clone(rest), i, i+1))
+		return c.handOver(id, slices.Delete(slices.Clone(rest), i, i+1), ask)
 	}
 	// Nothing left to say is a request for the CLI itself, not a mistake:
 	// `rota run` and `rota run 2` open a session.
 	if len(rest) == 0 {
-		return c.handOver(id, nil)
+		return c.handOver(id, nil, ask)
+	}
+	if ask.on {
+		// Sharing is about a terminal, and a question has none: it is asked
+		// and answered without anybody sitting in front of it.
+		return usageErr("%s", shareWithPrompt)
 	}
 	return c.answer(id, rest)
 }
@@ -896,7 +920,22 @@ func isNumber(s string) bool {
 var execProcess = execCLI
 
 // handOver gives the account's CLI the terminal, arguments and all.
-func (c *cli) handOver(id int, args []string) error {
+//
+// Two ways to do that, and the same preparation before either. Without
+// --share rota replaces itself with the CLI, which is the right answer when
+// nothing else wants the terminal: the CLI's exit status, signals and
+// terminal become its own and there is no rota left. With --share rota stays
+// as the parent, because something does want it — a server on this machine,
+// so that the terminal can also be watched from the page.
+func (c *cli) handOver(id int, args []string, ask shareAsk) error {
+	if ask.on {
+		// Before the account is prepared rather than after: a refusal is
+		// worth having before a token has been refreshed and a credential
+		// staged for a terminal that is not going to happen.
+		if err := shareStat(os.Stdin); err != nil {
+			return err
+		}
+	}
 	s, err := c.openStore()
 	if err != nil {
 		return err
@@ -908,7 +947,8 @@ func (c *cli) handOver(id int, args []string) error {
 	}
 	// The claim on the account is not released here: this process is about
 	// to become the CLI, and the CLI is what must hold it. It goes only if
-	// the handover does not happen.
+	// the handover does not happen — or, when the terminal is shared, when
+	// the CLI this process is holding has ended.
 	path, env, release, err := s.Prepare(context.Background(), a)
 	if err != nil {
 		return err
@@ -916,20 +956,53 @@ func (c *cli) handOver(id int, args []string) error {
 	bin := filepath.Base(path)
 	reg := sessions.RegistryFor(s)
 	cwd, _ := os.Getwd() // where the CLI will start, which is where rota is
-	_ = s.Close()        // everything is on disk; release the lock before handing over
+	sock := ""
+	if ask.on {
+		if sock, err = shareSock(s); err != nil {
+			release()
+			return err
+		}
+	}
+	_ = s.Close() // everything is on disk; release the lock before handing over
 
+	// This process is about to become the CLI, or to sit above it: either
+	// way the entry written here describes what is running. Nothing else
+	// can say whose it is — by default every Claude Code account reads the
+	// same ~/.claude, so a process list shows the work without showing
+	// whose quota pays for it.
+	started, rerr := reg.Add(sessions.Instance{
+		Account: a.ID, Label: a.Label(), Provider: a.Provider, Dir: cwd,
+	})
+	if rerr != nil {
+		fmt.Fprintf(c.err, "warning: could not record this run: %v\n", rerr)
+	}
+	if ask.on {
+		if ask.label == "" {
+			ask.label = shareLabel(cwd)
+		}
+		code, serr := c.startShare(sharePlan{
+			who: a.String(), bin: bin, path: path, args: args, env: env, cwd: cwd,
+			sock: sock, ask: ask,
+			account: a.ID, label: a.Label(), provider: a.Provider,
+		})
+		// The account is this process's to let go of, because this process
+		// held it for the whole life of the CLI rather than becoming it.
+		release()
+		_ = started.End()
+		if serr != nil {
+			return serr
+		}
+		if code != 0 {
+			return exitCode(code)
+		}
+		return nil
+	}
 	// Status goes to stderr so a redirected stdout carries only the CLI's
 	// own output.
 	fmt.Fprintf(c.err, "rota: %s via %s\n", a, bin)
-	// This process is about to become the CLI: execve keeps the process id,
-	// so the entry written here goes on describing what is running, and is
-	// cleaned up by the liveness check rather than by anything rota runs
-	// afterwards -- there is no afterwards.
-	if _, rerr := reg.Add(sessions.Instance{
-		Account: a.ID, Label: a.Label(), Provider: a.Provider, Dir: cwd,
-	}); rerr != nil {
-		fmt.Fprintf(c.err, "warning: could not record this run: %v\n", rerr)
-	}
+	// execve keeps the process id, so the entry above goes on describing
+	// what is running and is cleaned up by the liveness check rather than
+	// by anything rota runs afterwards -- there is no afterwards.
 	err = execProcess(path, append([]string{bin}, args...), env)
 	release() // only reached when the handover did not happen
 	var ee *exec.ExitError
