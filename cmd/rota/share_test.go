@@ -161,13 +161,20 @@ func (c *fakeChild) counted() (hangUps, ends int) {
 
 // shorter makes the waits in here take no time, so a test about what happens
 // after three seconds does not take three seconds.
+//
+// Once for the whole package, and never put back. A link stops its own
+// goroutines and waits for them, but the wait is bounded — that is the
+// point of it — so a link the machine was too busy to stop in time can
+// still be reading one of these a moment after the test that made it
+// returned. Restoring them at the end of each test is then a write racing
+// that read, about values no test wants restored anyway.
+var shorten sync.Once
+
 func shorter(t *testing.T) {
 	t.Helper()
-	retry, beat, flush, kill := shareRetry, shareBeat, shareFlush, shareKillAfter
-	shareRetry, shareBeat, shareFlush, shareKillAfter = 20*time.Millisecond, 50*time.Millisecond,
-		100*time.Millisecond, 20*time.Millisecond
-	t.Cleanup(func() {
-		shareRetry, shareBeat, shareFlush, shareKillAfter = retry, beat, flush, kill
+	shorten.Do(func() {
+		shareRetry, shareBeat, shareFlush, shareKillAfter = 20*time.Millisecond, 50*time.Millisecond,
+			100*time.Millisecond, 20*time.Millisecond
 	})
 }
 
@@ -504,6 +511,70 @@ func TestARefusalIsPrintedOnceAndNotRetried(t *testing.T) {
 	}
 	if said.Len() != 0 {
 		t.Fatalf("the first refusal is the caller's to print, not the link's: %q", said.String())
+	}
+}
+
+// A kill from the server hangs up the CLI here and is the end of the link:
+// coming back a moment later would put the terminal on the page that has
+// just closed it.
+func TestAKillFromTheServerHangsUpAndIsTheEndOfIt(t *testing.T) {
+	shorter(t)
+	dir, err := os.MkdirTemp("", "rota")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	path := filepath.Join(dir, "s.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Skipf("no unix socket here: %v", err)
+	}
+	defer ln.Close()
+	tries := make(chan struct{}, 8)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			select {
+			case tries <- struct{}{}:
+			default:
+			}
+			c := share.NewConn(conn, 0)
+			var hello share.HelloMsg
+			if _, err := share.ReadJSON(c, &hello); err != nil {
+				c.Close()
+				continue
+			}
+			_ = c.SendJSON(share.Welcome, share.WelcomeMsg{Version: share.Version, Terminal: "t-1"})
+			_ = c.Send(share.Kill, nil)
+		}
+	}()
+
+	killed := make(chan struct{}, 1)
+	l := newShareLink(path, newShareQueue(1<<20), io.Discard, func() share.HelloMsg {
+		return share.HelloMsg{Version: share.Version}
+	})
+	defer l.close()
+	l.kill = func() {
+		select {
+		case killed <- struct{}{}:
+		default:
+		}
+	}
+	if _, why := l.start(); why != "" {
+		t.Fatalf("this hello was refused: %q", why)
+	}
+	select {
+	case <-killed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("a kill frame never reached the CLI this rota is holding")
+	}
+	<-tries
+	time.Sleep(200 * time.Millisecond) // many retries' worth
+	if len(tries) > 0 {
+		t.Fatal("a terminal the server ended was offered to it again")
 	}
 }
 

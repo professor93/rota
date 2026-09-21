@@ -6,10 +6,12 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/professor93/rota/internal/pty"
 	"github.com/professor93/rota/internal/share"
 	"github.com/professor93/rota/store"
 )
@@ -415,9 +417,12 @@ func (l *shareLink) connect() (c *share.Conn, id, why string, final bool) {
 func (l *shareLink) keep(c *share.Conn, final bool) {
 	for {
 		if c != nil {
-			l.serve(c)
+			done := l.serve(c)
 			l.set(nil, "")
 			c = nil
+			if done {
+				return
+			}
 		}
 		if final {
 			return
@@ -444,22 +449,26 @@ func (l *shareLink) keep(c *share.Conn, final bool) {
 // It does not return until both of the others have. A link that is over has
 // to be over completely, or a retry would have two goroutines writing to two
 // sockets for the same terminal.
-func (l *shareLink) serve(c *share.Conn) {
-	done := make(chan struct{})
+//
+// done says this terminal is not to be offered again — the server ended it,
+// or refused it. Coming back after either would be arguing with somebody who
+// has already decided.
+func (l *shareLink) serve(c *share.Conn) (done bool) {
+	over := make(chan struct{})
 	var busy sync.WaitGroup
 	busy.Add(2)
-	go func() { defer busy.Done(); l.drain(c, done) }()
-	go func() { defer busy.Done(); l.beat(c, done) }()
+	go func() { defer busy.Done(); l.drain(c, over) }()
+	go func() { defer busy.Done(); l.beat(c, over) }()
 	// In this order on the way out: the socket first, which frees a drain
 	// that is blocked writing to a peer that stopped reading; then the
 	// channel, which frees the two loops; then the wait.
 	defer busy.Wait()
-	defer close(done)
+	defer close(over)
 	defer c.Close()
 	for {
 		kind, payload, err := c.Read()
 		if err != nil {
-			return
+			return false
 		}
 		switch kind {
 		case share.Input:
@@ -469,9 +478,14 @@ func (l *shareLink) serve(c *share.Conn) {
 				l.into(payload)
 			}
 		case share.Kill:
+			// Somebody ended this terminal from the page. The CLI is hung
+			// up here, and the link is not offered again: rota is on its
+			// way out, and a reconnection in the meantime would put the
+			// terminal back on the page that has just closed it.
 			if l.kill != nil {
 				l.kill()
 			}
+			return true
 		case share.Ping:
 			_ = c.Send(share.Pong, nil)
 		case share.Pong:
@@ -480,7 +494,7 @@ func (l *shareLink) serve(c *share.Conn) {
 			if share.Unmarshal(payload, &msg) == nil && msg.Message != "" {
 				l.say(msg.Message)
 			}
-			return
+			return true
 		}
 	}
 }
@@ -652,6 +666,13 @@ func shareOpening(who, bin, id, path, mode string) string {
 // shareStat is the store-side check rota makes before anything else, so the
 // refusals arrive before the account is prepared rather than after.
 func shareStat(in *os.File) error {
+	// The platform first. Somewhere with no pseudo-terminal, standard input
+	// is not a terminal either, and "this needs a terminal" would send
+	// somebody looking for one rather than telling them what is true.
+	if !pty.Supported {
+		return fmt.Errorf("--share needs a pseudo-terminal, and %s has none; rota shares a terminal on linux and macOS",
+			runtime.GOOS)
+	}
 	if !isTerminal(in) {
 		return usageErr("%s", shareNoTerm)
 	}
