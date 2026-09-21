@@ -82,12 +82,17 @@ const jsonAPI = async (path, init = {}) => {
 };
 globalThis.fetch = jsonAPI;
 
+// The page is two scripts: the one both of rota's pages load first, and the
+// playground's own. A browser gives them one scope between them, so they are
+// run here the same way.
+const shared = fs.readFileSync(T + '/page.js', 'utf8');
 const src = fs.readFileSync(T + '/pg.js', 'utf8');
-const pg = new Function(src + `
+const pg = new Function(shared + '\n' + src + `
 ;return {
   connect, render, renderPanel, renderIO, renderIONav, renderFoot, doRun, colorJSON, buildBody, runPath,
   answerSection, askSection, renderField, providerFields,
-  signIn, signOut, renderWho, watching, viewGate,
+  signIn, signOut, renderWho, watching, viewGate, renderLink,
+  get link(){return $("#otherpage")},
   get me(){return me}, set me(v){me=v},
   get token(){return token}, set token(v){token=v},
   get schema(){return schema},
@@ -485,6 +490,15 @@ const settle = () => new Promise(r => setTimeout(r, 5));
   await pg.doRun();
   assert(sockets.length === before + 1, 'and no socket is opened even so');
   pg.schema.websocket = true;
+
+  // 15b. the way to the other page is offered only where there is one: a
+  // link to a route group that is off is a link to a 404.
+  pg.schema.terminal = false; pg.renderLink();
+  assert(pg.link.hidden === true, 'no terminal group, no link to a terminal page');
+  pg.schema.terminal = true; pg.renderLink();
+  assert(pg.link.hidden === false && pg.link.attrs.href === '/terminal',
+    'a server with one offers the way to it: ' + JSON.stringify(pg.link.attrs));
+  pg.schema.terminal = false; pg.renderLink();
 
   // 16. signed out, the page is a sign-in and the bearer token underneath it.
   pg.me = null; pg.token = ''; pg.renderWho();

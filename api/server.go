@@ -438,9 +438,21 @@ func (s *Server) Handler() http.Handler {
 			writeJSON(w, http.StatusOK, map[string]any{"success": true, "version": wire.Version})
 		})
 		mux.HandleFunc("GET /playground", s.playground)
-		// Where an invite link lands. It is in this group because what it
-		// leads to is the page: a server with no page has nothing to invite
-		// anyone to.
+	}
+	if s.opts.Routes.Terminal {
+		mux.HandleFunc("GET /terminal", s.terminalPage)
+		// The emulator that page draws with, carried in this binary and
+		// served from this origin. It is the terminal page's, so it is in
+		// the terminal's group and behind no credential either — a server
+		// with no terminal page has nothing to draw with it.
+		mux.HandleFunc("GET /assets/xterm/{file}", s.assetsIn("xterm/"))
+	}
+	if s.opts.Routes.Playground || s.opts.Routes.Terminal {
+		// What the two pages are made of in common, so it exists wherever
+		// either of them does.
+		mux.HandleFunc("GET /assets/{file}", s.assetsIn(""))
+		// Where an invite link lands. It is here because what it leads to is
+		// a page: a server serving neither has nothing to invite anyone to.
 		mux.HandleFunc("GET /invite/{code}", s.useInvite)
 	}
 	if s.opts.Routes.Health {
@@ -749,6 +761,14 @@ func (s *Server) schema(w http.ResponseWriter, _ *http.Request) {
 		// A run that stays open is carried on a socket, so a page that is
 		// told there are none knows not to offer one.
 		"websocket": s.opts.Routes.WebSocket,
+		// The same for the terminal, which is the one group that is off
+		// unless the file asked for it. And whether a plain shell may be
+		// started, which is a second opt-in inside the first. Each page
+		// offers the way to the other one only where the other one is
+		// there, and this is how either of them knows.
+		"terminal":   s.opts.Routes.Terminal,
+		"shell":      s.opts.Routes.Terminal && s.opts.Terminal.Shell,
+		"playground": s.opts.Routes.Playground,
 	})
 }
 

@@ -2,344 +2,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>rota playground</title>
-<style>
-/* =============================================================== tokens ==
-   One palette, defined once for light and once for dark. Every colour in
-   the page comes from here, so a theme is a variable swap and nothing else.
-   ======================================================================= */
-:root {
-  --bg:#faf9f7; --panel:#fff; --sunk:#f3f2ee;
-  --fg:#1b1b19; --muted:#68685f; --faint:#94948c;
-  --line:#e3e2dc; --line2:#eeede8;
-  --accent:#3f6b3f; --accent-fg:#fff; --accent-soft:#eef3ec;
-  --bad:#a2332f; --warn:#8a6a1c; --ok:#2f6b3a;
-  --code:#f6f5f1;
-  --j-key:#2f5aa8; --j-str:#2f6b3a; --j-num:#8a4b1f; --j-bool:#7a3fa0; --j-null:#94948c;
-  --r:8px; --r-lg:12px;
-  --shadow:0 1px 2px rgba(0,0,0,.05), 0 6px 16px rgba(0,0,0,.045);
-  --rail:172px;
-}
-:root { color-scheme: light dark }
-:root[data-theme="light"] { color-scheme: light }
-:root[data-theme="dark"] { color-scheme: dark }
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --bg:#131315; --panel:#1a1a1d; --sunk:#151517;
-    --fg:#e9e8e3; --muted:#a09f98; --faint:#78776f;
-    --line:#2b2b30; --line2:#212125;
-    --accent:#8fb47a; --accent-fg:#131315; --accent-soft:#1e2620;
-    --bad:#e08a8a; --warn:#d9bd6a; --ok:#8fc79a;
-    --code:#0f0f11;
-    --j-key:#88b4f0; --j-str:#9fd0a4; --j-num:#e0a878; --j-bool:#c8a2e8; --j-null:#78776f;
-    --shadow:0 1px 2px rgba(0,0,0,.35), 0 6px 18px rgba(0,0,0,.3);
-  }
-}
-:root[data-theme="dark"] {
-  --bg:#131315; --panel:#1a1a1d; --sunk:#151517;
-  --fg:#e9e8e3; --muted:#a09f98; --faint:#78776f;
-  --line:#2b2b30; --line2:#212125;
-  --accent:#8fb47a; --accent-fg:#131315; --accent-soft:#1e2620;
-  --bad:#e08a8a; --warn:#d9bd6a; --ok:#8fc79a;
-  --code:#0f0f11;
-  --j-key:#88b4f0; --j-str:#9fd0a4; --j-num:#e0a878; --j-bool:#c8a2e8; --j-null:#78776f;
-  --shadow:0 1px 2px rgba(0,0,0,.35), 0 6px 18px rgba(0,0,0,.3);
-}
-
-*, *::before, *::after { box-sizing:border-box }
-html, body { height:100% }
-body {
-  margin:0; background:var(--bg); color:var(--fg);
-  font:14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-  -webkit-font-smoothing:antialiased;
-}
-button, input, select, textarea { font:inherit; color:inherit }
-button { cursor:pointer }
-::placeholder { color:var(--faint) }
-:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:4px }
-@media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important } }
-
-/* Screen-reader-only, and a skip link that appears on focus. */
-.sr { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0 }
-.skip { position:absolute; left:-9999px; top:8px; z-index:60; background:var(--panel); padding:8px 14px; border-radius:var(--r); border:1px solid var(--line) }
-.skip:focus { left:8px }
-
-/* =============================================================== header == */
-header.top {
-  display:flex; align-items:center; gap:10px; flex-wrap:wrap;
-  padding:9px 14px; background:var(--panel); border-bottom:1px solid var(--line);
-  position:sticky; top:0; z-index:20;
-}
-.brand { font-weight:680; letter-spacing:-.015em; font-size:15px }
-.brand span { color:var(--muted); font-weight:400 }
-.ver { color:var(--faint); font-size:11.5px; font-family:ui-monospace, Menlo, monospace }
-.grow { flex:1 }
-#token { width:min(260px, 42vw); padding:6px 10px; border:1px solid var(--line); border-radius:var(--r); background:var(--bg) }
-/* Who is signed in, and as what. One strip, in the header's own manner. */
-.who { display:inline-flex; align-items:center; gap:7px; font-size:12.5px; color:var(--muted) }
-.who b { color:var(--fg); font-weight:620 }
-.who .role { border:1px solid var(--line); border-radius:999px; padding:1px 8px; font-size:11px }
-.who .role.watch { background:var(--line2) }
-/* The note a watcher is shown once, above whatever they cannot change. */
-.readonly { border:1px solid var(--line); border-radius:var(--r); background:var(--line2);
-  padding:8px 11px; margin:0 0 12px; font-size:12.5px; color:var(--muted) }
-
-/* ================================================================ atoms == */
-.btn {
-  border:1px solid var(--line); background:var(--panel); padding:6px 12px;
-  border-radius:var(--r); font-size:13px; line-height:1.4;
-  transition:background .12s, border-color .12s, color .12s;
-}
-.btn:hover { background:var(--line2) }
-.btn.primary { background:var(--accent); border-color:var(--accent); color:var(--accent-fg); font-weight:620 }
-.btn.primary:hover { filter:brightness(1.07) }
-.btn.ghost { border-color:transparent; background:none; color:var(--muted) }
-.btn.ghost:hover { background:var(--line2); color:var(--fg) }
-.btn.icon { width:32px; padding:6px 0; text-align:center }
-.btn:disabled { opacity:.45; cursor:not-allowed }
-.btn.tiny { padding:3px 8px; font-size:11.5px; border-radius:6px }
-
-.pill {
-  font-size:11.5px; padding:3px 9px; border-radius:999px; border:1px solid var(--line);
-  color:var(--muted); white-space:nowrap;
-}
-.pill.ok { color:var(--ok); border-color:color-mix(in oklab, var(--ok) 45%, var(--line)) }
-.pill.bad { color:var(--bad); border-color:color-mix(in oklab, var(--bad) 45%, var(--line)) }
-.pill.busy { color:var(--warn); border-color:color-mix(in oklab, var(--warn) 45%, var(--line)) }
-.badge {
-  font-size:10px; font-weight:700; letter-spacing:.05em; text-transform:uppercase;
-  color:var(--accent-fg); background:var(--accent); border-radius:999px; padding:2px 7px;
-}
-.count {
-  display:inline-block; min-width:17px; text-align:center; margin-left:6px; padding:0 5px;
-  font-size:10.5px; font-weight:700; border-radius:999px; background:var(--accent); color:var(--accent-fg);
-}
-.empty { color:var(--muted); text-align:center; padding:46px 14px; font-size:13px }
-.empty b { display:block; color:var(--fg); font-size:14px; margin-bottom:4px }
-
-/* ================================================================ shell == */
-.shell {
-  display:grid; height:calc(100vh - 51px);
-  grid-template-columns:var(--rail) minmax(380px,1fr) minmax(360px,1fr);
-}
-@media (max-width:1040px) {
-  .shell { grid-template-columns:1fr; height:auto }
-  .rail { flex-direction:row !important; overflow-x:auto; border-right:none !important; border-bottom:1px solid var(--line) }
-  .pane { max-height:none }
-}
-.rail {
-  display:flex; flex-direction:column; gap:2px; padding:10px 8px;
-  background:var(--panel); border-right:1px solid var(--line);
-}
-.rail button {
-  display:flex; align-items:center; gap:8px; width:100%; text-align:left;
-  border:none; background:none; color:var(--muted); padding:8px 10px;
-  border-radius:var(--r); font-size:13.5px; white-space:nowrap;
-}
-.rail button:hover { background:var(--line2); color:var(--fg) }
-.rail button[aria-current="page"] { background:var(--accent-soft); color:var(--fg); font-weight:620 }
-.rail .k { font-family:ui-monospace, Menlo, monospace; font-size:11px; color:var(--faint); margin-left:auto }
-.rail button[aria-current="page"] .k { color:var(--muted) }
-
-.pane { display:flex; flex-direction:column; min-height:0; min-width:0 }
-.pane.out { border-left:1px solid var(--line); background:var(--panel) }
-.pane-body { overflow:auto; padding:16px; flex:1; min-height:0 }
-.pane-foot {
-  border-top:1px solid var(--line); padding:10px 16px; background:var(--panel);
-  display:flex; gap:9px; align-items:center; flex-wrap:wrap;
-}
-
-/* the box that talks back to a run that is still open */
-.talk:not(:empty) {
-  border-top:1px solid var(--line); padding:10px 16px; background:var(--panel);
-  display:flex; gap:9px; align-items:center; flex-wrap:wrap;
-}
-.talk input[type="text"] { flex:1; min-width:140px; padding:7px 10px; border:1px solid var(--line); border-radius:var(--r); background:var(--bg) }
-.talk input[type="text"]:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent) }
-.talk .steer { display:flex; align-items:center; gap:5px; font-size:12px; color:var(--muted) }
-
-/* ================================================================= tabs == */
-.tabs { display:flex; gap:2px; padding:8px 14px 0; border-bottom:1px solid var(--line); background:var(--panel) }
-.tabs button {
-  border:none; background:none; color:var(--muted); padding:7px 11px; font-size:13px;
-  border-bottom:2px solid transparent; margin-bottom:-1px; border-radius:6px 6px 0 0;
-}
-.tabs button:hover { color:var(--fg); background:var(--line2) }
-.tabs button[aria-selected="true"] { color:var(--fg); font-weight:620; border-bottom-color:var(--accent) }
-
-/* ================================================================ forms == */
-.field { margin:0 0 15px }
-.flabel { display:block; font-weight:600; font-size:13px; margin-bottom:2px }
-.flabel .name { font-family:ui-monospace, Menlo, monospace; font-size:11px; color:var(--faint); font-weight:400; margin-left:6px }
-.help { color:var(--muted); font-size:12px; margin:0 0 6px; max-width:64ch }
-.ctl {
-  width:100%; padding:7px 10px; border:1px solid var(--line); border-radius:var(--r);
-  background:var(--bg); transition:border-color .12s, box-shadow .12s;
-}
-.ctl:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent) }
-textarea.ctl { resize:vertical; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12.5px; line-height:1.5 }
-select.ctl {
-  appearance:none; padding-right:30px;
-  background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);
-  background-position:calc(100% - 15px) 55%, calc(100% - 10px) 55%; background-size:5px 5px; background-repeat:no-repeat;
-}
-.row2 { display:grid; grid-template-columns:1fr 1fr; gap:12px }
-@media (max-width:560px) { .row2 { grid-template-columns:1fr } }
-
-/* the account bar at the top of Ask */
-.target { display:flex; gap:10px; align-items:center; margin-bottom:12px }
-.target select { flex:1 }
-.target .pill { flex:none }
-
-/* the field filter */
-.filter { position:relative; margin-bottom:14px }
-.filter input { width:100%; padding:7px 30px 7px 10px; border:1px solid var(--line); border-radius:999px; background:var(--bg) }
-.filter .x { position:absolute; right:4px; top:4px; border:none; background:none; color:var(--muted); padding:2px 7px; border-radius:999px }
-
-/* collapsible groups */
-.group { border:1px solid var(--line); border-radius:var(--r-lg); margin-bottom:10px; background:var(--panel); overflow:hidden }
-.group > .head {
-  display:flex; align-items:center; gap:9px; width:100%; text-align:left;
-  border:none; background:none; padding:11px 13px; font-size:13.5px; font-weight:620;
-}
-.group > .head:hover { background:var(--line2) }
-.group > .head .sub { font-weight:400; color:var(--muted); font-size:12px }
-.group > .head .chev { margin-left:auto; color:var(--faint); font-size:11px; transition:transform .15s }
-.group.open > .head .chev { transform:rotate(90deg) }
-/* Collapsing is a class, not a re-render: the header keeps its identity, so
-   opening a group with the keyboard does not throw focus back to the top. */
-.group > .body { display:none; padding:4px 13px 13px; border-top:1px solid var(--line2) }
-.group.open > .body { display:block }
-
-/* toggles */
-.toggle { display:flex; align-items:flex-start; gap:10px; padding:9px 0; border-top:1px solid var(--line2) }
-.toggle:first-child { border-top:none }
-.switch { position:relative; width:34px; height:20px; flex:none; margin-top:1px }
-.switch input { position:absolute; opacity:0; width:100%; height:100%; margin:0; cursor:pointer }
-.switch i { position:absolute; inset:0; background:var(--line); border-radius:999px; transition:background .15s }
-.switch i::after { content:""; position:absolute; width:16px; height:16px; border-radius:50%; background:var(--panel); top:2px; left:2px; transition:transform .15s; box-shadow:0 1px 2px rgba(0,0,0,.2) }
-.switch input:checked + i { background:var(--accent) }
-.switch input:checked + i::after { transform:translateX(14px) }
-.switch input:focus-visible + i { box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 25%, transparent) }
-.toggle .t-text { min-width:0 }
-.toggle .t-text b { font-weight:600; font-size:13px; display:block }
-.toggle .t-text span { color:var(--muted); font-size:12px }
-
-/* danger */
-.danger .flabel, .danger .t-text b { color:var(--bad) }
-.danger-note { color:var(--bad); font-size:11.5px; margin-top:3px }
-.locked { opacity:.55 }
-
-/* chips */
-.chips { display:flex; flex-wrap:wrap; gap:5px; padding:5px; border:1px solid var(--line); border-radius:var(--r); background:var(--bg) }
-.chips:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent) }
-.chip { display:inline-flex; align-items:center; gap:5px; background:var(--line2); border:1px solid var(--line);
-  border-radius:5px; padding:1px 4px 1px 7px; font-size:12px; font-family:ui-monospace, Menlo, monospace }
-.chip button { border:none; background:none; color:var(--muted); font-size:14px; line-height:1; padding:0 2px }
-.chip button:hover { color:var(--bad) }
-.chips input { border:none; background:none; outline:none; flex:1; min-width:110px; padding:3px 4px; font-size:13px }
-
-/* key/value map */
-.kv { display:grid; grid-template-columns:1fr 1fr auto; gap:6px; margin-bottom:6px }
-
-/* json editor */
-.json-ed { border:1px solid var(--line); border-radius:var(--r); overflow:hidden; background:var(--bg) }
-.json-ed header { display:flex; gap:6px; align-items:center; padding:5px 7px; background:var(--line2); border-bottom:1px solid var(--line) }
-.json-ed textarea { width:100%; border:none; background:none; padding:10px 12px; min-height:130px; resize:vertical;
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12.5px; outline:none }
-.json-status { padding:4px 12px 7px; font-size:11.5px; color:var(--muted) }
-.json-status.ok { color:var(--ok) } .json-status.bad { color:var(--bad) }
-.sb-row { display:grid; grid-template-columns:1fr 130px auto auto; gap:6px; align-items:center; margin-bottom:6px }
-.sb-req { display:flex; align-items:center; gap:5px; font-size:12px; color:var(--muted); white-space:nowrap }
-
-/* files */
-.drop { border:1.5px dashed var(--line); border-radius:var(--r); padding:18px; text-align:center; color:var(--muted); font-size:13px }
-.drop:hover, .drop.over { border-color:var(--accent); color:var(--fg); background:var(--accent-soft) }
-.filelist { margin-top:8px; display:flex; flex-direction:column; gap:5px }
-.filerow { display:flex; gap:8px; align-items:center; font-size:12.5px; border:1px solid var(--line); border-radius:6px; padding:4px 7px }
-.filerow code { font-family:ui-monospace, Menlo, monospace; flex:1; overflow:hidden; text-overflow:ellipsis }
-
-/* ========================================================= code & output == */
-pre.code {
-  margin:0; padding:12px 14px; background:var(--code); border-radius:var(--r); border:1px solid var(--line);
-  font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:12.5px; line-height:1.55;
-  overflow:auto; white-space:pre-wrap; word-break:break-word; tab-size:2;
-}
-.j-key { color:var(--j-key) } .j-str { color:var(--j-str) } .j-num { color:var(--j-num) }
-.j-bool { color:var(--j-bool) } .j-null { color:var(--j-null) } .j-punc { color:var(--muted) }
-.answer { background:var(--bg); border:1px solid var(--line); border-radius:var(--r); padding:13px 15px; margin-bottom:12px; white-space:pre-wrap }
-.answer h4, .sect h4 { margin:0 0 6px; font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted) }
-.sect { margin-bottom:14px }
-.meta { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:11px }
-.ev { border-left:3px solid var(--line); padding:6px 0 6px 10px; margin-bottom:6px }
-.ev-name { font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; color:var(--muted) }
-.pathin { font-size:12px; padding:4px 6px; min-width:150px }
-.answer p { white-space:pre-wrap; margin:0 0 9px }
-.answer p:last-child { margin-bottom:0 }
-.sect.asking { border-left:3px solid var(--warn); padding-left:10px }
-.asked { font-weight:600; margin:0 0 8px }
-.opts { list-style:none; padding:0; margin:0 0 8px }
-.opts li { display:flex; gap:7px; align-items:center; padding:2px 0 }
-.ev.init { border-left-color:var(--muted) } .ev.init .ev-name { color:var(--muted) }
-.ev.text { border-left-color:var(--j-key) } .ev.text .ev-name { color:var(--j-key) }
-.ev.thinking { border-left-color:var(--line) } .ev.thinking .ev-name { color:var(--faint) }
-.ev.tool, .ev.tool_result { border-left-color:var(--j-num) }
-.ev.blocked { border-left-color:var(--warn) } .ev.blocked .ev-name { color:var(--warn) }
-.ev.usage { border-left-color:var(--line2) } .ev.usage .ev-name { color:var(--faint) }
-.ev.error { border-left-color:var(--bad) } .ev.error .ev-name { color:var(--bad) }
-.ev.done { border-left-color:var(--accent) } .ev.done .ev-name { color:var(--accent) }
-
-/* history */
-.hist { display:flex; flex-direction:column; gap:6px }
-.hist-item { border:1px solid var(--line); border-radius:var(--r); padding:9px 11px; background:var(--bg); transition:border-color .12s }
-.hist-item:hover { border-color:var(--accent) }
-.hist-item.on { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 15%, transparent) }
-.banner {
-  display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:12px;
-  padding:7px 10px; font-size:12px; color:var(--muted);
-  background:var(--accent-soft); border:1px solid var(--line); border-radius:var(--r);
-}
-.hist-top { display:flex; gap:8px; align-items:center; font-size:12px; color:var(--muted) }
-.hist-prompt { font-size:13px; margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
-.hist-actions { display:flex; gap:6px; margin-top:7px }
-
-/* ============================================================== tables === */
-table { border-collapse:collapse; width:100%; font-size:13px }
-th, td { text-align:left; padding:8px 9px; border-bottom:1px solid var(--line2); vertical-align:middle }
-th { color:var(--muted); font-weight:500; font-size:10.5px; text-transform:uppercase; letter-spacing:.06em }
-tr.out td { opacity:.5 }
-tr.next td { background:var(--accent-soft) }
-.bar { height:5px; background:var(--line); border-radius:3px; overflow:hidden; min-width:56px; margin-top:4px }
-.bar i { display:block; height:100%; background:var(--accent) }
-.bar i.hot { background:var(--bad) }
-.ordercell { white-space:nowrap; display:flex; gap:3px; align-items:center }
-.mv { border:1px solid var(--line); background:var(--panel); border-radius:6px; width:22px; height:22px;
-  line-height:1; padding:0; font-size:10px; color:var(--muted) }
-.mv:hover:not(:disabled) { background:var(--line2); color:var(--fg) }
-.mv:disabled { opacity:.3; cursor:not-allowed }
-.num { width:58px; padding:4px 6px; border:1px solid var(--line); border-radius:6px; background:var(--bg); text-align:right }
-.num:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 18%, transparent) }
-
-/* steps, for the sign-in flow */
-.step { border:1px solid var(--line); border-radius:var(--r-lg); padding:14px; margin-bottom:12px; background:var(--panel) }
-.step h3 { margin:0 0 3px; font-size:13.5px; display:flex; align-items:center; gap:8px }
-.step h3 i { font-style:normal; width:20px; height:20px; border-radius:50%; background:var(--accent); color:var(--accent-fg);
-  font-size:11px; font-weight:700; display:inline-flex; align-items:center; justify-content:center; flex:none }
-</style>
+<link rel="stylesheet" href="/assets/page.css">
 
 <a class="skip" href="#main">Skip to content</a>
 
-<header class="top">
-  <div class="brand">rota <span>playground</span></div>
-  <span id="ver" class="ver"></span>
-  <span class="grow"></span>
-  <span id="who" class="who" hidden></span>
-  <button id="signout" class="btn ghost" hidden>Sign out</button>
-  <label class="sr" for="token">Bearer token</label>
-  <input id="token" type="password" placeholder="bearer token" autocomplete="off" spellcheck="false">
-  <button id="connect" class="btn">Connect</button>
-  <span id="state" class="pill" role="status" aria-live="polite">not connected</span>
-  <button id="theme" class="btn icon" title="Switch light and dark" aria-label="Switch light and dark">◐</button>
-</header>
+<header id="top" class="top"></header>
 
 <div class="shell">
   <nav id="nav" class="rail" aria-label="Sections"></nav>
@@ -354,28 +21,9 @@ tr.next td { background:var(--accent-soft) }
   </aside>
 </div>
 
+<script src="/assets/page.js"></script>
 <script>
 "use strict";
-
-/* ============================================================ utilities == */
-const $ = (s, r = document) => r.querySelector(s);
-
-// el builds a node from a tag, attributes and children. Attributes that are
-// null, undefined or false are skipped, so a conditional attribute is just
-// an expression rather than an if.
-function el(tag, attrs = {}, kids = []) {
-  const n = document.createElement(tag);
-  for (const [k, v] of Object.entries(attrs)) {
-    if (v === null || v === undefined || v === false) continue;
-    if (k === "text") n.textContent = v;
-    else if (k === "html") n.innerHTML = v;
-    else if (k.startsWith("on")) n.addEventListener(k.slice(2), v);
-    else n.setAttribute(k, v === true ? "" : v);
-  }
-  for (const kid of [].concat(kids)) if (kid) n.append(kid);
-  return n;
-}
-const esc = s => String(s).replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 
 // colorJSON paints a JSON document without a parser: it walks the token
 // shapes JSON.stringify produces, which is all that is ever shown here.
@@ -395,15 +43,6 @@ const codeBlock = v => el("pre", { class: "code", html: colorJSON(v) });
 const ms = n => (n >= 1000 ? (n / 1000).toFixed(1) + "s" : n + "ms");
 
 /* ================================================================ state == */
-let token = sessionStorage.getItem("rota.token") || "";
-// me is who this page is, as GET /v1/session says: {name, role, via}. Null
-// is signed out. The role decides what is offered, never what is allowed —
-// the server decides that, and a page that hid a button would still have to
-// be refused by it.
-let me = null;
-let schema = null;               // GET /v1/schema
-let accounts = [];               // GET /v1/accounts, already in rotation order
-let defaultAccount = null;       // the account a run with no id would use
 let view = "ask";                // which rail section is showing
 let ioTab = "response";          // which output tab is showing
 let filter = "";                 // narrows the field list
@@ -444,144 +83,6 @@ function slim(doc) {
   const copy = Object.assign({}, doc);
   if (Array.isArray(copy.events)) { copy.events = undefined; delete copy.events; }
   return copy;
-}
-
-/* ================================================================= http == */
-async function api(method, path, body, extra = {}) {
-  // No token means the cookie is the credential, and an empty bearer header
-  // would be a guess the server counts against this address.
-  const headers = Object.assign(token ? { authorization: "Bearer " + token } : {}, extra.headers || {});
-  if (body !== undefined) headers["content-type"] = "application/json";
-  const r = await fetch(path, { method, headers, credentials: "same-origin",
-    body: body === undefined ? undefined : JSON.stringify(body) });
-  const text = await r.text();
-  let doc = text;
-  try { doc = JSON.parse(text); } catch {}
-  return { ok: r.ok, status: r.status, doc };
-}
-
-function setState(text, kind) {
-  const n = $("#state");
-  n.textContent = text;
-  n.className = "pill" + (kind ? " " + kind : "");
-}
-
-// load proves whatever credential this page is holding — a token typed in,
-// or the cookie a sign-in left — with the first thing it needs anyway, so a
-// wrong one says so at once and a right one costs no extra round trip.
-async function load() {
-  setState("connecting…", "busy");
-  let first;
-  try { first = await refreshAccounts(false); }
-  catch { setState("unreachable", "bad"); return false; }
-  if (!first.ok) {
-    setState(first.status === 429 ? "blocked" : "rejected", "bad");
-    showResponse(first.doc, first.status);
-    return false;
-  }
-  setState("connected", "ok");
-  // Who this turned out to be, which a token says as much as a cookie does:
-  // a token with the watch role is a watcher, and the page shows itself as
-  // one rather than offering buttons the server will refuse.
-  const whoami = await api("GET", "/v1/session");
-  me = whoami.ok && whoami.doc && whoami.doc.role ? whoami.doc : null;
-  renderWho();
-  schema = (await api("GET", "/v1/schema")).doc;
-  $("#ver").textContent = "v" + (schema.version || "?");
-  renderNav(); render();
-  return true;
-}
-
-// connect is the bearer-token way in, which is what this page had before it
-// had any other.
-async function connect() {
-  token = $("#token").value.trim();
-  if (!token) return setState("enter a token", "bad");
-  if (await load()) sessionStorage.setItem("rota.token", token);
-}
-
-// signIn is the other way: a name and a password, answered with a cookie the
-// browser keeps and this page never sees.
-async function signIn(name, password, say) {
-  if (!name || !password) return say("A name and a password.");
-  setState("signing in…", "busy");
-  const r = await api("POST", "/v1/session", { name, password });
-  if (!r.ok) {
-    setState(r.status === 429 ? "blocked" : "rejected", "bad");
-    say((r.doc && r.doc.error) || "That did not work.");
-    return;
-  }
-  // A cookie beats a token that may still be in this tab's storage: two
-  // credentials on one request is one credential too many.
-  token = "";
-  try { sessionStorage.removeItem("rota.token"); } catch {}
-  $("#token").value = "";
-  await load();
-}
-
-// signOut ends the session on the server, not only in this browser.
-async function signOut() {
-  await api("DELETE", "/v1/session");
-  me = null; token = "";
-  try { sessionStorage.removeItem("rota.token"); } catch {}
-  schema = null; accounts = []; live = null;
-  $("#token").value = "";
-  setState("signed out", "");
-  renderWho(); renderNav(); render();
-}
-
-// watching is the one question the rest of the page asks about the role.
-const watching = () => !!me && me.role === "watch";
-
-// renderWho puts who this is in the header, and takes the token field away
-// once there is a session: a page that shows both asks which one is in use.
-function renderWho() {
-  const box = $("#who"), out = $("#signout");
-  const hide = (n, yes) => { if (!n) return; n.hidden = yes; if (yes) n.setAttribute("hidden", ""); else n.removeAttribute("hidden"); };
-  if (!me) {
-    box.replaceChildren();
-    hide(box, true); hide(out, true);
-    hide($("#token"), false); hide($("#connect"), false);
-    return;
-  }
-  box.replaceChildren(
-    el("b", { text: me.name }),
-    el("span", { class: "role" + (watching() ? " watch" : ""), text: me.role }),
-  );
-  hide(box, false);
-  // A bearer token is not a session to sign out of: it is on every request
-  // this page makes, and the way to stop using it is to stop sending it.
-  hide(out, me.via === "token");
-  hide($("#token"), true); hide($("#connect"), true);
-}
-
-// lock disables every control under one node. It is how a watcher's page is
-// made read-only: the server refuses these acts anyway, and this is so that
-// nobody has to find that out by being refused.
-function lock(root) {
-  if (!watching() || !root) return;
-  const walk = n => {
-    if (!n) return;
-    if (n.tagName === "BUTTON" || n.tagName === "INPUT" || n.tagName === "SELECT" || n.tagName === "TEXTAREA") {
-      n.disabled = true;
-    }
-    for (const kid of Array.from(n.children || [])) walk(kid);
-  };
-  walk(root);
-}
-
-// watchNote is the one sentence a watcher is shown above what they cannot
-// change, so a disabled button is explained rather than merely dead.
-const watchNote = () => el("p", { class: "readonly",
-  text: "watching: this sign-in cannot change anything" });
-
-async function refreshAccounts(force) {
-  const r = await api("GET", "/v1/accounts" + (force ? "?refresh=1" : ""));
-  accounts = (r.doc && r.doc.accounts) || [];
-  // The server sends them in rotation order and names the one it would
-  // pick, so the page never has to work either out for itself.
-  defaultAccount = (r.doc && r.doc.default) || null;
-  return r;
 }
 
 // setRotation writes one account's place in the queue, or the usage at which
@@ -1414,7 +915,6 @@ function runEvent(name, doc, run) {
 // run the endpoints reach, and the same events the stream carries — the box
 // under the output pane is the only thing this transport adds.
 const wsPath = id => (id ? `/v1/accounts/${id}/ws` : "/v1/ws");
-const wsURL = path => location.origin.replace(/^http/, "ws") + path;
 
 async function runSocket(id, body, started) {
   const run = { id, endpoint: wsPath(id), body, started, status: 101, seq: 0, tries: 0 };
@@ -1756,41 +1256,6 @@ function renderFoot() {
   );
 }
 
-/* ============================================================ signed out == */
-// viewGate is what the page is before it is anybody: a sign-in for the
-// people this server's file names, and under it the bearer token, which is
-// how this page has always been used and still is.
-function viewGate(panel) {
-  const name = el("input", { class: "ctl", id: "signin_name", autocomplete: "username",
-    placeholder: "name", spellcheck: "false" });
-  const pass = el("input", { class: "ctl", id: "signin_password", type: "password",
-    autocomplete: "current-password", placeholder: "password" });
-  const said = el("p", { class: "help", style: "margin:9px 0 0", text: "" });
-  const say = msg => { said.textContent = msg; };
-  const go = () => signIn(name.value.trim(), pass.value, say);
-  for (const box of [name, pass]) {
-    box.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); go(); } });
-  }
-  panel.append(
-    el("div", { class: "step" }, [
-      el("h3", {}, [el("i", { text: "1" }), el("span", { text: "Sign in" })]),
-      el("p", { class: "help", text: "The name and password this server was given in its file. A sign-in lasts until it expires or you sign out; nothing is kept in this browser but the cookie." }),
-      el("div", { class: "row2" }, [
-        el("div", { class: "field" }, [el("label", { class: "flabel", for: "signin_name", text: "Name" }), name]),
-        el("div", { class: "field" }, [el("label", { class: "flabel", for: "signin_password", text: "Password" }), pass]),
-      ]),
-      el("div", { style: "margin-top:9px" }, [
-        el("button", { class: "btn primary", id: "signin", text: "Sign in", onclick: go }),
-      ]),
-      said,
-    ]),
-    el("div", { class: "step" }, [
-      el("h3", {}, [el("i", { text: "2" }), el("span", { text: "Or use a bearer token" })]),
-      el("p", { class: "help", text: "The token this server was started with, or one its file names. Put it in the box at the top of the page and press Connect; it is kept in this tab and nowhere else." }),
-    ]),
-  );
-}
-
 // renderPanel redraws the main column only. render also redraws the footer
 // and the output, which is what a change of section needs.
 function renderPanel() {
@@ -1812,25 +1277,6 @@ function render() {
 }
 
 /* ================================================================= boot == */
-const THEME_KEY = "rota.theme";
-function applyTheme(t) {
-  try { localStorage.setItem(THEME_KEY, t); } catch {}
-  const root = document.documentElement;
-  if (!root) return;
-  if (t === "system") root.removeAttribute("data-theme");
-  else root.setAttribute("data-theme", t);
-}
-function cycleTheme() {
-  let now = "system";
-  try { now = localStorage.getItem(THEME_KEY) || "system"; } catch {}
-  applyTheme({ system: "light", light: "dark", dark: "system" }[now]);
-}
-try { applyTheme(localStorage.getItem(THEME_KEY) || "system"); } catch {}
-
-$("#connect").addEventListener("click", connect);
-$("#signout").addEventListener("click", signOut);
-$("#theme").addEventListener("click", cycleTheme);
-$("#token").addEventListener("keydown", e => { if (e.key === "Enter") connect(); });
 document.addEventListener("keydown", e => {
   if (!schema) return;
   if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && view === "ask") { e.preventDefault(); doRun(); return; }
@@ -1842,26 +1288,13 @@ document.addEventListener("keydown", e => {
   if (hit) { view = hit[0]; renderNav(); render(); }
 });
 
-$("#token").value = token;
-renderWho();
+// What the shared page asks of whichever page it is on.
+showRefusal = showResponse;
+onReady = () => { renderNav(); render(); };
+onSignedOut = () => { live = null; renderNav(); render(); };
+
 renderNav();
 renderIONav();
 render();
-
-// boot asks who this page is before anything else. A session says so and the
-// page carries on signed in; nothing says so and it shows the sign-in, unless
-// this tab is still holding a token from earlier.
-async function boot() {
-  const whoami = await api("GET", "/v1/session");
-  if (whoami.ok && whoami.doc && whoami.doc.role) {
-    me = whoami.doc;
-    renderWho();
-    await load();
-    return;
-  }
-  me = null;
-  renderWho();
-  if (token) await connect();
-}
-boot();
+pageBoot("playground");
 </script>

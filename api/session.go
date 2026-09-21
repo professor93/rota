@@ -412,7 +412,14 @@ func (s *Server) useInvite(w http.ResponseWriter, r *http.Request) {
 	}
 	s.setCookie(w, r, p)
 	s.log.Info("invite used", "name", p.Name, "role", p.Role, "ip", ip)
-	http.Redirect(w, r, "/playground", http.StatusSeeOther)
+	// Where an invited watcher most likely wants to be: somebody is invited
+	// to look over a shoulder far more often than to read a form. The
+	// playground is where they land on a server that holds no terminals.
+	to := "/playground"
+	if s.opts.Routes.Terminal {
+		to = "/terminal"
+	}
+	http.Redirect(w, r, to, http.StatusSeeOther)
 }
 
 // plainPage is the one HTML this server writes that is not the playground:

@@ -56,10 +56,11 @@ const doc = {
   querySelector: sel => nodes[sel] || (nodes[sel] = new El('div')),
   addEventListener: () => {},
   body: new El('body'),
+  head: new El('head'),
   documentElement: new El('html'),
 };
 globalThis.document = doc;
-globalThis.window = { open: () => {} };
+globalThis.window = { open: () => {}, addEventListener: () => {} };
 globalThis.alert = () => {};
 globalThis.confirm = () => true;
 globalThis.navigator = { clipboard: { writeText: () => {} } };
@@ -74,11 +75,27 @@ globalThis.location = { origin: 'http://127.0.0.1:8787' };
 // a test plays the server's side of it.
 const sockets = [];
 class WS {
-  constructor(url, protocols) { this.url = url; this.protocols = protocols; this.sent = []; sockets.push(this); }
+  constructor(url, protocols) {
+    this.url = url; this.protocols = protocols; this.sent = [];
+    // Every code this socket was closed with, so a test can tell one clean
+    // goodbye from two, and the page's own close from the server's.
+    this.closes = []; this.binaryType = '';
+    sockets.push(this);
+  }
   send(data) { this.sent.push(data); }
   open() { this.onopen && this.onopen({}); }
   feed(doc) { this.onmessage && this.onmessage({ data: typeof doc === 'string' ? doc : JSON.stringify(doc) }); }
-  close() { this.onclose && this.onclose({}); }
+  // Output is a binary frame, which a browser hands over as an ArrayBuffer
+  // because the page asked for one.
+  feedBytes(bytes) {
+    const u8 = typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes;
+    this.onmessage && this.onmessage({ data: u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength) });
+  }
+  close(code, reason) {
+    const c = code === undefined ? 1000 : code;
+    this.closes.push(c);
+    this.onclose && this.onclose({ code: c, reason });
+  }
 }
 globalThis.WebSocket = WS;
 module.exports = { doc, nodes, El, sockets };

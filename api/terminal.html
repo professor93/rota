@@ -1,0 +1,719 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rota terminal</title>
+<link rel="stylesheet" href="/assets/page.css">
+<style>
+/* Only what this page is: the three regions. Everything else — the palette,
+   the header, the atoms, the panes — is in the stylesheet both pages share.
+   Same three columns as the playground, in the same proportions: what there
+   is on the left, the thing itself in the middle, what is true about it on
+   the right. */
+.shell.term { grid-template-columns:minmax(210px,250px) minmax(320px,1fr) minmax(250px,300px) }
+@media (max-width:1040px) { .shell.term { grid-template-columns:1fr } }
+.termlist { border-right:1px solid var(--line); background:var(--panel) }
+.trow {
+  display:block; width:100%; text-align:left; border:1px solid var(--line); background:var(--bg);
+  border-radius:var(--r); padding:8px 10px; margin-bottom:6px; font-size:13px;
+}
+.trow:hover { border-color:var(--accent) }
+.trow[aria-current="true"] { border-color:var(--accent); background:var(--accent-soft) }
+.trow b { display:block; font-weight:620; overflow:hidden; text-overflow:ellipsis; white-space:nowrap }
+.trow .sub { color:var(--muted); font-size:11.5px }
+.trow.over { opacity:.6 }
+/* the strip above the screen: where the connection is, and the keyboard */
+.termstrip {
+  display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+  padding:8px 12px; border-bottom:1px solid var(--line); background:var(--panel); font-size:12.5px;
+}
+.termstrip .kbd { display:flex; gap:7px; align-items:center; color:var(--muted) }
+.termstrip .kbd b { color:var(--fg); font-weight:620 }
+/* one flash, when a key was pressed by somebody who may not type */
+@keyframes nudge { 0%,100% { transform:translateX(0) } 25% { transform:translateX(-3px) } 75% { transform:translateX(3px) } }
+.termstrip .flash { animation:nudge .18s 2; color:var(--warn) }
+.termscreen { flex:1; min-height:0; min-width:0; overflow:auto; background:#000; padding:6px }
+.termscreen.nothing { display:flex; align-items:center; justify-content:center; background:var(--sunk) }
+.terminfo .irow { display:flex; gap:9px; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--line2); font-size:12.5px }
+.terminfo .irow dt { color:var(--muted) }
+.terminfo .irow dd { margin:0; text-align:right; word-break:break-word; min-width:0 }
+.terminfo .warn { color:var(--warn); font-weight:620 }
+.terminfo h4 { margin:14px 0 4px; font-size:10.5px; letter-spacing:.06em; text-transform:uppercase; color:var(--muted) }
+.terminfo dl { margin:0 }
+.viewer { display:flex; gap:7px; align-items:center; font-size:12.5px; padding:3px 0 }
+.viewer .role { border:1px solid var(--line); border-radius:999px; padding:0 7px; font-size:10.5px; color:var(--muted) }
+.gate { max-width:680px; margin:0 auto; padding:24px 16px }
+</style>
+
+<a class="skip" href="#tscreen">Skip to the terminal</a>
+
+<header id="top" class="top"></header>
+
+<div id="termshell" class="shell term" hidden>
+  <section class="pane termlist" aria-label="Terminals">
+    <div id="tlist" class="pane-body"></div>
+  </section>
+  <main class="pane">
+    <div id="tstrip" class="termstrip" role="status" aria-live="polite"></div>
+    <div id="tscreen" class="termscreen"></div>
+  </main>
+  <aside class="pane out terminfo" aria-label="About this terminal">
+    <div id="tinfo" class="pane-body"></div>
+  </aside>
+</div>
+
+<main id="gate" class="gate"></main>
+
+<script src="/assets/page.js"></script>
+<script>
+"use strict";
+
+/* A terminal that lives in the server, drawn here.
+ *
+ * Three regions: the terminals this server holds on the left, the terminal
+ * itself in the middle, and what is true about it on the right. Everything
+ * the middle and the right show after the first frame comes from the socket
+ * — a page that told you who was typing a second ago is a page that lied.
+ *
+ * xterm.js is named in exactly one place, makeTerminal below, and reached
+ * through the small object it returns. That is so a test can run this code
+ * with a terminal that only records what it was shown, and so the emulator
+ * could be replaced one day without reading the rest of this.
+ */
+
+// The clock, in one place, so a ten-second countdown can be tested without
+// waiting ten seconds for it.
+let termNow = () => Date.now();
+let termLater = (fn, ms) => setTimeout(fn, ms);
+
+let termAssets = null;
+// loadXterm fetches the emulator from this server — it is vendored into the
+// binary and served from /assets/xterm, so this reaches nothing but the host
+// the page itself came from. It happens once, when the page is first shown
+// something to draw.
+let loadXterm = () => {
+  if (termAssets) return termAssets;
+  const v = "?v=" + encodeURIComponent((schema && schema.version) || "0");
+  const host = document.head || document.body;
+  const once = (node, what) => new Promise((ok, no) => {
+    node.addEventListener("load", () => ok());
+    node.addEventListener("error", () => no(new Error("could not load " + what)));
+    host.append(node);
+  });
+  termAssets = once(el("link", { rel: "stylesheet", href: "/assets/xterm/xterm.css" + v }), "the terminal styles")
+    .then(() => once(el("script", { src: "/assets/xterm/xterm.js" + v }), "the terminal"))
+    .then(() => once(el("script", { src: "/assets/xterm/addon-fit.js" + v }), "the fit addon"));
+  return termAssets;
+};
+
+// makeTerminal is the one place xterm is named. What it returns is the whole
+// of what this page asks of an emulator: show these bytes, tell me what was
+// typed, be this size, be the size of your container, go away.
+let makeTerminal = async host => {
+  await loadXterm();
+  const term = new Terminal({
+    fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+    fontSize: 13, scrollback: 10000, cursorBlink: true, convertEol: false,
+    theme: { background: "#000000", foreground: "#e9e8e3", cursor: "#e9e8e3" },
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(host);
+  return {
+    write: bytes => term.write(bytes),
+    onData: cb => term.onData(cb),
+    resize: (cols, rows) => { try { term.resize(cols, rows); } catch {} },
+    fit: () => { try { fit.fit(); } catch {} return { cols: term.cols, rows: term.rows }; },
+    dispose: () => term.dispose(),
+  };
+};
+
+/* ================================================================ state == */
+let terms = [];              // GET /v1/terminals, live first
+let termId = null;           // the one that is open
+let termGen = 0;             // which selection is current, across awaits
+let termInfo = null;         // its description, for the things frames never say
+let termSock = null;         // the one socket; there is never a second
+let termView = null;         // the emulator adapter
+let termSeen = false;        // a hello has arrived for this terminal
+let termOffset = 0;          // the absolute offset of the next byte
+let termCols = 80, termRows = 24;
+let termHolder = null;       // who holds the keyboard, null for nobody
+let termYou = null;          // {name, role, conn} from hello
+let termViewers = [];
+let termEnded = null;        // the exit code, once there is one
+let termStatus = "idle";     // idle | connecting | live | reconnecting | ended
+let termWait = 0;            // seconds until the next attempt
+let termTries = 0;
+let termClaimAt = null;      // when this tab asked for the keyboard
+let termAsking = null;       // {by, id}: somebody asking this tab for it
+let termNote = "";           // the last thing the server refused
+let termNudge = false;       // a key pressed by somebody who may not type
+let termOpenNew = false;     // the New terminal form is unfolded
+let termPolling = false;
+const CLAIM_WAIT = 10000;    // the server's own wait before a force is allowed
+const TERM_BACKOFF = [1, 2, 4, 8, 15];
+
+const termWatcher = () => !!termYou && termYou.role === "watch";
+// termIHold: the keyboard is held by a name, and hello said which name this
+// connection has. Two sockets of one principal share a name, which is as
+// close as the server gets to "you" — and either way it is one person.
+const termIHold = () => !!termYou && !termWatcher() && termEnded === null && termHolder === termYou.name;
+
+/* ============================================================== the page == */
+// enterTerminal is this page once there is a credential: ask what there is,
+// fetch the emulator, and keep asking gently while somebody is looking.
+function enterTerminal() {
+  hide($("#termshell"), false);
+  $("#gate").replaceChildren();
+  loadXterm().catch(() => termSay("the terminal emulator could not be loaded"));
+  refreshTerminals();
+  renderTerm();
+  // A terminal this page had open is picked up from where it was shown to,
+  // rather than started again from the top.
+  if (termId && !termSock && termEnded === null) termConnect();
+  if (!termPolling) { termPolling = true; termPoll(); }
+}
+
+// The gate is this page with nobody behind it: the same sign-in the
+// playground shows, because it is the same sign-in.
+function renderGate() {
+  hide($("#termshell"), true);
+  const gate = $("#gate");
+  gate.replaceChildren();
+  viewGate(gate);
+}
+
+function termPoll() {
+  if (!schema) { termPolling = false; return; }
+  if (!document.hidden) refreshTerminals();
+  termLater(termPoll, 10000);
+}
+
+/* ========================================================= what there is == */
+async function refreshTerminals() {
+  const r = await api("GET", "/v1/terminals");
+  const list = (r.doc && r.doc.terminals) || [];
+  // Live first, then ended: what is still running is what anybody came for.
+  terms = list.slice().sort((a, b) => (a.ended ? 1 : 0) - (b.ended ? 1 : 0));
+  renderTermList();
+  // A terminal open on this page keeps its description up to date from the
+  // listing too, for the few things no frame carries.
+  const mine = terms.find(t => t.id === termId);
+  if (mine) { termInfo = mine; renderTermInfo(); }
+}
+
+function renderTermList() {
+  const host = $("#tlist");
+  if (!host) return;
+  const kids = [];
+  if (watching()) kids.push(watchNote());
+  else kids.push(newTerminalForm());
+  if (!terms.length) {
+    kids.push(el("div", { class: "empty" }, [
+      el("b", { text: "No terminals" }),
+      el("span", { text: watching() ? "nothing is running on this server" : "start one above" }),
+    ]));
+  }
+  for (const t of terms) {
+    const acct = t.account ? `#${t.account.id} ${t.account.label || t.account.provider}` : "a plain shell";
+    const sub = t.ended
+      ? `ended, code ${t.exit}`
+      : [t.holder ? `${t.holder} has the keyboard` : "keyboard free",
+         `${(t.viewers || []).length} watching`].join(" · ");
+    kids.push(el("button", {
+      class: "trow" + (t.ended ? " over" : ""), "data-id": t.id,
+      "aria-current": t.id === termId ? "true" : null,
+      onclick: () => termSelect(t.id),
+    }, [
+      el("b", { text: t.label || t.id }),
+      el("span", { class: "sub", text: acct }),
+      el("br"),
+      el("span", { class: "sub", text: sub }),
+    ]));
+  }
+  host.replaceChildren(...kids);
+}
+
+// splitArgs splits a line the way a shell would, as far as quoting goes:
+// whitespace separates, and either quote keeps a run together. It is not a
+// shell — nothing here expands anything — and the server hands what comes
+// out of it to the CLI verbatim.
+function splitArgs(line) {
+  const out = [];
+  let cur = "", quote = "", started = false;
+  for (const ch of String(line || "")) {
+    if (quote) { if (ch === quote) quote = ""; else cur += ch; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; started = true; continue; }
+    if (/\s/.test(ch)) { if (cur || started) { out.push(cur); cur = ""; started = false; } continue; }
+    cur += ch;
+  }
+  if (cur || started) out.push(cur);
+  return out;
+}
+
+// newTerminalForm is what starts one: which account pays, what to call it,
+// and the three things a terminal is besides — arguments, a folder, and
+// whether it is an account's CLI at all.
+function newTerminalForm() {
+  const acct = el("select", { class: "ctl", id: "nt_account" });
+  acct.append(el("option", { value: "", text: "rotation's choice" }));
+  for (const a of accounts) {
+    acct.append(el("option", { value: String(a.id), text: `#${a.id} ${a.email || a.uuid || a.provider}` }));
+  }
+  const label = el("input", { class: "ctl", id: "nt_label", placeholder: "what this one is for" });
+  const args = el("input", { class: "ctl", id: "nt_args", placeholder: "--resume  \"a session id\"", spellcheck: "false" });
+  const cwd = el("input", { class: "ctl", id: "nt_cwd", placeholder: "a folder to start in", spellcheck: "false" });
+  const shell = el("input", { type: "checkbox", id: "nt_shell" });
+  shell.addEventListener("change", () => { acct.disabled = !!shell.checked; });
+  const start = el("button", { class: "btn primary", id: "nt_start", text: "Start", onclick: async () => {
+    const body = {};
+    if (shell.checked) body.kind = "shell";
+    else if (acct.value) body.account = Number(acct.value);
+    if (label.value.trim()) body.label = label.value.trim();
+    const list = splitArgs(args.value);
+    if (list.length) body.args = list;
+    if (cwd.value.trim()) body.cwd = cwd.value.trim();
+    const r = await api("POST", "/v1/terminals", body);
+    if (!r.ok) { termSay((r.doc && r.doc.error) || "that terminal could not be started"); return; }
+    termOpenNew = false;
+    await refreshTerminals();
+    if (r.doc && r.doc.id) await termSelect(r.doc.id);
+  } });
+  const body = el("div", { class: "body" }, [
+    el("div", { class: "field" }, [el("label", { class: "flabel", for: "nt_account", text: "Account" }), acct]),
+    el("div", { class: "field" }, [el("label", { class: "flabel", for: "nt_label", text: "Label" }), label]),
+    el("div", { class: "field" }, [
+      el("label", { class: "flabel", for: "nt_args", text: "Arguments" }),
+      el("p", { class: "help", text: "Handed to the CLI after its own name. Quotes keep a run together." }),
+      args,
+    ]),
+    el("div", { class: "field" }, [el("label", { class: "flabel", for: "nt_cwd", text: "Folder" }), cwd]),
+    // Only where the server file allowed one: a terminal running an
+    // account's CLI is what this is, and a general remote shell is a
+    // different offer that has to be asked for.
+    schema && schema.shell === true
+      ? el("label", { class: "toggle", for: "nt_shell" }, [
+          el("span", { class: "switch" }, [shell, el("i")]),
+          el("span", { class: "t-text" }, [
+            el("b", { text: "Plain shell" }),
+            el("span", { text: "your login shell instead of an account's CLI" }),
+          ]),
+        ])
+      : null,
+    el("div", { style: "margin-top:9px" }, [start]),
+  ]);
+  const head = el("button", { class: "head", "aria-expanded": String(termOpenNew),
+    onclick: () => { termOpenNew = !termOpenNew; renderTermList(); } }, [
+      el("span", { text: "New terminal" }), el("span", { class: "chev", text: "›" })]);
+  return el("div", { class: "group" + (termOpenNew ? " open" : ""), style: "margin-bottom:12px" }, [head, body]);
+}
+
+/* =================================================== choosing and attaching == */
+async function termSelect(id) {
+  if (id === termId) return;
+  termDetach();
+  termDrop();
+  const mine = ++termGen;
+  termId = id;
+  termInfo = terms.find(t => t.id === id) || null;
+  termSeen = false; termOffset = 0; termTries = 0; termWait = 0;
+  termHolder = null; termYou = null; termViewers = []; termEnded = null;
+  termAsking = null; termClaimAt = null; termNote = "";
+  termCols = 80; termRows = 24;
+  termStatus = id ? "connecting" : "idle";
+  renderTerm();
+  if (!id) return;
+  // The description carries what no frame does: the account, the folder, when
+  // it started, whether it is being recorded, and when the login inside it
+  // lapses. After this the panel lives on frames alone.
+  const r = await api("GET", "/v1/terminals/" + encodeURIComponent(id));
+  if (mine !== termGen) return;
+  if (r.ok) termInfo = r.doc;
+  renderTermInfo();
+  await termScreen();
+  if (mine !== termGen) return;
+  termConnect();
+}
+
+// termScreen makes the emulator, once, for the terminal now open.
+async function termScreen() {
+  const host = $("#tscreen");
+  if (!host || termView) return;
+  host.replaceChildren();
+  host.classList.remove("nothing");
+  const mine = termGen;
+  let view;
+  try { view = await makeTerminal(host); }
+  catch (e) { termSay("the terminal could not be drawn: " + (e && e.message ? e.message : e)); return; }
+  if (mine !== termGen) { view.dispose(); return; }
+  termView = view;
+  // Typing is sent while this page holds the keyboard and swallowed while it
+  // does not: the server refuses it either way, and a page that sent every
+  // keystroke to be refused would be asking to be told off for each one.
+  view.onData(data => {
+    if (!termIHold() || !termSock) return termFlash();
+    try { termSock.send(new TextEncoder().encode(data)); } catch {}
+  });
+  termFit();
+}
+
+function termDrop() {
+  if (!termView) return;
+  try { termView.dispose(); } catch {}
+  termView = null;
+  const host = $("#tscreen");
+  if (host) host.replaceChildren();
+}
+
+// termDetach closes this page's socket for good: a clean 1000, which is a
+// person leaving rather than a connection breaking.
+function termDetach() {
+  const sock = termSock;
+  termSock = null;
+  if (!sock) return;
+  try { sock.close(1000); } catch {}
+}
+
+// termConnect opens the one socket. Saying nothing about since replays the
+// whole scrollback, which is what a page opening a terminal wants; after a
+// hello it is always the offset this page has actually been shown.
+function termConnect() {
+  if (termSock || !termId || termEnded !== null) return;
+  const q = termSeen ? "?since=" + termOffset : "";
+  const url = wsURL("/v1/terminals/" + encodeURIComponent(termId) + "/ws" + q);
+  // A browser cannot put a header on a WebSocket, so a token travels as a
+  // subprotocol; a session needs none of that, since the browser attaches
+  // the cookie itself.
+  const protocols = token ? ["rota", "bearer." + token] : ["rota"];
+  let sock;
+  try { sock = new WebSocket(url, protocols); }
+  catch (e) { termSay("no socket: " + e); return; }
+  termSock = sock;
+  sock.binaryType = "arraybuffer";
+  if (termStatus !== "reconnecting") { termStatus = "connecting"; renderTermStrip(); }
+  sock.onopen = () => { termNote = ""; renderTermStrip(); };
+  sock.onerror = () => {};
+  sock.onmessage = e => {
+    if (termSock !== sock) return;
+    // A string is a document; anything else is what the terminal printed.
+    if (typeof e.data === "string") {
+      let doc;
+      try { doc = JSON.parse(e.data); } catch { return; }
+      termFrame(doc);
+      return;
+    }
+    const bytes = new Uint8Array(e.data);
+    termOffset += bytes.byteLength;
+    if (termView) termView.write(bytes);
+  };
+  sock.onclose = ev => {
+    if (termSock !== sock) return;   // an older socket saying goodbye
+    termSock = null;
+    if (termEnded !== null) { termStatus = "ended"; renderTermStrip(); return; }
+    // 1013 is "you fell behind": the bytes are still there, so go back at
+    // once for the ones this page has not been shown.
+    if (ev && ev.code === 1013) { termConnect(); return; }
+    termRetry();
+  };
+}
+
+function termRetry() {
+  if (!termId || termEnded !== null || !schema) return;
+  termWait = TERM_BACKOFF[Math.min(termTries, TERM_BACKOFF.length - 1)];
+  termTries++;
+  termStatus = "reconnecting";
+  renderTermStrip();
+  const mine = termGen;
+  termLater(() => { if (mine === termGen) termConnect(); }, termWait * 1000);
+}
+
+/* ============================================================= the frames == */
+function termFrame(doc) {
+  switch (doc && doc.type) {
+    case "hello":
+      termSeen = true; termTries = 0; termWait = 0;
+      termOffset = doc.offset || 0;
+      termCols = doc.cols || termCols; termRows = doc.rows || termRows;
+      termHolder = doc.holder || null;
+      termYou = doc.you || null;
+      termViewers = doc.viewers || [];
+      termStatus = "live";
+      termFit();
+      renderTerm();
+      break;
+    case "gap":
+      // Output that was not kept is said, never papered over: a terminal
+      // that looked continuous when it was not is worse than a gap.
+      termMark("… " + ((doc.to || 0) - (doc.from || 0)) + " bytes were not kept …");
+      break;
+    case "keyboard":
+      termHolder = doc.holder || null;
+      if (termIHold()) termClaimAt = null; else termAsking = null;
+      termFit();
+      renderTerm();
+      refreshTerminals();
+      break;
+    case "claim_request":
+      // Only the holder is sent one of these, so this page is the holder.
+      termAsking = { by: doc.by, id: doc.id };
+      renderTermStrip();
+      break;
+    case "resized":
+      termCols = doc.cols || termCols; termRows = doc.rows || termRows;
+      // Somebody else's size is shown as it is: this page scrolls inside its
+      // container rather than telling a comfortable lie about how wide the
+      // terminal on the server is.
+      if (!termIHold() && termView) termView.resize(termCols, termRows);
+      renderTermStrip(); renderTermInfo();
+      break;
+    case "viewers":
+      termViewers = doc.list || [];
+      renderTermInfo();
+      refreshTerminals();
+      break;
+    case "exit":
+      termEnded = typeof doc.code === "number" ? doc.code : -1;
+      termStatus = "ended";
+      termHolder = null; termClaimAt = null; termAsking = null;
+      if (termInfo) { termInfo.ended = true; termInfo.exit = termEnded; }
+      renderTerm();
+      refreshTerminals();
+      break;
+    case "error":
+      termSay(doc.message || "that was refused");
+      break;
+    case "pong":
+      break;
+  }
+}
+
+function termSay(msg) { termNote = msg; renderTermStrip(); }
+
+// termMark writes a line of this page's own into the terminal, dimmed so it
+// cannot be mistaken for something the CLI printed.
+function termMark(text) {
+  if (!termView) return;
+  termView.write(new TextEncoder().encode("\r\n\x1b[2m" + text + "\x1b[0m\r\n"));
+}
+
+/* =============================================================== the size == */
+let termWantSize = null, termSizeTimer = false;
+// termFit: the holder's terminal is the size of the space it is in and says
+// so; everybody else's is the size of the session. Only one of the two is
+// the truth, and it belongs to whoever is typing.
+function termFit() {
+  if (!termView) return;
+  if (!termIHold()) { termView.resize(termCols, termRows); return; }
+  const size = termView.fit();
+  if (!size || !size.cols || !size.rows) return;
+  if (size.cols === termCols && size.rows === termRows) return;
+  termSendSize(size);
+}
+
+function termSendSize(size) {
+  termWantSize = size;
+  if (termSizeTimer) return;
+  termSizeTimer = true;
+  termLater(() => {
+    termSizeTimer = false;
+    const s = termWantSize; termWantSize = null;
+    if (!s || !termSock || !termIHold()) return;
+    try { termSock.send(JSON.stringify({ type: "resize", cols: s.cols, rows: s.rows })); } catch {}
+  }, 150);
+}
+
+/* =========================================================== the keyboard == */
+function termTalk(frame) {
+  if (!termSock) return termSay("nothing is attached");
+  try { termSock.send(JSON.stringify(frame)); } catch { termSay("the socket has gone"); }
+}
+
+function termClaim(force) {
+  termTalk(force ? { type: "claim", force: true } : { type: "claim" });
+  if (!force && !termClaimAt) termClaimAt = termNow();
+  renderTermStrip();
+  termTick();
+}
+
+// termTick redraws while a request of this page's is outstanding, so the
+// wait before Force is offered is visible rather than guessed at.
+function termTick() {
+  if (!termClaimAt || termIHold()) return;
+  renderTermStrip();
+  if (termNow() - termClaimAt < CLAIM_WAIT) termLater(termTick, 500);
+}
+
+// termFlash says no to a key this page may not send, once, on the control
+// that says why — rather than sending it to be refused.
+function termFlash() {
+  if (termNudge) return;
+  termNudge = true;
+  renderTermStrip();
+  termLater(() => { termNudge = false; renderTermStrip(); }, 500);
+}
+
+/* ============================================================== the strip == */
+function renderTermStrip() {
+  const host = $("#tstrip");
+  if (!host) return;
+  if (!termId) { host.replaceChildren(el("span", { class: "pill", text: "no terminal chosen" })); return; }
+  const kids = [el("span", { class: "pill" + termStatePill(), text: termStateText() })];
+  if (termWatcher()) kids.push(el("span", { class: "badge", text: "watching" }));
+  else if (termEnded === null) kids.push(termKeyboardBox());
+  if (termAsking && termIHold()) {
+    kids.push(el("span", { class: "kbd" }, [
+      el("b", { text: termAsking.by }),
+      el("span", { text: "wants the keyboard" }),
+      el("button", { class: "btn tiny primary", text: "Grant",
+        onclick: () => { termTalk({ type: "grant", to: termAsking.id }); termAsking = null; renderTermStrip(); } }),
+      el("button", { class: "btn tiny", text: "Deny",
+        onclick: () => { termTalk({ type: "deny", to: termAsking.id }); termAsking = null; renderTermStrip(); } }),
+    ]));
+  }
+  kids.push(el("span", { class: "grow" }));
+  kids.push(el("span", { class: "help", style: "margin:0", text: termCols + "×" + termRows }));
+  if (termNote) kids.push(el("span", { class: "pill bad", text: termNote }));
+  host.replaceChildren(...kids);
+}
+
+const termStateText = () => ({
+  idle: "not attached",
+  connecting: "connecting…",
+  live: "live",
+  reconnecting: "reconnecting in " + termWait + "s",
+  ended: termEnded === null ? "ended" : "ended, code " + termEnded,
+}[termStatus] || termStatus);
+const termStatePill = () => ({ live: " ok", connecting: " busy", reconnecting: " busy", ended: " bad" }[termStatus] || "");
+
+// The keyboard, in three states and no more: you have it, nobody has it, or
+// somebody else has it and may be asked for it.
+function termKeyboardBox() {
+  const flash = termNudge ? " flash" : "";
+  if (termIHold()) {
+    return el("span", { class: "kbd" + flash }, [
+      el("b", { text: "you" }), el("span", { text: "hold the keyboard" }),
+      el("button", { class: "btn tiny", id: "kbd_release", text: "Release", onclick: () => termTalk({ type: "release" }) }),
+    ]);
+  }
+  if (!termHolder) {
+    return el("span", { class: "kbd" + flash }, [
+      el("span", { text: "the keyboard is free" }),
+      el("button", { class: "btn tiny primary", id: "kbd_take", text: "Take the keyboard", onclick: () => termClaim(false) }),
+    ]);
+  }
+  const kids = [el("b", { text: termHolder }), el("span", { text: "holds the keyboard" })];
+  if (!termClaimAt) {
+    kids.push(el("button", { class: "btn tiny", id: "kbd_ask", text: "Ask for the keyboard", onclick: () => termClaim(false) }));
+  } else {
+    const left = Math.max(0, Math.ceil((CLAIM_WAIT - (termNow() - termClaimAt)) / 1000));
+    if (left > 0) kids.push(el("span", { class: "pill busy", id: "kbd_waiting", text: "asked · " + left + "s" }));
+    // Ten seconds unanswered is the server's rule as much as this page's: it
+    // refuses a force before then, so offering one earlier would be a lie.
+    else kids.push(el("button", { class: "btn tiny", id: "kbd_force", text: "Force", onclick: () => termClaim(true) }));
+  }
+  return el("span", { class: "kbd" + flash }, kids);
+}
+
+/* ======================================================== the information == */
+// A time in words, which is what a person reads a terminal's age as.
+function termAgo(iso) {
+  const t = Date.parse(iso || "");
+  if (!t) return "—";
+  return termSpan(Math.max(0, termNow() - t)) + " ago";
+}
+function termSpan(ms) {
+  const s = Math.round(ms / 1000);
+  if (s < 60) return s + "s";
+  if (s < 3600) return Math.floor(s / 60) + "m";
+  if (s < 86400) return Math.floor(s / 3600) + "h " + Math.floor((s % 3600) / 60) + "m";
+  return Math.floor(s / 86400) + "d " + Math.floor((s % 86400) / 3600) + "h";
+}
+
+function renderTermInfo() {
+  const host = $("#tinfo");
+  if (!host) return;
+  if (!termId) {
+    host.replaceChildren(el("div", { class: "empty" }, [
+      el("b", { text: "Nothing open" }), el("span", { text: "choose a terminal on the left" })]));
+    return;
+  }
+  const d = termInfo || {};
+  const row = (label, value, cls) => el("div", { class: "irow" }, [
+    el("dt", { text: label }), el("dd", { class: cls || null, text: value })]);
+  const kids = [el("dl", {}, [
+    row("Account", d.account ? `#${d.account.id} ${d.account.label || ""}`.trim() : "a plain shell"),
+    d.account ? row("Provider", d.account.provider || "—") : null,
+    row("Label", d.label || "—"),
+    row("Folder", d.cwd || "—"),
+    row("Started", termAgo(d.started)),
+    row("Size", termCols + "×" + termRows),
+    row("Keyboard", termEnded !== null ? "nobody" : (termHolder || "free")),
+    row("Recording", d.recording ? "on" : "off"),
+    termLapse(d.token_until, row),
+    termEnded !== null ? row("Ended", "exited, code " + termEnded) : null,
+  ])];
+  kids.push(el("h4", { text: "Watching" }));
+  if (!termViewers.length) kids.push(el("p", { class: "help", text: "nobody else" }));
+  for (const v of termViewers) {
+    kids.push(el("div", { class: "viewer" }, [
+      el("span", { text: v.name }), el("span", { class: "role", text: v.role })]));
+  }
+  if (!watching() && termEnded === null) {
+    kids.push(el("div", { style: "margin-top:14px" }, [
+      el("button", { class: "btn", id: "term_kill", text: "Kill",
+        title: "a hangup, and then the signal nothing survives",
+        onclick: async () => {
+          if (!confirm("End this terminal? Whatever is running in it is sent a hangup.")) return;
+          const r = await api("DELETE", "/v1/terminals/" + encodeURIComponent(termId));
+          if (!r.ok) termSay((r.doc && r.doc.error) || "that terminal could not be ended");
+          refreshTerminals();
+        } }),
+    ]));
+  }
+  host.replaceChildren(...kids);
+}
+
+// termLapse is the one thing about a terminal nobody can see by looking at
+// it: the login inside it has a date, and past that date the CLI in there
+// stops working whatever it is in the middle of.
+function termLapse(until, row) {
+  if (!until) return null;
+  const at = Date.parse(until);
+  if (!at) return null;
+  const left = at - termNow();
+  if (left <= 0) return row("The login inside", "has lapsed", "warn");
+  return row("The login inside", "lapses in " + termSpan(left), left < 3600000 ? "warn" : null);
+}
+
+function renderTerm() {
+  renderTermList(); renderTermStrip(); renderTermInfo();
+  const host = $("#tscreen");
+  if (host && !termId) {
+    host.classList.add("nothing");
+    host.replaceChildren(el("div", { class: "empty" }, [
+      el("b", { text: "No terminal open" }),
+      el("span", { text: "choose one on the left" })]));
+  }
+}
+
+/* ================================================================= boot == */
+// The holder's terminal is the size of the space it is in, so it is refitted
+// when that space changes. Neither of these exists everywhere this script is
+// run, and neither is worth failing over.
+if (typeof ResizeObserver === "function") {
+  try { new ResizeObserver(() => termFit()).observe($("#tscreen")); } catch {}
+}
+if (window && window.addEventListener) window.addEventListener("resize", () => termFit());
+
+// What the shared page asks of whichever page it is on.
+onReady = () => { enterTerminal(); };
+onSignedOut = () => {
+  termDetach(); termDrop();
+  terms = []; termId = null; termGen++; termInfo = null; termStatus = "idle";
+  termPolling = false;
+  renderGate();
+};
+
+renderGate();
+pageBoot("terminal");
+</script>
