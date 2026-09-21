@@ -171,9 +171,11 @@ type shareSession struct {
 // type `stty sane` into, and it is the kind of damage a program does once
 // and is never forgiven for.
 func (sh *shareSession) run() int {
-	if restore, err := sh.lo.raw(); err == nil {
-		defer restore()
+	restore := func() {}
+	if back, err := sh.lo.raw(); err == nil {
+		restore = back
 	}
+	defer restore()
 	done := make(chan struct{})
 	defer close(done)
 
@@ -187,6 +189,12 @@ func (sh *shareSession) run() int {
 	// the queue the link drains.
 	sharePrinted(sh.child, sh.lo, sh.link.q)
 	code := sh.child.wait()
+	// The terminal is the person's again here rather than on the way out.
+	// What follows gives the exit frame a couple of seconds to reach the
+	// server, and nobody should be sitting in front of a raw terminal while
+	// it does. Calling it twice is safe, which is what the deferred one
+	// above is for — it is the path where none of this was reached.
+	restore()
 	sh.link.finished(code)
 	sh.child.close()
 	return code

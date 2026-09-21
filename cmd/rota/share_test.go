@@ -82,10 +82,16 @@ func (l *fakeLocal) raw() (func(), error) {
 		return nil, errNotATerminal
 	}
 	l.rawTimes++
+	// Once, as the real one is: the caller puts the terminal back as soon
+	// as it can and again on the way out, and the second call must not be
+	// a second change of anybody's terminal.
+	var once sync.Once
 	return func() {
-		l.mu.Lock()
-		defer l.mu.Unlock()
-		l.restored++
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.restored++
+		})
 	}, nil
 }
 
