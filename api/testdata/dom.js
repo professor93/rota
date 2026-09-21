@@ -10,7 +10,8 @@ class CL {
 class El {
   constructor(tag){ this.tagName=(tag||'').toUpperCase(); this.children=[]; this.attrs={};
     this.listeners={}; this.classList=new CL(this); this.style={}; this.dataset={};
-    this._text=''; this.value=''; this.checked=false; this.files=[]; this.selectionStart=0; this.selectionEnd=0; }
+    this._text=''; this.value=''; this.checked=false; this.disabled=false; this.files=[];
+    this.hidden=false; this.selectionStart=0; this.selectionEnd=0; }
   set textContent(v){ this._text=String(v); this.children=[]; }
   get textContent(){ return this._text + this.children.map(c=>c.textContent||'').join(''); }
   set innerHTML(v){ this._html=String(v); }
@@ -19,9 +20,13 @@ class El {
   get className(){ return this.attrs.class||''; }
   setAttribute(k,v){ this.attrs[k]=String(v); if(k==='class') this.className=v;
     if(k==='value') this.value=v; if(k==='checked') this.checked=true;
+    // disabled and hidden are attributes in the markup and properties in the
+    // code that reads them back, exactly as a browser has them.
+    if(k==='disabled') this.disabled=true; if(k==='hidden') this.hidden=true;
     if(k.startsWith('data-')) this.dataset[k.slice(5).replace(/-(\w)/g,(_,c)=>c.toUpperCase())]=String(v); }
   getAttribute(k){ return this.attrs[k]; }
-  removeAttribute(k){ delete this.attrs[k]; }
+  removeAttribute(k){ delete this.attrs[k];
+    if(k==='disabled') this.disabled=false; if(k==='hidden') this.hidden=false; }
   append(...kids){ for(const k of kids){ if(k===null||k===undefined) continue;
     this.children.push(typeof k==='object'?k:{textContent:String(k),children:[],attrs:{}}); } }
   replaceChildren(...kids){ this.children=[]; this._text=''; this.append(...kids); }

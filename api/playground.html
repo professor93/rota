@@ -74,6 +74,14 @@ header.top {
 .ver { color:var(--faint); font-size:11.5px; font-family:ui-monospace, Menlo, monospace }
 .grow { flex:1 }
 #token { width:min(260px, 42vw); padding:6px 10px; border:1px solid var(--line); border-radius:var(--r); background:var(--bg) }
+/* Who is signed in, and as what. One strip, in the header's own manner. */
+.who { display:inline-flex; align-items:center; gap:7px; font-size:12.5px; color:var(--muted) }
+.who b { color:var(--fg); font-weight:620 }
+.who .role { border:1px solid var(--line); border-radius:999px; padding:1px 8px; font-size:11px }
+.who .role.watch { background:var(--line2) }
+/* The note a watcher is shown once, above whatever they cannot change. */
+.readonly { border:1px solid var(--line); border-radius:var(--r); background:var(--line2);
+  padding:8px 11px; margin:0 0 12px; font-size:12.5px; color:var(--muted) }
 
 /* ================================================================ atoms == */
 .btn {
@@ -324,6 +332,8 @@ tr.next td { background:var(--accent-soft) }
   <div class="brand">rota <span>playground</span></div>
   <span id="ver" class="ver"></span>
   <span class="grow"></span>
+  <span id="who" class="who" hidden></span>
+  <button id="signout" class="btn ghost" hidden>Sign out</button>
   <label class="sr" for="token">Bearer token</label>
   <input id="token" type="password" placeholder="bearer token" autocomplete="off" spellcheck="false">
   <button id="connect" class="btn">Connect</button>
@@ -386,6 +396,11 @@ const ms = n => (n >= 1000 ? (n / 1000).toFixed(1) + "s" : n + "ms");
 
 /* ================================================================ state == */
 let token = sessionStorage.getItem("rota.token") || "";
+// me is who this page is, as GET /v1/session says: {name, role, via}. Null
+// is signed out. The role decides what is offered, never what is allowed —
+// the server decides that, and a page that hid a button would still have to
+// be refused by it.
+let me = null;
 let schema = null;               // GET /v1/schema
 let accounts = [];               // GET /v1/accounts, already in rotation order
 let defaultAccount = null;       // the account a run with no id would use
@@ -433,9 +448,12 @@ function slim(doc) {
 
 /* ================================================================= http == */
 async function api(method, path, body, extra = {}) {
-  const headers = Object.assign({ authorization: "Bearer " + token }, extra.headers || {});
+  // No token means the cookie is the credential, and an empty bearer header
+  // would be a guess the server counts against this address.
+  const headers = Object.assign(token ? { authorization: "Bearer " + token } : {}, extra.headers || {});
   if (body !== undefined) headers["content-type"] = "application/json";
-  const r = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const r = await fetch(path, { method, headers, credentials: "same-origin",
+    body: body === undefined ? undefined : JSON.stringify(body) });
   const text = await r.text();
   let doc = text;
   try { doc = JSON.parse(text); } catch {}
@@ -448,26 +466,114 @@ function setState(text, kind) {
   n.className = "pill" + (kind ? " " + kind : "");
 }
 
-// connect proves the token with the first thing the page needs anyway, so a
+// load proves whatever credential this page is holding — a token typed in,
+// or the cookie a sign-in left — with the first thing it needs anyway, so a
 // wrong one says so at once and a right one costs no extra round trip.
-async function connect() {
-  token = $("#token").value.trim();
-  if (!token) return setState("enter a token", "bad");
+async function load() {
   setState("connecting…", "busy");
   let first;
   try { first = await refreshAccounts(false); }
-  catch { return setState("unreachable", "bad"); }
+  catch { setState("unreachable", "bad"); return false; }
   if (!first.ok) {
     setState(first.status === 429 ? "blocked" : "rejected", "bad");
     showResponse(first.doc, first.status);
-    return;
+    return false;
   }
-  sessionStorage.setItem("rota.token", token);
   setState("connected", "ok");
+  // Who this turned out to be, which a token says as much as a cookie does:
+  // a token with the watch role is a watcher, and the page shows itself as
+  // one rather than offering buttons the server will refuse.
+  const whoami = await api("GET", "/v1/session");
+  me = whoami.ok && whoami.doc && whoami.doc.role ? whoami.doc : null;
+  renderWho();
   schema = (await api("GET", "/v1/schema")).doc;
   $("#ver").textContent = "v" + (schema.version || "?");
   renderNav(); render();
+  return true;
 }
+
+// connect is the bearer-token way in, which is what this page had before it
+// had any other.
+async function connect() {
+  token = $("#token").value.trim();
+  if (!token) return setState("enter a token", "bad");
+  if (await load()) sessionStorage.setItem("rota.token", token);
+}
+
+// signIn is the other way: a name and a password, answered with a cookie the
+// browser keeps and this page never sees.
+async function signIn(name, password, say) {
+  if (!name || !password) return say("A name and a password.");
+  setState("signing in…", "busy");
+  const r = await api("POST", "/v1/session", { name, password });
+  if (!r.ok) {
+    setState(r.status === 429 ? "blocked" : "rejected", "bad");
+    say((r.doc && r.doc.error) || "That did not work.");
+    return;
+  }
+  // A cookie beats a token that may still be in this tab's storage: two
+  // credentials on one request is one credential too many.
+  token = "";
+  try { sessionStorage.removeItem("rota.token"); } catch {}
+  $("#token").value = "";
+  await load();
+}
+
+// signOut ends the session on the server, not only in this browser.
+async function signOut() {
+  await api("DELETE", "/v1/session");
+  me = null; token = "";
+  try { sessionStorage.removeItem("rota.token"); } catch {}
+  schema = null; accounts = []; live = null;
+  $("#token").value = "";
+  setState("signed out", "");
+  renderWho(); renderNav(); render();
+}
+
+// watching is the one question the rest of the page asks about the role.
+const watching = () => !!me && me.role === "watch";
+
+// renderWho puts who this is in the header, and takes the token field away
+// once there is a session: a page that shows both asks which one is in use.
+function renderWho() {
+  const box = $("#who"), out = $("#signout");
+  const hide = (n, yes) => { if (!n) return; n.hidden = yes; if (yes) n.setAttribute("hidden", ""); else n.removeAttribute("hidden"); };
+  if (!me) {
+    box.replaceChildren();
+    hide(box, true); hide(out, true);
+    hide($("#token"), false); hide($("#connect"), false);
+    return;
+  }
+  box.replaceChildren(
+    el("b", { text: me.name }),
+    el("span", { class: "role" + (watching() ? " watch" : ""), text: me.role }),
+  );
+  hide(box, false);
+  // A bearer token is not a session to sign out of: it is on every request
+  // this page makes, and the way to stop using it is to stop sending it.
+  hide(out, me.via === "token");
+  hide($("#token"), true); hide($("#connect"), true);
+}
+
+// lock disables every control under one node. It is how a watcher's page is
+// made read-only: the server refuses these acts anyway, and this is so that
+// nobody has to find that out by being refused.
+function lock(root) {
+  if (!watching() || !root) return;
+  const walk = n => {
+    if (!n) return;
+    if (n.tagName === "BUTTON" || n.tagName === "INPUT" || n.tagName === "SELECT" || n.tagName === "TEXTAREA") {
+      n.disabled = true;
+    }
+    for (const kid of Array.from(n.children || [])) walk(kid);
+  };
+  walk(root);
+}
+
+// watchNote is the one sentence a watcher is shown above what they cannot
+// change, so a disabled button is explained rather than merely dead.
+const watchNote = () => el("p", { class: "readonly",
+  text: "watching: this sign-in cannot change anything" });
 
 async function refreshAccounts(force) {
   const r = await api("GET", "/v1/accounts" + (force ? "?refresh=1" : ""));
@@ -1105,6 +1211,8 @@ function viewAccounts(panel) {
         el("td", {}, [el("button", { class: "btn tiny ghost", text: "Remove", onclick: () => remove(a) })]),
       ]));
     }
+    // Every one of those writes; a watcher sees the numbers and moves none.
+    lock(table);
   };
 
   panel.append(
@@ -1161,6 +1269,8 @@ function viewSignIn(panel) {
       } })]),
     ]),
   );
+  // Signing an account in is a change like any other.
+  lock(panel);
 }
 
 /* ========================================================= view: Console == */
@@ -1315,12 +1425,15 @@ async function runSocket(id, body, started) {
 }
 
 // openSocket holds one connection until the run is over. A browser cannot put
-// a header on a WebSocket, so the token travels as a subprotocol: the server
-// checks it before the upgrade and echoes only "rota" back.
+// a header on a WebSocket, so a token travels as a subprotocol: the server
+// checks it before the upgrade and echoes only "rota" back. A session needs
+// none of that — the browser attaches the cookie itself — so a page that has
+// signed in offers only "rota".
 function openSocket(url, run, first) {
   return new Promise(resolve => {
     let sock;
-    try { sock = new WebSocket(url, ["rota", "bearer." + token]); }
+    const protocols = token ? ["rota", "bearer." + token] : ["rota"];
+    try { sock = new WebSocket(url, protocols); }
     catch (e) { setState("no socket: " + e, "bad"); resolve(); return; }
     run.sock = sock; live = run;
     sock.onopen = () => { setState("streaming…", "busy"); first(sock); renderTalk(); };
@@ -1390,6 +1503,7 @@ function renderTalk() {
     el("button", { class: "btn tiny", text: "Close", title: "no more messages: it finishes its turn and exits",
       onclick: () => talk({ type: "close" }) }),
   );
+  lock(host);
 }
 
 /* ============================================================== history == */
@@ -1633,12 +1747,47 @@ function renderFoot() {
   if (view !== "ask") return;
   const who = accounts.find(x => String(x.id) === (values.__account || String(defaultAccount)));
   $("#foot").replaceChildren(
-    el("button", { class: "btn primary", text: "▶  Run", onclick: doRun }),
+    el("button", { class: "btn primary", text: "▶  Run", onclick: doRun, disabled: watching() }),
     el("span", { class: "pill", text: values.stream ? "streaming" : "buffered" }),
     el("span", { class: "pill", title: values.__account ? "the account you named" : "the rotation's current choice",
       text: who ? `→ #${who.id} ${who.provider}${who.metered ? "  " + Math.round(who.percent) + "%" : ""}` : "no account available" }),
     el("span", { class: "grow" }),
     el("span", { class: "help", style: "margin:0", text: "⌘/Ctrl + Enter" }),
+  );
+}
+
+/* ============================================================ signed out == */
+// viewGate is what the page is before it is anybody: a sign-in for the
+// people this server's file names, and under it the bearer token, which is
+// how this page has always been used and still is.
+function viewGate(panel) {
+  const name = el("input", { class: "ctl", id: "signin_name", autocomplete: "username",
+    placeholder: "name", spellcheck: "false" });
+  const pass = el("input", { class: "ctl", id: "signin_password", type: "password",
+    autocomplete: "current-password", placeholder: "password" });
+  const said = el("p", { class: "help", style: "margin:9px 0 0", text: "" });
+  const say = msg => { said.textContent = msg; };
+  const go = () => signIn(name.value.trim(), pass.value, say);
+  for (const box of [name, pass]) {
+    box.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+  }
+  panel.append(
+    el("div", { class: "step" }, [
+      el("h3", {}, [el("i", { text: "1" }), el("span", { text: "Sign in" })]),
+      el("p", { class: "help", text: "The name and password this server was given in its file. A sign-in lasts until it expires or you sign out; nothing is kept in this browser but the cookie." }),
+      el("div", { class: "row2" }, [
+        el("div", { class: "field" }, [el("label", { class: "flabel", for: "signin_name", text: "Name" }), name]),
+        el("div", { class: "field" }, [el("label", { class: "flabel", for: "signin_password", text: "Password" }), pass]),
+      ]),
+      el("div", { style: "margin-top:9px" }, [
+        el("button", { class: "btn primary", id: "signin", text: "Sign in", onclick: go }),
+      ]),
+      said,
+    ]),
+    el("div", { class: "step" }, [
+      el("h3", {}, [el("i", { text: "2" }), el("span", { text: "Or use a bearer token" })]),
+      el("p", { class: "help", text: "The token this server was started with, or one its file names. Put it in the box at the top of the page and press Connect; it is kept in this tab and nowhere else." }),
+    ]),
   );
 }
 
@@ -1648,12 +1797,10 @@ function renderPanel() {
   const panel = $("#panel");
   panel.replaceChildren();
   if (!schema) {
-    panel.append(el("div", { class: "empty" }, [
-      el("b", { text: "Not connected" }),
-      el("span", { text: "Enter the token this server was started with, then press Connect." }),
-    ]));
+    viewGate(panel);
     return;
   }
+  if (watching()) panel.append(watchNote());
   ({ ask: viewAsk, accounts: viewAccounts, running: viewRunning, signin: viewSignIn, console: viewConsole }[view] || viewAsk)(panel);
 }
 
@@ -1681,6 +1828,7 @@ function cycleTheme() {
 try { applyTheme(localStorage.getItem(THEME_KEY) || "system"); } catch {}
 
 $("#connect").addEventListener("click", connect);
+$("#signout").addEventListener("click", signOut);
 $("#theme").addEventListener("click", cycleTheme);
 $("#token").addEventListener("keydown", e => { if (e.key === "Enter") connect(); });
 document.addEventListener("keydown", e => {
@@ -1695,8 +1843,25 @@ document.addEventListener("keydown", e => {
 });
 
 $("#token").value = token;
+renderWho();
 renderNav();
 renderIONav();
 render();
-if (token) connect();
+
+// boot asks who this page is before anything else. A session says so and the
+// page carries on signed in; nothing says so and it shows the sign-in, unless
+// this tab is still holding a token from earlier.
+async function boot() {
+  const whoami = await api("GET", "/v1/session");
+  if (whoami.ok && whoami.doc && whoami.doc.role) {
+    me = whoami.doc;
+    renderWho();
+    await load();
+    return;
+  }
+  me = null;
+  renderWho();
+  if (token) await connect();
+}
+boot();
 </script>

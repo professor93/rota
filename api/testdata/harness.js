@@ -26,6 +26,10 @@ const sessionsDoc = {
 let lastPost = null, lastPath = null;
 const patches = [];
 const deletes = [];
+// sessionDoc is what GET /v1/session answers: null is signed out, which the
+// server says with 401. signInRole is the role a sign-in turns out to have.
+let sessionDoc = null;
+let signInRole = 'control';
 
 // jsonAPI answers every request the page makes, recording the ones a test
 // asserts on.
@@ -34,6 +38,25 @@ const jsonAPI = async (path, init = {}) => {
     ok: true, status: 200, headers: { get: () => 'application/json' },
     text: async () => JSON.stringify(doc), json: async () => doc,
   });
+  const refuse = (status, doc) => ({
+    ok: false, status, headers: { get: () => 'application/json' },
+    text: async () => JSON.stringify(doc), json: async () => doc,
+  });
+  // The three session routes, before anything else: two of them are a POST
+  // and a DELETE that would otherwise be read as a run and an account.
+  if (path === '/v1/session') {
+    if (init.method === 'POST') {
+      const body = JSON.parse(init.body);
+      if (body.password !== 'right') return refuse(401, { error: 'that name and password do not go together' });
+      sessionDoc = { name: body.name, role: signInRole, via: 'user', expires: '2030-01-01T00:00:00Z' };
+      return reply(sessionDoc);
+    }
+    if (init.method === 'DELETE') { sessionDoc = null; return reply({ signed_out: true }); }
+    if (sessionDoc) return reply(sessionDoc);
+    // A bearer token is a principal too, and the server names it.
+    if (init.headers && init.headers.authorization) return reply({ name: 'token', role: 'control', via: 'token' });
+    return refuse(401, { error: 'invalid or missing bearer token' });
+  }
   if (init.method === 'PATCH') {
     patches.push({ path, body: JSON.parse(init.body) });
     return reply({});
@@ -64,6 +87,9 @@ const pg = new Function(src + `
 ;return {
   connect, render, renderPanel, renderIO, renderIONav, renderFoot, doRun, colorJSON, buildBody, runPath,
   answerSection, askSection, renderField, providerFields,
+  signIn, signOut, renderWho, watching, viewGate,
+  get me(){return me}, set me(v){me=v},
+  get token(){return token}, set token(v){token=v},
   get schema(){return schema},
   get values(){return values}, set values(v){values=v},
   get view(){return view}, set view(v){view=v},
@@ -459,6 +485,63 @@ const settle = () => new Promise(r => setTimeout(r, 5));
   await pg.doRun();
   assert(sockets.length === before + 1, 'and no socket is opened even so');
   pg.schema.websocket = true;
+
+  // 16. signed out, the page is a sign-in and the bearer token underneath it.
+  pg.me = null; pg.token = ''; pg.renderWho();
+  const gateBox = document.createElement('div');
+  pg.viewGate(gateBox);
+  const gateName = byId(gateBox, 'signin_name');
+  const gatePass = byId(gateBox, 'signin_password');
+  const gateGo = byId(gateBox, 'signin');
+  assert(gateName && gatePass && gateGo, 'signed out, the page asks for a name and a password');
+  assert(gateBox.textContent.includes('bearer token'),
+    'and still offers the token, which is how this page has always been used');
+  assert(nodes['#who'].hidden === true, 'nobody is named in the header while signed out');
+
+  // 17. signing in makes the page that principal, and drops any token.
+  pg.token = 'playground-token';
+  let told = '';
+  await pg.signIn('driver', 'right', m => { told = m; });
+  assert(pg.me && pg.me.name === 'driver' && pg.me.role === 'control' && pg.me.via === 'user',
+    'signing in makes the page that principal: ' + JSON.stringify(pg.me));
+  assert(pg.token === '', 'a cookie beats a token that was lying about: ' + pg.token);
+  assert(nodes['#who'].textContent.includes('driver') && nodes['#who'].textContent.includes('control'),
+    'the header says who and as what: ' + nodes['#who'].textContent);
+  assert(nodes['#token'].hidden === true, 'and the token box goes away');
+
+  // a wrong password says so and changes nothing
+  await pg.signOut();
+  await pg.signIn('driver', 'wrong', m => { told = m; });
+  assert(pg.me === null, 'a wrong password signs nobody in');
+  assert(told.includes('do not go together'), 'and the server\'s own sentence is shown: ' + told);
+
+  // 18. a watcher sees everything and can change nothing.
+  signInRole = 'watch';
+  await pg.signIn('looker', 'right', m => { told = m; });
+  assert(pg.watching(), 'the page knows it is watching');
+  pg.view = 'ask'; pg.values = {}; pg.values.__account = '1';
+  pg.render();
+  const watchRunBtn = findAll(nodes['#foot'], e => e.tagName === 'BUTTON')[0];
+  assert(watchRunBtn && watchRunBtn.disabled === true, 'a watcher cannot press Run');
+  assert(nodes['#panel'].textContent.includes('watching: this sign-in cannot change anything'),
+    'and is told why: ' + nodes['#panel'].textContent.slice(0, 160));
+
+  pg.view = 'accounts'; pg.render(); await settle();
+  const rowCells = findAll(nodes['#panel'], e => ['BUTTON', 'INPUT', 'SELECT'].includes(e.tagName));
+  assert(rowCells.length > 0, 'the accounts table has controls');
+  assert(rowCells.every(e => e.disabled === true),
+    'and a watcher may touch none of them: ' + rowCells.filter(e => !e.disabled).length + ' were live');
+
+  pg.view = 'signin'; pg.render();
+  const vendorBtns = findAll(nodes['#panel'], e => e.tagName === 'BUTTON');
+  assert(vendorBtns.length && vendorBtns.every(e => e.disabled === true),
+    'nor sign an account in');
+
+  // 19. and signing out puts the page back where it started.
+  await pg.signOut();
+  assert(pg.me === null && pg.token === '', 'signing out forgets both');
+  assert(nodes['#token'].hidden === false, 'and the token box comes back');
+  signInRole = 'control';
 
   console.log('PLAYGROUND_OK passes=' + passes);
 })().catch(e => { console.error('FAILED:', e.stack); process.exit(1); });
