@@ -169,13 +169,19 @@ func (s *Server) takeShare(conn net.Conn) {
 		return
 	}
 	ts := s.newShared(c, &hello)
+	// Listed before the welcome goes out, and not after. The welcome is what
+	// tells the sharer its terminal's id, and a sharer that has been told an
+	// id is one whose next breath may be somebody asking this server about
+	// it — the page it prints the id for is already open. Registering
+	// afterwards leaves a window in which that id is a 404, and it is a
+	// window a slower machine loses and a faster one wins.
+	s.addTerminal(ts)
 	if err := c.SendJSON(share.Welcome, share.WelcomeMsg{Version: share.Version, Terminal: ts.id}); err != nil {
 		s.dropTerminal(ts.id)
 		c.Close()
 		return
 	}
 	c.Clear()
-	s.addTerminal(ts)
 	ts.audit("terminal shared", "account", hello.Account, "label", ts.name,
 		"pid", hello.PID, "mode", ts.shareMode())
 	go ts.run()
@@ -196,9 +202,7 @@ func (s *Server) mayShare(hello *share.HelloMsg) (why string, final bool) {
 	return "", false
 }
 
-// newShared builds the session for one hello. Nothing about it is registered
-// yet: the welcome has to reach the sharer first, because a terminal listed
-// on a link that turned out to be broken is a terminal nobody can end.
+// newShared builds the session for one hello.
 func (s *Server) newShared(c *share.Conn, hello *share.HelloMsg) *termSession {
 	mode := share.ModeControl
 	if hello.Mode == share.ModeWatch {

@@ -177,7 +177,12 @@ type shareQueue struct {
 	bits [][]byte
 	held int
 	max  int
+	// lost is what has been dropped and not yet announced, which take
+	// clears as it hands it over. gone is the same number never cleared:
+	// how much this server has missed altogether, which is a question with
+	// an answer whether or not a link happens to be draining right now.
 	lost int64
+	gone int64
 	// exit is the code the CLI ended with, put here rather than sent
 	// directly so that it cannot overtake the output it comes after.
 	exit *int
@@ -207,6 +212,7 @@ func (q *shareQueue) push(p []byte) {
 	// what is about to be sent, which is why one number is enough to say it.
 	for q.held > q.max && len(q.bits) > 0 {
 		q.lost += int64(len(q.bits[0]))
+		q.gone += int64(len(q.bits[0]))
 		q.held -= len(q.bits[0])
 		q.bits = q.bits[1:]
 	}
@@ -230,12 +236,15 @@ func (q *shareQueue) nudge() {
 	}
 }
 
-// dropped is how much the server has missed so far, for a test and for
-// nothing else.
-func (q *shareQueue) dropped() int64 {
+// missed is how much the server has missed altogether and how much of that
+// is still waiting to be announced to it, for a test and for nothing else.
+// The two differ because take clears the second as it hands it over, and a
+// link that happened to pick the count up a moment ago has not made the
+// bytes come back.
+func (q *shareQueue) missed() (total, owed int64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	return q.lost
+	return q.gone, q.lost
 }
 
 // take hands over everything waiting, and what was lost in front of it. It

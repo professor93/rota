@@ -237,7 +237,7 @@ func TestTheTerminalIsPutBackWhenTheLinkNeverReads(t *testing.T) {
 		t.Fatalf("the screen was shown %d bytes of %d",
 			lo.out.Len(), len(strings.Repeat("a screenful of output\r\n", 4000)))
 	}
-	if q.dropped() == 0 {
+	if total, _ := q.missed(); total == 0 {
 		t.Fatal("nothing was dropped for a server that read nothing, so something waited for it")
 	}
 }
@@ -322,8 +322,12 @@ func TestWhatTheServerMissedIsCountedAndAnnouncedInFrontOfTheRest(t *testing.T) 
 	if len(bits) != 1 || string(bits[0][:1]) != "b" {
 		t.Fatalf("what is kept is the newest, which is what somebody watching wants: %d chunks", len(bits))
 	}
-	if q.dropped() != 0 {
-		t.Fatal("a count that was handed over is not still owed")
+	total, owed := q.missed()
+	if owed != 0 {
+		t.Fatalf("a count that was handed over is not still owed: %d", owed)
+	}
+	if total != 600 {
+		t.Fatalf("but what went is still what went: %d", total)
 	}
 }
 
