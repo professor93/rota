@@ -159,21 +159,32 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 		kind: kind, account: plan.account, label: plan.label, provider: plan.provider,
 		name: strings.TrimSpace(req.Label), cwd: cwd, started: s.now(),
 		tokenUntil: plan.tokenUntil,
-		master:     master, proc: cmd.Process, release: plan.release,
-		cols: cols, rows: rows, ring: newOutRing(s.opts.Terminal.Scrollback),
+		back:       &localTerm{master: master, cmd: cmd, proc: cmd.Process},
+		release:    plan.release,
+		cols:       cols, rows: rows, ring: newOutRing(s.opts.Terminal.Scrollback),
 	}
 	ts.idleAt = ts.started
-	if s.opts.Terminal.Record {
-		if rec, err := s.recorderFor(ts.id); err != nil {
-			s.log.Warn("this terminal is not being recorded", "terminal", ts.id, "err", err)
-		} else {
-			ts.rec = rec
-		}
-	}
+	s.recordTerminal(ts)
 	s.addTerminal(ts)
 	ts.audit("terminal created", "kind", kind, "account", plan.account, "by", who(r).Name)
-	go ts.run(cmd)
+	go ts.run()
 	return ts, nil
+}
+
+// recordTerminal opens the recording, where the file asked for one. A
+// terminal that could not be recorded still runs: the warning is all that
+// happens, because the alternative is refusing somebody a terminal over a
+// directory they cannot see.
+func (s *Server) recordTerminal(ts *termSession) {
+	if !s.opts.Terminal.Record {
+		return
+	}
+	rec, err := s.recorderFor(ts.id)
+	if err != nil {
+		s.log.Warn("this terminal is not being recorded", "terminal", ts.id, "err", err)
+		return
+	}
+	ts.rec = rec
 }
 
 // termPlan is what to run and as whom: the executable, its arguments, the

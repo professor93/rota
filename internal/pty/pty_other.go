@@ -22,6 +22,10 @@ func Start(*exec.Cmd, uint16, uint16) (*os.File, error) { return nil, unsupporte
 // everywhere and fails in one place.
 func Resize(*os.File, uint16, uint16) error { return unsupported() }
 
+// Size refuses too: a platform with no pseudo-terminal is one where nothing
+// here has a window to measure.
+func Size(*os.File) (uint16, uint16, error) { return 0, 0, unsupported() }
+
 func unsupported() error {
 	return fmt.Errorf("%w: %s has none; the terminal runs on linux and macOS", ErrUnsupported, runtime.GOOS)
 }

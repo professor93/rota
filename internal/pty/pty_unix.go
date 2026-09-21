@@ -76,6 +76,20 @@ func Resize(master *os.File, cols, rows uint16) error {
 	return nil
 }
 
+// Size is how big a terminal is, asked of the device rather than of the
+// environment: TERM and COLUMNS are what a program was told once, and a
+// window that has been dragged since has made a liar of both.
+//
+// It takes any terminal, not only a master, because the window rota is
+// sitting at is the one whose size a shared terminal follows.
+func Size(f *os.File) (cols, rows uint16, err error) {
+	var ws winsize
+	if err := control(f, syscall.TIOCGWINSZ, unsafe.Pointer(&ws)); err != nil {
+		return 0, 0, fmt.Errorf("asking the terminal how big it is: %w", err)
+	}
+	return ws.cols, ws.rows, nil
+}
+
 // control runs one ioctl on a file without taking its descriptor out of the
 // runtime's poller. os.File.Fd would put the master into blocking mode, and
 // a blocking master is one whose reader cannot be woken by closing it — the

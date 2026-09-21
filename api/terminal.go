@@ -35,11 +35,14 @@ import (
 // server listening anywhere but the loopback is refused without TLS.
 
 const (
-	// termKindAccount is a terminal running an account's vendor CLI, and
+	// termKindAccount is a terminal running an account's vendor CLI,
 	// termKindShell one running the person's login shell — which is off
-	// unless the file asks for it.
+	// unless the file asks for it — and termKindShared one that is not this
+	// server's at all: a terminal somebody is sitting at, offered to this
+	// server by the rota that is running it.
 	termKindAccount = "account"
 	termKindShell   = "shell"
+	termKindShared  = "shared"
 
 	// termQueue is how many frames one connection may fall behind by. A
 	// terminal fans out to everyone attached, and a reader that has stopped
@@ -91,17 +94,26 @@ var (
 // needs to go on working would be the one dropped.
 var termQueueFor = func(*Principal, bool) int { return termQueue }
 
-// The two refusals a connection is given for trying to type. They are
-// constants because they are part of what this server answers, and a test
-// reads them.
+// The refusals a connection is given for trying to type, or to change a
+// terminal that is not this server's to change. They are constants because
+// they are part of what this server answers, and a test reads them.
 const (
 	notHolding = "you are not holding the keyboard"
 	watchConn  = "this connection attached to watch; attach again with mode=control to ask for the keyboard"
+	// sharedWatch is a terminal offered to be read and never typed into. It
+	// is the sharer's decision, made where the terminal is, so no role on
+	// this server overrides it.
+	sharedWatch = "this terminal is shared to be watched only"
+	// sharedSize is the other thing a shared terminal does not take: its
+	// size belongs to the window somebody is actually sitting at.
+	sharedSize = "this terminal's size follows the window it was started in"
 )
 
 var (
-	errNotHolding = errors.New(notHolding)
-	errTermEnded  = errors.New("this terminal has ended")
+	errNotHolding  = errors.New(notHolding)
+	errTermEnded   = errors.New("this terminal has ended")
+	errSharedWatch = errors.New(sharedWatch)
+	errSharedSize  = errors.New(sharedSize)
 )
 
 /* -------------------------------------------------------------- the clock --- */
@@ -354,6 +366,110 @@ func (tc *termConn) join(first []byte) []byte {
 	return out
 }
 
+/* ------------------------------------------------------- the other end --- */
+
+// termBackend is whatever is at the far end of a terminal.
+//
+// For most of them it is a process on a pseudo-terminal this server started,
+// and for a shared one it is another rota on a socket, with the process at
+// the far end of that. Everything above this line — the ring with its
+// absolute offsets, the fan-out, the slow reader closed with 1013, the
+// replay, the keyboard, the audit, the recording, the listing — is the same
+// either way, and says so by never mentioning a file descriptor.
+//
+// What a terminal needs of its other end is small: take these bytes, be this
+// size, stop, and print until there is no more.
+type termBackend interface {
+	// typeInto writes the bytes of somebody typing. An error is the answer
+	// the connection that typed them is given.
+	typeInto(p []byte) error
+	// resize tells it the window is a different size, or says why it will
+	// not be told — a shared terminal's size is not this server's to set.
+	resize(cols, rows uint16) error
+	// hangUp is the ending a CLI is written to tidy up after, and end is
+	// the one nothing survives, a few seconds later.
+	hangUp()
+	end()
+	// run carries everything printed into sink until there is nothing more,
+	// and answers with the exit code. It is the whole life of the far end,
+	// and returning from it is what ends the session.
+	run(sink termSink) int
+	// close lets go of what it holds, once the session is finished with it.
+	close()
+	// describe adds what only this kind of far end knows to a terminal's
+	// description.
+	describe(doc map[string]any)
+}
+
+// termSink is the session as its other end sees it: somewhere to put output,
+// and the two things only a shared far end ever says.
+type termSink interface {
+	output(p []byte)
+	resizedBy(cols, rows uint16)
+	gapOf(bytes int64)
+}
+
+// localTerm is the far end this server started itself: a process on a
+// pseudo-terminal of its own, which is what every terminal was before one
+// could be shared.
+type localTerm struct {
+	master *os.File
+	cmd    *exec.Cmd
+	proc   *os.Process
+}
+
+func (l *localTerm) typeInto(p []byte) error { _, err := l.master.Write(p); return err }
+
+func (l *localTerm) resize(cols, rows uint16) error { return pty.Resize(l.master, cols, rows) }
+
+func (l *localTerm) hangUp() {
+	if l.proc != nil {
+		_ = l.proc.Signal(syscall.SIGHUP)
+	}
+}
+
+func (l *localTerm) end() {
+	if l.proc != nil {
+		_ = l.proc.Signal(syscall.SIGKILL)
+	}
+}
+
+func (l *localTerm) close() { l.master.Close() }
+
+func (l *localTerm) describe(map[string]any) {}
+
+// run is the output pump and then the wait.
+//
+// The order here is fixed, and it is deliberately not the order in which the
+// two things that end a terminal are noticed. On Linux a read of the master
+// fails the moment the child's side of it is closed, while on macOS it hands
+// back what is left and then reports the end, so "the output has stopped"
+// and "the process has exited" arrive in either order depending on the
+// platform. Everything that follows from the ending happens after both.
+//
+// Any read error ends it, and none of them is worth a line in the log: a
+// master whose child has gone reads as EIO on Linux and as an end of file on
+// macOS, and both mean the same thing. Whatever came back with the error is
+// kept first, because a read may hand over the last of the output and the
+// end of it at the same time.
+func (l *localTerm) run(sink termSink) int {
+	buf := make([]byte, termRead)
+	for {
+		n, err := l.master.Read(buf)
+		if n > 0 {
+			sink.output(buf[:n])
+		}
+		if err != nil {
+			break
+		}
+	}
+	_ = l.cmd.Wait() // and only then is there an exit code to report
+	if l.cmd.ProcessState != nil {
+		return l.cmd.ProcessState.ExitCode()
+	}
+	return -1
+}
+
 /* -------------------------------------------------------------- a session --- */
 
 // termClaim is somebody asking for the keyboard: the connection that asked
@@ -383,10 +499,13 @@ type termSession struct {
 	// for a day wants to know that before the CLI tells them.
 	tokenUntil time.Time
 
-	master  *os.File
-	proc    *os.Process
+	back    termBackend
 	release func()
 	rec     *recorder
+	// lookOnly is a terminal shared to be watched: nobody on this server may
+	// type into it or hold its keyboard, whatever their role. It is set once
+	// when the session is made and never changes.
+	lookOnly bool
 
 	mu         sync.Mutex
 	cols, rows uint16
@@ -413,9 +532,13 @@ type termSession struct {
 // and the principal behind it may control. Identity and role, not the page's
 // good manners.
 //
+// A terminal shared to be watched has no keyboard at all, so nobody holds
+// it: the person at the far end is typing at their own machine, and what
+// they offered this server was a window onto it.
+//
 // Called with mu held.
 func (ts *termSession) holds(tc *termConn) bool {
-	return tc != nil && ts.holder == tc && !tc.watch && tc.role.allows(RoleControl)
+	return tc != nil && !ts.lookOnly && ts.holder == tc && !tc.watch && tc.role.allows(RoleControl)
 }
 
 // typeInto is the one door into the terminal's input. Every byte a client
@@ -427,19 +550,26 @@ func (ts *termSession) typeInto(tc *termConn, p []byte) error {
 		ts.mu.Unlock()
 		return errTermEnded
 	}
+	if ts.lookOnly {
+		ts.mu.Unlock()
+		return errSharedWatch
+	}
 	if !ts.holds(tc) {
 		ts.mu.Unlock()
 		return errNotHolding
 	}
-	master := ts.master
+	back := ts.back
 	ts.mu.Unlock()
-	_, err := master.Write(p)
-	return err
+	return back.typeInto(p)
 }
 
 // resizeTo is the other thing only the holder may do: the size is the
 // terminal's, not the viewer's, and a watcher whose window is narrower must
 // not reflow everybody else's screen.
+//
+// The far end has the last word on it. A shared terminal is a window
+// somebody is sitting at, and a page cannot reach across and make that
+// window a different size, so it is refused and nothing changes here.
 func (ts *termSession) resizeTo(tc *termConn, cols, rows uint16) error {
 	cols, rows = boundSize(cols, rows)
 	ts.mu.Lock()
@@ -447,20 +577,53 @@ func (ts *termSession) resizeTo(tc *termConn, cols, rows uint16) error {
 		ts.mu.Unlock()
 		return errTermEnded
 	}
+	if ts.lookOnly {
+		ts.mu.Unlock()
+		return errSharedWatch
+	}
 	if !ts.holds(tc) {
 		ts.mu.Unlock()
 		return errNotHolding
 	}
-	master := ts.master
+	back := ts.back
 	ts.mu.Unlock()
-	if err := pty.Resize(master, cols, rows); err != nil {
+	if err := back.resize(cols, rows); err != nil {
 		return err
 	}
+	ts.resizedBy(cols, rows)
+	return nil
+}
+
+// resizedBy is the size having changed, wherever the change came from: this
+// server having set it, or a sharer saying its window was dragged. Everyone
+// attached is told, because everyone attached is drawing that size.
+func (ts *termSession) resizedBy(cols, rows uint16) {
+	cols, rows = boundSize(cols, rows)
 	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.ended || (ts.cols == cols && ts.rows == rows) {
+		return
+	}
 	ts.cols, ts.rows = cols, rows
 	ts.tell(map[string]any{"type": "resized", "cols": cols, "rows": rows})
-	ts.mu.Unlock()
-	return nil
+}
+
+// gapOf is output that never reached this server: a sharer's queue overflowed
+// because this server was slow or was not there at all. It is said rather
+// than papered over, in the same frame and the same words a reader gets when
+// it asks for an offset the scrollback no longer has — the offsets stay
+// consistent either way, because the bytes were never counted.
+func (ts *termSession) gapOf(n int64) {
+	if n <= 0 {
+		return
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.ended {
+		return
+	}
+	at := ts.ring.end
+	ts.tell(map[string]any{"type": "gap", "from": at, "to": at, "bytes": n})
 }
 
 // free reports whether the keyboard is nobody's, letting a lapsed grace go
@@ -530,6 +693,8 @@ func (ts *termSession) claim(tc *termConn, force bool) {
 	switch {
 	case ts.ended:
 		tc.fail(errTermEnded.Error())
+	case ts.lookOnly:
+		tc.fail(sharedWatch)
 	case tc.watch:
 		tc.fail(watchConn)
 	case ts.holder == tc:
@@ -671,7 +836,7 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 	ts.mu.Lock()
 	ts.conns = append(ts.conns, tc)
 	ts.idleAt = time.Time{}
-	if !tc.watch && (ts.free() || ts.mine(tc)) {
+	if !tc.watch && !ts.lookOnly && (ts.free() || ts.mine(tc)) {
 		ts.take(tc)
 		ts.audit("keyboard taken", "to", tc.name)
 	}
@@ -778,27 +943,6 @@ func (ts *termSession) audit(msg string, args ...any) {
 
 /* -------------------------------------------------------- the output pump --- */
 
-// pump reads the terminal and gives what it read to everyone at once. It is
-// the only reader of the master.
-//
-// Any error ends it, and none of them is worth a line in the log: a master
-// whose child has gone reads as EIO on Linux and as an end of file on macOS,
-// and both mean the same thing — there is no more output. Whatever came back
-// with the error is kept first, because a read may hand over the last of the
-// output and the end of it at the same time.
-func (ts *termSession) pump() {
-	buf := make([]byte, termRead)
-	for {
-		n, err := ts.master.Read(buf)
-		if n > 0 {
-			ts.output(buf[:n])
-		}
-		if err != nil {
-			return
-		}
-	}
-}
-
 // output keeps what was printed and fans it out. One copy is made and shared:
 // the frames are never written to again, and copying per connection would
 // multiply every burst by the number of people watching.
@@ -827,24 +971,10 @@ func (ts *termSession) over() bool {
 }
 
 // run is the whole of a terminal after it has started, and the one place it
-// ends.
-//
-// The order here is fixed, and it is deliberately not the order in which the
-// two things that end a terminal are noticed. On Linux a read of the master
-// fails the moment the child's side of it is closed, while on macOS it hands
-// back what is left and then reports the end, so "the output has stopped"
-// and "the process has exited" arrive in either order depending on the
-// platform. Everything that follows from the ending — the exit frame, the
+// ends: the far end prints until there is nothing more and then says how it
+// ended, and everything that follows from the ending — the exit frame, the
 // recording, the account, the sockets — happens after both, once, here.
-func (ts *termSession) run(cmd *exec.Cmd) {
-	ts.pump()      // returns when the master has nothing more to give
-	_ = cmd.Wait() // and only then is there an exit code to report
-	code := -1
-	if cmd.ProcessState != nil {
-		code = cmd.ProcessState.ExitCode()
-	}
-	ts.finish(code)
-}
+func (ts *termSession) run() { ts.finish(ts.back.run(ts)) }
 
 // finish is the process having gone: everyone is told how, the account is
 // let go of, and the terminal stays listed for a while so a client that
@@ -875,7 +1005,7 @@ func (ts *termSession) finish(code int) {
 	if ts.release != nil {
 		ts.release()
 	}
-	ts.master.Close()
+	ts.back.close()
 	for _, tc := range conns {
 		tc.settle()
 	}
@@ -884,7 +1014,12 @@ func (ts *termSession) finish(code int) {
 
 // kill asks the terminal to end and makes sure it does: a hangup first,
 // which is what closing a terminal window sends and what a CLI is written to
-// tidy up after, and then the signal nothing survives.
+// tidy up after, and then the ending nothing survives.
+//
+// For a shared terminal the hangup is a frame rather than a signal — this
+// server has no process to signal — and the sharer hangs up the child it is
+// holding. The insisting ending is this server letting go of the link, which
+// is all it can do to a machine it does not own.
 func (ts *termSession) kill(by string) {
 	ts.mu.Lock()
 	if ts.ended || ts.killing {
@@ -892,18 +1027,15 @@ func (ts *termSession) kill(by string) {
 		return
 	}
 	ts.killing = true
-	proc := ts.proc
+	back := ts.back
 	ts.mu.Unlock()
 	if by != "" {
 		ts.audit("terminal killed", "by", by)
 	}
-	if proc == nil {
-		return
-	}
-	_ = proc.Signal(syscall.SIGHUP)
+	back.hangUp()
 	time.AfterFunc(termKillAfter, func() {
 		if !ts.over() {
-			_ = proc.Signal(syscall.SIGKILL)
+			back.end()
 		}
 	})
 }
@@ -932,9 +1064,13 @@ func (ts *termSession) describe() map[string]any {
 		// person should have to read a configuration file to find out.
 		"recording": ts.rec != nil,
 	}
-	if ts.kind == termKindAccount {
+	if ts.kind != termKindShell && ts.account != 0 {
 		doc["account"] = map[string]any{"id": ts.account, "label": ts.label, "provider": ts.provider}
 	}
+	// What only this terminal's far end knows: for a shared one, the process
+	// answering for it, whether it may be typed into, and whether the rota
+	// holding it is still there.
+	ts.back.describe(doc)
 	if ts.ended {
 		doc["exit"] = ts.exit
 	}
