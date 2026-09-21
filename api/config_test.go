@@ -65,11 +65,13 @@ key = "/k.pem"
 [auth]
 token = "t"
 token_env = "OTHER"
+session_ttl = "2h"
 
 [routes]
 api = true
 playground = false
 websocket = false
+health = false
 
 [runs]
 timeout = "30s"
@@ -84,6 +86,16 @@ allow_raw_flags = true
 
 [store]
 dir = "/srv/rota"
+
+[[users]]
+name = "inoyat"
+role = "control"
+password = "pbkdf2-sha256$600000$c2FsdHNhbHRzYWx0c2FsdA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+
+[[tokens]]
+name = "ci-watch"
+role = "watch"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 `))
 	if err != nil {
 		t.Fatal(err)
@@ -91,7 +103,7 @@ dir = "/srv/rota"
 	want := &Config{
 		Server: ServerSection{Listen: "0.0.0.0:1234", Quiet: true},
 		TLS:    TLSSection{Cert: "/c.pem", Key: "/k.pem"},
-		Auth:   AuthSection{Token: "t", TokenEnv: "OTHER"},
+		Auth:   AuthSection{Token: "t", TokenEnv: "OTHER", SessionTTL: 2 * time.Hour},
 		Routes: RoutesSection{API: true},
 		Runs: RunsSection{
 			Timeout: 30 * time.Second, MaxConcurrent: 2, InputTimeout: 5 * time.Minute,
@@ -99,6 +111,10 @@ dir = "/srv/rota"
 			Roots: []string{"/tmp"}, AllowDangerous: true, AllowRawFlags: true,
 		},
 		Store: StoreSection{Dir: "/srv/rota"},
+		Users: []UserEntry{{Name: "inoyat", Role: "control",
+			Password: "pbkdf2-sha256$600000$c2FsdHNhbHRzYWx0c2FsdA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
+		Tokens: []TokenEntry{{Name: "ci-watch", Role: "watch",
+			SHA256: "0000000000000000000000000000000000000000000000000000000000000000"}},
 	}
 	c.From = nil
 	if !reflect.DeepEqual(c, want) {
@@ -325,5 +341,132 @@ func TestPrintSaysNothingIsSetWhenNothingIs(t *testing.T) {
 	}
 	if !strings.Contains(b.String(), `token           = ""                 # default`) {
 		t.Fatalf("a server with no token:\n%s", b.String())
+	}
+}
+
+// goodHash is one real derived password, made once and reused: every test
+// below that needs a valid entry needs the same valid entry, and deriving
+// one per case is the slowest thing in this package.
+var goodHash = func() string {
+	h, err := HashPassword("open sesame")
+	if err != nil {
+		panic(err)
+	}
+	return h
+}()
+
+// shortSalt, cheap and stub are entries wrong in one way each, written out
+// rather than built so that what the file says is what the test reads.
+const (
+	realSalt = "c2FsdHNhbHRzYWx0c2FsdA=="                     // 16 bytes
+	realKey  = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=" // 32 bytes
+)
+
+// TestUsersAndTokensAreCheckedByName: every refusal names the entry it is
+// about and the field, because the person reading it is holding a file with
+// several of these in it.
+func TestUsersAndTokensAreCheckedByName(t *testing.T) {
+	user := func(body string) string { return "[[users]]\n" + body }
+	tok := func(body string) string { return "[[tokens]]\n" + body }
+	sum := strings.Repeat("ab", 32)
+	for _, c := range []struct{ name, body, want string }{
+		{"a user with no name", user("role = \"watch\"\npassword = \"x\"\n"),
+			`[[users]] #1: name is empty`},
+		{"a user with no role", user("name = \"a\"\npassword = \"x\"\n"),
+			`[[users]] "a": role: is empty; write "control" or "watch"`},
+		{"a user with an invented role", user("name = \"a\"\nrole = \"admin\"\npassword = \"x\"\n"),
+			`[[users]] "a": role: "admin" is not a role`},
+		{"a user with no password", user("name = \"a\"\nrole = \"watch\"\npassword = \"\"\n"),
+			"[[users]] \"a\": password is empty; make one with `rota serve passwd a`"},
+		{"a password in the wrong shape", user("name = \"a\"\nrole = \"watch\"\npassword = \"hunter2\"\n"),
+			`[[users]] "a": password: must be pbkdf2-sha256`},
+		{"a password from another algorithm", user("name = \"a\"\nrole = \"watch\"\npassword = \"bcrypt$1$" + realSalt + "$" + realKey + "\"\n"),
+			`"bcrypt" is not an algorithm rota knows`},
+		{"a password derived too cheaply", user("name = \"a\"\nrole = \"watch\"\npassword = \"pbkdf2-sha256$1000$" + realSalt + "$" + realKey + "\"\n"),
+			`1000 iterations is fewer than the 100000`},
+		{"a password with a short salt", user("name = \"a\"\nrole = \"watch\"\npassword = \"pbkdf2-sha256$600000$c2FsdA==$" + realKey + "\"\n"),
+			`the salt is 4 bytes; rota insists on at least 16`},
+		{"a password with a short hash", user("name = \"a\"\nrole = \"watch\"\npassword = \"pbkdf2-sha256$600000$" + realSalt + "$aGFzaA==\"\n"),
+			`the hash is 4 bytes; a pbkdf2-sha256 hash is 32`},
+		{"two users with one name", user("name = \"a\"\nrole = \"watch\"\npassword = \""+goodHash+"\"\n") +
+			user("name = \"a\"\nrole = \"control\"\npassword = \""+goodHash+"\"\n"),
+			`[[users]] "a": there is already a user called "a"`},
+		{"a token with no name", tok("role = \"watch\"\nsha256 = \"" + sum + "\"\n"),
+			`[[tokens]] #1: name is empty`},
+		{"a token with an invented role", tok("name = \"ci\"\nrole = \"root\"\nsha256 = \"" + sum + "\"\n"),
+			`[[tokens]] "ci": role: "root" is not a role`},
+		{"a token that is not a digest", tok("name = \"ci\"\nrole = \"watch\"\nsha256 = \"nope\"\n"),
+			`[[tokens]] "ci": sha256: "nope" is not 64 hexadecimal characters`},
+		{"a digest of the wrong length", tok("name = \"ci\"\nrole = \"watch\"\nsha256 = \"abcd\"\n"),
+			`is not 64 hexadecimal characters`},
+		{"two tokens with one name", tok("name = \"ci\"\nrole = \"watch\"\nsha256 = \""+sum+"\"\n") +
+			tok("name = \"ci\"\nrole = \"control\"\nsha256 = \""+sum+"\"\n"),
+			`[[tokens]] "ci": there is already a token called "ci"`},
+		{"a session that lasts no time", "[auth]\nsession_ttl = \"0s\"\n",
+			"auth.session_ttl must be longer than nothing"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := LoadConfig(write(t, c.body))
+			if err == nil {
+				t.Fatalf("%q was accepted", c.body)
+			}
+			if !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("%v\nmust say %q", err, c.want)
+			}
+		})
+	}
+}
+
+// TestPrintMasksEverySecret: the token, a user's password and a token's
+// digest all come out as "(set)", and the output says at the top that it is
+// a report rather than a file.
+func TestPrintMasksEverySecret(t *testing.T) {
+	c := DefaultConfig()
+	c.Users = []UserEntry{{Name: "inoyat", Role: "control", Password: goodHash}}
+	c.Tokens = []TokenEntry{{Name: "ci-watch", Role: "watch", SHA256: strings.Repeat("ab", 32)}}
+	var b bytes.Buffer
+	if err := c.Print(&b, "a-real-secret"); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, gone := range []string{"a-real-secret", goodHash, strings.Repeat("ab", 32)} {
+		if strings.Contains(out, gone) {
+			t.Fatalf("a secret was printed:\n%s", out)
+		}
+	}
+	for _, want := range []string{
+		`# A secret shows as "(set)": this is a report of what rota would`,
+		`token           = "(set)"`,
+		`session_ttl     = "12h"`,
+		`health          = true`,
+		"[[users]]",
+		`name            = "inoyat"`,
+		`password        = "(set)"`,
+		"[[tokens]]",
+		`sha256          = "(set)"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("the output must have %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestPrintIsStillAFileWhenNothingIsSecret pins the other half: a server
+// with no secrets prints something it reads back, and says nothing about
+// reports.
+func TestPrintIsStillAFileWhenNothingIsSecret(t *testing.T) {
+	var b bytes.Buffer
+	if err := DefaultConfig().Print(&b, ""); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(b.String(), "report") {
+		t.Fatalf("nothing is set, so there is nothing to warn about:\n%s", b.String())
+	}
+	back := DefaultConfig()
+	if err := toml.Unmarshal([]byte(b.String()), back); err != nil {
+		t.Fatalf("what it printed is not a file it reads: %v\n%s", err, b.String())
+	}
+	if err := back.Check(); err != nil {
+		t.Fatalf("what it printed is not a file it would serve with: %v", err)
 	}
 }

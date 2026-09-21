@@ -7,8 +7,9 @@
 # file beats the defaults printed here. `rota serve --print-config` says
 # where each value in the end came from.
 #
-# This file may hold the bearer token, so rota refuses to start if anyone
-# but its owner can read it: chmod 600 server.toml.
+# This file may hold the bearer token and the derived passwords of everyone
+# who may sign in, so rota refuses to start if anyone but its owner can read
+# it: chmod 600 server.toml.
 #
 # rota has no database. What persists is the store directory, [store] below.
 
@@ -24,13 +25,15 @@ key = ""   # the private key; cert and key go together or not at all
 token = ""                # the bearer token, if you keep it here
 token_file = ""           # or a file holding it, under the same permission rule
 token_env = "ROTA_TOKEN"  # or the name of the variable that holds it
+session_ttl = "12h"       # how long a sign-in on the page lasts
 
 # Whole groups of routes, on or off. A group that is off is not registered,
 # so its paths answer 404 like any path this server never had.
 [routes]
-api = true         # everything under /v1 except the sockets
-playground = true  # GET / and GET /playground
+api = true         # everything under /v1 except the sockets and /v1/health
+playground = true  # GET /, GET /playground and the invite landing
 websocket = true   # the /ws routes, which carry a run that stays open
+health = true      # GET /v1/health, open and depending on nothing
 
 [runs]
 timeout = "10m"          # hard cap on one run
@@ -45,3 +48,30 @@ allow_raw_flags = false  # let callers pass flags straight to the vendor CLI
 
 [store]
 dir = ""  # where rota keeps everything; empty is $ROTA_HOME or ~/.rota
+
+# Who may sign in on the page, and what they may do. There are two roles:
+# "control" may do everything this server does, which includes running a
+# coding agent on this machine; "watch" may read everything and change
+# nothing. rota never writes this file — make a block with
+#
+#   rota serve passwd alice --role control
+#
+# which asks for the password twice without echoing it and prints:
+#
+#   [[users]]
+#   name     = "alice"
+#   role     = "control"
+#   password = "pbkdf2-sha256$600000$<salt>$<hash>"
+
+# Bearer tokens besides the one above, each with a role: a CI job that reads
+# the accounts and never runs anything is a watch token. Only the SHA-256 is
+# written down, so this file gives a reader nothing to send. Make one with
+#
+#   rota serve token ci-watch --role watch
+#
+# which prints the token once and:
+#
+#   [[tokens]]
+#   name   = "ci-watch"
+#   role   = "watch"
+#   sha256 = "<64 hexadecimal characters>"

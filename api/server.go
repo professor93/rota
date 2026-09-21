@@ -12,11 +12,10 @@ package api
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -70,6 +69,47 @@ type Options struct {
 	// them, which is what every server answered before there was a way to
 	// ask for fewer.
 	Routes *Routes
+	// Users are the people who may sign in on the page, each with a role and
+	// a derived password. Empty means nobody can: the page then offers only
+	// the bearer token it always did.
+	Users []User
+	// Tokens are bearer tokens besides Token, each with a role of its own.
+	// Token itself is always control — it is the server's own key.
+	Tokens []TokenPrincipal
+	// SessionTTL is how long a page sign-in lasts. Zero is twelve hours.
+	SessionTTL time.Duration
+}
+
+// User is one person who may sign in on the page. Password is the derived
+// form `rota serve passwd` prints; the plain password is never here, and
+// never anywhere else either.
+type User struct {
+	Name     string
+	Role     Role
+	Password string
+}
+
+// TokenPrincipal is one more bearer token, named and with a role. SHA256 is
+// the hex digest of the token: the token itself is not stored, so a
+// configuration somebody reads gives them nothing to send.
+type TokenPrincipal struct {
+	Name   string
+	Role   Role
+	SHA256 string
+}
+
+// user and token are the checked forms of the two above, built once by New
+// so that no request pays for parsing a file.
+type user struct {
+	name string
+	role Role
+	pw   *password
+}
+
+type token struct {
+	name string
+	role Role
+	sum  [32]byte
 }
 
 // Routes selects the groups of routes a server registers. A group that is
@@ -77,17 +117,23 @@ type Options struct {
 // this server never had would: nothing tells a stranger that a door is
 // there but shut.
 //
-// Playground covers the page and the version at the root; WebSocket covers
-// the three socket routes; API covers everything else under /v1. The other
-// two are the API in another shape, so neither means anything without it.
+// Playground covers the page, the version at the root and the invite
+// landing; WebSocket covers the three socket routes; API covers everything
+// else under /v1. Those two are the API in another shape, so neither means
+// anything without it. Health is one route and depends on nothing, which is
+// what makes it worth having: a probe that goes off with the page is not a
+// probe.
 type Routes struct {
 	API        bool
 	Playground bool
 	WebSocket  bool
+	Health     bool
 }
 
 // allRoutes is every group on.
-func allRoutes() Routes { return Routes{API: true, Playground: true, WebSocket: true} }
+func allRoutes() Routes {
+	return Routes{API: true, Playground: true, WebSocket: true, Health: true}
+}
 
 // defaultRefreshEvery is a little under the quota cache's lifetime, so a
 // reading is renewed shortly after it goes stale rather than a whole period
@@ -113,6 +159,15 @@ type Server struct {
 	// keeperDone closes when the background refresher has returned, so Stop
 	// can promise that nothing is still writing to the store afterwards.
 	keeperDone chan struct{}
+	// Who may ask for what: the users and tokens the configuration named,
+	// checked once here, and the two tables of live credentials a page
+	// hands out. All of it is read-only after New but the two tables, which
+	// hold their own locks.
+	users    []user
+	tokens   []token
+	decoy    *password
+	sessions *sessionTable
+	invites  *inviteTable
 }
 
 // New validates options and builds a server. It refuses to start without a
@@ -151,17 +206,84 @@ func New(opts Options) (*Server, error) {
 		r := allRoutes()
 		opts.Routes = &r
 	}
+	users, err := checkUsers(opts.Users)
+	if err != nil {
+		return nil, err
+	}
+	tokens, err := checkTokens(opts.Tokens)
+	if err != nil {
+		return nil, err
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		opts: opts, sem: make(chan struct{}, opts.MaxConcurrent), limit: newLimiter(),
 		log: log, ctx: ctx, cancel: cancel, forced: map[int]time.Time{},
-		runs: map[string]*liveRun{},
+		runs:     map[string]*liveRun{},
+		users:    users,
+		tokens:   tokens,
+		decoy:    decoyFor(users),
+		sessions: newSessions(opts.SessionTTL),
+		invites:  newInvites(),
 	}
 	if opts.RefreshEvery > 0 {
 		s.keeperDone = make(chan struct{})
 		go s.keepFresh(opts.RefreshEvery)
 	}
 	return s, nil
+}
+
+// checkUsers and checkTokens turn what a caller wrote into what a request
+// is answered from, refusing anything that cannot be. A server is not
+// started with a principal it would never be able to admit: the file that
+// named them is the thing to fix, and start-up is when somebody is looking.
+func checkUsers(in []User) ([]user, error) {
+	out := make([]user, 0, len(in))
+	seen := map[string]bool{}
+	for i, u := range in {
+		at := entryName("users", i, u.Name)
+		if u.Name == "" {
+			return nil, fmt.Errorf("api: %s: name is empty", at)
+		}
+		if seen[u.Name] {
+			return nil, fmt.Errorf("api: %s: there is already a user called %q", at, u.Name)
+		}
+		seen[u.Name] = true
+		role, err := parseRole(string(u.Role))
+		if err != nil {
+			return nil, fmt.Errorf("api: %s: role: %w", at, err)
+		}
+		pw, err := parsePassword(u.Password)
+		if err != nil {
+			return nil, fmt.Errorf("api: %s: password: %w", at, err)
+		}
+		out = append(out, user{name: u.Name, role: role, pw: pw})
+	}
+	return out, nil
+}
+
+func checkTokens(in []TokenPrincipal) ([]token, error) {
+	out := make([]token, 0, len(in))
+	seen := map[string]bool{}
+	for i, t := range in {
+		at := entryName("tokens", i, t.Name)
+		if t.Name == "" {
+			return nil, fmt.Errorf("api: %s: name is empty", at)
+		}
+		if seen[t.Name] {
+			return nil, fmt.Errorf("api: %s: there is already a token called %q", at, t.Name)
+		}
+		seen[t.Name] = true
+		role, err := parseRole(string(t.Role))
+		if err != nil {
+			return nil, fmt.Errorf("api: %s: role: %w", at, err)
+		}
+		sum, err := parseSum(t.SHA256)
+		if err != nil {
+			return nil, fmt.Errorf("api: %s: sha256: %w", at, err)
+		}
+		out = append(out, token{name: t.Name, role: role, sum: sum})
+	}
+	return out, nil
 }
 
 // keepFresh rotates expiring tokens and re-reads usage until the server
@@ -249,9 +371,41 @@ func (s *Server) Handler() http.Handler {
 			writeJSON(w, http.StatusOK, map[string]any{"success": true, "version": wire.Version})
 		})
 		mux.HandleFunc("GET /playground", s.playground)
+		// Where an invite link lands. It is in this group because what it
+		// leads to is the page: a server with no page has nothing to invite
+		// anyone to.
+		mux.HandleFunc("GET /invite/{code}", s.useInvite)
+	}
+	if s.opts.Routes.Health {
+		mux.HandleFunc("GET /v1/health", s.health)
+	}
+	if s.opts.Routes.API {
+		// The three session routes are registered without the guard, and
+		// each decides for itself: signing in cannot be asked to prove who
+		// it is first, asking who you are is how a page finds out it is
+		// nobody, and signing out has to work for a watcher too.
+		mux.HandleFunc("/v1/session", s.session)
 	}
 
-	guarded := map[string]http.HandlerFunc{
+	if s.opts.Routes.API {
+		for pattern, h := range s.guarded() {
+			mux.Handle(pattern, s.guard(pattern, h))
+		}
+	}
+	if s.opts.Routes.WebSocket {
+		for pattern, h := range s.sockets() {
+			mux.Handle(pattern, s.wsAuth(pattern, h))
+		}
+	}
+	return s.recover(mux)
+}
+
+// guarded is every route under /v1 that takes a principal, HTTP side. It is
+// a method rather than a literal inside Handler so that the role table can
+// be checked against it: a route added here without a row there is a failing
+// test rather than a route that quietly takes control.
+func (s *Server) guarded() map[string]http.HandlerFunc {
+	return map[string]http.HandlerFunc{
 		"GET /v1/schema":               s.schema,
 		"GET /v1/accounts":             s.listAccounts,
 		"GET /v1/accounts/{id}/schema": s.accountSchema,
@@ -275,26 +429,20 @@ func (s *Server) Handler() http.Handler {
 		// answering 404 breaks whoever was calling it.
 		"POST /v1/auth":      s.loginBegin,
 		"POST /v1/auth/{id}": s.loginFinish,
+		// A link for somebody who should see and not touch.
+		"POST /v1/invites": s.makeInvite,
 	}
-	if s.opts.Routes.API {
-		for pattern, h := range guarded {
-			mux.Handle(pattern, s.auth(h))
-		}
-	}
-	// The same three doors as a socket: one run, carried both ways. They are
-	// guarded apart because a browser cannot put a header on a WebSocket, so
-	// the token may arrive as a subprotocol instead.
-	sockets := map[string]http.HandlerFunc{
+}
+
+// sockets is the same three doors as a WebSocket: one run, carried both
+// ways. They are guarded apart because a browser cannot put a header on a
+// WebSocket, so the credential may arrive as a subprotocol or a cookie.
+func (s *Server) sockets() map[string]http.HandlerFunc {
+	return map[string]http.HandlerFunc{
 		"GET /v1/runs/{id}/ws":     s.attachWS,
 		"GET /v1/accounts/{id}/ws": s.startWS,
 		"GET /v1/ws":               s.startWS,
 	}
-	if s.opts.Routes.WebSocket {
-		for pattern, h := range sockets {
-			mux.Handle(pattern, s.wsAuth(h))
-		}
-	}
-	return s.recover(mux)
 }
 
 // recover keeps one panicking request from taking the server down, and
@@ -355,46 +503,28 @@ func (t *trackingWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return hj.Hijack()
 }
 
-// auth enforces the bearer token and the brute-force block.
+// refuseToken is the answer to a request with no principal behind it, and
+// the record of it. guessed says a bearer credential was offered and was
+// wrong, which is the only thing the limiter counts: a page asking who it is
+// before it has signed in is not a guess, and neither is a cookie that has
+// simply expired.
 //
-// The block applies to guesses, never to the right token: an address is
-// shared by everyone behind a proxy, and the loopback is reachable from any
-// web page the operator visits, so a block that refused the right token
-// would let a stranger lock the operator out of their own server. Guessing
-// is still throttled — a wrong token from a blocked address answers 429 —
-// and the token itself, 256 random bits, is what makes guessing hopeless.
-func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
-	const prefix = "Bearer "
-	return func(w http.ResponseWriter, r *http.Request) {
-		got := r.Header.Get("Authorization")
-		if len(got) > len(prefix) && got[:len(prefix)] == prefix && s.tokenOK(got[len(prefix):]) {
-			next(w, r)
-			return
-		}
-		s.refuseToken(w, r)
-	}
-}
-
-// tokenOK is the comparison itself. Both sides are hashed first: a plain
-// comparison returns at once on a length mismatch, and that alone would tell
-// a guesser how long the token is.
-func (s *Server) tokenOK(got string) bool {
-	if got == "" {
-		return false
-	}
-	want := sha256.Sum256([]byte(s.opts.Token))
-	sum := sha256.Sum256([]byte(got))
-	return subtle.ConstantTimeCompare(sum[:], want[:]) == 1
-}
-
-// refuseToken is the answer to a guess, and the record of it.
-func (s *Server) refuseToken(w http.ResponseWriter, r *http.Request) {
+// The block applies to guesses, never to a credential that is right: an
+// address is shared by everyone behind a proxy, and the loopback is
+// reachable from any web page the operator visits, so a block that refused
+// the right token would let a stranger lock the operator out of their own
+// server. Guessing is still throttled — a wrong token from a blocked address
+// answers 429 — and the token itself, 256 random bits, is what makes
+// guessing hopeless.
+func (s *Server) refuseToken(w http.ResponseWriter, r *http.Request, guessed bool) {
 	ip := clientIP(r)
 	if s.limit.blocked(ip) {
 		writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "too many bad tokens; try again later"})
 		return
 	}
-	s.limit.fail(ip)
+	if guessed {
+		s.limit.fail(ip)
+	}
 	s.log.Warn("rejected request", "ip", ip, "path", r.URL.Path)
 	writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid or missing bearer token"})
 }

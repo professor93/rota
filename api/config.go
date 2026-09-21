@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -8,9 +9,11 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/professor93/rota/internal/toml"
@@ -37,6 +40,13 @@ type Config struct {
 	Routes RoutesSection `toml:"routes"`
 	Runs   RunsSection   `toml:"runs"`
 	Store  StoreSection  `toml:"store"`
+	// Users and Tokens are the principals besides the one bearer token: the
+	// people who sign in on the page, and the tokens a script carries. They
+	// are arrays of tables rather than more keys under [auth] because each
+	// one is a thing with a name and a role, and [auth] is about one
+	// credential this server has always had.
+	Users  []UserEntry  `toml:"users"`
+	Tokens []TokenEntry `toml:"tokens"`
 
 	// From says where each value came from, by dotted key: "runs.timeout" ->
 	// "file", "auth.token" -> "env ROTA_TOKEN". Nothing reads it to decide
@@ -63,9 +73,39 @@ type TLSSection struct {
 // alternatives, not layers: a token written here, a file holding one, or the
 // name of an environment variable that does.
 type AuthSection struct {
-	Token     string `toml:"token"`
+	Token     string `toml:"token,secret"`
 	TokenFile string `toml:"token_file"`
 	TokenEnv  string `toml:"token_env"`
+	// SessionTTL is how long a sign-in on the page lasts. It belongs here
+	// rather than beside the users because it is the same for all of them:
+	// a per-user lifetime would be one more thing to get wrong in a file
+	// somebody edits by hand.
+	SessionTTL time.Duration `toml:"session_ttl"`
+}
+
+// UserEntry is one person who may sign in on the page: a name, a role, and
+// a password nobody can read back out of the file.
+//
+// The password is stored derived — see passwd.go for the shape — and rota
+// never writes this file: `rota serve passwd <name>` prints the block to
+// paste, which keeps the only copy of the plain password in the head of
+// whoever typed it.
+type UserEntry struct {
+	Name     string `toml:"name"`
+	Role     string `toml:"role"`
+	Password string `toml:"password,secret"`
+}
+
+// TokenEntry is one more bearer token, with a role of its own: a CI job that
+// may look and not touch is this, rather than a second server.
+//
+// Only the SHA-256 of the token is written down, so a file somebody reads
+// gives them nothing to send. `rota serve token <name>` prints the token
+// once and the block that holds its hash.
+type TokenEntry struct {
+	Name   string `toml:"name"`
+	Role   string `toml:"role"`
+	SHA256 string `toml:"sha256,secret"`
 }
 
 // RoutesSection switches whole groups of routes on and off. A group that is
@@ -75,6 +115,7 @@ type RoutesSection struct {
 	API        bool `toml:"api"`
 	Playground bool `toml:"playground"`
 	WebSocket  bool `toml:"websocket"`
+	Health     bool `toml:"health"`
 }
 
 // RunsSection is everything about the CLIs this server starts.
@@ -102,8 +143,8 @@ type StoreSection struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Server: ServerSection{Listen: "127.0.0.1:8787"},
-		Auth:   AuthSection{TokenEnv: "ROTA_TOKEN"},
-		Routes: RoutesSection{API: true, Playground: true, WebSocket: true},
+		Auth:   AuthSection{TokenEnv: "ROTA_TOKEN", SessionTTL: defaultSessionTTL},
+		Routes: RoutesSection{API: true, Playground: true, WebSocket: true, Health: true},
 		Runs: RunsSection{
 			Timeout: 10 * time.Minute, MaxConcurrent: 8,
 			InputTimeout: time.Hour, InputGrace: time.Minute,
@@ -177,15 +218,24 @@ func (c *Config) Check() error {
 	if (c.TLS.Cert == "") != (c.TLS.Key == "") {
 		return errors.New("tls.cert and tls.key go together")
 	}
-	if !c.Routes.API {
-		// The page and the sockets are the API in another shape: the one
-		// calls it, the other is it. Neither can stand while it is off.
-		if c.Routes.Playground {
-			return errors.New("routes.playground needs routes.api: the page has nothing to call without it")
+	// What each group of routes needs from another, as a table rather than a
+	// chain of ifs: a group added later is a row, and the reason it depends
+	// on what it depends on is written beside it. health needs nothing,
+	// which is the whole point of it — a probe that goes off with the page
+	// is not a probe.
+	for _, dep := range []struct{ group, needs, why string; on, has bool }{
+		{"playground", "api", "the page has nothing to call without it", c.Routes.Playground, c.Routes.API},
+		{"websocket", "api", "a socket is the same run by another door", c.Routes.WebSocket, c.Routes.API},
+	} {
+		if dep.on && !dep.has {
+			return fmt.Errorf("routes.%s needs routes.%s: %s", dep.group, dep.needs, dep.why)
 		}
-		if c.Routes.WebSocket {
-			return errors.New("routes.websocket needs routes.api: a socket is the same run by another door")
-		}
+	}
+	if err := c.checkPrincipals(); err != nil {
+		return err
+	}
+	if c.Auth.SessionTTL <= 0 {
+		return errors.New("auth.session_ttl must be longer than nothing")
 	}
 	for _, d := range []struct {
 		key string
@@ -207,6 +257,82 @@ func (c *Config) Check() error {
 		return fmt.Errorf("server.listen: %w", err)
 	}
 	return nil
+}
+
+// checkPrincipals says what is wrong with the people and the tokens this
+// file names. Every message names the entry it is about — by its name where
+// it has one, by its position where it does not — and the field, because
+// the person reading it is looking at a file with several of these in it.
+func (c *Config) checkPrincipals() error {
+	seen := map[string]bool{}
+	for i, u := range c.Users {
+		at := entryName("users", i, u.Name)
+		if u.Name == "" {
+			return fmt.Errorf("%s: name is empty; every user needs one to be logged as", at)
+		}
+		if seen[u.Name] {
+			return fmt.Errorf("%s: there is already a user called %q", at, u.Name)
+		}
+		seen[u.Name] = true
+		if _, err := parseRole(u.Role); err != nil {
+			return fmt.Errorf("%s: role: %w", at, err)
+		}
+		if u.Password == "" {
+			return fmt.Errorf("%s: password is empty; make one with `rota serve passwd %s`", at, u.Name)
+		}
+		if _, err := parsePassword(u.Password); err != nil {
+			return fmt.Errorf("%s: password: %w", at, err)
+		}
+	}
+	seen = map[string]bool{}
+	for i, t := range c.Tokens {
+		at := entryName("tokens", i, t.Name)
+		if t.Name == "" {
+			return fmt.Errorf("%s: name is empty; every token needs one to be logged as", at)
+		}
+		if seen[t.Name] {
+			return fmt.Errorf("%s: there is already a token called %q", at, t.Name)
+		}
+		seen[t.Name] = true
+		if _, err := parseRole(t.Role); err != nil {
+			return fmt.Errorf("%s: role: %w", at, err)
+		}
+		if _, err := parseSum(t.SHA256); err != nil {
+			return fmt.Errorf("%s: sha256: %w", at, err)
+		}
+	}
+	return nil
+}
+
+// entryName is how one entry of an array of tables is pointed at in a
+// message: by its name if it has one, by where it is if it does not.
+func entryName(table string, i int, name string) string {
+	if name == "" {
+		return fmt.Sprintf("[[%s]] #%d", table, i+1)
+	}
+	return fmt.Sprintf("[[%s]] %q", table, name)
+}
+
+// parseRole reads the one word a role is written as.
+func parseRole(s string) (Role, error) {
+	switch Role(s) {
+	case RoleWatch, RoleControl:
+		return Role(s), nil
+	case "":
+		return "", fmt.Errorf("is empty; write %q or %q", RoleControl, RoleWatch)
+	}
+	return "", fmt.Errorf("%q is not a role; write %q or %q", s, RoleControl, RoleWatch)
+}
+
+// parseSum reads the hex SHA-256 a token entry is written as.
+func parseSum(s string) ([32]byte, error) {
+	var out [32]byte
+	raw, err := hex.DecodeString(s)
+	if err != nil || len(raw) != len(out) {
+		return out, fmt.Errorf("%q is not 64 hexadecimal characters; make one with `rota serve token <name>`", s)
+	}
+	copy(out[:], raw)
+	return out, nil
 }
 
 // Token is the bearer token this configuration describes, and where it came
@@ -291,9 +417,21 @@ func (c *Config) Serve() (Options, Listener, error) {
 	if refresh <= 0 {
 		refresh = -1
 	}
-	routes := Routes{API: c.Routes.API, Playground: c.Routes.Playground, WebSocket: c.Routes.WebSocket}
+	routes := Routes{API: c.Routes.API, Playground: c.Routes.Playground,
+		WebSocket: c.Routes.WebSocket, Health: c.Routes.Health}
+	users := make([]User, 0, len(c.Users))
+	for _, u := range c.Users {
+		users = append(users, User{Name: u.Name, Role: Role(u.Role), Password: u.Password})
+	}
+	tokens := make([]TokenPrincipal, 0, len(c.Tokens))
+	for _, t := range c.Tokens {
+		tokens = append(tokens, TokenPrincipal{Name: t.Name, Role: Role(t.Role), SHA256: t.SHA256})
+	}
 	return Options{
 		Dir:            c.Store.Dir,
+		Users:          users,
+		Tokens:         tokens,
+		SessionTTL:     c.Auth.SessionTTL,
 		Roots:          roots,
 		AllowDangerous: c.Runs.AllowDangerous,
 		AllowRawFlags:  c.Runs.AllowRawFlags,
@@ -336,46 +474,51 @@ func ListenAddr(in string) (string, error) {
 // order the file has them, each with a comment saying where its value came
 // from.
 //
-// The token is never written down, only whether there is one, so the output
-// can be pasted where the file itself could not. What comes out is a file
-// this parser reads back.
+// No secret is written down, only whether there is one — every field tagged
+// `secret` in the schema above comes out as "(set)" — so the output can be
+// pasted where the file itself could not. A server with no secrets set is a
+// file this parser reads straight back; one with them is a report, and says
+// so at the top, because "(set)" is not a password.
 func (c *Config) Print(w io.Writer, token string) error {
-	var b strings.Builder
+	var b, body strings.Builder
+	masked := false
 	key := func(name string, rendered string) {
-		short := name[strings.IndexByte(name, '.')+1:]
-		fmt.Fprintf(&b, "%-15s = %-18s # %s\n", short, rendered, c.origin(name))
+		short := name[strings.LastIndexByte(name, '.')+1:]
+		fmt.Fprintf(&body, "%-15s = %-18s # %s\n", short, rendered, c.origin(name))
 	}
-	str := func(name, v string) { key(name, quote(v)) }
+	str := func(name, v string) {
+		if v != "" && isSecret(name) {
+			v, masked = "(set)", true
+		}
+		key(name, quote(v))
+	}
 	yes := func(name string, v bool) { key(name, strconv.FormatBool(v)) }
 	num := func(name string, v int) { key(name, strconv.Itoa(v)) }
 	span := func(name string, v time.Duration) { key(name, quote(duration(v))) }
 
-	b.WriteString("[server]\n")
+	body.WriteString("[server]\n")
 	str("server.listen", c.Server.Listen)
 	yes("server.quiet", c.Server.Quiet)
 
-	b.WriteString("\n[tls]\n")
+	body.WriteString("\n[tls]\n")
 	str("tls.cert", c.TLS.Cert)
 	str("tls.key", c.TLS.Key)
 
-	b.WriteString("\n[auth]\n")
-	// The token is a secret whatever it came from, so only its existence is
-	// printed. "(set)" is a string like any other, which keeps this file
-	// readable by the parser that wrote it.
-	masked := ""
-	if token != "" {
-		masked = "(set)"
-	}
-	str("auth.token", masked)
+	body.WriteString("\n[auth]\n")
+	// The token printed is the one this server would actually use, whatever
+	// it came from — and it comes out masked, like every other secret.
+	str("auth.token", token)
 	str("auth.token_file", c.Auth.TokenFile)
 	str("auth.token_env", c.Auth.TokenEnv)
+	span("auth.session_ttl", c.Auth.SessionTTL)
 
-	b.WriteString("\n[routes]\n")
+	body.WriteString("\n[routes]\n")
 	yes("routes.api", c.Routes.API)
 	yes("routes.playground", c.Routes.Playground)
 	yes("routes.websocket", c.Routes.WebSocket)
+	yes("routes.health", c.Routes.Health)
 
-	b.WriteString("\n[runs]\n")
+	body.WriteString("\n[runs]\n")
 	span("runs.timeout", c.Runs.Timeout)
 	num("runs.max_concurrent", c.Runs.MaxConcurrent)
 	span("runs.input_timeout", c.Runs.InputTimeout)
@@ -390,17 +533,95 @@ func (c *Config) Print(w io.Writer, token string) error {
 	yes("runs.allow_dangerous", c.Runs.AllowDangerous)
 	yes("runs.allow_raw_flags", c.Runs.AllowRawFlags)
 
-	b.WriteString("\n[store]\n")
+	body.WriteString("\n[store]\n")
 	str("store.dir", c.Store.Dir)
 
+	for i, u := range c.Users {
+		body.WriteString("\n[[users]]\n")
+		str(fmt.Sprintf("users.%d.name", i), u.Name)
+		str(fmt.Sprintf("users.%d.role", i), u.Role)
+		str(fmt.Sprintf("users.%d.password", i), u.Password)
+	}
+	for i, t := range c.Tokens {
+		body.WriteString("\n[[tokens]]\n")
+		str(fmt.Sprintf("tokens.%d.name", i), t.Name)
+		str(fmt.Sprintf("tokens.%d.role", i), t.Role)
+		str(fmt.Sprintf("tokens.%d.sha256", i), t.SHA256)
+	}
+
+	if masked {
+		b.WriteString("# A secret shows as \"(set)\": this is a report of what rota would\n" +
+			"# serve with, not a file to load back.\n\n")
+	}
+	b.WriteString(body.String())
 	_, err := io.WriteString(w, b.String())
 	return err
 }
 
+// isSecret reports whether the value at one dotted key is a secret, by
+// looking the key up in the schema above and asking the tag. The keys of an
+// array of tables carry their index — "users.0.password" — which is dropped
+// here: which entry it is does not change what the field is.
+func isSecret(key string) bool { return secretKeys()[strings.Join(unindex(key), ".")] }
+
+func unindex(key string) []string {
+	parts := strings.Split(key, ".")
+	out := parts[:0]
+	for _, p := range parts {
+		if _, err := strconv.Atoi(p); err == nil {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// secretKeys walks the schema once and collects the dotted key of every
+// field tagged secret. It is derived rather than listed so that a field
+// added to one of the structs above is masked by saying so where it is
+// declared, and not by remembering to edit a second list down here.
+var secretKeys = sync.OnceValue(func() map[string]bool {
+	out := map[string]bool{}
+	var walk func(t reflect.Type, path string)
+	walk = func(t reflect.Type, path string) {
+		for i := range t.NumField() {
+			f := t.Field(i)
+			name := toml.Name(f)
+			if name == "" {
+				continue
+			}
+			at := name
+			if path != "" {
+				at = path + "." + name
+			}
+			if toml.Option(f, "secret") {
+				out[at] = true
+			}
+			ft := f.Type
+			if ft.Kind() == reflect.Slice {
+				ft = ft.Elem()
+			}
+			if ft.Kind() == reflect.Struct && ft != durationStruct {
+				walk(ft, at)
+			}
+		}
+	}
+	walk(reflect.TypeOf(Config{}), "")
+	return out
+})
+
+// durationStruct is what the walk above must not descend into: a
+// time.Duration is an integer, but a time.Time — if one ever appears here —
+// is a struct with unexported fields and nothing to say about secrets.
+var durationStruct = reflect.TypeOf(time.Time{})
+
 // origin is where one key's value came from, with "default" for the keys
 // nobody has spoken for.
 func (c *Config) origin(key string) string {
-	if from := c.From[key]; from != "" {
+	// An entry of an array of tables is recorded once for the table, not
+	// once per row — the file said "users.name", whichever user it was — so
+	// the index this printer carries is dropped before looking it up.
+	if from := c.From[strings.Join(unindex(key), ".")]; from != "" {
 		return from
 	}
 	return "default"

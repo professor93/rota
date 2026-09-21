@@ -135,6 +135,10 @@ type harness struct {
 	srv     *httptest.Server
 	token   string
 	dir     string
+	// api is the server behind the handler, for the few tests that have to
+	// reach past HTTP — moving a clock a session is measured against, or
+	// asking the limiter what it thinks.
+	api *Server
 }
 
 func newHarness(t testing.TB, opts Options) *harness {
@@ -177,7 +181,8 @@ func newHarness(t testing.TB, opts Options) *harness {
 		t.Fatal(err)
 	}
 	handler := s.Handler()
-	h := &harness{t: t, handler: handler, root: root, dir: home, srv: httptest.NewServer(handler), token: opts.Token}
+	h := &harness{t: t, handler: handler, root: root, dir: home, srv: httptest.NewServer(handler),
+		token: opts.Token, api: s}
 	t.Cleanup(h.srv.Close)
 	// Registered last, so it runs first: while the server still answers and
 	// before any temporary directory is removed.

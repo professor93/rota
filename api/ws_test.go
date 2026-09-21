@@ -2,7 +2,9 @@ package api
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -524,4 +526,141 @@ func closeRun(t *testing.T, h *harness, id string) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+/* ------------------------------------------------------- roles on a socket --- */
+
+// TestAWatcherOnASocketSeesEverythingAndSaysNothing: a watcher may attach to
+// a run and is sent every event, and each of the four frames that would
+// change it is refused by name — with the socket still open afterwards,
+// because a read-only page must not be able to hang up on itself.
+func TestAWatcherOnASocketSeesEverythingAndSaysNothing(t *testing.T) {
+	watchTok := "watch-token-aaaa"
+	sum := sha256.Sum256([]byte(watchTok))
+	h := newHarness(t, Options{Tokens: []TokenPrincipal{
+		{Name: "ci-watch", Role: RoleWatch, SHA256: hex.EncodeToString(sum[:])},
+	}})
+	echoClaude(t)
+	s, id := startInputRun(t, h, "one")
+	defer s.cancel()
+	t.Cleanup(func() { closeRun(t, h, id) })
+
+	c, resp := dialWS(t, h, "/v1/runs/"+id+"/ws?since=0", "Sec-WebSocket-Protocol", "rota, bearer."+watchTok)
+	if c == nil {
+		t.Fatalf("a watcher must be able to attach: %d", resp.StatusCode)
+	}
+	// Reading works: the run's events reach it like any other reader.
+	c.wait("the run's own events", func(doc map[string]any) bool {
+		text, _ := doc["text"].(string)
+		return strings.Contains(text, "echo: one")
+	})
+
+	for i, frame := range []map[string]any{
+		{"type": "message", "text": "two", "ref": "w1"},
+		{"type": "interrupt", "ref": "w2"},
+		{"type": "raw", "line": map[string]any{"type": "x"}, "ref": "w3"},
+		{"type": "close", "ref": "w4"},
+	} {
+		ref := fmt.Sprintf("w%d", i+1)
+		c.say(frame)
+		ack := c.ack(ref)
+		if ack["error"] != watchOnly {
+			t.Fatalf("%v was answered %v, want a refusal saying the role may only watch", frame, ack)
+		}
+		if ack["state"] == "accepted" {
+			t.Fatalf("%v was accepted: %v", frame, ack)
+		}
+	}
+	// The socket is still there, and still streaming: the run is asked for
+	// another turn through the controlling side and the watcher sees it.
+	if code, doc := post(t, h, "POST", "/v1/runs/"+id+"/messages", map[string]any{"text": "three"}); code != http.StatusAccepted {
+		t.Fatalf("the controller's message: %d %v", code, doc)
+	}
+	c.wait("what the controller asked for", func(doc map[string]any) bool {
+		text, _ := doc["text"].(string)
+		return strings.Contains(text, "echo: three")
+	})
+}
+
+// TestAWatcherMayNotStartARunOverASocket: refused before the upgrade, so
+// there is no connection to take over and the answer is ordinary HTTP.
+func TestAWatcherMayNotStartARunOverASocket(t *testing.T) {
+	watchTok := "watch-token-aaaa"
+	sum := sha256.Sum256([]byte(watchTok))
+	h := newHarness(t, Options{Tokens: []TokenPrincipal{
+		{Name: "ci-watch", Role: RoleWatch, SHA256: hex.EncodeToString(sum[:])},
+	}})
+	for _, path := range []string{"/v1/ws", "/v1/accounts/1/ws"} {
+		c, resp := dialWS(t, h, path, "Sec-WebSocket-Protocol", "rota, bearer."+watchTok)
+		if c != nil {
+			t.Fatalf("GET %s as a watcher was upgraded", path)
+		}
+		if resp.StatusCode != http.StatusForbidden {
+			t.Fatalf("GET %s as a watcher: %d", path, resp.StatusCode)
+		}
+		raw, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if !strings.Contains(string(raw), watchOnly) {
+			t.Fatalf("GET %s must say why: %s", path, raw)
+		}
+	}
+}
+
+// TestASocketOnACookieNeedsItsOwnOrigin: any page on the internet may open a
+// WebSocket to this server and the browser will attach the cookie, so an
+// upgrade authorized by one is held to the same rule as a write.
+func TestASocketOnACookieNeedsItsOwnOrigin(t *testing.T) {
+	h := newHarness(t, Options{
+		Users:      []User{{Name: "driver", Role: RoleControl, Password: cheapHash}},
+		SessionTTL: time.Hour,
+	})
+	echoClaude(t)
+	s, id := startInputRun(t, h, "one")
+	defer s.cancel()
+	t.Cleanup(func() { closeRun(t, h, id) })
+
+	// Sign in the way the page does, and keep the cookie.
+	req, _ := http.NewRequest("POST", h.srv.URL+"/v1/session",
+		strings.NewReader(`{"name":"driver","password":"`+testPlain+`"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", h.srv.URL)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("signing in: %d", resp.StatusCode)
+	}
+	var cookie string
+	for _, ck := range resp.Cookies() {
+		if ck.Name == sessionCookie {
+			cookie = ck.Name + "=" + ck.Value
+		}
+	}
+	if cookie == "" {
+		t.Fatal("no cookie was set")
+	}
+
+	// From somebody else's page: refused, without an upgrade.
+	c, refused := dialWS(t, h, "/v1/runs/"+id+"/ws", "Cookie", cookie, "Origin", "https://evil.example")
+	if c != nil {
+		t.Fatal("a cross-site socket on a cookie was upgraded")
+	}
+	if refused.StatusCode != http.StatusForbidden {
+		t.Fatalf("a cross-site socket: %d", refused.StatusCode)
+	}
+	// With no Origin at all, likewise: a browser always sends one.
+	if c, refused := dialWS(t, h, "/v1/runs/"+id+"/ws", "Cookie", cookie); c != nil {
+		t.Fatalf("a socket on a cookie with no Origin was upgraded (%d)", refused.StatusCode)
+	}
+	// From this server's own page, it works.
+	c, resp2 := dialWS(t, h, "/v1/runs/"+id+"/ws", "Cookie", cookie, "Origin", h.srv.URL)
+	if c == nil {
+		t.Fatalf("the page's own socket was refused: %d", resp2.StatusCode)
+	}
+	c.wait("the run's own events", func(doc map[string]any) bool {
+		text, _ := doc["text"].(string)
+		return strings.Contains(text, "echo: one")
+	})
 }

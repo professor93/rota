@@ -78,22 +78,64 @@ const (
 
 /* --------------------------------------------------------- the handshake --- */
 
-// wsAuth is auth for a socket, and it runs before the upgrade: a wrong token
-// is an ordinary 401, with no connection taken over.
+// wsAuth is auth and authorization for a socket, and it runs before the
+// upgrade: a wrong credential is an ordinary 401 and a wrong role an
+// ordinary 403, with no connection taken over.
 //
-// A browser cannot put a header on a WebSocket, so the token may travel as a
-// subprotocol instead — Sec-WebSocket-Protocol: rota, bearer.<token> — and the
-// reply names only rota. It may not travel in the query string: a URL is
-// written to every access log on the way, and a token in one is a token given
-// away.
-func (s *Server) wsAuth(next http.HandlerFunc) http.HandlerFunc {
+// A browser cannot put a header on a WebSocket, so a credential may travel
+// three ways here rather than one: the Authorization header a program sends,
+// a subprotocol — Sec-WebSocket-Protocol: rota, bearer.<token> — and, for a
+// page whose person has signed in, the session cookie the browser attaches
+// on its own. The reply names only rota: the other entry is a credential,
+// and a server that repeated it would write it into the client's own logs.
+//
+// A token may not travel in the query string: a URL is written to every
+// access log on the way, and a token in one is a token given away.
+//
+// A cookie-authenticated upgrade is held to the same Origin rule as a
+// cookie-authenticated write, because an upgrade is one: any page on the
+// internet may open a WebSocket to this server, and the browser would attach
+// the cookie to it.
+func (s *Server) wsAuth(pattern string, next http.HandlerFunc) http.HandlerFunc {
+	need := needs(pattern)
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.tokenOK(bearerToken(r.Header.Get("Authorization"))) || s.tokenOK(protoToken(r)) {
-			next(w, r)
+		p, guessed := s.principalWS(r)
+		if p == nil {
+			s.refuseToken(w, r, guessed)
 			return
 		}
-		s.refuseToken(w, r)
+		if p.Via != "token" && !sameOrigin(r) {
+			s.log.Warn("refused a cross-site socket", "name", p.Name, "role", p.Role,
+				"path", r.URL.Path, "ip", clientIP(r))
+			fail(w, http.StatusForbidden, crossSiteNo)
+			return
+		}
+		if !p.Role.allows(need) {
+			s.refuseRole(w, r, p, need)
+			return
+		}
+		next(w, withPrincipal(r, p))
 	}
+}
+
+// principalWS is resolve with the subprotocol as one more place a bearer
+// token may be.
+func (s *Server) principalWS(r *http.Request) (*Principal, bool) {
+	for _, tok := range []string{bearerToken(r.Header.Get("Authorization")), protoToken(r)} {
+		if tok == "" {
+			continue
+		}
+		if p := s.byToken(tok); p != nil {
+			return p, false
+		}
+		return nil, true
+	}
+	if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+		if p := s.sessions.get(c.Value); p != nil {
+			return p, false
+		}
+	}
+	return nil, false
 }
 
 func bearerToken(header string) string {
@@ -487,7 +529,7 @@ func (s *Server) attachWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	s.serveWS(c, lr, since)
+	s.serveWS(c, lr, since, who(r).Role)
 }
 
 // startWS starts a run over a socket. The first frame is the request — the
@@ -532,7 +574,9 @@ func (s *Server) startWS(w http.ResponseWriter, r *http.Request) {
 		s.refuseWS(c, r, err)
 		return
 	}
-	s.serveWS(c, lr, 0)
+	// Only control reaches this route at all, so the run is served as what
+	// started it.
+	s.serveWS(c, lr, 0, RoleControl)
 }
 
 // startFrame reads the opening frame as a run request. Unknown fields are
@@ -572,7 +616,12 @@ func (s *Server) refuseWS(c *wsConn, r *http.Request, err error) {
 }
 
 // serveWS carries the run both ways until one end of it stops.
-func (s *Server) serveWS(c *wsConn, lr *liveRun, since int) {
+//
+// role is what the socket's own principal may do. A watcher gets every event
+// and none of the acts: what it sends back is answered with a refusal and
+// the connection carries on, because a page that is read-only by design must
+// not be able to hang up on itself by mistake.
+func (s *Server) serveWS(c *wsConn, lr *liveRun, since int, role Role) {
 	rd := newWSReader(c)
 	lr.attach(rd, since)
 	reads := make(chan []byte, 8)
@@ -594,7 +643,7 @@ func (s *Server) serveWS(c *wsConn, lr *liveRun, since int) {
 				c.bye(code, "", reads)
 				return
 			}
-			if err := s.onWS(c, lr, raw); err != nil {
+			if err := s.onWS(c, lr, raw, role); err != nil {
 				lr.detach(rd)
 				c.bye(wsPolicy, err.Error(), reads)
 				return
@@ -644,7 +693,7 @@ type wsAck struct {
 // onWS acts on one frame and answers it. Returning an error ends the socket:
 // that is for a frame this server cannot read at all. Everything it can read
 // and will not do is an ack with a reason, because the connection is fine.
-func (s *Server) onWS(c *wsConn, lr *liveRun, raw []byte) error {
+func (s *Server) onWS(c *wsConn, lr *liveRun, raw []byte, role Role) error {
 	if !isObject(raw) {
 		return wsFail{wsPolicy, "every frame is one JSON object"}
 	}
@@ -654,7 +703,7 @@ func (s *Server) onWS(c *wsConn, lr *liveRun, raw []byte) error {
 	}
 	// A write that fails is a peer that has gone, which the reading side will
 	// find on its own: this one has nothing left to say about it.
-	id, err := s.actWS(lr, f)
+	id, err := s.actWS(lr, f, role)
 	if err != nil {
 		_ = c.say(wsAck{Type: "ack", Ref: f.Ref, Error: s.wsErr(lr, err)})
 		return nil
@@ -667,7 +716,12 @@ func (s *Server) onWS(c *wsConn, lr *liveRun, raw []byte) error {
 // carry, when the act has one. A close and a raw line have none: the CLI is
 // told something, and what it makes of it is in the stream like everything
 // else.
-func (s *Server) actWS(lr *liveRun, f wsFrame) (string, error) {
+func (s *Server) actWS(lr *liveRun, f wsFrame, role Role) (string, error) {
+	// Everything a socket carries inward changes the run, so a watcher is
+	// told so once, whatever the frame was going to ask for.
+	if !role.allows(RoleControl) {
+		return "", refuse(http.StatusForbidden, watchOnly)
+	}
 	if lr.over() {
 		return "", refuse(http.StatusConflict, "run "+lr.id+" has ended")
 	}

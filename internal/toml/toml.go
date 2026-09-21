@@ -32,7 +32,9 @@ import (
 // Unmarshal parses TOML and fills the struct v points at.
 //
 // Fields are matched by their `toml:"name"` tag, or by their name in lower
-// case when they have none; a field tagged "-" is not matched at all. A
+// case when they have none; a field tagged "-" is not matched at all, and
+// anything after a comma in the tag is an option for the program rather than
+// part of the name — see Name and Option. A
 // string, an integer, a bool, a []string, a []int and a time.Duration
 // written as "10m" fill from a value; a nested struct fills from a table,
 // and a slice of structs from an array of tables. Anything the struct does
@@ -196,20 +198,57 @@ func wanted(t reflect.Type) string {
 	return "an integer"
 }
 
+// Name is the key one struct field answers to in a file: its `toml:"…"` tag
+// up to the first comma, or its own name in lower case when it has no tag.
+// A field tagged "-", and an unexported one, answer to nothing and come back
+// empty.
+//
+// Everything after that comma is an option for whoever declared the field —
+// this package reads none of them, and the one rota uses, "secret", is read
+// by the program printing its own configuration back. Options live in the
+// tag rather than a second one beside it because a field's name and what may
+// be said about it are one fact, and two tags drift apart.
+func Name(f reflect.StructField) string {
+	if !f.IsExported() {
+		return ""
+	}
+	name := f.Tag.Get("toml")
+	if i := strings.IndexByte(name, ','); i >= 0 {
+		name = name[:i]
+	}
+	switch name {
+	case "-":
+		return ""
+	case "":
+		return strings.ToLower(f.Name)
+	}
+	return name
+}
+
+// Option reports whether one struct field's tag carries this option after
+// its name — `toml:"password,secret"` has "secret".
+func Option(f reflect.StructField, want string) bool {
+	tag := f.Tag.Get("toml")
+	i := strings.IndexByte(tag, ',')
+	if i < 0 {
+		return false
+	}
+	for opt := range strings.SplitSeq(tag[i+1:], ",") {
+		if strings.TrimSpace(opt) == want {
+			return true
+		}
+	}
+	return false
+}
+
 // fields maps the names a struct answers to onto its fields.
 func fields(t reflect.Type) map[string]reflect.StructField {
 	out := map[string]reflect.StructField{}
 	for i := range t.NumField() {
 		f := t.Field(i)
-		if !f.IsExported() {
-			continue
-		}
-		name := f.Tag.Get("toml")
-		if name == "-" {
-			continue
-		}
+		name := Name(f)
 		if name == "" {
-			name = strings.ToLower(f.Name)
+			continue
 		}
 		out[name] = f
 	}
