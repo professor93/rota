@@ -181,16 +181,6 @@ func (s *Server) byToken(got string) *Principal {
 	return found
 }
 
-// tokenOK is the old question — is this the bearer token? — kept for the
-// places that ask nothing else.
-func (s *Server) tokenOK(got string) bool {
-	if got == "" {
-		return false
-	}
-	p := s.byToken(got)
-	return p != nil
-}
-
 /* --------------------------------------------------------- the middleware --- */
 
 // guard is auth and authorization for one HTTP route: who is asking, whether
