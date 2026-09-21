@@ -4,9 +4,11 @@ package api
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -14,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -148,6 +151,30 @@ func (p *terms) attach(id, token, query string) *term {
 	return &term{t: p.tt, c: c}
 }
 
+// attachNarrow attaches over a connection whose receive window is a couple
+// of kilobytes, set before the connection exists so the kernel cannot grow
+// it afterwards. A reader that then stops reading really does stop the
+// server's writes, rather than having a megabyte of buffer quietly absorb
+// everything the test was counting on it not absorbing.
+func (p *terms) attachNarrow(id, token string) *term {
+	p.tt.Helper()
+	wide := wsDial
+	wsDial = func(addr string) (net.Conn, error) {
+		d := &net.Dialer{Control: func(_, _ string, c syscall.RawConn) error {
+			var err error
+			if cerr := c.Control(func(fd uintptr) {
+				err = syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_RCVBUF, 2048)
+			}); cerr != nil {
+				return cerr
+			}
+			return err
+		}}
+		return d.Dial("tcp", addr)
+	}
+	defer func() { wsDial = wide }()
+	return p.attach(id, token, "")
+}
+
 // step reads one frame, keeping the bytes of output apart from the
 // documents: a terminal says both on the same socket and they are told apart
 // by the framing.
@@ -217,19 +244,119 @@ func (tm *term) typeIn(s string) {
 
 func (tm *term) say(v any) { tm.c.say(v) }
 
-// dropped reads until this connection ends, however it ends: a close frame
-// or the connection simply going. A reader the server gave up on is gone
-// either way, and which of the two it is depends on how full the socket was.
-func (tm *term) dropped() bool {
+// readFrame is the client's frame reader without the fatal, for the two
+// places a test reads outside its own goroutine or past the end of a
+// connection: neither may call t.Fatalf, and a socket the server has closed
+// is an answer rather than a failure.
+func readFrame(c *wsClient) (byte, []byte, error) {
+	_ = c.conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	var head [2]byte
+	if _, err := io.ReadFull(c.r, head[:]); err != nil {
+		return 0, nil, err
+	}
+	n := uint64(head[1] & 0x7f)
+	switch n {
+	case 126:
+		var b [2]byte
+		if _, err := io.ReadFull(c.r, b[:]); err != nil {
+			return 0, nil, err
+		}
+		n = uint64(binary.BigEndian.Uint16(b[:]))
+	case 127:
+		var b [8]byte
+		if _, err := io.ReadFull(c.r, b[:]); err != nil {
+			return 0, nil, err
+		}
+		n = binary.BigEndian.Uint64(b[:])
+	}
+	payload := make([]byte, n)
+	if _, err := io.ReadFull(c.r, payload); err != nil {
+		return 0, nil, err
+	}
+	return head[0] & 0x0f, payload, nil
+}
+
+// endedWith reads this connection through whatever the server had already
+// written and says how it closed it, or zero if it never did.
+//
+// Reading to the end matters: a connection the server gave up on may have a
+// socketful of output in front of the close frame, and the server's own
+// write of that frame is waiting behind it.
+func (tm *term) endedWith() uint16 {
 	tm.t.Helper()
-	_ = tm.c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	buf := make([]byte, 64<<10)
-	for range 4000 {
-		if _, err := tm.c.r.Read(buf); err != nil {
-			return true
+	for range 20000 {
+		op, payload, err := readFrame(tm.c)
+		if err != nil {
+			return 0
+		}
+		if op == opClose {
+			return closeCode(payload)
 		}
 	}
-	return false
+	return 0
+}
+
+// busy is a connection somebody is reading as fast as it arrives, on a
+// goroutine of its own.
+//
+// A test about one reader falling behind needs the other one never to: with
+// the test reading only when it gets round to it, the server ends up waiting
+// on the test, and which connection fills up first becomes a question about
+// the machine. Nothing here calls t.Fatalf — a goroutine that is not the
+// test's may not — so the end of a connection is recorded and reported by
+// whoever was waiting.
+type busy struct {
+	mu   sync.Mutex
+	out  strings.Builder
+	code uint16
+	over bool
+}
+
+// drain starts reading a connection and keeps everything it is shown.
+func drain(c *wsClient) *busy {
+	b := &busy{}
+	go func() {
+		for {
+			op, payload, err := readFrame(c)
+			b.mu.Lock()
+			switch {
+			case err != nil:
+				b.over = true
+			case op == opBinary:
+				b.out.Write(payload)
+			case op == opClose:
+				b.code, b.over = closeCode(payload), true
+			}
+			done := b.over
+			b.mu.Unlock()
+			if done {
+				return
+			}
+		}
+	}()
+	return b
+}
+
+func (b *busy) printed() (seen string, over bool, code uint16) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.out.String(), b.over, b.code
+}
+
+// waitOut waits for this connection to have been shown something.
+func (b *busy) waitOut(t *testing.T, want string) {
+	t.Helper()
+	for range 2000 {
+		switch seen, over, code := b.printed(); {
+		case strings.Contains(seen, want):
+			return
+		case over:
+			t.Fatalf("the socket ended with %d before %q was printed; it had said:\n%s", code, want, seen)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	seen, _, _ := b.printed()
+	t.Fatalf("%q was never printed; the terminal said:\n%s", want, seen)
 }
 
 /* ------------------------------------------------------ starting and seeing --- */
@@ -581,37 +708,44 @@ func TestReplayFromAnOffsetAndTheGapWhenItIsTooOld(t *testing.T) {
 // One reader that has stopped reading is closed, and everybody else carries
 // on: a terminal never waits for a socket.
 func TestASlowWatcherIsDroppedAndTheHolderKeepsWorking(t *testing.T) {
-	old := termQueue
-	termQueue = 64
-	t.Cleanup(func() { termQueue = old })
+	// Only the connection that is going to stop reading is given a shallow
+	// queue; the holder is given one deeper than this terminal could fill,
+	// so which of the two is dropped is settled by which of them is reading
+	// and by nothing else. Shortening every queue alike would make this a
+	// test about how promptly the machine got round to the holder.
+	was := termQueueFor
+	termQueueFor = func(_ *Principal, watch bool) int {
+		if watch {
+			return 4
+		}
+		return 1 << 14
+	}
+	t.Cleanup(func() { termQueueFor = was })
 
 	p := withTerminals(t)
 	id := p.start(nil)["id"].(string)
 	alice := p.attach(id, p.alice, "")
-	// The holder is reading, and is given a window big enough that the
-	// server never has to wait for it: this test is about the one that is
-	// not reading.
-	if tcp, ok := alice.c.conn.(*net.TCPConn); ok {
-		_ = tcp.SetReadBuffer(4 << 20)
-	}
-	alice.waitOut("ready ")
+	// The holder's socket is read from before the noise starts and goes on
+	// being read: the server must never have to wait for the holder, or the
+	// holder is what this test would be about.
+	held := drain(alice.c)
+	held.waitOut(t, "ready ")
 
-	looker := p.attach(id, p.watch, "")
-	looker.waitType("hello")
-	// A window this small means the server cannot push much into the socket
-	// before the queue behind it fills, which is the state being tested.
-	if tcp, ok := looker.c.conn.(*net.TCPConn); ok {
-		_ = tcp.SetReadBuffer(1024)
-	}
+	looker := p.attachNarrow(id, p.watch)
+	// Attached, and not reading another byte from here on.
+	p.waitViewers(id, 2)
 
-	alice.typeIn("noise\n")
-	alice.waitOut("noise done")
-	if !looker.dropped() {
-		t.Fatal("a watcher that stopped reading was kept for ever")
+	// Four megabytes: past anything a kernel will buffer for a socket
+	// nobody is reading, so the watcher's queue fills for certain rather
+	// than for luck.
+	alice.typeIn("noise 20000\n")
+	held.waitOut(t, "noise done")
+	if code := looker.endedWith(); code != wsTooSlow {
+		t.Fatalf("a watcher that stopped reading was closed with %d, want %d", code, wsTooSlow)
 	}
 	// And the holder never noticed.
 	alice.typeIn("still here\n")
-	alice.waitOut("got:still here")
+	held.waitOut(t, "got:still here")
 }
 
 /* ------------------------------------------------------------ the ending --- */

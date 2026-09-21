@@ -32,6 +32,13 @@ type wsClient struct {
 	log []map[string]any
 }
 
+// wsDial is how a test's socket is opened. It is a variable because one test
+// needs a connection whose receive window is tiny, and a window can only be
+// made tiny before the connection exists: shrinking the buffer afterwards is
+// advice the kernel is free to ignore, and a test that depended on it would
+// be depending on luck.
+var wsDial = func(addr string) (net.Conn, error) { return net.Dial("tcp", addr) }
+
 // dialWS opens one socket. It returns the response when the handshake was
 // refused, so a test can read the status the server answered with.
 func dialWS(t *testing.T, h *harness, path string, headers ...string) (*wsClient, *http.Response) {
@@ -40,7 +47,7 @@ func dialWS(t *testing.T, h *harness, path string, headers ...string) (*wsClient
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := net.Dial("tcp", u.Host)
+	conn, err := wsDial(u.Host)
 	if err != nil {
 		t.Fatal(err)
 	}

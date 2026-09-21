@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -53,8 +54,8 @@ type Spec struct {
 	// says it is ready and how big its window is, answers each line it reads
 	// with a transformed copy — so a test can tell the terminal's own echo
 	// from the program's output — says the new size whenever the window
-	// changes, prints a great deal on "noise" and exits on "bye". Stdout is
-	// ignored in this mode.
+	// changes, prints as much as it is asked to on "noise N" and exits on
+	// "bye". Stdout is ignored in this mode.
 	Tty bool `json:"tty,omitempty"`
 	// EchoHold holds the first turn, in echo mode, until this many further
 	// lines have arrived on stdin. A test about messages that arrive
@@ -258,16 +259,24 @@ func atty(spec Spec, stdin io.Reader, stdout io.Writer) int {
 	sc := bufio.NewScanner(stdin)
 	sc.Buffer(make([]byte, 0, 4096), 1<<20)
 	for sc.Scan() {
-		switch line := strings.TrimRight(sc.Text(), "\r"); line {
-		case "size":
-			size("size")
-		case "noise":
-			// Enough output that a reader which is not reading falls behind:
-			// two hundred kilobytes, and then a line saying it is over.
-			for i := range 1000 {
-				say("noise %03d %s", i, strings.Repeat("x", 190))
+		line := strings.TrimRight(sc.Text(), "\r")
+		// "noise N" prints N lines of two hundred bytes and then says it is
+		// over: what a test needs to make a reader that is not reading fall
+		// behind whatever the kernel was willing to buffer for it.
+		if n, ok := strings.CutPrefix(line, "noise "); ok {
+			count, err := strconv.Atoi(strings.TrimSpace(n))
+			if err != nil || count < 0 {
+				count = 0
+			}
+			for i := range count {
+				say("noise %06d %s", i, strings.Repeat("x", 185))
 			}
 			say("noise done")
+			continue
+		}
+		switch line {
+		case "size":
+			size("size")
 		case "bye":
 			say("bye")
 			return spec.Exit
