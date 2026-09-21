@@ -1,0 +1,58 @@
+Vendored terminal emulator
+==========================
+
+The Terminal tab of the playground draws a real terminal, and the code that
+draws it is here rather than at a CDN: rota is usually served on a loopback
+address with no route out, and a page that fetches its emulator from another
+host is a page that breaks there and a third party that can change what runs
+in front of somebody's shell. These files are embedded in the binary and
+served by it, from this server's own origin and nowhere else.
+
+Both packages are MIT. The licences are beside the code, as
+LICENSE-xterm.txt and LICENSE-addon-fit.txt, and are served too.
+
+What is here
+------------
+
+  @xterm/xterm      5.5.0   lib/xterm.js      -> xterm.js
+                            css/xterm.css     -> xterm.css
+                            LICENSE           -> LICENSE-xterm.txt
+  @xterm/addon-fit  0.10.0  lib/addon-fit.js  -> addon-fit.js
+                            LICENSE           -> LICENSE-addon-fit.txt
+
+Nothing else from either tarball: no source maps (each file keeps its
+sourceMappingURL comment, which resolves to nothing here and costs nothing
+unless a browser's devtools are open), no TypeScript sources, no README.
+
+The tarballs each answered their own sha512 from the registry's metadata for
+that exact version:
+
+  @xterm/xterm 5.5.0
+    https://registry.npmjs.org/@xterm/xterm/-/xterm-5.5.0.tgz
+    sha512-hqJHYaQb5OptNunnyAnkHyM8aCjZ1MEIDTQu1iIbbTD/xops91NB5yq1ZK/dC2JDbVWtF23zUtl9JE2NqwT87A==
+
+  @xterm/addon-fit 0.10.0
+    https://registry.npmjs.org/@xterm/addon-fit/-/addon-fit-0.10.0.tgz
+    sha512-UFYkDm4HUahf2lnEyHvio51TNGiLK66mqP2JoATy7hRZeXaGMRDr00JiSF7m63vR5WKATF605yEggJKsw0JpMQ==
+
+And every file here is its own SHA-256, which a Go test recomputes from what
+is embedded, so none of this can be edited without a test saying so:
+
+  addon-fit.js            bdaefa370b1bfc42ee88d46fe6072400902a4d4b2d45cd93438dda9b23c97089
+  LICENSE-addon-fit.txt   e256f01188af527e4d06d21d06fbf785ae9c50d4b328bf03cbe0ba7f0aa4228f
+  LICENSE-xterm.txt       b569f629d00f2626a8100df2a1798210535621e42164dfd426a6fe5aac7b0ccd
+  xterm.css               ba8e6985669488981ccf40c0cefe3aba80722cb6c92de7ad628b0bd717faf2b6
+  xterm.js                1f991ac3b4b283ebf96e60ae23a00a52765dd3a2e46fa6fdda9f1aab032f7495
+
+To update
+---------
+
+1. Read the registry metadata and take that version's dist.integrity:
+   curl -s https://registry.npmjs.org/@xterm/xterm | python3 -c \
+     "import json,sys; print(json.load(sys.stdin)['versions']['<ver>']['dist'])"
+2. Fetch the tarball and check it against that sha512 before opening it:
+   curl -sO <tarball> && python3 -c "import base64,hashlib;\
+     print(base64.b64encode(hashlib.sha512(open('<file>.tgz','rb').read()).digest()))"
+3. Copy the five files above out of it, put the new versions, integrity
+   strings and `shasum -a 256 *` output in this file, and paste the same
+   sums into the table in api/assets_test.go.
