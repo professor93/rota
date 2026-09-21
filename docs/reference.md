@@ -175,6 +175,8 @@ rota set 2 --long forget      # throw away its long-lived token
 rota login 6                  # sign in an account whose CLI keeps its own credentials
 rota remove 2 5               # forget accounts, and the homes rota made for them
 rota serve 8787 --token=T     # serve the HTTP API and its playground
+rota serve --config ./server.toml   # one file instead of the flags below
+rota serve --print-config     # what it would serve with, and where each value came from
 ```
 
 ### The rotation
@@ -282,6 +284,7 @@ as well as within one; a rejected code costs one retry, not a whole login.
 rota serve --token=$(openssl rand -hex 32)      # 127.0.0.1:8787
 rota serve 8787 --token=T --root /srv/work      # a bare port means 0.0.0.0
 ROTA_TOKEN=T rota serve                          # keeps it out of the process table
+rota serve --config /etc/rota/server.toml        # or write it all down once
 ```
 
 The token is mandatory and is checked in constant time. Ten bad tokens from
@@ -300,9 +303,92 @@ fatal: a provider that cannot be reached leaves its account exactly as it
 was, and the next sweep tries again. `--refresh-every 0` turns it off, and
 the command line still refreshes what it is about to use.
 
+### One file for the server
+
+Everything above can be written down once instead of typed every time.
+`rota serve` reads `server.toml` from the store directory — `$ROTA_HOME/
+server.toml`, or `~/.rota/server.toml` — and `--config PATH` reads another.
+The default file is allowed not to exist, and then nothing has changed; a
+file somebody names has to be there, because naming one that is not is a
+typo nobody would otherwise be told about.
+
+The file may hold the bearer token, so on unix rota refuses to start unless
+it belongs to its owner alone, and says the command that fixes it:
+
+```
+/home/me/.rota/server.toml is readable by other users (mode 0644); it may
+hold a token, so fix it with: chmod 600 /home/me/.rota/server.toml
+```
+
+**A flag beats the environment, the environment beats the file, and the file
+beats the default.** A flag counts only when it was actually typed: its own
+default is just another way of spelling the default. `ROTA_TOKEN` beats a
+token written in the file.
+
+`docs/server.toml` in this repository is the whole schema with every key at
+its default and a line of comment each; a test loads it and insists it comes
+out equal to the defaults, so it cannot drift. In short:
+
+```toml
+[server]
+listen = "127.0.0.1:8787"   # host:port, or a bare port for every interface
+quiet  = false              # log warnings and errors only
+
+[tls]
+cert = ""                   # cert and key go together or not at all
+key  = ""
+
+[auth]
+token      = ""             # the bearer token, if you keep it here
+token_file = ""             # or a file holding it, same permission rule
+token_env  = "ROTA_TOKEN"   # or the name of the variable that holds it
+
+[routes]
+api        = true           # everything under /v1 except the sockets
+playground = true           # GET / and GET /playground
+websocket  = true           # the /ws routes
+
+[runs]
+timeout         = "10m"     # hard cap on one run
+max_concurrent  = 8         # how many CLIs may run at once
+input_timeout   = "1h"      # hard cap on a run that stays open
+input_grace     = "1m"      # how long an open run survives unread
+replay          = 1000      # events kept for a reader that reattaches
+refresh_every   = "2m"      # "0s" turns the background sweep off
+roots           = []        # confine cwd, uploads and extra directories here
+allow_dangerous = false
+allow_raw_flags = false
+
+[store]
+dir = ""                    # empty is $ROTA_HOME or ~/.rota
+```
+
+Three of those keys — `input_timeout`, `input_grace` and `replay` — have no
+flag at all: a run that stays open was only ever configurable from the
+library until now.
+
+`[routes]` switches whole groups on and off. A group that is off is not
+registered, so its paths answer `404` exactly as a path this server never
+had would: nothing tells a stranger that a door is there but shut. The page
+and the sockets are the API in another shape, so neither means anything
+without it, and asking for one without `api` is refused by name. With
+`websocket = false` the playground is told so by `/v1/schema` and stops
+offering a run that stays open, rather than opening a socket at nothing.
+
+`rota serve --print-config` prints the whole schema as TOML and exits
+without serving, each line saying where its value came from — `# default`,
+`# file`, `# env ROTA_TOKEN`, `# flag --timeout`, `# argument`. The token is
+never printed, only whether there is one (`"(set)"`), so the output can be
+pasted where the file itself could not; it is otherwise a file rota reads
+back.
+
+rota has no database, and this file configures none. What persists is the
+store directory: the accounts, the homes rota stages for them and, now, this
+file.
+
 | Method | Path | |
 |---|---|---|
-| `GET` | `/` | unauthenticated and never rate-limited: what this is, its version, and where the page is. The only liveness answer — what a watchdog reads |
+| `GET` | `/` | unauthenticated and never rate-limited: what this is, its version, and where the page is. The only liveness answer — what a watchdog reads. With the rest of the `playground` group |
 | `GET` | `/playground` | the playground, a single self-contained page |
 | `GET` | `/v1/schema` | every provider, its models, efforts, defaults and fields |
 | `GET` | `/v1/accounts` | accounts in rotation order, with usage, status, order, threshold and when limits were read (`?refresh=1`); `default` names the one a bare run would use |
@@ -1686,4 +1772,7 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `api/server.go`, `api/run.go` | Routing, the token, the rate limit, requests and streaming |
 | `api/runs.go`, `api/ws.go` | The runs that stay open, and the WebSocket that carries one both ways |
 | `api/playground.html` | The page served at `/playground` |
+| `api/config.go` | `server.toml`: the schema, its defaults, what it validates, and `--print-config` |
+| `internal/toml/` | The part of TOML that file uses, and a refusal by name for the rest |
+| `docs/server.toml` | The whole schema at its defaults, kept honest by a test |
 | `cmd/rota/main.go` | The command |

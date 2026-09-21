@@ -1,0 +1,47 @@
+# rota server.toml — one file for running the server and for the routes it
+# answers. Every key below is written with the value rota uses when it is
+# left out, so this file changes nothing: copy it to $ROTA_HOME/server.toml
+# (or ~/.rota/server.toml) and edit what you mean.
+#
+# A flag beats the environment, the environment beats this file, and this
+# file beats the defaults printed here. `rota serve --print-config` says
+# where each value in the end came from.
+#
+# This file may hold the bearer token, so rota refuses to start if anyone
+# but its owner can read it: chmod 600 server.toml.
+#
+# rota has no database. What persists is the store directory, [store] below.
+
+[server]
+listen = "127.0.0.1:8787"  # host:port, or a bare port for every interface
+quiet = false              # log warnings and errors only
+
+[tls]
+cert = ""  # the certificate; without it the token travels in clear text
+key = ""   # the private key; cert and key go together or not at all
+
+[auth]
+token = ""                # the bearer token, if you keep it here
+token_file = ""           # or a file holding it, under the same permission rule
+token_env = "ROTA_TOKEN"  # or the name of the variable that holds it
+
+# Whole groups of routes, on or off. A group that is off is not registered,
+# so its paths answer 404 like any path this server never had.
+[routes]
+api = true         # everything under /v1 except the sockets
+playground = true  # GET / and GET /playground
+websocket = true   # the /ws routes, which carry a run that stays open
+
+[runs]
+timeout = "10m"          # hard cap on one run
+max_concurrent = 8       # how many CLIs may run at once
+input_timeout = "1h"     # hard cap on a run that stays open for more messages
+input_grace = "1m"       # how long an open run survives with nobody reading it
+replay = 1000            # events an open run keeps for a reader that reattaches
+refresh_every = "2m"     # how often to rotate tokens and re-read usage; "0s" is off
+roots = []               # confine cwd, uploads and extra directories here
+allow_dangerous = false  # permit permission-bypass and full-access options
+allow_raw_flags = false  # let callers pass flags straight to the vendor CLI
+
+[store]
+dir = ""  # where rota keeps everything; empty is $ROTA_HOME or ~/.rota
