@@ -48,11 +48,20 @@ Usage:
   rota run [id]                 open that account's CLI instead
   rota run [id] -- <args...>    hand the CLI these arguments untouched
   rota run [id] <prompt> --input   keep the run open for more messages
+  rota run [id] --share         open the CLI here, and let a rota server on
+                                this machine show it on its terminal page
   rota send <run> "..."         send another message into a run started with --input
   rota set <id> [flags]         where an account sits and what it reads:
-                                --order, --threshold, --cwd, --config, --long
+                                --order, --threshold, --cwd, --config,
+                                --sessions, --long forget, --clear
   rota remove <id>...           forget accounts and their staged credentials
   rota serve [addr] --token=T   serve the HTTP API and its playground
+  rota serve --config FILE      ...configured by one file instead of flags
+  rota serve --print-config     what it would serve with, and where each value
+                                came from; prints nothing secret
+  rota serve passwd|token|invite   a person, a token or a watcher's link for
+                                that file; rota serve -h describes the three
+  rota version                  which rota this is
 
 The id is optional: leave it out and rota takes the first account in the
 rotation that is still under its threshold — order 1, then 2, and so on.
@@ -61,7 +70,10 @@ be run by naming its id.
 
 serve takes a bare port as 0.0.0.0:port, or a full host:port; it listens on
 127.0.0.1:8787 by default. The token may come from ROTA_TOKEN instead of the
-command line, which keeps it out of the process table.
+command line, which keeps it out of the process table. Everything else about
+a server — TLS, which groups of routes it answers, who may sign in and what
+they may do — lives in $ROTA_HOME/server.toml, which nothing writes but you.
+The terminal page is one of those groups, and is off until that file says so.
 
 A first word that is not a command is taken as a prompt, but only when it
 could not be a mistyped one: it has to contain a space, or follow -p. So
@@ -81,7 +93,7 @@ Usage:
   rota list                accounts, usage, health
   rota run [id] [flags]    ask with flags — or open the CLI itself
   rota send <run> "..."    send more into a run started with --input
-  rota set <id> [flags]    order, threshold, cwd, config, long token
+  rota set <id> [flags]    order, threshold, cwd, config, sessions, long token
   rota remove <id>...      forget accounts
   rota serve [addr]        the HTTP API and its playground
 
@@ -1706,10 +1718,19 @@ server starts included.
 Everything below can also be written down once, in $ROTA_HOME/server.toml
 (or ~/.rota/server.toml), together with the groups of routes this server
 answers; --config reads another file, and --print-config shows what the
-server would use and where each value came from. The file must not be
-readable by anyone but its owner, because it may hold the token.
-A flag beats the environment, the environment beats the file, and the file
-beats the default.
+server would use and where each value came from, printing nothing secret.
+The file must not be readable by anyone but its owner, because it may hold
+the token. A flag beats the environment, the environment beats the file, and
+the file beats the default.
+
+Some of the file has no flag here at all: how long a sign-in lasts, where
+the store is, the three settings a run that stays open is governed by, and
+[routes] and [terminal]. [routes] terminal serves a page at /terminal where
+an account's CLI runs on this machine and can be watched, or typed into, by
+whoever signs in. It is off until that file turns it on, it runs on linux
+and macOS only, and off the loopback address it will not start without a
+certificate — a control sign-in on it runs commands here, as this user.
+docs/server.toml in the repository is the whole schema at its defaults.
 
 That file can also name people who may sign in on the page and tokens with
 a role of their own. rota never writes it; these three print what to paste,
