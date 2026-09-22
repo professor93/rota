@@ -1,5 +1,7 @@
-# The vendored terminal emulator is somebody else's release, carried byte for
-# byte: a test compares each file with the checksum its README records, and
-# the binary embeds exactly what is here. Git must not rewrite line endings
-# in it at checkout, which on Windows it otherwise does.
-api/assets/xterm/** -text
+# What the binary embeds is served byte for byte, and tests read it byte for
+# byte: the vendored emulator against the checksums its README records, the
+# pages by the exact shape of their script tags. Git must not rewrite line
+# endings in any of it at checkout, which on Windows it otherwise does.
+api/assets/**  -text
+api/*.html     -text
+api/testdata/* -text
