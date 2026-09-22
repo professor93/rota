@@ -12,6 +12,10 @@
 # it: chmod 600 server.toml.
 #
 # rota has no database. What persists is the store directory, [store] below.
+#
+# Some of this can also be typed on the command line. [routes], [terminal],
+# auth (except the token itself), store.dir and runs.input_timeout,
+# input_grace and replay have no flag at all: they are set here or not.
 
 [server]
 listen = "127.0.0.1:8787"  # host:port, or a bare port for every interface
@@ -43,6 +47,8 @@ terminal = false   # /v1/terminals and GET /terminal; needs api and websocket
 # the server runs as — which is also why rota refuses to start with it on, a
 # listen address that is not the loopback, and no certificate. It runs on
 # linux and macOS.
+#
+# Nothing in this section means anything unless routes.terminal is true.
 [terminal]
 shell = false               # also allow a plain login shell, not only accounts' CLIs
 max_sessions = 8            # terminals running at once

@@ -69,6 +69,14 @@ in `rota/store` (HideFromAgents, HostEnv), where `ROTA_HOME` is declared by
 the package that defines it and `ROTA_TOKEN` by the command. lib never
 hears either name.
 
+**In this manual.** [How it works](#how-it-works-and-why-nothing-is-faked) ·
+[Install](#install) · [The command](#the-command) ·
+[The HTTP API](#the-http-api) · [Models and effort](#models-and-effort) ·
+[Providers](#providers) · [Quota](#quota) ·
+[Token lifetimes](#token-lifetimes) · [Storage](#storage) ·
+[Using the library](#using-the-library) · [Performance](#performance) ·
+[Layout](#layout)
+
 ## How it works, and why nothing is faked
 
 rota is not a proxy. It never speaks a provider's inference API, never
@@ -166,6 +174,8 @@ rota run 2 "start here" --input    # keep the run open and type more messages in
 rota send 7f3c1a5d "and the tests?"  # send into that run from another terminal
 rota run                      # open the rotation's account in its own CLI
 rota run 2                    # open account 2's CLI, as it comes
+rota run 2 --share            # the same, watchable from this machine's terminal page
+rota run --share=watch --label api   # ...offered to be read and never typed into
 rota set 2 --order 1          # put account 2 first in the queue (0 = out of it)
 rota set 2 --threshold 80     # move on to the next account at 80% usage
 rota set 2                    # what account 2 is set to
@@ -177,7 +187,115 @@ rota remove 2 5               # forget accounts, and the homes rota made for the
 rota serve 8787 --token=T     # serve the HTTP API and its playground
 rota serve --config ./server.toml   # one file instead of the flags below
 rota serve --print-config     # what it would serve with, and where each value came from
+rota serve passwd alice --role control  # a [[users]] block to paste into that file
+rota serve token ci --role watch        # a second bearer token, and its [[tokens]] block
+rota serve invite --ttl 10m   # ask a running server for a single-use watcher's link
+rota version                  # which rota this is
 ```
+
+### Every command, and every flag it takes
+
+`--json` works before a command or among its flags and turns that command's
+output into one machine-readable document. `rota --help` is the paragraph
+version of this; `rota <command> -h` is one command's flags with their
+defaults. `ls` and `rm` are accepted for `list` and `remove`; `help` is
+`--help`; and `rota version`, or `rota --version`, prints the version.
+
+**`rota login [provider | login-id | account-id] [code]`** — one verb for
+every way an account is signed in.
+
+| | |
+|---|---|
+| `--long` | ask for a year-long token for an account already here — see *A token that outlives the window* |
+| `--provider <name>` | the provider, spelled out where a bare name would read as something else |
+
+Anything after an account id is passed to the vendor CLI's own login
+(`--region mainland-cn`, say).
+
+**`rota list [provider]`**
+
+| | |
+|---|---|
+| `-r`, `--refresh` | read the quotas now, rather than using the five-minute cache |
+| `-s`, `--short` | what is already known, asking no provider anything |
+| `--sessions` | also what the CLIs are running and what could be resumed |
+| `--all` | with `--sessions`: every conversation, not five per account |
+
+**`rota run [id] [prompt]`** — with no prompt it opens the CLI itself.
+
+| | |
+|---|---|
+| `-p`, `--print` | the prompt as a flag; also how a prompt that is nothing but digits is written |
+| `-m`, `--model` | the model; the provider's default when empty |
+| `-e`, `--effort` | reasoning effort, for providers that have one |
+| `-s`, `--stream` | print events as they happen rather than one answer at the end |
+| `--input` | keep the run open and read more messages from stdin; implies `--stream` |
+| `--with <names>` | readings to add beside the answer: a comma list, or the flag repeated |
+| `--cwd <dir>` | where the run starts, when the account names none |
+| `-t`, `--timeout` | give up after this long |
+| `--permission-mode` | how the agent asks before acting |
+| `--sandbox` | sandbox profile, for providers that have one |
+| `--system-prompt` | instructions added before the prompt |
+| `-r`, `--resume [id]` | continue an earlier conversation; on its own, the most recent |
+| `-c`, `--continue` | continue the most recent conversation in this directory |
+| `--session <id>` | name a new conversation with this id, so it can be resumed later |
+| `--fork` | with `--resume`: branch into a new conversation instead of continuing it |
+| `--json-schema` | constrain the answer to this JSON Schema |
+| `-S`, `--stateless` | no session saved, no settings, memory or rules read (claude, codex) |
+| `-v` | also report, on stderr, which account ran and how to resume |
+| `--json` | the whole result: cost, usage, session id, exit status |
+| `-i`, `--interactive` | open the CLI as it comes instead of asking it anything |
+| `--share[=control\|watch]` | open the CLI here *and* offer this terminal to a rota server on this machine |
+| `--label <name>` | what to call that shared terminal in the listing |
+| `--` | everything after it belongs to the vendor CLI, untouched |
+
+**`rota send <run-id> [text]`** — into a run started with `--input`.
+
+| | |
+|---|---|
+| `--steer` | interrupt first, so the message starts the next turn |
+| `--interrupt` | stop the tool the agent is running, and send nothing |
+| `--close` | no more messages: the run finishes its turn and exits |
+
+**`rota set <id>`** — with no flags it prints what the account is set to.
+
+| | |
+|---|---|
+| `--order <place>` | a number, or `first`, `last`, `up`, `down`, `before:<id>`, `after:<id>`, `0`/`out` |
+| `--threshold <pct>` | the usage at which the rotation moves on, 1 to 100 |
+| `--cwd <dir>` | where this account's runs start |
+| `--config <dir>` | its own CLI configuration, and the private home its credentials are staged in |
+| `--sessions <where>` | where a claude account's conversations live: `shared`, `own`, or a directory |
+| `--long forget` | throw away its long-lived token; the only value the flag takes |
+| `--clear` | forget `cwd`, `config` and `sessions`, back to the defaults |
+
+**`rota remove <id>...`** takes no flags.
+
+**`rota serve [address]`** — every flag here can be written in `server.toml`
+instead; see *One file for the server*.
+
+| | |
+|---|---|
+| `--config <path>` | the file to read the rest of this from (default `<store dir>/server.toml`) |
+| `--print-config` | print what it would serve with, and where each value came from, then exit |
+| `--token <secret>` | the bearer token every request must carry; prefer `ROTA_TOKEN` |
+| `--root <dir>` | confine cwd, uploads and extra directories here; repeatable |
+| `--timeout` | hard cap on one run |
+| `--max-concurrent` | how many CLIs may run at once |
+| `--refresh-every` | how often to rotate expiring tokens and re-read usage; `0` turns it off |
+| `--tls-cert`, `--tls-key` | the certificate pair; together or not at all |
+| `--allow-dangerous` | permit permission-bypass and full-access options |
+| `--allow-raw-flags` | let callers pass flags straight to the vendor CLI |
+| `--quiet` | log warnings and errors only |
+
+**`rota serve passwd <name>`** and **`rota serve token <name>`** take
+`--role control|watch` and print a block to paste. **`rota serve invite`**
+takes `--ttl` (ten minutes by default, a day at most) and `--config`, and
+asks a server that is already running for the link. None of the three serves
+anything; see *The principals*.
+
+The whole `[routes]` and `[terminal]` groups — the terminal page among them —
+have no flag at all and are set in the file only.
 
 ### The rotation
 
@@ -364,7 +482,8 @@ max_sessions     = 8
 scrollback_bytes = 2097152  # output kept per terminal, for whoever attaches
 idle_timeout     = "12h"    # a terminal nobody is attached to ends after this
 record           = false    # keep each terminal's output under <store>/terminals/
-record_max_bytes = 52428800
+record_max_bytes = 52428800 # how much of one terminal is kept; input never is
+share            = true     # take terminals offered by `rota run --share` here
 
 [runs]
 timeout         = "10m"     # hard cap on one run
@@ -381,9 +500,13 @@ allow_raw_flags = false
 dir = ""                    # empty is $ROTA_HOME or ~/.rota
 ```
 
-Three of those keys — `input_timeout`, `input_grace` and `replay` — have no
-flag at all: a run that stays open was only ever configurable from the
-library until now.
+Much of that has no flag at all and never will: the whole of `[routes]` and
+`[terminal]`, all of `[auth]` but the token itself, `store.dir`, and the
+three keys a run that stays open is governed by — `input_timeout`,
+`input_grace` and `replay`, which were configurable from the library alone
+until this file existed. A command line is for what changes between one
+server and the next run of it; who may sign in, and whether this server
+holds terminals, is not that.
 
 `[routes]` switches whole groups on and off. A group that is off is not
 registered, so its paths answer `404` exactly as a path this server never
@@ -421,45 +544,55 @@ rota has no database, and this file configures none. What persists is the
 store directory: the accounts, the homes rota stages for them and, now, this
 file.
 
-| Method | Path | |
-|---|---|---|
-| `GET` | `/v1/health` | unauthenticated and never rate-limited: `{"ok":true}` and nothing else. Its own group, so it survives switching the page off |
-| `GET` | `/` | unauthenticated: what this is and its version. With the rest of the `playground` group |
-| `GET` | `/playground` | the playground, a page over the API |
-| `GET` | `/terminal` | the terminal page. With the `terminal` group, not this one: a server may serve either page without the other |
-| `GET` | `/assets/page.css`, `/assets/page.js` | what both pages are made of in common; present wherever either page is |
-| `GET` | `/assets/xterm/…` | the vendored terminal emulator, with the `terminal` group |
-| `GET` | `/v1/schema` | every provider, its models, efforts, defaults and fields |
-| `GET` | `/v1/accounts` | accounts in rotation order, with usage, status, order, threshold and when limits were read (`?refresh=1`); `default` names the one a bare run would use |
-| `GET` | `/v1/accounts/{id}/schema` | the models *that* account may actually use |
-| `POST` | `/v1/run` | run a prompt on whichever account the rotation picks |
-| `POST` | `/v1/accounts/{id}/run` | run a prompt on that account |
-| `GET` | `/v1/runs` | the runs staying open right now, and the ones that have just ended |
-| `GET` | `/v1/runs/{id}` | one of them: its account, state, how many messages are waiting, whether anyone is reading |
-| `GET` | `/v1/runs/{id}/events` | attach to its stream, `?since=N` replaying what was missed |
-| `POST` | `/v1/runs/{id}/messages` | `{"text":"…","steer":false}` — one more message into it |
-| `POST` | `/v1/runs/{id}/interrupt` | stop the tool it is running |
-| `POST` | `/v1/runs/{id}/close` | no more messages: it finishes its turn and exits |
-| `GET` | `/v1/ws` | a WebSocket that starts a run on whichever account the rotation picks and carries it both ways |
-| `GET` | `/v1/accounts/{id}/ws` | the same, on that account |
-| `GET` | `/v1/runs/{id}/ws` | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
-| `GET` | `/v1/terminals` | the terminals running right now, and the ones that have just ended |
-| `GET` | `/v1/terminals/{id}` | one of them: what it runs, who is watching, who holds the keyboard |
-| `POST` | `/v1/terminals` | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one |
-| `DELETE` | `/v1/terminals/{id}` | end one: a hangup, then a kill three seconds later |
-| `GET` | `/v1/terminals/{id}/ws` | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard |
-| `PATCH` | `/v1/accounts/{id}` | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), and `"long":"forget"` to throw away its long-lived token |
-| `DELETE` | `/v1/accounts/{id}` | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays |
-| `POST` | `/v1/login` | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead |
-| `POST` | `/v1/login/{id}` | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"status":"long","long_until":"..."}` |
-| `GET` | `/v1/session` | who this request is: `{name, role, via, expires}`, or `401` |
-| `POST` | `/v1/session` | `{"name":"…","password":"…"}` → the same, and the session cookie |
-| `DELETE` | `/v1/session` | end this session |
-| `POST` | `/v1/invites` | `{"ttl":"10m"}` → `{"url","expires"}` — a single-use link that signs somebody in as a watcher |
-| `GET` | `/invite/{code}` | unauthenticated: spends one of those and lands on a page — the terminal where there is one, the playground otherwise |
+Every route this server can register is here, with the role it takes. `open`
+means no credential at all — the page, the assets, the health probe and the
+three doors a sign-in goes through, which cannot be asked to prove who they
+are first. Everything else is `watch` (reading) or `control` (changing);
+see *Who is asking, and what they may do*.
 
-`/v1/auth` and `/v1/auth/{id}` are the same two under their old names, kept
-working for anything already calling them.
+| Method | Path | Role | |
+|---|---|---|---|
+| `GET` | `/v1/health` | open | never rate-limited: `{"ok":true}` and nothing else. Its own group, so it survives switching the page off |
+| `GET` | `/` | open | what this is and its version. With the rest of the `playground` group |
+| `GET` | `/playground` | open | the playground, a page over the API |
+| `GET` | `/terminal` | open | the terminal page. With the `terminal` group, not this one: a server may serve either page without the other |
+| `GET` | `/assets/{file}` | open | what both pages are made of in common — `page.css` and `page.js`; present wherever either page is |
+| `GET` | `/assets/xterm/{file}` | open | the vendored terminal emulator, with the `terminal` group |
+| `GET` | `/invite/{code}` | open | spends a single-use link and lands on a page — the terminal where there is one, the playground otherwise |
+| `GET` | `/v1/session` | open | who this request is: `{name, role, via, expires}`, or `401` |
+| `POST` | `/v1/session` | open | `{"name":"…","password":"…"}` → the same, and the session cookie |
+| `DELETE` | `/v1/session` | open | end this session |
+| `GET` | `/v1/schema` | watch | every provider, its models, efforts, defaults and fields |
+| `GET` | `/v1/accounts` | watch | accounts in rotation order, with usage, status, order, threshold, `long_until` and when limits were read (`?refresh=1`); `default` names the one a bare run would use |
+| `GET` | `/v1/accounts/{id}/schema` | watch | the models *that* account may actually use |
+| `POST` | `/v1/run` | control | run a prompt on whichever account the rotation picks |
+| `POST` | `/v1/accounts/{id}/run` | control | run a prompt on that account |
+| `GET` | `/v1/runs` | watch | the runs staying open right now, and the ones that have just ended |
+| `GET` | `/v1/runs/{id}` | watch | one of them: its account, state, how many messages are waiting, whether anyone is reading |
+| `GET` | `/v1/runs/{id}/events` | watch | attach to its stream, `?since=N` replaying what was missed |
+| `POST` | `/v1/runs/{id}/messages` | control | `{"text":"…","steer":false}` — one more message into it |
+| `POST` | `/v1/runs/{id}/interrupt` | control | stop the tool it is running |
+| `POST` | `/v1/runs/{id}/close` | control | no more messages: it finishes its turn and exits |
+| `GET` | `/v1/ws` | control | a WebSocket that starts a run on whichever account the rotation picks and carries it both ways |
+| `GET` | `/v1/accounts/{id}/ws` | control | the same, on that account |
+| `GET` | `/v1/runs/{id}/ws` | watch | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
+| `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended |
+| `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard |
+| `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one |
+| `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later |
+| `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame |
+| `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), and `"long":"forget"` to throw away its long-lived token |
+| `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays |
+| `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead |
+| `POST` | `/v1/login/{id}` | control | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"status":"long","long_until":"..."}` |
+| `POST` | `/v1/auth` | control | what `POST /v1/login` was called before the API and the command agreed on one word; kept working for anything already calling it |
+| `POST` | `/v1/auth/{id}` | control | likewise for `POST /v1/login/{id}` |
+| `POST` | `/v1/invites` | control | `{"ttl":"10m"}` → `{"url","expires"}` — a single-use link that signs somebody in as a watcher |
+
+The `/v1/terminals` and `/assets/xterm/` rows exist only where
+`routes.terminal` is on, and the pages and `/assets/` only where a page is
+served. A group that is off is not registered, so its paths answer `404`
+like any path this server never had.
 
 ```sh
 curl -H "authorization: Bearer $T" -X POST localhost:8787/v1/accounts/1/run \
@@ -509,11 +642,14 @@ instead of.
 | message, steer, interrupt, close a run | no | yes |
 | `PATCH` and `DELETE` an account, sign one in | no | yes |
 | make an invite | no | yes |
+| list the terminals, and attach to one | yes, read-only | yes |
+| start or kill a terminal, and hold its keyboard | no | yes |
 
 That is one table in the code as well — route to role, consulted by the
-middleware, checked against the routes actually registered by a test — so
-the terminal, when it arrives, is rows in it rather than checks scattered
-through handlers. A route nobody wrote a row for takes `control`.
+middleware, checked against the routes actually registered by a test — which
+is why the terminals are rows in it rather than checks scattered through
+handlers, and why the frames a terminal's socket takes are a second table
+beside it. A route nobody wrote a row for takes `control`.
 
 A principal whose role does not cover what it asked for gets `403` and the
 sentence *this sign-in may only watch; nothing here can be changed from it*.
@@ -1186,21 +1322,20 @@ asked for one anywhere else refuses to start, naming the platform, rather
 than failing at the first terminal somebody opens.
 
 **It is off.** Not "off in the sample file" — off in the defaults, which is
-the one route group that is. Turning it on takes two lines:
+the one route group that is. Turning it on takes one line:
 
 ```toml
 [routes]
 terminal = true   # needs api and websocket
-
-[terminal]
-shell            = false    # also allow a plain login shell
-max_sessions     = 8
-scrollback_bytes = 2097152  # output kept per terminal, for whoever attaches
-idle_timeout     = "12h"    # a terminal nobody is attached to ends after this
-record           = false    # keep each terminal's output under <store>/terminals/
-record_max_bytes = 52428800
-share            = true     # take terminals offered by `rota run --share` here
 ```
+
+The `[terminal]` section then governs it: the login shell, how many terminals
+may run at once, how much scrollback is kept, how long an unattended one
+lives, whether output is recorded, and whether terminals offered from this
+machine are taken. Every key and its default is in
+*[One file for the server](#one-file-for-the-server)*, and in
+`docs/server.toml`; the ones that need more than a line of comment are
+explained below.
 
 **And it needs TLS off the loopback.** With `routes.terminal` on and a listen
 address that is not `127.0.0.1` or `localhost`, `tls.cert` and `tls.key` are
@@ -1634,7 +1769,10 @@ when `[[users]]` are configured, no certificate is given and the address is
 not the loopback. And **`control` is the power to run commands on this
 machine**: the agents this server starts have a shell, so handing somebody
 that role is handing them the machine, and `watch` exists so that showing
-somebody what is happening does not have to be.
+somebody what is happening does not have to be. The terminal is the sharpest
+edge of that, which is why it is the one route group that is off in the
+defaults and the one that refuses a listen address off the loopback without
+a certificate — see *A terminal on the server*.
 
 `--root` (repeatable) confines every path a request names — the working
 directory, uploads, extra directories, plugin directories, images, a debug
@@ -2152,7 +2290,14 @@ and treat the file the way you treat a private key.
 By default `~/.rota/accounts.json`, mode 0600, written atomically, with an
 exclusive lock held for the duration of each command so two rota processes
 cannot overwrite each other's rotated tokens. `ROTA_HOME` moves the
-directory. It holds live refresh tokens — treat it like a private key.
+directory. It holds live refresh tokens, and long-lived ones where an
+account has one — treat it like a private key.
+
+The rest of what persists is in that directory too, and nowhere else: the
+private homes under `homes/`, the server's own `server.toml`, the socket a
+run that stays open is reached through (`runs/<id>.sock`), and, where the
+server holds terminals, `terminals/` — the share socket and any recordings,
+mode `0600` inside a directory that is `0700`. rota has no database.
 
 On Windows rota builds, runs and locks: store and session state take real
 exclusive locks through kernel32's LockFileEx, with the same one-writer
@@ -2372,8 +2517,15 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `rotation/` | The queue: order, threshold, and which account a bare run takes. Outside lib on purpose — which account to spend is an application's policy |
 | `wire/` | `Upload`, `End`, the account view, and the request vocabulary described for forms. Outside lib on purpose — a library has no opinion about JSON or labels |
 | `message/` | Reading a finished answer: blocks, the normalized event vocabulary, `ask`. Outside lib on purpose — the SDK has no business knowing what markdown is |
+| `sessions/` | What the vendor CLIs are doing: the runs rota started, the editors holding one open, and the conversations `--resume` could pick up |
+| `store/mirror.go` | The Claude world each account gets: what is linked, what stays its own, and the warning for an entry that stopped being a link |
 | `api/server.go`, `api/run.go` | Routing, the token, the rate limit, requests and streaming |
 | `api/runs.go`, `api/ws.go` | The runs that stay open, and the WebSocket that carries one both ways |
+| `api/principal.go` | Who is asking: the two roles, the route table, the middleware and the cross-site rule |
+| `api/session.go`, `api/passwd.go` | Signing in on the page, invite links, health, and how a password is derived |
+| `api/terminal.go`, `api/terminals.go` | The terminals this server holds: the pseudo-terminal, the scrollback, the keyboard, and the routes over them |
+| `api/share.go`, `internal/share/` | A terminal offered from this machine, and the framing the two ends speak |
+| `internal/pty/` | The pseudo-terminal itself, on linux and macOS, and `Supported` everywhere else |
 | `api/playground.html` | The page served at `/playground` |
 | `api/terminal.html` | The page served at `/terminal` |
 | `api/assets/page.css`, `api/assets/page.js` | What both pages are made of in common |
@@ -2381,4 +2533,7 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `api/config.go` | `server.toml`: the schema, its defaults, what it validates, and `--print-config` |
 | `internal/toml/` | The part of TOML that file uses, and a refusal by name for the rest |
 | `docs/server.toml` | The whole schema at its defaults, kept honest by a test |
+| `docs/releases/` | What each released version changed |
 | `cmd/rota/main.go` | The command |
+| `cmd/rota/share.go` | `rota run --share`: the CLI on a pseudo-terminal, and the link to the server |
+| `cmd/rota/serveauth.go` | `rota serve passwd`, `token` and `invite` |
