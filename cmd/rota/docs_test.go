@@ -49,7 +49,7 @@ func TestReferenceDocumentsEveryFlag(t *testing.T) {
 		// A word boundary that counts a dash as part of the word, so
 		// --session is not satisfied by --sessions and -s is not satisfied
 		// by --short.
-		if !regexp.MustCompile(`(^|[^-\w])`+regexp.QuoteMeta(spelt)+`($|[^-\w])`).MatchString(doc) {
+		if !regexp.MustCompile(`(^|[^-\w])` + regexp.QuoteMeta(spelt) + `($|[^-\w])`).MatchString(doc) {
 			t.Errorf("%s is a flag this command takes and docs/reference.md never mentions it", spelt)
 		}
 	}
