@@ -1,7 +1,7 @@
 Vendored terminal emulator
 ==========================
 
-The Terminal tab of the playground draws a real terminal, and the code that
+The terminal page at /terminal draws a real terminal, and the code that
 draws it is here rather than at a CDN: rota is usually served on a loopback
 address with no route out, and a page that fetches its emulator from another
 host is a page that breaks there and a third party that can change what runs

@@ -38,6 +38,7 @@ go install github.com/professor93/rota/cmd/rota@latest
 rota login                     # sign a Claude account in (prints a URL)
 rota login codex               # ...or another provider: codex, grok
 rota login <login-id> <code>   # finish with the code from the browser
+rota login --long              # ...a token for an account here that lasts a year
 rota list                      # every account, in rotation order, with usage
 
 rota "explain this repo"       # ask — the rotation picks the account
@@ -48,6 +49,7 @@ rota run 1 "explain it" --with blocks,ask  # JSON, with fences split and the que
 rota run 2 "start here" --input   # keep it open; type more lines, /interrupt, /close
 rota send 7f3c1a5d "and the tests?"  # ...or send into that run from another terminal
 rota run 2                     # open account 2's CLI interactively
+rota run 2 --share             # ...and let a rota server's page watch it too
 rota set 2 --order first       # put account 2 first; the rest move down
 rota set 2 --order before:5    # ...or right before account 5, or up, down, last, out
 rota set 2 --threshold 80      # move on to the next account at 80% usage
@@ -59,6 +61,11 @@ Every answer prints to stdout; add `--json` anywhere for machine-readable
 output. `rota list --sessions` shows what is running right now and which
 conversations `--resume` could pick up.
 
+An access token lasts eight hours, and a window left open overnight outlives
+it. `rota login --long` stores a second, year-long credential for an account
+already registered, and every launch prefers it from then on;
+`rota set <id> --long forget` throws it away.
+
 ## The HTTP API
 
 `rota serve` exposes accounts at `/v1/accounts`, one-call runs at
@@ -69,6 +76,26 @@ for more messages: `/v1/runs/{id}/messages`, `interrupt` and `close` reach it
 while it runs, and `/v1/runs/{id}/events` reattaches a reader that dropped.
 Paths a request names can be confined with
 `--root`; everything risky is refused unless the operator allows it.
+
+Everything `rota serve` takes can be written down once in
+`~/.rota/server.toml` — the address, TLS, which groups of routes to answer,
+and the people and tokens that may sign in, each `control` (may run things)
+or `watch` (may only look). `rota serve --print-config` prints what it would
+serve with and where each value came from.
+
+```sh
+rota serve --config ~/.rota/server.toml
+rota serve passwd alice --role control   # prints a [[users]] block to paste
+```
+
+With `[routes] terminal = true` the server also serves `/terminal`: an
+account's CLI running on the server itself, kept when the browser tab
+closes, watched by several people and typed into by one at a time. It is off
+by default, and refuses an address off the loopback without TLS, because a
+`control` sign-in on it runs commands as the user the server runs as.
+
+The terminal — both the server's own and `rota run --share` — is Linux and
+macOS only. A Windows build has everything else.
 
 ## Use it as a library
 
