@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -79,7 +80,7 @@ func TestTurningRemoteControlOnGivesTheAccountItsOwnConfiguration(t *testing.T) 
 	if cfg["numStartups"] != float64(7) || cfg["mcpServers"] == nil || cfg["projects"] == nil {
 		t.Fatalf("started from the person's: %v", cfg)
 	}
-	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
+	if fi, _ := os.Stat(path); runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("private: %v", fi.Mode())
 	}
 	if fi, err := os.Lstat(filepath.Join(dst, "backups")); err == nil && fi.Mode()&os.ModeSymlink != 0 {
