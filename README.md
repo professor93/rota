@@ -50,6 +50,7 @@ rota run 2 "start here" --input   # keep it open; type more lines, /interrupt, /
 rota send 7f3c1a5d "and the tests?"  # ...or send into that run from another terminal
 rota run 2                     # open account 2's CLI interactively
 rota run 2 --share             # ...and let a rota server's page watch it too
+rota run 2 --remote-control    # ...with Claude Code's own Remote Control on
 rota set 2 --order first       # put account 2 first; the rest move down
 rota set 2 --order before:5    # ...or right before account 5, or up, down, last, out
 rota set 2 --threshold 80      # move on to the next account at 80% usage
@@ -61,10 +62,20 @@ Every answer prints to stdout; add `--json` anywhere for machine-readable
 output. `rota list --sessions` shows what is running right now and which
 conversations `--resume` could pick up.
 
-An access token lasts eight hours, and a window left open overnight outlives
-it. `rota login --long` stores a second, year-long credential for an account
-already registered, and every launch prefers it from then on;
-`rota set <id> --long forget` throws it away.
+A Claude account runs on a login of its own, kept in Claude Code's own
+credential store inside the account's private home: Claude Code refreshes it
+there, every window and background session of that account shares it, and
+Remote Control works. rota writes it there and reads back what Claude Code
+rotated, and never writes or refreshes it while Claude Code runs in that
+home. Your own login — your `~/.claude` and its keychain item — is never read
+or written. Accounts share your settings, memory, skills, plugins and MCP
+servers, and nothing of each other's running work: an account's agent view
+shows its own background sessions only.
+
+A run with no home of its own — `--stateless` — still takes a token in its
+environment, which lasts eight hours. `rota login --long` stores a second,
+year-long credential for such runs; `rota set <id> --long forget` throws it
+away.
 
 ## The HTTP API
 
@@ -102,8 +113,9 @@ macOS only. A Windows build has everything else.
 The SDK lives at `github.com/professor93/rota/lib` (import name `rota`) and
 depends on the Go standard library alone. It authenticates accounts,
 refreshes tokens, reads quotas, and runs agents — values in, values out. It
-stores nothing, reads no environment, and makes no decision an application
-could make: where files and tokens live is yours.
+stores nothing of yours, reads no environment, and makes no decision an
+application could make: where accounts and tokens live is yours. The one
+thing it writes is the credential a vendor CLI reads from its private home.
 
 ```go
 import rota "github.com/professor93/rota/lib"
