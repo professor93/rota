@@ -493,10 +493,10 @@ type termSession struct {
 	name     string // what the person who started it called it
 	cwd      string
 	started  time.Time
-	// tokenUntil is when the login inside this terminal lapses: the
-	// long-lived token's date where the account has one, the access token's
-	// expiry otherwise. A person looking at a terminal that has been open
-	// for a day wants to know that before the CLI tells them.
+	// tokenUntil is when the login inside this terminal lapses: the stored
+	// login's own end for a claude terminal on it, the token's expiry for one
+	// on a token (see loginUntil). A person looking at a terminal that has
+	// been open for a day wants to know that before the CLI tells them.
 	tokenUntil time.Time
 
 	back    termBackend

@@ -1409,8 +1409,10 @@ page's information panel is built from:
  "offset":20418,"ended":false,"recording":false,"token_until":"2027-03-04T00:00:00Z"}
 ```
 
-`token_until` is when the login inside will lapse — the long-lived token's
-date where the account has one, the access token's expiry otherwise — so
+`token_until` is when the login inside will lapse — for a claude terminal on
+the account's own stored login, when that login itself ends, if Claude Code
+has recorded it, since Claude Code refreshes the token inside; for one on a
+token, the long-lived token's date or the access token's expiry — so
 somebody looking at a terminal that has been open all day can see it coming.
 `offset` is how many bytes it has printed altogether, which is what `since`
 is measured in.

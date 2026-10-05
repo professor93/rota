@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -233,7 +234,7 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest) (*
 	_ = st.Close()
 	return &termPlan{
 		path: path, args: append([]string{}, req.Args...), env: termEnv(env), release: release,
-		account: a.ID, label: a.Label(), provider: a.Provider, tokenUntil: loginUntil(a),
+		account: a.ID, label: a.Label(), provider: a.Provider, tokenUntil: loginUntil(a, env),
 	}, nil
 }
 
@@ -277,14 +278,19 @@ func setEnv(env []string, name, value string) []string {
 	return append(out, name+"="+value)
 }
 
-// loginUntil is when the credential inside this terminal stops working: the
-// long-lived token's date where the account has one, because that is what a
-// launch uses, and the access token's expiry otherwise.
-func loginUntil(a *rota.Account) time.Time {
-	if a.LongValid() {
+// loginUntil is when the credential inside this terminal stops working. A
+// claude terminal on the account's own stored login — no token in its
+// environment — runs until the login itself ends, because Claude Code
+// refreshes it; one on a token runs until that token does: the long-lived
+// one's date where that is what it was given, the access token's otherwise.
+func loginUntil(a *rota.Account, env []string) time.Time {
+	onToken := slices.ContainsFunc(env, func(e string) bool { return strings.HasPrefix(e, "CLAUDE_CODE_OAUTH_TOKEN=") })
+	switch {
+	case rota.Flavor(a.Provider) == "claude" && !onToken:
+		return a.LoginUntil()
+	case a.LongValid():
 		return a.LongUntil()
-	}
-	if a.Token.ExpiresAt != 0 {
+	case a.Token.ExpiresAt != 0:
 		return time.UnixMilli(a.Token.ExpiresAt)
 	}
 	return time.Time{}
