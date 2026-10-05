@@ -464,8 +464,28 @@ func TestWhereConversationsLiveIsSetOverHTTP(t *testing.T) {
 	}
 	// And an empty body still says what may be sent.
 	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{}); resp.StatusCode != 400 ||
-		!strings.Contains(string(raw), "sessions") {
+		!strings.Contains(string(raw), "sessions") || !strings.Contains(string(raw), "remote_control") {
 		t.Fatalf("nothing to change: %d %s", resp.StatusCode, raw)
+	}
+}
+
+// Remote control is a claude account's to turn on and off, and the view says
+// which it is.
+func TestRemoteControlIsSetOverHTTP(t *testing.T) {
+	h := newHarness(t, Options{})
+	resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"remote_control": true})
+	var got wire.Account
+	json.Unmarshal(raw, &got)
+	if resp.StatusCode != 200 || !got.RemoteControl {
+		t.Fatalf("on: %d %s", resp.StatusCode, raw)
+	}
+	resp, raw = h.do("PATCH", "/v1/accounts/1", map[string]any{"remote_control": false})
+	if resp.StatusCode != 200 || strings.Contains(string(raw), "remote_control") {
+		t.Fatalf("off, and absent when off: %d %s", resp.StatusCode, raw)
+	}
+	if resp, raw := h.do("PATCH", "/v1/accounts/2", map[string]any{"remote_control": true}); resp.StatusCode != 400 ||
+		!strings.Contains(string(raw), "Claude Code") {
+		t.Fatalf("codex: %d %s", resp.StatusCode, raw)
 	}
 }
 

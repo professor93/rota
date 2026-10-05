@@ -903,13 +903,17 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		ConfigDir *string        `json:"config_dir"`
 		Sessions  *string        `json:"sessions"`
 		Long      *string        `json:"long"`
+		// RemoteControl gives a claude account its own .claude.json, which
+		// Claude Code's Remote Control reads the identity it acts as from.
+		RemoteControl *bool `json:"remote_control"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if body.Order == nil && body.Threshold == nil && body.Cwd == nil && body.ConfigDir == nil && body.Sessions == nil && body.Long == nil {
-		fail(w, http.StatusBadRequest, "nothing to change: send order, threshold, cwd, config_dir, sessions or long")
+	if body.Order == nil && body.Threshold == nil && body.Cwd == nil && body.ConfigDir == nil && body.Sessions == nil &&
+		body.Long == nil && body.RemoteControl == nil {
+		fail(w, http.StatusBadRequest, "nothing to change: send order, threshold, cwd, config_dir, sessions, remote_control or long")
 		return
 	}
 	// forget is all this field ever says. A long-lived token arrives by
@@ -959,6 +963,9 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		// write where the server was told not to.
 		want.Sessions = wire.Sessions(*body.Sessions)
 	}
+	if body.RemoteControl != nil {
+		want.RemoteControl = *body.RemoteControl
+	}
 	if err := want.CheckProject(); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
@@ -977,7 +984,7 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	a.Cwd, a.ConfigDir, a.Sessions = want.Cwd, want.ConfigDir, want.Sessions
+	a.Cwd, a.ConfigDir, a.Sessions, a.RemoteControl = want.Cwd, want.ConfigDir, want.Sessions, want.RemoteControl
 	if body.Threshold != nil {
 		a.Threshold = *body.Threshold
 	}
@@ -992,6 +999,9 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("rotation changed", "account", a.ID, "order", a.Order, "threshold", rotation.Cutoff(a))
+	if why := st.RemoteControlWaits(a); why != "" {
+		s.log.Warn(why)
+	}
 	view := wire.Describe(a)
 	view.Threshold = rotation.Cutoff(a)
 	writeJSON(w, http.StatusOK, view)

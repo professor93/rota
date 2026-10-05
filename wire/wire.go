@@ -54,6 +54,9 @@ type Account struct {
 	Cwd       string `json:"cwd,omitempty"`
 	ConfigDir string `json:"config_dir,omitempty"`
 	Sessions  string `json:"sessions,omitempty"`
+	// RemoteControl says the account keeps a .claude.json of its own, which
+	// is what Claude Code's Remote Control needs; absent when it shares yours.
+	RemoteControl bool `json:"remote_control,omitzero"`
 	// LongUntil is when this account's long-lived token stops working, RFC
 	// 3339, and absent when it has none. The token itself is never here and
 	// never anywhere else a person or a program can read: its date is the
@@ -122,7 +125,7 @@ func Sessions(v string) string {
 func Describe(a *rota.Account) Account {
 	v := Account{ID: a.ID, Provider: a.Provider, Email: a.Email, UUID: a.UUID, Status: a.Status(),
 		Metered: rota.Metered(a.Provider), Order: a.Order, Threshold: a.Threshold, Percent: a.Percent(),
-		Cwd: a.Cwd, ConfigDir: a.ConfigDir, Sessions: a.Sessions, DeadReason: a.DeadReason}
+		Cwd: a.Cwd, ConfigDir: a.ConfigDir, Sessions: a.Sessions, RemoteControl: a.RemoteControl, DeadReason: a.DeadReason}
 	if t := a.LongUntil(); !t.IsZero() {
 		v.LongUntil = t.UTC().Format(time.RFC3339)
 	}
@@ -167,7 +170,7 @@ func LongNote(a *rota.Account) string {
 	day := t.Format(time.DateOnly)
 	switch left := time.Until(t); {
 	case left <= 0:
-		return "its long-lived token expired on " + day + "; launches are back on the 8-hour token — `rota login --long` for another"
+		return "its long-lived token expired on " + day + "; runs without the account's home are back on the 8-hour token — `rota login --long` for another"
 	case left <= LongSoon:
 		return fmt.Sprintf("its long-lived token expires on %s, in %d days; `rota login --long` for another", day, int(left/(24*time.Hour)))
 	}

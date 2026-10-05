@@ -92,7 +92,7 @@ func TestLoginLongStoresTheTokenAndSaysWhoseItIs(t *testing.T) {
 	out, _, code = call(t, "login", id, "CODE")
 	day := time.Now().AddDate(1, 0, 0).Format(time.DateOnly)
 	want := "long-lived token stored for #1 claude/a@b.c, good until " + day +
-		"; every launch uses it from now on.\n"
+		"; a run without the account's home, or on a dead login, uses it from now on.\n"
 	if code != 0 || out != want {
 		t.Fatalf("%d\n got %q\nwant %q", code, out, want)
 	}

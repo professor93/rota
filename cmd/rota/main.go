@@ -50,10 +50,13 @@ Usage:
   rota run [id] <prompt> --input   keep the run open for more messages
   rota run [id] --share         open the CLI here, and let a rota server on
                                 this machine show it on its terminal page
+  rota run [id] --remote-control[=name]   open Claude Code with its own
+                                Remote Control on, as this account
   rota send <run> "..."         send another message into a run started with --input
   rota set <id> [flags]         where an account sits and what it reads:
                                 --order, --threshold, --cwd, --config,
-                                --sessions, --long forget, --clear
+                                --sessions, --remote-control, --long forget,
+                                --clear
   rota remove <id>...           forget accounts and their staged credentials
   rota serve [addr] --token=T   serve the HTTP API and its playground
   rota serve --config FILE      ...configured by one file instead of flags
@@ -81,8 +84,12 @@ could not be a mistyped one: it has to contain a space, or follow -p. So
 
 Add --json to any command for machine-readable output. After a bare -- it
 belongs to the vendor CLI instead, along with everything else.
-Default provider is claude. Accounts live in $ROTA_HOME or ~/.rota (0600);
-no vendor CLI's own credential store is ever read or written.`
+Default provider is claude. Accounts live in $ROTA_HOME or ~/.rota (0600).
+A claude account runs on a login of its own, kept in Claude Code's own
+credential store inside the account's home, where Claude Code refreshes it:
+rota reads back what Claude Code rotated, and writes or refreshes the login
+only while nothing runs in that home. Your own login — your ~/.claude and its
+keychain item — is never read or written.`
 
 const shortUsage = "rota " + wire.Version + ` — several AI coding CLIs, several accounts, one rotation
 
@@ -453,7 +460,7 @@ func (c *cli) finish(s *store.Store, id, code string) error {
 			return c.emit(map[string]any{"id": a.ID, "provider": a.Provider, "email": a.Email,
 				"uuid": a.UUID, "status": "long", "long_until": a.LongUntil().UTC().Format(time.RFC3339)})
 		}
-		fmt.Fprintf(c.out, "long-lived token stored for #%d %s, good until %s; every launch uses it from now on.\n",
+		fmt.Fprintf(c.out, "long-lived token stored for #%d %s, good until %s; a run without the account's home, or on a dead login, uses it from now on.\n",
 			a.ID, a, a.LongUntil().Format(time.DateOnly))
 		return nil
 	}
@@ -471,6 +478,11 @@ func (c *cli) finish(s *store.Store, id, code string) error {
 		return c.emit(doc)
 	}
 	fmt.Fprintf(c.out, "%s %s account %d (%s).\n", verb, a.Provider, a.ID, a.Label())
+	if !added && rota.SharedHome(a.Provider) && s.InUse(a) {
+		// The new login is not written under a running Claude Code, which
+		// owns the one in the home until it stops.
+		fmt.Fprintln(c.out, "Its running sessions keep their present login until they end; /login inside one switches it at once.")
+	}
 	if login != "" {
 		fmt.Fprintf(c.out, "\nrota holds no credential for it. Sign it in once:\n\n  rota login %d\n", a.ID)
 	}
@@ -806,6 +818,14 @@ for the server alone and announced as a gap. --share=watch offers it to be
 read and never typed into, whatever role the person on the page has. --label
 names it in the listing; without one it is the folder's name. linux and macOS.
 
+--remote-control opens a claude account's own Claude Code, as a run with no
+prompt does, with Claude Code's Remote Control on — --remote-control=name
+names the session. It turns the account's remote control setting on first
+(see ` + "`rota set`" + `), because Remote Control acts as whoever the account's
+.claude.json names, and refuses to start a session whose Remote Control
+could not work: one on a token rather than the account's own login, or one
+whose home still runs Claude Code from before the setting was on.
+
 Conversations carry on: every run has a session id, and --resume <id>
 continues from it. On its own, --resume picks up the most recent
 conversation, which every provider can find without being told its id, and
@@ -822,6 +842,7 @@ conversation, which every provider can find without being told its id, and
   rota run 2 -- --some-vendor-flag   hand it these arguments untouched
   rota run 2 --share                 the same, watchable on this machine's page
   rota run --share=watch --label api offered to be read, under that name
+  rota run 2 --remote-control=laptop open it, controllable from claude.ai
 
 Flags:
 `
@@ -858,24 +879,31 @@ func (c *cli) run(args []string) error {
 	if err != nil {
 		return err
 	}
+	rest, remote, err := takeRemoteControl(rest)
+	if err != nil {
+		return err
+	}
 
 	// Two ways to say "not rota's vocabulary": -- for the arguments that
 	// follow, -i for the CLI's own session.
 	if len(rest) > 0 && rest[0] == "--" {
-		return c.handOver(id, rest[1:], ask)
+		return c.handOver(id, rest[1:], ask, remote)
 	}
 	if i := slices.IndexFunc(rest, func(a string) bool { return a == "-i" || a == "--interactive" }); i >= 0 {
-		return c.handOver(id, slices.Delete(slices.Clone(rest), i, i+1), ask)
+		return c.handOver(id, slices.Delete(slices.Clone(rest), i, i+1), ask, remote)
 	}
 	// Nothing left to say is a request for the CLI itself, not a mistake:
 	// `rota run` and `rota run 2` open a session.
 	if len(rest) == 0 {
-		return c.handOver(id, nil, ask)
+		return c.handOver(id, nil, ask, remote)
 	}
 	if ask.on {
 		// Sharing is about a terminal, and a question has none: it is asked
 		// and answered without anybody sitting in front of it.
 		return usageErr("%s", shareWithPrompt)
+	}
+	if remote.on {
+		return usageErr("%s", remoteWithPrompt)
 	}
 	return c.answer(id, rest)
 }
@@ -939,7 +967,7 @@ var execProcess = execCLI
 // terminal become its own and there is no rota left. With --share rota stays
 // as the parent, because something does want it — a server on this machine,
 // so that the terminal can also be watched from the page.
-func (c *cli) handOver(id int, args []string, ask shareAsk) error {
+func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) error {
 	if ask.on {
 		// Before the account is prepared rather than after: a refusal is
 		// worth having before a token has been refreshed and a credential
@@ -957,6 +985,11 @@ func (c *cli) handOver(id int, args []string, ask shareAsk) error {
 	if err != nil {
 		return err
 	}
+	more, err := c.remoteControl(s, a, remote)
+	if err != nil {
+		return err
+	}
+	args = append(slices.Clone(args), more...)
 	// The claim on the account is not released here: this process is about
 	// to become the CLI, and the CLI is what must hold it. It goes only if
 	// the handover does not happen — or, when the terminal is shared, when
@@ -1337,7 +1370,8 @@ func (c *cli) set(args []string) error {
 		config    = fs.String("config", "", "this account's own CLI configuration and credentials")
 		sessions  = fs.String("sessions", "", "where this account's conversations live: shared (default), own, or a directory")
 		long      = fs.String("long", "", "forget: throw away this account's long-lived token")
-		clear     = fs.Bool("clear", false, "forget cwd, config and sessions, so the account goes back to the defaults")
+		remoteCtl = fs.String("remote-control", "", "on or off: a claude account's own .claude.json, which Claude Code's Remote Control needs")
+		clear     = fs.Bool("clear", false, "forget cwd, config, sessions and remote control, so the account goes back to the defaults")
 	)
 	if _, err := parseFlags(fs, args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -1366,6 +1400,9 @@ func (c *cli) set(args []string) error {
 	if given["long"] && *long != "forget" {
 		return usageErr("--long takes forget and nothing else; `rota login --long` is how one is obtained")
 	}
+	if given["remote-control"] && *remoteCtl != "on" && *remoteCtl != "off" {
+		return usageErr("--remote-control takes on or off, not %q", *remoteCtl)
+	}
 
 	s, err := c.openStore()
 	if err != nil {
@@ -1386,7 +1423,10 @@ func (c *cli) set(args []string) error {
 	// account exactly as it was rather than half-applied.
 	want := *a
 	if *clear {
-		want.Cwd, want.ConfigDir, want.Sessions = "", "", ""
+		want.Cwd, want.ConfigDir, want.Sessions, want.RemoteControl = "", "", "", false
+	}
+	if given["remote-control"] {
+		want.RemoteControl = *remoteCtl == "on"
 	}
 	if *cwd != "" {
 		if want.Cwd, err = filepath.Abs(*cwd); err != nil {
@@ -1425,7 +1465,7 @@ func (c *cli) set(args []string) error {
 			return err
 		}
 	}
-	a.Cwd, a.ConfigDir, a.Sessions = want.Cwd, want.ConfigDir, want.Sessions
+	a.Cwd, a.ConfigDir, a.Sessions, a.RemoteControl = want.Cwd, want.ConfigDir, want.Sessions, want.RemoteControl
 	if given["threshold"] {
 		a.Threshold = *threshold
 	}
@@ -1442,6 +1482,11 @@ func (c *cli) set(args []string) error {
 	}
 	if err := s.Save(); err != nil {
 		return err
+	}
+	// Said at once rather than at the next launch: the person who just
+	// changed it is the one who wants to know it has not taken effect.
+	if why := s.RemoteControlWaits(a); why != "" {
+		fmt.Fprintf(c.err, "warning: %s\n", why)
 	}
 	if given["order"] && !c.json {
 		// A move changes the neighbours too, so the answer is the queue, not
@@ -1543,6 +1588,9 @@ func (c *cli) show(a *rota.Account, home string) error {
 	if a.Long != nil {
 		fmt.Fprintf(c.out, "  long token  %s\n", longLine(a))
 	}
+	if a.RemoteControl {
+		fmt.Fprintln(c.out, "  remote      on: its own .claude.json, so Claude Code's Remote Control acts as this account")
+	}
 	if a.ConfigDir == "" && rota.Flavor(a.Provider) == "claude" {
 		fmt.Fprintln(c.out, "  memory and skills come from your own ~/.claude until --config names somewhere else")
 	}
@@ -1550,16 +1598,16 @@ func (c *cli) show(a *rota.Account, home string) error {
 }
 
 // longLine is what the account's long-lived token is worth right now: the
-// date it runs out, and whether launches are still using it.
+// date it runs out, and whether the runs it is for are still using it.
 func longLine(a *rota.Account) string {
 	until := a.LongUntil()
 	switch {
 	case until.IsZero():
 		return "stored, with no expiry"
 	case a.LongValid():
-		return "good until " + until.Format(time.DateOnly) + "; every launch uses it"
+		return "good until " + until.Format(time.DateOnly) + "; runs without the account's home use it"
 	}
-	return "expired " + until.Format(time.DateOnly) + "; launches are back on the 8-hour token"
+	return "expired " + until.Format(time.DateOnly) + "; runs without the account's home are back on the 8-hour token"
 }
 
 // conversations is where this account's conversations live, said the way
@@ -1577,7 +1625,7 @@ func conversations(a *rota.Account) string {
 	return "shared with your own Claude Code directory"
 }
 
-const setUsage = `usage: rota set <id> [--order place] [--threshold pct] [--cwd dir] [--config dir] [--sessions where] [--long forget] [--clear]
+const setUsage = `usage: rota set <id> [--order place] [--threshold pct] [--cwd dir] [--config dir] [--sessions where] [--remote-control on|off] [--long forget] [--clear]
 
 Sets what is a choice about an account rather than a fact about it, in one
 write. With no flags it prints what the account is set to.
@@ -1595,10 +1643,19 @@ the account's own CLI configuration — its memory files, skills and settings �
 and the private home its credentials are staged in, which is why it must not
 be the project directory itself.
 
---long forget throws away the account's long-lived token, so every launch
-goes back to the ordinary 8-hour one. It is the only value the flag takes: a
-long-lived token is obtained by approving one in a browser, with
-rota login --long, and never by typing it here.
+--long forget throws away the account's long-lived token, so the runs that
+used it — those without the account's home, and a dead login's — go back to
+the ordinary 8-hour one. It is the only value the flag takes: a long-lived
+token is obtained by approving one in a browser, with rota login --long, and
+never by typing it here.
+
+--remote-control on gives a claude account a .claude.json of its own, which
+is what Claude Code's Remote Control needs: it acts as whoever that file
+names, and by default the file is your own, shared by every account. The
+copy starts from yours and keeps gaining what yours gains, but MCP servers
+and trusted folders added inside the account stay its own. off puts the copy
+aside and shares yours again. While Claude Code runs in the account's home
+the change waits for those sessions to end, and rota says so.
 
 --sessions is where a claude account's conversations live. shared is the
 default: every account reads the ones in your own Claude Code directory and
@@ -1613,6 +1670,7 @@ and no others.
   rota set 2 --cwd ~/src/api --config ~/.rota/api-memory
   rota set 2 --sessions own              its conversations are nobody else's
   rota set 2 --sessions ~/work/threads   and its neighbours' if they say so
+  rota set 2 --remote-control on         its own .claude.json, for /remote-control
   rota set 2 --long forget               throw away its long-lived token
   rota set 2                             what account 2 is set to
 
@@ -1672,8 +1730,8 @@ func (c *cli) remove(args []string) error {
 		if a == nil {
 			return rota.WrapNoAccount(id)
 		}
-		if s.Busy(a) {
-			return fmt.Errorf("%w: %s is running; stop it before removing the account", rota.ErrBusy, a)
+		if err := s.Removable(a); err != nil {
+			return err
 		}
 	}
 	var removed []map[string]any
