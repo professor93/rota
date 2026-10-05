@@ -486,3 +486,28 @@ func onPath(t *testing.T, name string) {
 	fakecli.Install(t, bin, name, fakecli.Spec{})
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
+
+// A CLI that keeps its credential file to one process is left alone while it
+// runs, even for a reading: usage is read once nothing holds the account.
+// Only a home many processes share is read while it runs.
+func TestAListingLeavesARunningAccountOfAnExclusiveCLIAlone(t *testing.T) {
+	dir := t.TempDir()
+	writeAccounts(t, dir, `{"accounts":[{"id":1,"provider":"t-owns-creds","token":{"accessToken":"tok","refreshToken":"r1"}}],"nextId":2}`)
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a := s.Find(1)
+	release, ok := s.holdRun(a)
+	if !ok {
+		t.Fatal("claim")
+	}
+	if errs := s.Refresh(context.Background(), true, a); len(errs) != 0 || a.QuotaAt != 0 {
+		t.Fatalf("left alone while it runs: %v %d", errs, a.QuotaAt)
+	}
+	release()
+	if errs := s.Refresh(context.Background(), true, a); len(errs) != 0 || a.QuotaAt == 0 {
+		t.Fatalf("read once it has stopped: %v", errs)
+	}
+}

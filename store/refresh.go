@@ -105,8 +105,22 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 			continue
 		}
 		switch {
-		case !a.Expired():
-			// A reading spends nothing, so it is taken whatever runs.
+		case s.released && !shared:
+			// Nothing may rotate here. A CLI that keeps its credential file to
+			// one process is still left alone while it runs, as ever.
+			if a.Expired() || s.claimed(a) {
+				continue
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer guard(a)
+				q, err := rota.Usage(ctx, a)
+				reading(a, q, err)
+			}()
+		case shared && !a.Expired():
+			// A reading spends nothing, so for a home many processes share it
+			// is taken whatever runs there.
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
