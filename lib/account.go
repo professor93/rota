@@ -64,6 +64,19 @@ type Account struct {
 	// way it arranges the home a credential is staged in; all that is
 	// settled here is what the setting says.
 	Sessions string `json:"sessions,omitempty"`
+	// RemoteControl gives a Claude Code account a .claude.json of its own in
+	// its home, which is what Claude Code's Remote Control needs: it reads the
+	// account's identity and organisation out of that file, and by default the
+	// file is the person's own, shared by every account and naming whoever
+	// signed in there last. Off by default, because the same file holds the
+	// MCP servers, per-project approvals and trusted folders a person keeps
+	// in common across accounts, and an account's own copy stops seeing what
+	// is added to the person's afterwards.
+	//
+	// Like Sessions, this package does nothing with it beyond refusing it for
+	// a provider that has no such thing; arranging the file is the
+	// application's, as the home is.
+	RemoteControl bool `json:"remoteControl,omitzero"`
 	// Long is a second credential for this same account, kept beside the
 	// ordinary one and never replacing it: an access token the provider
 	// issues for a year, with no refresh behind it and, by that provider's
@@ -206,7 +219,13 @@ func (a *Account) apply(t *Token) {
 			a.Org = id.Org
 		}
 	}
+	// An empty value forgets the key: it is how a provider says that what the
+	// account remembered belongs to the login this one replaces.
 	for k, v := range t.Extra {
+		if v == "" {
+			delete(a.Extra, k)
+			continue
+		}
 		a.setExtra(k, v)
 	}
 	a.Dead, a.DeadReason = false, ""
@@ -247,6 +266,10 @@ func (a *Account) CheckProject() error {
 	if a.Sessions != "" && Flavor(a.Provider) != "claude" {
 		return failf(ErrInvalidRequest,
 			"sessions is Claude Code's setting: a %s account keeps its conversations in the home its CLI is given", a.Provider)
+	}
+	if a.RemoteControl && Flavor(a.Provider) != "claude" {
+		return failf(ErrInvalidRequest,
+			"remote control is Claude Code's: a %s account has no Remote Control to give its own configuration file for", a.Provider)
 	}
 	for _, d := range []struct{ what, path string }{
 		{"config_dir", a.ConfigDir},

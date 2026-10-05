@@ -109,10 +109,16 @@ func TestOwnsCredentialsNamesTheProvidersWhoseCLIRewritesTheFile(t *testing.T) {
 			t.Fatalf("%s hands its CLI a private home and lets it rotate in place", provider)
 		}
 	}
-	// rota holds Claude Code's token and passes it in the environment, so
-	// nothing in the home is shared.
-	if rota.OwnsCredentials("claude") {
-		t.Fatal("claude's credential does not live in a file the CLI rewrites")
+	// Claude Code keeps an account's login in its home and refreshes it
+	// there, so its CLI owns that store too — but it runs many processes on
+	// one home by design, so the home is shared rather than exclusive.
+	if !rota.OwnsCredentials("claude") || !rota.SharedHome("claude") {
+		t.Fatal("claude's login lives in a store its CLI rewrites, in a home many of its processes share")
+	}
+	for _, provider := range []string{"codex", "grok", "kimi"} {
+		if rota.SharedHome(provider) {
+			t.Fatalf("%s's home is one process's at a time", provider)
+		}
 	}
 	if rota.OwnsCredentials("nonesuch") {
 		t.Fatal("an unknown provider owns nothing")

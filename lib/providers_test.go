@@ -127,10 +127,24 @@ func TestClaudeFlow(t *testing.T) {
 		}
 		return 500, nil
 	}
+	// The login asks the profile once for the plan, which Claude Code wants
+	// in the login it is handed.
+	f.reply["/profile"] = func(r *http.Request, _ map[string]any) (int, any) {
+		if r.Header.Get("Authorization") != "Bearer A1" {
+			return 401, nil
+		}
+		return 200, map[string]any{"account": map[string]string{"uuid": "u1", "email": "e@x", "display_name": "Ann"},
+			"organization": map[string]string{"uuid": "o1", "name": "Ann's Org", "organization_type": "claude_max",
+				"rate_limit_tier": "default_claude_max_20x"}}
+	}
 	tok, err := p.Complete(context.Background(), "CODE#ST", state)
 	if err != nil || tok.Access != "A1" || tok.Refresh != "R1" || tok.Identity.UUID != "u1" || tok.Identity.Email != "e@x" ||
 		tok.Identity.Org != "o1" || tok.ExpiresAt < nowMS()+3_000_000 || len(tok.Scopes) != 2 {
 		t.Fatalf("complete: %+v %v", tok, err)
+	}
+	if tok.Extra[claudeSubscription] != "max" || tok.Extra[claudeRateLimitTier] != "default_claude_max_20x" ||
+		tok.Extra[claudeOrgName] != "Ann's Org" || tok.Extra[claudeDisplayName] != "Ann" {
+		t.Fatalf("the plan and the names come from the profile: %v", tok.Extra)
 	}
 	if _, err := p.Complete(context.Background(), "WRONG", state); err == nil || errors.Is(err, ErrDeadToken) {
 		t.Fatalf("rejected code must be a plain error: %v", err)
@@ -144,12 +158,6 @@ func TestClaudeFlow(t *testing.T) {
 		t.Fatalf("object-shaped invalid_grant must still read as dead: %v", err)
 	}
 
-	f.reply["/profile"] = func(r *http.Request, _ map[string]any) (int, any) {
-		if r.Header.Get("Authorization") != "Bearer A1" {
-			return 401, nil
-		}
-		return 200, map[string]any{"account": map[string]string{"uuid": "u1", "email": "e@x"}, "organization": map[string]string{"uuid": "o1"}}
-	}
 	if id, err := p.(Identifier).Identify(context.Background(), "A1"); err != nil || id.UUID != "u1" || id.Email != "e@x" || id.Org != "o1" {
 		t.Fatalf("identify: %+v %v", id, err)
 	}

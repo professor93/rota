@@ -31,6 +31,14 @@ func (s *Store) Maintain(ctx context.Context) []error {
 	var errs []error
 	changed := false
 	for _, a := range s.Accounts {
+		if rota.SharedHome(a.Provider) {
+			did, err := s.maintainShared(ctx, a)
+			changed = changed || did
+			if err != nil {
+				errs = append(errs, err)
+			}
+			continue
+		}
 		if a.Dead {
 			continue // only a fresh login helps; asking again just spends requests
 		}
@@ -70,4 +78,38 @@ func (s *Store) Maintain(ctx context.Context) []error {
 	}
 	// Usage honours the five-minute cache and saves whatever it changed.
 	return append(errs, s.Refresh(ctx, false)...)
+}
+
+// maintainShared is Maintain for a claude account. Its home is read first,
+// whatever state the account is in — a dead one may have been signed in
+// again inside Claude Code, which is how rota learns of it. A login kept in
+// the home is refreshed only while nothing is alive there, and goes back
+// into the home at once; one rota alone holds is refreshed as it always was.
+func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, error) {
+	before := snapshot(a)
+	if err := s.claudeHome(a, true).adopt(ctx); err != nil {
+		return false, err
+	}
+	changed := before.differs(a)
+	if a.Dead {
+		return changed, nil
+	}
+	if !s.keepsLogin(a) {
+		did, err := rota.Refresh(ctx, a)
+		return changed || did, wrapAccount(a, err)
+	}
+	release, idle := s.holdIdle(a)
+	if !idle {
+		return changed, nil
+	}
+	defer release()
+	did, err := s.claudeHome(a, false).renew(ctx)
+	return changed || did, wrapAccount(a, err)
+}
+
+func wrapAccount(a *rota.Account, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", a, err)
 }

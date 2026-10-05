@@ -202,14 +202,21 @@ func Metered(provider string) bool {
 //
 // This is the one core verb that touches the filesystem, because some CLIs
 // take credentials only as a file: home is a directory private to this
-// account where such a file is written (0600). Providers that pass their
-// credential in the environment — claude among them — write nothing, and
-// home may be "".
+// account where such a file is written (0600). claude keeps the account's
+// login there too, in Claude Code's own credential store, so that every
+// process Claude Code starts in that home shares it and Claude Code refreshes
+// it by itself; given home "" it hands the token over in the environment
+// instead and writes nothing. See claudehome.go for both routes.
 //
 // Stage may also change the account: it adopts a refresh token the CLI
 // rotated on its own, and may refresh once to repair a stale record. The
 // caller must persist the account afterwards, or that rotation is lost and
 // the lineage dies.
+//
+// A write into a home is only safe while the CLI is not running there,
+// which this package cannot see. An application that may launch an account
+// while it is already running calls StagePlan instead and writes the files
+// when it knows the home is quiet.
 //
 // A provider that writes a credential file refuses an empty home rather
 // than falling back to the working directory, which would scatter live
@@ -253,15 +260,15 @@ func launchable(a *Account) error {
 
 // identify tells the child which account it is running as.
 //
-// The credential alone does not say. Claude Code, for one, takes the token
-// from the environment and bills the right account — but its own display,
-// and every status line or hook that reads its shared ~/.claude.json, reports
-// the e-mail of whoever last signed in through the keychain, which is a
-// different account entirely. Nothing else in the child's world contradicts
-// that. These three variables are the truthful answer: the provider, the
-// account's id in the caller's store, and the label a person recognises.
-// Anything that wants to name the account should read them and not the
-// vendor's config file.
+// The credential alone does not say. Claude Code, for one, bills the right
+// account on either route — but a status line or a hook that reads a
+// .claude.json shared with the person's own Claude Code reports the e-mail of
+// whoever last signed in there, which is a different account entirely, and
+// on the environment route nothing in the child's world contradicts that.
+// These three variables are the truthful answer on every route: the
+// provider, the account's id in the caller's store, and the label a person
+// recognises. Anything that wants to name the account should read them and
+// not the vendor's config file.
 //
 // They are appended after the provider's own variables — a caller that pins
 // Env[0] to the credential keeps it — and they are set for every provider,
@@ -294,15 +301,19 @@ func identify(a *Account, cmd *Command) *Command {
 // Two runs on such an account are two processes each believing the home is
 // theirs: the second staging overwrites the token the first has already
 // rotated to, and for these providers a spent refresh token is refused for
-// good. A caller that keeps accounts must not let those overlap.
+// good. A caller that keeps accounts must not let those overlap — unless the
+// provider says its home is shared (SharedHome), in which case its CLI runs
+// many processes on one login by design and what must not overlap is a
+// write, or a refresh, with any of them.
 //
 // Two kinds of provider answer yes, and it is worth saying why both do rather
 // than only the first, which is what this used to ask. A provider that adopts
-// does so precisely because its CLI rewrites that file as it goes. A provider
-// that delegates hands the CLI the whole login: the credential it obtains
-// lives in that home and nowhere else, and it is rewritten on every rotation.
-// Kimi is the second kind without being the first — rota holds no token of its
-// own there, so there is nothing to adopt — and its access token lasts fifteen
+// does so precisely because its CLI rewrites that file as it goes — codex,
+// and claude on the route that keeps its login in the home. A provider that
+// delegates hands the CLI the whole login: the credential it obtains lives in
+// that home and nowhere else, and it is rewritten on every rotation. Kimi is
+// the second kind without being the first — rota holds no token of its own
+// there, so there is nothing to adopt — and its access token lasts fifteen
 // minutes, which makes it the provider whose file is rewritten most often.
 func OwnsCredentials(provider string) bool {
 	p, err := Lookup(provider)
@@ -314,6 +325,63 @@ func OwnsCredentials(provider string) bool {
 	}
 	_, ok := p.(Delegator)
 	return ok
+}
+
+// HomeSharer is implemented by a provider whose CLI runs many processes in
+// one home at once — windows, a daemon, the background sessions the daemon
+// hosts — all signed in by one login kept in that home's credential store.
+// Claude Code is one.
+//
+// It changes what a caller keeping accounts must hold apart. Two runs of
+// such an account are the CLI's own design, not a hazard: they share the
+// login, and the CLI keeps it fresh between them. What must never meet a
+// live process in that home is anything that writes the store or refreshes
+// the login behind the CLI's back. A caller that cannot tell whether one is
+// alive may read the home (Adopt), and may launch on the login already
+// there, but must not write or refresh.
+type HomeSharer interface {
+	// StoresLogin reports whether staging this account into home keeps its
+	// login there, for every process started in that home to share, rather
+	// than handing one process a token in its environment.
+	StoresLogin(a *Account, home string) bool
+	// HoldsLogin reports whether a home's credential store, read through
+	// fsys, holds a login the CLI can use — something a new process started
+	// there could sign in with.
+	HoldsLogin(fsys fs.FS) bool
+}
+
+// SharedHome reports whether a provider's homes are shared between many of
+// its CLI's processes. See HomeSharer.
+func SharedHome(provider string) bool {
+	p, err := Lookup(provider)
+	if err != nil {
+		return false
+	}
+	_, ok := p.(HomeSharer)
+	return ok
+}
+
+// StoresLogin reports whether Stage(a, home) would keep the account's login
+// in home rather than hand it over in the environment. Only a provider whose
+// home is shared ever does.
+func StoresLogin(a *Account, home string) bool {
+	p, err := Lookup(a.Provider)
+	if err != nil {
+		return false
+	}
+	hs, ok := p.(HomeSharer)
+	return ok && hs.StoresLogin(a, home)
+}
+
+// HoldsLogin reports whether an account's home, read through fsys, holds a
+// login its CLI can use. False for every provider whose home is not shared.
+func HoldsLogin(a *Account, fsys fs.FS) bool {
+	p, err := Lookup(a.Provider)
+	if err != nil {
+		return false
+	}
+	hs, ok := p.(HomeSharer)
+	return ok && hs.HoldsLogin(fsys)
 }
 
 // Adopter is implemented by a provider whose CLI keeps its credentials in a
@@ -372,7 +440,10 @@ type Planner interface {
 //
 // Adoption is the caller's step first — AdoptFrom, or Adopt for a local
 // home — exactly as it is before Stage. A provider that stages nothing
-// returns its command and no files.
+// returns its command and no files, and so does claude when the home already
+// holds the account's login; when it plans the credential store, writing it
+// means merging it into the store already there (MergeClaudeCredentials),
+// and only while Claude Code is not running in that home.
 func StagePlan(ctx context.Context, a *Account, home string) (*Command, []StagedFile, error) {
 	if err := launchable(a); err != nil {
 		return nil, nil, err

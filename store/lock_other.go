@@ -20,3 +20,6 @@ func tryLockFile(path string) (*os.File, bool, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	return f, err == nil, err
 }
+
+// tryLockShared is tryLockFile: nothing is locked outside Unix and Windows.
+func tryLockShared(path string) (*os.File, bool, error) { return tryLockFile(path) }

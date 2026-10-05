@@ -50,11 +50,22 @@ func lockFile(path string) (*os.File, error) {
 // tryLockFile takes the same lock without waiting. ok is false when someone
 // else holds it — an answer, not a failure.
 func tryLockFile(path string) (f *os.File, ok bool, err error) {
+	return tryLockRegion(path, lockfileExclusive)
+}
+
+// tryLockShared takes the same byte shared, without waiting: LockFileEx
+// without the exclusive flag, which any number of handles may hold at once
+// and none may while another holds it exclusively.
+func tryLockShared(path string) (f *os.File, ok bool, err error) {
+	return tryLockRegion(path, 0)
+}
+
+func tryLockRegion(path string, flags uintptr) (f *os.File, ok bool, err error) {
 	f, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, false, err
 	}
-	if err := lockRegion(f, lockfileExclusive|lockfileFailImmediately); err != nil {
+	if err := lockRegion(f, flags|lockfileFailImmediately); err != nil {
 		_ = f.Close()
 		var errno syscall.Errno
 		if errors.As(err, &errno) && errno == 33 /* ERROR_LOCK_VIOLATION */ {

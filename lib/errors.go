@@ -41,6 +41,18 @@ var (
 	// safely run twice at once. See OwnsCredentials.
 	ErrBusy = errors.New("account is already running")
 
+	// ErrForeignLogin: an account's home is signed in as somebody else —
+	// someone ran the CLI's own login there as another account. Nothing of
+	// that login was taken. It is reported rather than failed: the run the
+	// caller asked for still happens, and an application tells the person.
+	ErrForeignLogin = errors.New("home is signed in as another account")
+
+	// ErrNewLogin: an account's home holds a login that is not a rotation of
+	// the account's own — somebody signed in there — and whose it is has not
+	// been checked yet. The error is a *NewLogin, which carries what the
+	// check needs and the two ways to settle it.
+	ErrNewLogin = errors.New("home holds a new login")
+
 	// ErrClosed: the session's stdin is shut, so nothing more can be sent
 	// into it. A run that has ended, or one the caller closed itself.
 	ErrClosed = errors.New("session is closed")

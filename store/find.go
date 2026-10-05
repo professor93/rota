@@ -1,7 +1,6 @@
 package store
 
 import (
-	"fmt"
 	"os"
 	"slices"
 
@@ -13,18 +12,33 @@ func (s *Store) Find(id int) *rota.Account { return rota.FindID(s.Accounts, id) 
 
 // Remove forgets an account. The private home rota made for it goes too,
 // staged credentials included; a directory the person chose as its
-// ConfigDir holds their memory and skills and is left alone. Call Save
-// afterwards.
+// ConfigDir holds their memory and skills and is left alone, but for the
+// account's login in it. Call Save afterwards.
+//
+// A claude account is more than its directory. Its daemon may be running
+// there with no rota run in sight, hosting background sessions, and is
+// stopped first; and on macOS its login lives in a keychain item named for
+// the directory, which goes before the directory does — afterwards nothing
+// would name it again.
 func (s *Store) Remove(id int) error {
 	for i, a := range s.Accounts {
 		if a.ID != id {
 			continue
 		}
-		// Not while its CLI is using it. Deleting the directory a running
+		// Not while a run is using it. Deleting the directory a running
 		// agent authenticates from is worse than making somebody wait, and
 		// nothing here is undoable once the files are gone.
-		if s.Busy(a) {
-			return fmt.Errorf("%w: %s is running; stop it before removing the account", rota.ErrBusy, a)
+		if err := s.Removable(a); err != nil {
+			return err
+		}
+		if rota.SharedHome(a.Provider) && !s.personalClaude(a) {
+			h := s.claudeHome(a, false)
+			if err := h.quiesce(); err != nil {
+				return err
+			}
+			if err := h.forget(); err != nil {
+				return err
+			}
 		}
 		if s.owns(a) {
 			if err := os.RemoveAll(s.Home(a)); err != nil {

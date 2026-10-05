@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	rota "github.com/professor93/rota/lib"
@@ -26,41 +27,14 @@ import (
 // that CLI, and the claim has to outlive the replacing — a caller that does
 // not go through with the handover calls release instead.
 func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env []string, release func(), err error) {
-	if err := s.mayLaunch(a); err != nil {
-		return "", nil, nil, err
-	}
-	release, ok := s.holdForExec(a)
-	if !ok {
-		return "", nil, nil, fmt.Errorf("%w: %s keeps its own credential file, and two runs would spend the same refresh token", rota.ErrBusy, a)
-	}
-	fail := func(err error) (string, []string, func(), error) {
-		release()
-		return "", nil, nil, err
-	}
-	// Adopt first: the CLI may have rotated its refresh token during the
-	// last run, and refreshing from rota's older copy would present a spent
-	// one — which these providers reject for good.
-	adopted := rota.Adopt(a, s.Home(a)) == nil
-	changed, err := refreshForLaunch(ctx, a)
-	changed = changed || adopted
-	var cmd *rota.Command
-	if err == nil {
-		// Stage may adopt a token the CLI rotated, or mark the account dead
-		// on its way to an error; either way the account must be saved.
-		cmd, err = s.command(a, true)
-		changed = true
-	}
-	if changed {
-		if serr := s.Save(); serr != nil {
-			return fail(errors.Join(err, fmt.Errorf("refusing to run: store not saved after a token change: %w", serr)))
-		}
-	}
+	cmd, release, err := s.prepare(ctx, a, true)
 	if err != nil {
-		return fail(err)
+		return "", nil, nil, err
 	}
 	path, err = exec.LookPath(cmd.Bin)
 	if err != nil {
-		return fail(fmt.Errorf("%s not found in PATH: %w", cmd.Bin, err))
+		release()
+		return "", nil, nil, fmt.Errorf("%s not found in PATH: %w", cmd.Bin, err)
 	}
 	return path, rota.Environ(HostEnv(), cmd), release, nil
 }
@@ -174,6 +148,25 @@ func (s *Store) Start(ctx context.Context, a *rota.Account, spec rota.Spec, lim 
 // A hermetic run is given a throwaway configuration directory instead, so
 // building one for it would be work nobody reads.
 func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
+	cmd, release, err := s.prepare(ctx, a, mirror)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Everything a run needs from the store is on disk by now. The lock goes,
+	// because the run that follows lasts as long as the agent does and
+	// nothing else may be made to wait for it.
+	_ = s.Release() // releasing a lock cannot fail in a way a caller can act on
+	cmd.BaseEnv = HostEnv()
+	return cmd, release, nil
+}
+
+// prepare claims the account, brings its credential up to date, stages it,
+// saves the store, and returns the command with the claim still held. A
+// handover and a run are the same launch, differing in who waits for it.
+func (s *Store) prepare(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
+	if rota.SharedHome(a.Provider) {
+		return s.prepareShared(ctx, a, mirror)
+	}
 	if err := s.mayLaunch(a); err != nil {
 		return nil, nil, err
 	}
@@ -204,53 +197,80 @@ func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.
 		return fail(err)
 	}
 	// Staging is the last thing that needs the store: it may adopt a token
-	// the CLI rotated, and that must be on disk before anything runs. Once
-	// it is saved the lock is released, because the run that follows lasts
-	// as long as the agent does and nothing else may be made to wait for it.
+	// the CLI rotated, and that must be on disk before anything runs.
 	cmd, err := s.command(a, mirror)
+	if serr := s.Save(); serr != nil {
+		return fail(errors.Join(err, fmt.Errorf("refusing to run: store not saved after staging: %w", serr)))
+	}
 	if err != nil {
-		if serr := s.Save(); serr != nil {
-			return fail(errors.Join(err, fmt.Errorf("the store could not be saved: %w", serr)))
-		}
 		return fail(err)
 	}
-	if err := s.Save(); err != nil {
-		return fail(fmt.Errorf("refusing to run: the store could not be saved after staging: %w", err))
+	return cmd, release, nil
+}
+
+// prepareShared is prepare for an account whose CLI runs many processes in
+// one home on one stored login — Claude Code. Its claim is shared, so runs
+// overlap as they are meant to; what decides whether rota may write or
+// refresh is whether anything at all is alive in the home, and part of that
+// answer — another rota run holding the account — has to be asked before
+// this run takes its own claim. See claude.go for the rest.
+func (s *Store) prepareShared(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
+	h := s.claudeHome(a, s.claimed(a))
+	release, ok := s.holdForExec(a)
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: another rota process is changing %s's login right now; try again in a moment", rota.ErrBusy, a)
 	}
-	_ = s.Release() // releasing a lock cannot fail in a way a caller can act on
-	cmd.BaseEnv = HostEnv()
+	cmd, err := h.launch(ctx, mirror)
+	// Whatever happened, the account may have changed — a rotation adopted,
+	// a refresh, a login found dead — and none of it may be lost.
+	if serr := s.Save(); serr != nil {
+		release()
+		return nil, nil, errors.Join(err, fmt.Errorf("refusing to run: store not saved: %w", serr))
+	}
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
 	return cmd, release, nil
 }
 
 // command stages an account's credentials and returns the command that
 // starts its CLI, with the account's own Claude Code world added to the
-// environment when there is one to add.
-//
-// Prepare and ready share it because both must do these two things in this
-// order and neither may do only the first: a handover and a run are the same
-// launch, differing in who waits for it.
+// environment when there is one to add. A claude account goes the whole way
+// a launch goes (claudeHome.launch), judging what is alive in its home now.
+func (s *Store) command(a *rota.Account, mirror bool) (*rota.Command, error) {
+	if rota.SharedHome(a.Provider) {
+		return s.claudeHome(a, s.claimed(a)).launch(context.Background(), mirror)
+	}
+	return rota.Stage(a, s.Home(a))
+}
+
+// mirrored adds the account's own Claude Code world to a command.
 //
 // A mirror that cannot be built is not a reason to refuse the run. The run
-// still works — it is billed correctly, it just shares the person's daemon
-// as every rota run did before — so the environment is left alone and the
-// application is told, if it left somewhere to tell.
-func (s *Store) command(a *rota.Account, mirror bool) (*rota.Command, error) {
-	cmd, err := rota.Stage(a, s.Home(a))
-	if err != nil || !mirror {
-		return cmd, err
-	}
-	dir, merr := s.mirrorClaude(a)
-	switch {
-	case merr != nil:
-		if s.Warn != nil {
-			s.Warn(fmt.Sprintf("could not mirror Claude Code's configuration into %s (%v); "+
-				"running with Claude Code's own directory and daemon", dir, merr))
+// still works — it is billed correctly, it just lacks the person's settings
+// or shares their daemon — so the application is told, if it left somewhere
+// to tell, and the run goes ahead.
+func (s *Store) mirrored(a *rota.Account, cmd *rota.Command, quiet bool) (*rota.Command, error) {
+	dir, merr := s.mirrorClaude(a, quiet)
+	pointed := false
+	for _, e := range cmd.Env {
+		if k, _, _ := strings.Cut(e, "="); k == "CLAUDE_CONFIG_DIR" {
+			pointed = true
 		}
-	case dir != "" && a.ConfigDir == "":
+	}
+	switch {
+	case merr != nil && pointed:
+		s.say(fmt.Sprintf("could not mirror Claude Code's configuration into %s (%v); "+
+			"running there without your settings, memory and skills", dir, merr))
+	case merr != nil:
+		s.say(fmt.Sprintf("could not mirror Claude Code's configuration into %s (%v); "+
+			"running with Claude Code's own directory and daemon", dir, merr))
+	case dir != "" && !pointed:
 		// Appended rather than replacing: Environ drops every inherited
 		// value a command sets, so the child sees this one and only this one.
-		// An account that named its own configuration directory is already
-		// pointed at it by lib — saying so twice is two answers.
+		// A command lib already pointed somewhere — the home its login is
+		// kept in, or the directory the account named — is not pointed twice.
 		cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR="+dir)
 	}
 	return cmd, nil
@@ -293,17 +313,18 @@ const runLock = ".rota-run.lock"
 // and only the second one notices when it stops being made.
 var keepingAcrossExec = keepAcrossExec
 
-// holdIdle claims an account whose CLI owns its credential file, so nothing
-// touches that file while the CLI has it.
+// claimFile claims an account whose CLI owns its credential file: shared or
+// exclusively.
 //
-// ok is false when someone else holds it. That is an answer rather than a
-// failure — the caller wants to know whether it may proceed, not to queue
-// behind an agent — and release is always safe to call.
+// ok is false when someone else holds it in a way that excludes this claim.
+// That is an answer rather than a failure — the caller wants to know whether
+// it may proceed, not to queue behind an agent — and release is always safe
+// to call.
 //
 // An account whose credential rota holds is never claimed: its token reaches
 // the CLI in its environment, so two runs share nothing and holding them apart
 // would cost the rotation its whole point.
-func (s *Store) holdIdleFile(a *rota.Account) (release func(), ok bool, held *os.File) {
+func (s *Store) claimFile(a *rota.Account, shared bool) (release func(), ok bool, held *os.File) {
 	if !rota.OwnsCredentials(a.Provider) {
 		return func() {}, true, nil
 	}
@@ -313,29 +334,48 @@ func (s *Store) holdIdleFile(a *rota.Account) (release func(), ok bool, held *os
 		// so let the caller fail on the real thing rather than on this.
 		return func() {}, true, nil
 	}
-	held, got, err := tryLockFile(filepath.Join(home, runLock))
+	try := tryLockFile
+	if shared {
+		try = tryLockShared
+	}
+	held, got, err := try(filepath.Join(home, runLock))
 	if err != nil || !got {
 		return func() {}, false, nil
 	}
 	return func() { held.Close() }, true, held
 }
 
-// holdForExec is holdIdle for the one caller about to replace this process
-// with the vendor CLI: the claim's close-on-exec flag is cleared so it
-// survives the handover. Every other hold leaves the flag set — a child
-// spawned while a hold is live must not inherit another account's lock and
-// keep it long after this process released its own copy.
+// holdForExec is the claim a run takes, for the one caller about to replace
+// this process with the vendor CLI as much as for one that waits for it: the
+// claim's close-on-exec flag is cleared so it survives the handover. Every
+// other hold leaves the flag set — a child spawned while a hold is live must
+// not inherit another account's lock and keep it long after this process
+// released its own copy.
+//
+// It is exclusive for a CLI that keeps its credential file to one process at
+// a time, and shared for one whose home is shared (rota.SharedHome): many
+// windows and runs on one Claude Code account at once are the whole point,
+// and the rotation must never pass such an account over because it is busy.
 func (s *Store) holdForExec(a *rota.Account) (release func(), ok bool) {
-	release, ok, held := s.holdIdleFile(a)
+	release, ok, held := s.claimFile(a, rota.SharedHome(a.Provider))
 	if ok && held != nil {
 		_ = keepingAcrossExec(held)
 	}
 	return release, ok
 }
 
-// holdIdle is the in-process claim: held for as long as this process runs.
+// holdIdle is the claim that means nothing else is using the account: taken
+// exclusively, and for a shared home only while nothing is alive there
+// either — not a rota run, not a window somebody opened in that home
+// themselves, not the daemon. It is what a refresh, maintenance and a login
+// written into the home ask for, and it is held for as long as this process
+// runs.
 func (s *Store) holdIdle(a *rota.Account) (release func(), ok bool) {
-	release, ok, _ = s.holdIdleFile(a)
+	release, ok, _ = s.claimFile(a, false)
+	if ok && rota.SharedHome(a.Provider) && len(claudeLive(s.Home(a))) > 0 {
+		release()
+		return func() {}, false
+	}
 	return release, ok
 }
 
@@ -343,17 +383,31 @@ func (s *Store) holdIdle(a *rota.Account) (release func(), ok bool) {
 // private home — the vendor CLI's own login, most of all, which replaces the
 // credential file wholesale.
 //
-// It is the same claim Run and Prepare take, exported because signing an
-// account in is the one write rota hands to another program entirely. ok is
-// false when somebody else holds it, and release is always safe to call.
+// It is the idle claim — nothing else may be using the account while it is
+// held, runs included — exported because signing an account in is the one
+// write rota hands to another program entirely. ok is false when anything
+// else is using it, and release is always safe to call.
 func (s *Store) Hold(a *rota.Account) (release func(), ok bool) { return s.holdIdle(a) }
 
-// Busy reports whether a run has this account, so a caller can choose another
-// one instead of being refused. It is a glance rather than a promise: the
-// answer can be out of date the moment it is given, and Run is what actually
-// decides.
+// Busy reports whether a run has this account in a way that would refuse
+// another, so a caller can choose another one instead of being refused. An
+// account whose home is shared is never busy in that sense: its runs share
+// it. It is a glance rather than a promise: the answer can be out of date the
+// moment it is given, and Run is what actually decides.
 func (s *Store) Busy(a *rota.Account) bool {
 	release, ok := s.holdForExec(a)
 	release()
 	return !ok
+}
+
+// Removable says why an account cannot be removed right now — a run holds
+// it — or nil. Deleting the directory a running agent works from is worse
+// than making somebody wait, and nothing is undoable once the files are
+// gone; a claude account that is running in some other way has its daemon
+// stopped by Remove itself.
+func (s *Store) Removable(a *rota.Account) error {
+	if s.claimed(a) {
+		return fmt.Errorf("%w: %s is running; stop it before removing the account", rota.ErrBusy, a)
+	}
+	return nil
 }

@@ -54,8 +54,8 @@ func (a *Account) cliRotated(fileRefresh string) bool {
 // records which refresh token it carries, so the next run can tell a
 // rotation by the CLI from this package's own write. An application that
 // takes the files from StagePlan and writes them itself performs the same
-// record by setting a.Staged from the refresh token it wrote — or leaves
-// Staged empty and lets adoption treat the file as the CLI's.
+// record with Account.StagedWritten — or leaves Staged empty and lets
+// adoption treat the file as the CLI's.
 func stageRaw(a *Account, path string, f StagedFile) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err

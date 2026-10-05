@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -99,8 +100,104 @@ func (r *claudeTokenResp) token() *Token {
 	return t
 }
 
+// Complete finishes an ordinary login, and then asks the profile once what
+// the account's plan is.
+//
+// The exchange says who logged in but not on what terms, and Claude Code
+// wants both in the login it is handed: the plan decides which models it
+// offers and the limits it shows, and an organisation's name is what its
+// Remote Control looks for. A profile that cannot be read never fails the
+// login — the token is good either way, and Claude Code asks for itself.
 func (p claudeProvider) Complete(ctx context.Context, code string, state map[string]string) (*Token, error) {
-	return p.exchange(ctx, code, state, nil)
+	t, err := p.exchange(ctx, code, state, nil)
+	if err != nil {
+		return nil, err
+	}
+	if prof, err := readClaudeProfile(ctx, t.Access); err == nil {
+		prof.into(t)
+	}
+	// A fresh login is a new lineage, and when its refresh token ends is
+	// not something the exchange says. Whatever the account remembers is the
+	// last login's, and carried over it would both be written into Claude
+	// Code's store as this login's and make a rotation of this login look
+	// like somebody else's. An empty value is how a token says "forget it".
+	if t.Extra == nil {
+		t.Extra = map[string]string{}
+	}
+	t.Extra[claudeRefreshUntil] = ""
+	return t, nil
+}
+
+// claudeProfile is the part of the profile endpoint's reply rota reads: who
+// the token belongs to, and the plan and name of the organisation it is in.
+type claudeProfile struct {
+	Account *struct {
+		UUID        string `json:"uuid"`
+		Email       string `json:"email"`
+		DisplayName string `json:"display_name"`
+	} `json:"account"`
+	Organization *struct {
+		UUID          string `json:"uuid"`
+		Name          string `json:"name"`
+		Type          string `json:"organization_type"`
+		RateLimitTier string `json:"rate_limit_tier"`
+	} `json:"organization"`
+}
+
+func readClaudeProfile(ctx context.Context, access string) (*claudeProfile, error) {
+	var p claudeProfile
+	if err := getJSON(ctx, ClaudeEndpoints.Profile, access, &p, nil); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// claudePlans maps the profile's organisation type onto the word Claude Code
+// stores as subscriptionType. Anything else is left unsaid rather than
+// guessed: an absent plan is one Claude Code looks up, a wrong one is a
+// model list it believes.
+var claudePlans = map[string]string{
+	"claude_max": "max", "claude_pro": "pro", "claude_enterprise": "enterprise", "claude_team": "team",
+}
+
+// The account keeps what Claude Code's login carries beyond the tokens, so a
+// login rota writes into a home later says everything the last one said.
+const (
+	claudeSubscription  = "subscription_type"
+	claudeRateLimitTier = "rate_limit_tier"
+	claudeRefreshUntil  = "refresh_token_expires_at"
+	claudeClient        = "client_id"
+	claudeOrgName       = "organization_name"
+	claudeDisplayName   = "display_name"
+)
+
+// into folds a profile into a fresh token: the plan for the credential
+// store, the names for the identity Claude Code shows, and the identity
+// itself when the exchange carried none.
+func (p *claudeProfile) into(t *Token) {
+	if t.Identity == nil && p.Account != nil && p.Account.UUID != "" {
+		t.Identity = &Identity{UUID: p.Account.UUID, Email: p.Account.Email}
+		if p.Organization != nil {
+			t.Identity.Org = p.Organization.UUID
+		}
+	}
+	set := func(k, v string) {
+		if v == "" {
+			return
+		}
+		if t.Extra == nil {
+			t.Extra = map[string]string{}
+		}
+		t.Extra[k] = v
+	}
+	if o := p.Organization; o != nil {
+		set(claudeSubscription, claudePlans[o.Type])
+		set(claudeRateLimitTier, o.RateLimitTier)
+		set(claudeOrgName, o.Name)
+	}
+	if p.Account != nil {
+		set(claudeDisplayName, p.Account.DisplayName)
+	}
 }
 
 // CompleteLong finishes a long login. One field more than the ordinary
@@ -161,16 +258,8 @@ func (claudeProvider) Refresh(ctx context.Context, a *Account) (*Token, error) {
 }
 
 func (claudeProvider) Identify(ctx context.Context, access string) (*Identity, error) {
-	var p struct {
-		Account *struct {
-			UUID  string `json:"uuid"`
-			Email string `json:"email"`
-		} `json:"account"`
-		Organization *struct {
-			UUID string `json:"uuid"`
-		} `json:"organization"`
-	}
-	if err := getJSON(ctx, ClaudeEndpoints.Profile, access, &p, nil); err != nil {
+	p, err := readClaudeProfile(ctx, access)
+	if err != nil {
 		return nil, err
 	}
 	if p.Account == nil || p.Account.UUID == "" {
@@ -237,37 +326,40 @@ func (claudeProvider) Quota(ctx context.Context, access string) (*Quota, error) 
 	return q, nil
 }
 
-// Launch hands the token to Claude Code through the environment. Anything
-// that would outrank it — or redirect it to another host — is dropped: a
-// stray ANTHROPIC_BASE_URL would send this OAuth token to a third party.
-func (claudeProvider) Launch(a *Account, home string) (*Command, error) {
-	// A long-lived token wins whenever the account has one worth using. The
-	// ordinary token lasts eight hours and cannot be replaced inside a
-	// process that already holds it — Claude Code refuses by design to adopt
-	// another after a 401 on an environment token — so a window or a daemon
-	// launched with the short one simply stops when it expires. The long one
-	// is the same account by a different key.
-	access := a.Token.Access
-	if long := a.LongAccess(); long != "" {
-		access = long
+// Launch starts Claude Code on one of two routes, and claudehome.go is where
+// both are described: a login of the account's own kept in home, which
+// Claude Code refreshes for itself, or a token in the environment when there
+// is no home to keep one in.
+//
+// On the first route Launch reads home before anything else — Claude Code
+// may have rotated the login since — and writes the account's login there
+// when the home does not already hold it. Writing is only safe while no
+// Claude Code process is alive in that home, which this package cannot see;
+// an application that runs several processes per home plans instead
+// (StagePlan) and writes when it knows. rota's store does exactly that.
+func (p claudeProvider) Launch(a *Account, home string) (*Command, error) {
+	if !claudeStored(a, home) {
+		return claudeEnvCommand(a), nil
 	}
-	env := []string{"CLAUDE_CODE_OAUTH_TOKEN=" + access}
-	if a.ConfigDir != "" {
-		// Claude Code keeps memory, skills and settings here. Unset, it
-		// finds the person's own — which is right until an account is meant
-		// for one project, and then it is exactly wrong. The value is the
-		// account's own field, not the home argument: the two usually agree,
-		// but only because rota's store passes ConfigDir as the home, and an
-		// SDK must not depend on one caller's habit.
-		env = append(env, "CLAUDE_CONFIG_DIR="+a.ConfigDir)
+	if err := p.AdoptFS(a, os.DirFS(home)); err != nil {
+		return nil, err
 	}
-	return &Command{
-		Bin: "claude",
-		Env: env,
-		Drop: dropList("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
-			"ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
-			"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX"),
-	}, nil
+	// Adoption may have found that Claude Code blanked this very login, and
+	// a dead login launches nothing — unless a long token takes over, which
+	// is the environment route Plan now chooses.
+	if err := launchable(a); err != nil {
+		return nil, err
+	}
+	cmd, files, err := p.Plan(context.Background(), a, home)
+	if err != nil {
+		return nil, err
+	}
+	for _, f := range files {
+		if err := stageMerged(a, home, f); err != nil {
+			return nil, err
+		}
+	}
+	return cmd, nil
 }
 
 // Models are the Claude 5 family plus the aliases Claude Code resolves to

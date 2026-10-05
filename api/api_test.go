@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/professor93/rota/internal/claudecode"
 	"github.com/professor93/rota/internal/fakecli"
 	"io"
 	"mime/multipart"
@@ -35,6 +36,8 @@ func TestMain(m *testing.M) {
 	case "codex":
 		fakeCodex()
 	}
+	// No keychain and no Claude Code daemon of anybody's is reached from here.
+	claudecode.StandIn()
 	// A claude run mirrors the Claude Code configuration directory this
 	// process is in. The tests get one of their own, so nothing here depends
 	// on — or reaches into — the directory of whoever runs them.

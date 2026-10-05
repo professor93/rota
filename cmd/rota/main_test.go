@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"github.com/professor93/rota/internal/claudecode"
 	"github.com/professor93/rota/internal/fakecli"
 	"net"
 	"os"
@@ -28,6 +29,9 @@ import (
 // main_test.go. A test that means to exercise the handover calls handover(t).
 func TestMain(m *testing.M) {
 	fakecli.Maybe()
+	// No keychain and no Claude Code daemon of anybody's is reached from
+	// here, in this process or in the rota it runs as below.
+	claudecode.StandIn()
 	// One test needs a real rota, in a process of its own, at a real
 	// terminal: sharing is about what happens between a window somebody is
 	// sitting at and the CLI under it, and nothing run inside `go test`

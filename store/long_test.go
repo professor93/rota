@@ -142,11 +142,43 @@ func TestLongLoginRefusesAnIdentityItDoesNotKnow(t *testing.T) {
 	}
 }
 
-func TestALaunchWithALongTokenAsksTheProviderForNothing(t *testing.T) {
+// A run without its home — a hermetic one — goes on a token in its
+// environment, and a long-lived token is what such runs are for: with one
+// worth using, the provider is asked nothing.
+func TestARunWithoutItsHomeOnALongTokenAsksTheProviderForNothing(t *testing.T) {
+	f := &claudeFake{refuse: true}
+	newClaudeFake(t, f)
+	s := openTemp(t)
+	a := claudeAccount(s, "u1", "one@x")
+	a.Long = &rota.LongToken{Access: "LONG-SECRET", ExpiresAt: time.Now().Add(300 * 24 * time.Hour).UnixMilli()}
+
+	cmd, release, err := s.ready(context.Background(), a, false)
+	if err != nil {
+		t.Fatalf("a run on a long token must not depend on a refresh: %v", err)
+	}
+	release()
+	if n := f.refreshes.Load(); n != 0 {
+		t.Fatalf("the refresh endpoint was called %d times", n)
+	}
+	if !slices.Contains(cmd.Env, "CLAUDE_CODE_OAUTH_TOKEN=LONG-SECRET") {
+		t.Fatalf("the long token is what the CLI must be launched with: %v", cmd.Env)
+	}
+	if a.Dead {
+		t.Fatal("a refresh that was never made cannot have killed the account")
+	}
+}
+
+// A launch in the account's home runs on its own stored login, and an
+// expired one is refreshed first. When the provider refuses that refresh
+// for good, the login is dead — and the long token is the one exception, as
+// it is for any dead login: the run happens on it, and says so.
+func TestALaunchWhoseLoginDiesOnRefreshFallsBackToItsLongToken(t *testing.T) {
 	f := &claudeFake{refuse: true}
 	newClaudeFake(t, f)
 	onPath(t, "claude")
 	s := openTemp(t)
+	var said []string
+	s.Warn = func(msg string) { said = append(said, msg) }
 	a := claudeAccount(s, "u1", "one@x")
 	a.Long = &rota.LongToken{Access: "LONG-SECRET", ExpiresAt: time.Now().Add(300 * 24 * time.Hour).UnixMilli()}
 
@@ -154,20 +186,25 @@ func TestALaunchWithALongTokenAsksTheProviderForNothing(t *testing.T) {
 	if release != nil {
 		release()
 	}
-	// The refresh endpoint refuses everything, and the run happens anyway:
-	// it never needed that lineage.
-	if err != nil {
-		t.Fatalf("a run on a long token must not depend on a refresh: %v", err)
+	if err != nil || !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=LONG-SECRET") {
+		t.Fatalf("the run goes ahead on the long token: %v %v", err, env)
 	}
-	if n := f.refreshes.Load(); n != 0 {
-		t.Fatalf("the refresh endpoint was called %d times", n)
+	if n := f.refreshes.Load(); n != 1 || !a.Dead {
+		t.Fatalf("refreshes=%d dead=%v", n, a.Dead)
 	}
-	if !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=LONG-SECRET") {
-		t.Fatal("the long token is what the CLI must be launched with")
+	if len(said) == 0 || !strings.Contains(said[0], "long-lived token") {
+		t.Fatalf("and says it: %q", said)
 	}
-	if a.Dead {
-		t.Fatal("a refresh that was never made cannot have killed the account")
+	if _, err := os.Stat(filepath.Join(s.Home(a), ".credentials.json")); !os.IsNotExist(err) {
+		t.Fatalf("a dead login is never written into the home: %v", err)
 	}
+}
+
+func TestALaunchWithoutALongTokenDiesOnARefusedRefresh(t *testing.T) {
+	f := &claudeFake{refuse: true}
+	newClaudeFake(t, f)
+	onPath(t, "claude")
+	s := openTemp(t)
 
 	// Without one, the same launch refreshes — and dies on that refusal, as
 	// it always did.

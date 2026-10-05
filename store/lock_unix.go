@@ -28,11 +28,22 @@ func keepAcrossExec(f *os.File) error {
 // else holds it, which is an answer rather than a failure: the caller wants to
 // know whether it may proceed, not to queue behind whoever is there.
 func tryLockFile(path string) (f *os.File, ok bool, err error) {
+	return tryFlock(path, syscall.LOCK_EX)
+}
+
+// tryLockShared takes the same lock shared, without waiting: any number of
+// shared holders at once, and none while somebody holds it exclusively — so
+// an exclusive try succeeds only when nobody holds it at all.
+func tryLockShared(path string) (f *os.File, ok bool, err error) {
+	return tryFlock(path, syscall.LOCK_SH)
+}
+
+func tryFlock(path string, how int) (f *os.File, ok bool, err error) {
 	f, err = os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, false, err
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+	if err := syscall.Flock(int(f.Fd()), how|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
 		return nil, false, nil
 	}

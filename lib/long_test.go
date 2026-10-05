@@ -17,6 +17,8 @@ import (
 func TestClaudeLongLoginAsksForInferenceOnlyAndAYear(t *testing.T) {
 	f := newFakeServer(t, false)
 	setURL(t, &ClaudeEndpoints.Token, f.URL+"/token")
+	setURL(t, &ClaudeEndpoints.Profile, f.URL+"/profile")
+	f.reply["/profile"] = func(*http.Request, map[string]any) (int, any) { return 403, nil }
 	p, _ := Lookup("claude")
 	lp, ok := p.(LongLived)
 	if !ok {

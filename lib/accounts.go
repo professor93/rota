@@ -44,6 +44,12 @@ func FindID(accounts []*Account, id int) *Account {
 // it. A fresh login sets this.
 func (a *Account) StagedSuperseded() { a.Staged = stagedNone }
 
+// StagedWritten records that the account's current login is what its home
+// now holds — for an application that took the files from StagePlan and
+// wrote them itself. The next adoption then knows a different login found
+// there as a rotation by the CLI rather than as its own write.
+func (a *Account) StagedWritten() { a.Staged = fingerprint(a.Token.Refresh) }
+
 // Apply folds a provider's token response into the account: a new access
 // token, a rotated refresh token, a name, whatever extra state the provider
 // asked to keep. An absent refresh token means "keep the old one", never
