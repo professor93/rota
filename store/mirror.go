@@ -13,36 +13,28 @@ import (
 )
 
 // conversationState is every entry of a Claude Code directory that a
-// conversation at rest is keyed by or derived from: the transcripts
-// themselves, the file edits, todos and tasks filed under a session id, the
-// environment a session left behind, the pastes and shell snapshots it
-// referred to, and the prompt history. Moving conversations means moving all
-// of it — transcripts alone would resume into a session whose edits and
-// todos were somewhere else.
+// conversation is keyed by or derived from: the transcripts themselves, the
+// file edits, todos and tasks filed under a session id, the environment, the
+// jobs and the teams a session left behind, the pastes and shell snapshots
+// it referred to, and the prompt history. Moving conversations means moving
+// all of it — transcripts alone would resume into a session whose edits and
+// todos were somewhere else. Background sessions are conversations in this
+// sense, and the agent view lists them from here: they follow the account's
+// sessions setting like the rest.
 //
 // Everything outside this list is settings, memory, skills and plugins, and
-// follows the general rule instead — or is live state of one account's own
-// Claude Code, which is never shared in any mode. `sessions/` is the registry
-// of live processes and the keys that open them; `jobs/` and `teams/` are
-// what a daemon is running right now — the background sessions an agent view
-// lists, resumes, replies to and deletes, and the agent teams it
-// orchestrates. Shared, one account's agent view would offer another
-// account's background work to resume and delete, on the wrong account's
-// quota. See sharedWithClaude.
+// follows the general rule instead — or belongs to one login or one running
+// Claude Code, and is never shared in any mode. Claude Code's own `sessions/`
+// is that: the registry of live processes and the keys that open them, not
+// conversations. See sharedWithClaude.
 var conversationState = []string{
 	"projects", "file-history", "todos", "session-env", "tasks",
-	"paste-cache", "shell-snapshots", conversationHistory,
+	"jobs", "teams", "paste-cache", "shell-snapshots", conversationHistory,
 }
 
 // conversationHistory is the one entry of conversationState that is a file
 // rather than a directory.
 const conversationHistory = "history.jsonl"
-
-// liveState are the entries that were once arranged with the conversations
-// and are now each account's own, because they are a running daemon's state
-// rather than conversations at rest. A link rota made for one of them into a
-// conversation folder is pruned once the home is quiet.
-var liveState = []string{"jobs", "teams"}
 
 // keepsConversations reports whether an entry is one of those.
 func keepsConversations(name string) bool { return slices.Contains(conversationState, name) }
@@ -56,8 +48,8 @@ func keepsConversations(name string) bool { return slices.Contains(conversationS
 // attached sessions and the "N ⧉" sub-sessions in a helper process — one
 // daemon per configuration directory — and the login it signs them in with
 // is the one kept in that directory. A directory of its own gives an account
-// a daemon of its own and a login of its own, and nothing of one account's
-// running work is visible from another's.
+// a daemon of its own and a login of its own: two accounts running at once
+// never authenticate with each other's tokens.
 //
 // A directory of its own would otherwise mean an empty world: no settings,
 // no memory, no skills, no plugins, no trusted folders, and none of the
@@ -91,7 +83,7 @@ func (s *Store) mirrorClaude(a *rota.Account, quiet bool) (string, error) {
 		// What is still arranged there is a conversation directory the
 		// account was told to keep its transcripts in, and — with Remote
 		// Control on — who the account is, when that directory does not say.
-		if err := s.placeConversations(a, a.ConfigDir, quiet); err != nil {
+		if err := s.placeConversations(a, a.ConfigDir); err != nil {
 			return a.ConfigDir, err
 		}
 		if a.RemoteControl && quiet && !s.personalClaude(a) {
@@ -190,16 +182,8 @@ func (s *Store) mirrorClaude(a *rota.Account, quiet bool) (string, error) {
 // placeConversations arranges only the conversation entries of a directory
 // the person chose, for an account that names both a configuration
 // directory and somewhere else to keep its transcripts. Nothing else in
-// there is rota's to touch: it is the account's own world, not a mirror —
-// except a link rota itself once made there for jobs/ or teams/, which are a
-// running daemon's own state and must not be shared through a conversation
-// folder. Those go when the home is quiet, whatever the setting says now.
-func (s *Store) placeConversations(a *rota.Account, home string, quiet bool) error {
-	if quiet {
-		if err := pruneLiveStateLinks(home); err != nil {
-			return err
-		}
-	}
+// there is rota's to touch: it is the account's own world, not a mirror.
+func (s *Store) placeConversations(a *rota.Account, home string) error {
 	dir := a.SessionsDir()
 	if dir == "" {
 		return nil
@@ -221,27 +205,6 @@ func (s *Store) placeConversations(a *rota.Account, home string, quiet bool) err
 		return err
 	}
 	s.sayOwnEntriesStay(a, home, blocked, from)
-	return nil
-}
-
-// pruneLiveStateLinks removes the links to a conversation folder's jobs/ and
-// teams/ that rota made in a directory the person chose, when those were
-// still arranged with the conversations. Only links of that shape go — a
-// link named for the entry it points at — so anything the person made there
-// themselves is left alone.
-func pruneLiveStateLinks(home string) error {
-	for _, name := range liveState {
-		p := filepath.Join(home, name)
-		fi, err := os.Lstat(p)
-		if err != nil || fi.Mode()&fs.ModeSymlink == 0 {
-			continue
-		}
-		if target, err := os.Readlink(p); err == nil && filepath.Base(target) == name {
-			if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return err
-			}
-		}
-	}
 	return nil
 }
 
@@ -372,18 +335,16 @@ func makeConversationState(dir string) error {
 // directory may be shared with an account.
 //
 // What is shared is the person's world: settings, memory, skills, plugins,
-// and the conversations at rest. What is not is anything that belongs to one
-// login or to one running Claude Code, because sharing it would mix two
-// accounts — let one see, act on or sign in as the other:
+// and the conversations, background sessions among them, as the account's
+// sessions setting says. What is not is anything that belongs to one login
+// or to one running Claude Code, because sharing it would let two accounts'
+// processes confuse each other's tokens, or one reach the other's daemon:
 //   - every file the daemon keeps is named for it — the lock, the log, the
 //     status, the auth cooldown — so the prefix is the rule rather than a
 //     list that would go stale the next time Claude Code invents one;
 //   - `.credentials.json` is the login itself, and the person's is theirs;
 //   - `sessions/` is the registry of live session processes and the keys
 //     that open them, which is how one account would reach another's daemon;
-//   - `jobs/` and `teams/` are what a daemon is running: the background
-//     sessions an agent view lists and offers to resume, reply to and
-//     delete, and the agent teams it orchestrates;
 //   - `bridge-spawn` is Remote Control's own state for this login;
 //   - `policy-limits.json`, `statsig`, `mcp-needs-auth-cache.json` and
 //     `telemetry` are caches and spools kept per login: limits the
@@ -405,7 +366,7 @@ func sharedWithClaude(name string) bool {
 	}
 	switch name {
 	case claudeCredentials, claudeConfigFile, claudeConfigAside, configBackupsAside, ".DS_Store",
-		"sessions", "jobs", "teams", "bridge-spawn",
+		"sessions", "bridge-spawn",
 		"policy-limits.json", "statsig", "mcp-needs-auth-cache.json", "telemetry":
 		return false
 	}

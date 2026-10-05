@@ -41,7 +41,7 @@ func personWorld(t *testing.T) string {
 
 // neverShared are the entries of a Claude Code directory that belong to one
 // login or one running Claude Code, and never resolve to anybody else's.
-var neverShared = []string{"sessions", "jobs", "teams", "telemetry", "daemon", "daemon.lock", "daemon.log",
+var neverShared = []string{"sessions", "telemetry", "daemon", "daemon.lock", "daemon.log",
 	".credentials.json", "policy-limits.json", "statsig", "mcp-needs-auth-cache.json", "bridge-spawn", "ide.lock"}
 
 // sameThing reports whether two paths lead to the same file or directory.
@@ -74,12 +74,14 @@ func claudeMakesItsOwn(t *testing.T, home string, names []string) {
 	}
 }
 
-// Two accounts are isolated: nothing either one's running Claude Code keeps
-// for itself is the other's or the person's — in the default shared mode
-// and with both keeping their conversations in the same folder; and with
-// Remote Control on, their configuration file and its backups are their own
-// too, while with it off those are the person's, as everything else shared
-// is.
+// Two accounts are isolated where it matters — each has its own login and
+// its own daemon: nothing either one's Claude Code authenticates or runs
+// with is the other's or the person's, in the default shared mode and with
+// both keeping their conversations in the same folder. Their background
+// sessions and teams are conversations and follow that setting, linked to
+// the person's or to the folder. With Remote Control on, their configuration
+// file and its backups are their own too; with it off those are the
+// person's, as everything else shared is.
 func TestTwoAccountsShareNothingTheirRunningClaudeCodeKeeps(t *testing.T) {
 	storedRouteHere(t)
 	for _, folder := range []bool{false, true} {
@@ -100,6 +102,14 @@ func TestTwoAccountsShareNothingTheirRunningClaudeCodeKeeps(t *testing.T) {
 				t.Fatal(err)
 			}
 			homeA, homeB := s.Home(a), s.Home(b)
+			for _, name := range []string{"jobs", "teams"} {
+				want := filepath.Join(src, name)
+				if folder {
+					want = filepath.Join(a.SessionsDir(), name)
+				}
+				linksTo(t, filepath.Join(homeA, name), want)
+				linksTo(t, filepath.Join(homeB, name), want)
+			}
 			private := slices.Clone(neverShared)
 			if remote {
 				private = append(private, ".claude.json", "backups")
@@ -243,8 +253,8 @@ func TestOneAccountsLoginNeverTouchesAnothers(t *testing.T) {
 
 // The names that belong to one login or one running Claude Code are never
 // linked from the person's directory, whatever the account says about its
-// conversations. jobs/ and teams/ are among them: shared, one account's
-// agent view lists, resumes and deletes another's background sessions.
+// conversations; jobs/ and teams/ follow that setting, as conversations do —
+// shared, the account's own, or in the folder it names.
 func TestTheMirrorLinksNoneOfARunningClaudeCodesOwnState(t *testing.T) {
 	src := personWorld(t)
 	s, a := claudeStore(t)
@@ -260,11 +270,14 @@ func TestTheMirrorLinksNoneOfARunningClaudeCodesOwnState(t *testing.T) {
 			}
 		}
 		linksTo(t, filepath.Join(dst, "skills"), filepath.Join(src, "skills"))
-		if dir := a.SessionsDir(); dir != "" {
-			for _, name := range []string{"jobs", "teams"} {
-				if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
-					t.Fatalf("a conversation folder holds no %s: %v", name, err)
-				}
+		for _, name := range []string{"jobs", "teams"} {
+			switch dir := a.SessionsDir(); {
+			case dir != "":
+				linksTo(t, filepath.Join(dst, name), filepath.Join(dir, name))
+			case mode == rota.SessionsOwn:
+				absent(t, filepath.Join(dst, name))
+			default:
+				linksTo(t, filepath.Join(dst, name), filepath.Join(src, name))
 			}
 		}
 	}
@@ -281,7 +294,7 @@ func TestALinkForANameNoLongerSharedWaitsForAQuietHome(t *testing.T) {
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"jobs", "statsig"} {
+	for _, name := range []string{"telemetry", "statsig"} {
 		if err := os.Symlink(filepath.Join(src, name), filepath.Join(dst, name)); err != nil {
 			t.Fatal(err)
 		}
@@ -290,7 +303,7 @@ func TestALinkForANameNoLongerSharedWaitsForAQuietHome(t *testing.T) {
 	if _, err := s.command(a, true); err != nil {
 		t.Fatal(err)
 	}
-	linksTo(t, filepath.Join(dst, "jobs"), filepath.Join(src, "jobs"))
+	linksTo(t, filepath.Join(dst, "telemetry"), filepath.Join(src, "telemetry"))
 	linksTo(t, filepath.Join(dst, "statsig"), filepath.Join(src, "statsig"))
 	linksTo(t, filepath.Join(dst, "projects"), filepath.Join(src, "projects"))
 
@@ -304,37 +317,6 @@ func TestALinkForANameNoLongerSharedWaitsForAQuietHome(t *testing.T) {
 	if _, err := s.command(a, true); err != nil {
 		t.Fatal(err)
 	}
-	absent(t, filepath.Join(dst, "jobs"))
+	absent(t, filepath.Join(dst, "telemetry"))
 	absent(t, filepath.Join(dst, "statsig"))
-}
-
-// In a directory the person chose, the jobs/ and teams/ links an older rota
-// made into the account's conversation folder are taken away once the home
-// is quiet, although those names are no longer arranged there at all.
-func TestAChosenDirectoryLosesTheJobsAndTeamsLinksRotaMadeThere(t *testing.T) {
-	personWorld(t)
-	s, a := claudeStore(t)
-	a.ConfigDir = t.TempDir()
-	folder := filepath.Join(t.TempDir(), "threads")
-	a.Sessions = folder
-	for _, name := range []string{"jobs", "teams"} {
-		if err := os.MkdirAll(filepath.Join(folder, name), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(filepath.Join(folder, name), filepath.Join(a.ConfigDir, name)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	mine := filepath.Join(t.TempDir(), "elsewhere")
-	os.MkdirAll(mine, 0o700)
-	if err := os.Symlink(mine, filepath.Join(a.ConfigDir, "jobs-mine")); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.command(a, true); err != nil {
-		t.Fatal(err)
-	}
-	absent(t, filepath.Join(a.ConfigDir, "jobs"))
-	absent(t, filepath.Join(a.ConfigDir, "teams"))
-	linksTo(t, filepath.Join(a.ConfigDir, "projects"), filepath.Join(folder, "projects"))
-	linksTo(t, filepath.Join(a.ConfigDir, "jobs-mine"), mine)
 }
