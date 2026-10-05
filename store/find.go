@@ -31,12 +31,8 @@ func (s *Store) Remove(id int) error {
 		if err := s.Removable(a); err != nil {
 			return err
 		}
-		if rota.SharedHome(a.Provider) && !s.personalClaude(a) {
-			h := s.claudeHome(a, false)
-			if err := h.quiesce(); err != nil {
-				return err
-			}
-			if err := h.dropLogin(); err != nil {
+		if rota.SharedHome(a.Provider) {
+			if err := s.claudeHome(a, false).dropOwnLogin(); err != nil {
 				return err
 			}
 		}

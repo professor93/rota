@@ -194,11 +194,15 @@ func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, 
 	if err != nil {
 		return nil, err
 	}
-	// A dead lineage is the store's to refuse (409, with the reason), and not
-	// refused here first: a long-lived token is a credential of its own, and
-	// a claude account's home may hold a login somebody made inside Claude
-	// Code that revives it — both runs the store lets through. The rotation
-	// never offers a dead account, so this can only be one asked for by id.
+	// A dead lineage is refused here, before any reply is under way, so a
+	// streamed request is refused with the same 409 as a buffered one. The
+	// store's own rule decides it: a long-lived token is a credential of its
+	// own, and a claude account's home may hold a login somebody made inside
+	// Claude Code that is waiting to be confirmed — both of which run. The
+	// rotation never offers a dead account, so this is one asked for by id.
+	if err := st.Launchable(r.Context(), a); err != nil {
+		return nil, err
+	}
 	// A server session is hermetic by default: no settings sources unless
 	// the request names them. The server's policy, not the SDK's — nil means
 	// "leave the CLI alone", which is right for a person at a terminal. Only

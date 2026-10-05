@@ -26,6 +26,7 @@ import (
 	"time"
 
 	rota "github.com/professor93/rota/lib"
+	"github.com/professor93/rota/store"
 )
 
 // Session is one conversation an account could resume.
@@ -98,14 +99,9 @@ func ConfigHome(a *rota.Account, staged string) (dir string, shared bool) {
 	if !claude || a.Sessions == rota.SessionsOwn {
 		return staged, false
 	}
-	if own := os.Getenv("CLAUDE_CONFIG_DIR"); own != "" {
-		return own, true
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", true
-	}
-	return filepath.Join(home, ".claude"), true
+	// The person's own directory, by the same answer the store gives: not a
+	// CLAUDE_CONFIG_DIR a rota that launched this one handed down.
+	return store.PersonalClaudeDir(), true
 }
 
 // readers is where each CLI rota knows to look for conversations, and how to

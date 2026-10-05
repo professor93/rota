@@ -88,7 +88,10 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		shared := rota.SharedHome(a.Provider)
 		var h *claudeHome
 		if shared && s.loginInHome(a) {
-			h = s.claudeHome(a, s.claimed(a))
+			// A store without its lock tries no claim at all — even a moment's
+			// exclusive try can refuse a launch's shared one — and takes the
+			// home for busy instead.
+			h = s.claudeHome(a, s.released || s.claimed(a))
 			h.warn = collect
 			before := snapshot(a)
 			if err := h.adopt(ctx); err != nil {
@@ -106,18 +109,9 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		}
 		switch {
 		case s.released && !shared:
-			// Nothing may rotate here. A CLI that keeps its credential file to
-			// one process is still left alone while it runs, as ever.
-			if a.Expired() || s.claimed(a) {
-				continue
-			}
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer guard(a)
-				q, err := rota.Usage(ctx, a)
-				reading(a, q, err)
-			}()
+			// Nothing may rotate here, and whether a CLI that keeps its
+			// credential file to one process is running is not asked: it is
+			// left alone, as it would be while it runs.
 		case shared && !a.Expired():
 			// A reading spends nothing, so for a home many processes share it
 			// is taken whatever runs there.
@@ -148,20 +142,18 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 			go func() {
 				defer wg.Done()
 				defer guard(a)
-				revived, err := h.refresh(ctx)
+				changed, err := h.refresh(ctx)
 				if err != nil {
-					report(a.Dead, err)
+					report(changed, err)
 					return
 				}
-				if !revived {
-					mu.Lock()
-					renewed = append(renewed, h)
-					mu.Unlock()
-				}
-				if a.Expired() {
-					report(true, nil) // revived into the hold: nothing to read with
+				if a.Dead || h.hold != "" {
+					report(true, nil) // refused, with a login in the home waiting to be confirmed
 					return
 				}
+				mu.Lock()
+				renewed = append(renewed, h)
+				mu.Unlock()
 				q, err := rota.Usage(ctx, a)
 				reading(a, q, err)
 			}()
@@ -205,18 +197,11 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		return append(errs, err)
 	}
 	// Each refreshed login goes into its home now that the store has it,
-	// while the home is still claimed — unless something started there
-	// meanwhile, in which case the next quiet launch writes it.
+	// while the home is still claimed — when rota may write there (mayWrite),
+	// which a home still holding the login just refreshed away always is.
 	again := false
 	for _, h := range renewed {
-		if !h.quiet() {
-			continue
-		}
-		_, files, err := rota.StagePlan(ctx, h.a, h.home)
-		if err == nil {
-			err = h.seed(files)
-		}
-		if err != nil {
+		if err := h.writeRefreshed(ctx); err != nil {
 			errs = append(errs, err)
 		}
 		again = true

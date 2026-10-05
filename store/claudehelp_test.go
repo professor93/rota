@@ -346,14 +346,22 @@ type orderBackend struct {
 	want, homeFile string
 	saved          bool // a save has carried want
 	homeFirst      bool // and the home held it before that save
+	// then runs once, right after that save: what happens between the save
+	// and the write into the home.
+	then func()
 }
 
 func (o *orderBackend) Save(b []byte) error {
-	if !o.saved && o.want != "" && bytes.Contains(b, []byte(o.want)) {
+	first := !o.saved && o.want != "" && bytes.Contains(b, []byte(o.want))
+	if first {
 		o.saved = true
 		o.homeFirst = strings.Contains(readFile(o.homeFile), o.want)
 	}
-	return o.FileBackend.Save(b)
+	err := o.FileBackend.Save(b)
+	if first && o.then != nil {
+		o.then()
+	}
+	return err
 }
 
 func orderedStore(t *testing.T) (*Store, *orderBackend) {

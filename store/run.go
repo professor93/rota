@@ -53,7 +53,9 @@ func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env 
 // credential in hand. Usage still wants a fresh token, and still refreshes
 // for itself: `rota list` and the server's background sweep are untouched.
 func refreshForLaunch(ctx context.Context, a *rota.Account) (bool, error) {
-	if a.LongValid() {
+	// A dead account is never refreshed: its refresh token was refused, and
+	// presenting it again may cost the provider's patience with the login.
+	if a.LongValid() || a.Dead {
 		return false, nil
 	}
 	return rota.Refresh(ctx, a)
@@ -230,6 +232,11 @@ func (s *Store) prepareShared(ctx context.Context, a *rota.Account, mirror bool)
 		return nil, nil, fmt.Errorf("%w: another rota process is changing %s's login right now; try again in a moment", rota.ErrBusy, a)
 	}
 	cmd, err := h.launch(ctx, mirror)
+	if err == nil {
+		// Everything rota launches is told whose Claude Code directory is the
+		// person's, so a rota started inside it knows without guessing.
+		cmd.Env = append(cmd.Env, claudeHomeVar+"="+s.handDown())
+	}
 	// Whatever happened, the account may have changed — a rotation adopted,
 	// a refresh, a login found dead — and none of it may be lost.
 	if serr := s.Save(); serr != nil {
@@ -275,10 +282,13 @@ func (s *Store) mirrored(a *rota.Account, cmd *rota.Command, quiet bool) (*rota.
 	case merr != nil:
 		s.say(fmt.Sprintf("could not mirror Claude Code's configuration into %s (%v); "+
 			"running with Claude Code's own directory and daemon", dir, merr))
-		// Claude Code's own directory is the person's — not one a session
-		// rota launched handed down, which is another account's home.
-		if own := os.Getenv("CLAUDE_CONFIG_DIR"); own != "" && s.isAccountHome(own) {
-			cmd.Drop = append(cmd.Drop, "CLAUDE_CONFIG_DIR")
+		// Claude Code's own directory is the person's — not whatever a rota
+		// that launched this one handed down, an account's home or a
+		// hermetic run's throwaway directory.
+		if own := os.Getenv("CLAUDE_CONFIG_DIR"); own != "" {
+			if dir, _ := s.personalDir(); !sameDir(own, dir) {
+				cmd.Drop = append(cmd.Drop, "CLAUDE_CONFIG_DIR")
+			}
 		}
 	case dir != "" && !pointed:
 		// Appended rather than replacing: Environ drops every inherited
@@ -325,6 +335,14 @@ const runLock = ".rota-run.lock"
 // the handover arranges for the claims to survive it rather than take the
 // comment's word for it.
 var keepingAcrossExec = keepAcrossExec
+
+// tryExclusive and tryShared are the two ways a claim is tried, as variables
+// so a test can see that a store which must try none tries none: a moment's
+// exclusive try is enough to refuse a launch's shared claim.
+var (
+	tryExclusive = tryLockFile
+	tryShared    = tryLockShared
+)
 
 // heldClaims are the claim files this process holds right now, so that the
 // one moment they must outlive it — the handover — can find them.
@@ -374,9 +392,9 @@ func (s *Store) claimFile(a *rota.Account, shared bool) (release func(), ok bool
 		// so let the caller fail on the real thing rather than on this.
 		return func() {}, true
 	}
-	try := tryLockFile
+	try := tryExclusive
 	if shared {
-		try = tryLockShared
+		try = tryShared
 	}
 	held, got, err := try(filepath.Join(home, runLock))
 	if err != nil || !got {
@@ -446,9 +464,18 @@ func (s *Store) Busy(a *rota.Account) bool {
 // Removable says why an account cannot be removed right now — a run holds
 // it — or nil. Deleting the directory a running agent works from is worse
 // than making somebody wait, and nothing is undoable once the files are
-// gone; a claude account that is running in some other way has its daemon
-// stopped by Remove itself.
+// gone.
+//
+// A claude account's home is made quiet first: its daemon is stopped, which
+// ends the background sessions it hosts, and the home is given a few seconds;
+// only then is the claim asked about, so a daemon that held it would be
+// stopped rather than refuse the removal. Whatever still runs is named.
 func (s *Store) Removable(a *rota.Account) error {
+	if rota.SharedHome(a.Provider) && !s.personalClaude(a) {
+		if err := s.claudeHome(a, false).quiesce(); err != nil {
+			return err
+		}
+	}
 	if s.claimed(a) {
 		return fmt.Errorf("%w: %s is running; stop it before removing the account", rota.ErrBusy, a)
 	}

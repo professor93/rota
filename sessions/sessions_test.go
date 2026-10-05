@@ -32,6 +32,7 @@ func TestConfigHomeSaysWhoOwnsWhatIsFound(t *testing.T) {
 	staged := "/rota/homes/claude-1"
 	own := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", own)
+	unset(t, "ROTA_CLAUDE_HOME", "ROTA_ACCOUNT_ID")
 
 	dir, shared := ConfigHome(&rota.Account{ID: 1, Provider: "claude"}, staged)
 	if dir != own || !shared {
@@ -423,5 +424,39 @@ func TestGrokListsWithoutOpeningEveryConversation(t *testing.T) {
 		if s.Dir != "/tmp/x" {
 			t.Fatalf("every session shown must have been read: %+v", s)
 		}
+	}
+}
+
+// unset removes variables for the length of a test.
+func unset(t *testing.T, names ...string) {
+	t.Helper()
+	for _, n := range names {
+		t.Setenv(n, "")
+		os.Unsetenv(n)
+	}
+}
+
+// The person's own directory is the one a rota that launched this one told
+// down, not a CLAUDE_CONFIG_DIR it inherited — which is an account's home, a
+// hermetic run's throwaway directory, or another store's.
+func TestThePersonsOwnDirectoryIsTheOneToldDown(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	inherited, told := t.TempDir(), t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", inherited)
+	a := &rota.Account{ID: 1, Provider: "claude"}
+
+	t.Setenv("ROTA_CLAUDE_HOME", told)
+	if dir, shared := ConfigHome(a, "/s"); dir != told || !shared {
+		t.Fatalf("told: %q", dir)
+	}
+	t.Setenv("ROTA_CLAUDE_HOME", "")
+	if dir, _ := ConfigHome(a, "/s"); dir != filepath.Join(home, ".claude") {
+		t.Fatalf("told the default: %q", dir)
+	}
+	unset(t, "ROTA_CLAUDE_HOME")
+	t.Setenv("ROTA_ACCOUNT_ID", "7")
+	if dir, _ := ConfigHome(a, "/s"); dir != filepath.Join(home, ".claude") {
+		t.Fatalf("launched by a rota that did not say: %q", dir)
 	}
 }

@@ -164,9 +164,8 @@ func (s *Store) CheckHome(a *rota.Account, roots ...string) error {
 	// same directory would each read the other's credential there as a
 	// rotation of their own, and take it.
 	if a.ConfigDir != "" {
-		dir := realDir(a.ConfigDir)
 		for _, o := range s.Accounts {
-			if o.ID != a.ID && realDir(s.Home(o)) == dir {
+			if o.ID != a.ID && sameDir(s.Home(o), a.ConfigDir) {
 				return rota.Invalid("config_dir %q is already %s's home, and a home holds one account's credential", a.ConfigDir, o)
 			}
 		}
@@ -176,9 +175,10 @@ func (s *Store) CheckHome(a *rota.Account, roots ...string) error {
 
 func (s *Store) checkDir(a *rota.Account, what, path string, ownAllowed bool, roots []string) error {
 	dir := realDir(path)
-	homes := realDir(s.homeRoot)
-	own := ownAllowed && dir == realDir(s.ownHome(a))
-	if (within(homes, dir) && !own) || within(dir, filepath.Dir(homes)) {
+	// By file identity as well as by path, so a second spelling of one of
+	// rota's directories on a volume that ignores case does not pass.
+	own := ownAllowed && sameDir(path, s.ownHome(a))
+	if (inside(s.homeRoot, path) && !own) || inside(path, filepath.Dir(s.homeRoot)) {
 		return rota.Invalid("%s %q: that directory is rota's own", what, path)
 	}
 	if len(roots) == 0 {

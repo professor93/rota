@@ -986,7 +986,7 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	// A claude account's login lives in its home: a new one means taking it
 	// out of the old one first, and not while anything runs there.
-	if err := st.MoveHome(a, want.ConfigDir); err != nil {
+	if err := st.MoveHome(r.Context(), a, want.ConfigDir); err != nil {
 		s.report(w, r, err)
 		return
 	}

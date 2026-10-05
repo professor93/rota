@@ -296,6 +296,49 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 	return nil
 }
 
+// HomeLogin is what a home's credential store holds, measured against one
+// account and what is recorded about writing there.
+type HomeLogin int
+
+const (
+	// HomeLoginNone: no login Claude Code could use — no store, no login in
+	// it, a blanked one, or a store that cannot be read.
+	HomeLoginNone HomeLogin = iota
+	// HomeLoginCurrent: the account's current refresh token.
+	HomeLoginCurrent
+	// HomeLoginWritten: the login this package recorded writing there
+	// (Staged), which the account has since replaced by refreshing it. That
+	// login is spent: the provider issued its successor.
+	HomeLoginWritten
+	// HomeLoginOther: anything else — a rotation by the CLI, a login somebody
+	// made inside it, another account's — about which the home alone proves
+	// nothing.
+	HomeLoginOther
+)
+
+// ClaudeHomeLogin says what a home holds for an account, and for
+// HomeLoginOther hands back the login as a *NewLogin to be confirmed with the
+// provider (Identify) and then taken (Accept) or left (Refuse). It reads
+// only, and changes nothing.
+//
+// AdoptFS decides about such a login by its own rules — a rotation it takes,
+// an older login it lets be written over. An application that must never
+// take or replace a login it cannot prove is the account's — in a directory
+// a person chose, which may be their own — asks this first, and confirms
+// whatever comes back as other.
+func ClaudeHomeLogin(a *Account, fsys fs.FS) (HomeLogin, *NewLogin) {
+	l, ok := readClaudeLogin(fsys)
+	switch {
+	case !ok || !l.usable():
+		return HomeLoginNone, nil
+	case l.RefreshToken == a.Token.Refresh:
+		return HomeLoginCurrent, nil
+	case a.Staged != "" && a.Staged != stagedNone && fingerprint(l.RefreshToken) == a.Staged:
+		return HomeLoginWritten, nil
+	}
+	return HomeLoginOther, &NewLogin{Access: l.AccessToken, login: l}
+}
+
 // adopt takes the whole login into the account.
 func (l *claudeLogin) adopt(a *Account) {
 	a.Token.Refresh = l.RefreshToken

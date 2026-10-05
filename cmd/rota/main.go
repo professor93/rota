@@ -88,8 +88,10 @@ Default provider is claude. Accounts live in $ROTA_HOME or ~/.rota (0600).
 A claude account runs on a login of its own, kept in Claude Code's own
 credential store inside the account's home, where Claude Code refreshes it:
 rota reads back what Claude Code rotated, and writes or refreshes the login
-only while nothing runs in that home. Your own login — your ~/.claude and its
-keychain item — is never read or written.`
+only while nothing runs in that home. Your own login — your Claude Code
+directory, ~/.claude or your CLAUDE_CONFIG_DIR, and its keychain item — is
+never read or written, and a login in a directory you name with --config is
+replaced only when it is provably the account's.`
 
 const shortUsage = "rota " + wire.Version + ` — several AI coding CLIs, several accounts, one rotation
 
@@ -1473,7 +1475,7 @@ func (c *cli) set(args []string) error {
 	// A claude account's login lives in its home, so a new home means
 	// taking it out of the old one first — and not while anything runs
 	// there. A refusal is returned before the store is saved.
-	if err := s.MoveHome(a, want.ConfigDir); err != nil {
+	if err := s.MoveHome(context.Background(), a, want.ConfigDir); err != nil {
 		return err
 	}
 	a.Cwd, a.ConfigDir, a.Sessions, a.RemoteControl = want.Cwd, want.ConfigDir, want.Sessions, want.RemoteControl

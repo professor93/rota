@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -51,6 +52,11 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
+	// Whose Claude Code directory is the person's is read from variables a
+	// rota that launched this one would have set; a test answers from its
+	// own environment alone.
+	os.Unsetenv("ROTA_CLAUDE_HOME")
+	os.Unsetenv("ROTA_ACCOUNT_ID")
 	os.Setenv("HOME", person)
 	os.Setenv("USERPROFILE", person)
 	dir, err := os.MkdirTemp("", "rota-claude")
@@ -1196,5 +1202,37 @@ func TestAConfigDirDoesNotChangeUnderARunningClaudeCode(t *testing.T) {
 	os.Remove(filepath.Join(home, "sessions", "1.json"))
 	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": config}); resp.StatusCode != 200 {
 		t.Fatalf("once it has stopped: %d %s", resp.StatusCode, raw)
+	}
+}
+
+// A dead account is refused with 409 before any reply is under way, whether
+// the run was asked to stream or not. A dead account whose home holds a
+// login made inside Claude Code that nobody can confirm yet runs, both ways:
+// starting it there is what makes that login confirmable.
+func TestADeadAccountIsDecidedBeforeTheReplyStreamedOrNot(t *testing.T) {
+	h := newHarness(t, Options{})
+	for _, stream := range []bool{false, true} {
+		resp, raw := h.do("POST", "/v1/accounts/4/run", map[string]any{"prompt": "p", "stream": stream})
+		if resp.StatusCode != http.StatusConflict {
+			t.Fatalf("stream=%v: %d %s", stream, resp.StatusCode, raw)
+		}
+	}
+	if runtime.GOOS == "windows" {
+		return // no login is kept in a home there
+	}
+	login := fmt.Sprintf(`{"claudeAiOauth":{"accessToken":"A-in","refreshToken":"R-in","expiresAt":%d,"refreshTokenExpiresAt":1777777777000}}`,
+		time.Now().Add(time.Hour).UnixMilli())
+	home := filepath.Join(h.dir, "homes", "claude-4")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".credentials.json"), []byte(login), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, stream := range []bool{false, true} {
+		resp, raw := h.do("POST", "/v1/accounts/4/run", map[string]any{"prompt": "p", "stream": stream})
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("in the hold, stream=%v: %d %s", stream, resp.StatusCode, raw)
+		}
 	}
 }

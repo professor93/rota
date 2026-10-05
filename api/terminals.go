@@ -222,7 +222,11 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest) (*
 	if err != nil {
 		return nil, err
 	}
-	// A dead lineage is the store's to refuse, for the reasons run.go gives.
+	// A dead lineage is refused before anything starts, by the store's own
+	// rule, for the reasons run.go gives.
+	if err := st.Launchable(r.Context(), a); err != nil {
+		return nil, err
+	}
 	path, env, release, err := st.Prepare(r.Context(), a)
 	if err != nil {
 		return nil, err

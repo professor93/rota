@@ -28,6 +28,11 @@ func TestMain(m *testing.M) {
 	if err != nil {
 		panic(err)
 	}
+	// Whose Claude Code directory is the person's is read from variables a
+	// rota that launched this one would have set; a test answers from its
+	// own environment alone.
+	os.Unsetenv("ROTA_CLAUDE_HOME")
+	os.Unsetenv("ROTA_ACCOUNT_ID")
 	os.Setenv("HOME", person)
 	os.Setenv("USERPROFILE", person)
 	dir, err := os.MkdirTemp("", "rota-claude")

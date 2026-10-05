@@ -627,3 +627,34 @@ func TestJoiningAHomeWritesNothingAndHandsOverNothing(t *testing.T) {
 		t.Fatal("nothing to join on Windows, or for a provider whose home is not shared")
 	}
 }
+
+// What a home holds, measured against the account: nothing usable, its
+// current login, the one rota recorded writing and has refreshed away since
+// (spent), or something else — handed back to be confirmed.
+func TestWhatAHomeHoldsIsMeasuredAgainstTheAccount(t *testing.T) {
+	a := livingClaude()
+	login := func(refresh string) string {
+		return `{"accessToken":"A-` + refresh + `","refreshToken":"` + refresh + `","expiresAt":5}`
+	}
+	a.Staged = fingerprint("R0")
+	for i, c := range []struct {
+		fsys fstest.MapFS
+		want HomeLogin
+	}{
+		{fstest.MapFS{}, HomeLoginNone},
+		{homeWith(`{"accessToken":"","refreshToken":"","expiresAt":0}`), HomeLoginNone},
+		{fstest.MapFS{claudeCredentials: {Data: []byte("{torn")}}, HomeLoginNone},
+		{homeWith(login("R1")), HomeLoginCurrent},
+		{homeWith(login("R0")), HomeLoginWritten},
+		{homeWith(login("R9")), HomeLoginOther},
+	} {
+		got, nl := ClaudeHomeLogin(a, c.fsys)
+		if got != c.want || (got == HomeLoginOther) != (nl != nil) {
+			t.Fatalf("case %d: got %v %v", i, got, nl)
+		}
+	}
+	a.Staged = stagedNone
+	if got, _ := ClaudeHomeLogin(a, homeWith(login("R0"))); got != HomeLoginOther {
+		t.Fatal("with nothing recorded, an older login proves nothing")
+	}
+}
