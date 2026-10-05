@@ -67,9 +67,10 @@ credential store inside the account's private home: Claude Code refreshes it
 there, every window and background session of that account shares it, and
 Remote Control works. rota writes it there and reads back what Claude Code
 rotated, and never writes or refreshes it while Claude Code runs in that
-home. Your own login — your Claude Code directory and its keychain item — is
-never read or written, and a login in a directory you name for an account is
-replaced only when it is provably that account's. Every account has its own login and its own daemon, so two
+home. An account you give a directory of your own (`--config`) runs on a
+token there, as before, without Remote Control, and rota reads, writes and
+removes no login in it. Your own login — your Claude Code directory and its
+keychain item — is never read or written. Every account has its own login and its own daemon, so two
 accounts running at once never confuse each other's tokens; they share your
 settings, memory, skills, plugins, MCP servers and, unless an account keeps
 its own, your conversations.
