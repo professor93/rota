@@ -2,6 +2,7 @@ package wire
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -49,5 +50,29 @@ func TestDescribeCarriesTheLongTokensDateAndNeverTheToken(t *testing.T) {
 		if strings.Contains(note, "LONG-SECRET") {
 			t.Fatalf("%s: the note carried the token: %q", c.what, note)
 		}
+	}
+}
+
+// When the login itself ends is shown beside the long token's date, and said
+// in a listing only in its last few days.
+func TestWhenTheLoginEndsIsShownAndSaidOnlyNearTheEnd(t *testing.T) {
+	a := &rota.Account{ID: 1, Provider: "claude"}
+	if Describe(a).LoginUntil != "" || LoginNote(a) != "" {
+		t.Fatal("unknown is unsaid")
+	}
+	at := func(d time.Duration) map[string]string {
+		return map[string]string{"refresh_token_expires_at": strconv.FormatInt(time.Now().Add(d).UnixMilli(), 10)}
+	}
+	a.Extra = at(30 * 24 * time.Hour)
+	if Describe(a).LoginUntil == "" || LoginNote(a) != "" {
+		t.Fatal("a month away is shown and not said")
+	}
+	a.Extra = at(3 * 24 * time.Hour)
+	if !strings.Contains(LoginNote(a), "in 2 days") {
+		t.Fatal(LoginNote(a))
+	}
+	a.Extra = at(-time.Hour)
+	if !strings.Contains(LoginNote(a), "ended") {
+		t.Fatal(LoginNote(a))
 	}
 }

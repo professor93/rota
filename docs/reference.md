@@ -567,7 +567,7 @@ see *Who is asking, and what they may do*.
 | `POST` | `/v1/session` | open | `{"name":"…","password":"…"}` → the same, and the session cookie |
 | `DELETE` | `/v1/session` | open | end this session |
 | `GET` | `/v1/schema` | watch | every provider, its models, efforts, defaults and fields |
-| `GET` | `/v1/accounts` | watch | accounts in rotation order, with usage, status, order, threshold, `long_until`, `remote_control` and when limits were read (`?refresh=1`); `default` names the one a bare run would use |
+| `GET` | `/v1/accounts` | watch | accounts in rotation order, with usage, status, order, threshold, `long_until`, `login_until`, `remote_control` and when limits were read (`?refresh=1`); `default` names the one a bare run would use |
 | `GET` | `/v1/accounts/{id}/schema` | watch | the models *that* account may actually use |
 | `POST` | `/v1/run` | control | run a prompt on whichever account the rotation picks |
 | `POST` | `/v1/accounts/{id}/run` | control | run a prompt on that account |
@@ -2446,10 +2446,12 @@ that names no account at all. So log the account in normally first.
 
 `rota list` says nothing about the token for eleven months, then one line
 while it is within thirty days of expiry, and one more if it lapses — after
-which those runs are back on the eight-hour token. `--json` and
-`GET /v1/accounts` carry `long_until` (RFC 3339); the token itself is never
-printed, logged or sent anywhere. `rota set <id> --long forget` throws it
-away, leaving the ordinary login alone.
+which those runs are back on the eight-hour token. It says the same about the
+ordinary login in its last five days, when Claude Code has recorded when it
+ends. `--json` and `GET /v1/accounts` carry `long_until` and `login_until`
+(RFC 3339); the token itself is never printed, logged or sent anywhere.
+`rota set <id> --long forget` throws it away, leaving the ordinary login
+alone.
 
 One risk, plainly: a year-long credential sitting in `~/.rota/accounts.json`
 is worth far more to a thief than an eight-hour one. If that file ever

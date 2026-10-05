@@ -62,6 +62,10 @@ type Account struct {
 	// never anywhere else a person or a program can read: its date is the
 	// only part of it anybody outside the store needs.
 	LongUntil string `json:"long_until,omitempty"`
+	// LoginUntil is when the account's login itself ends — its refresh
+	// token, not the access token refreshed under it — RFC 3339, and absent
+	// when the provider has not said.
+	LoginUntil string `json:"login_until,omitempty"`
 	// Metered says whether this provider publishes a usage endpoint at all.
 	// When it does not, there are no limits to report and no check to make.
 	Metered bool `json:"metered"`
@@ -129,6 +133,9 @@ func Describe(a *rota.Account) Account {
 	if t := a.LongUntil(); !t.IsZero() {
 		v.LongUntil = t.UTC().Format(time.RFC3339)
 	}
+	if t := a.LoginUntil(); !t.IsZero() {
+		v.LoginUntil = t.UTC().Format(time.RFC3339)
+	}
 	if a.QuotaAt > 0 {
 		t := time.UnixMilli(a.QuotaAt)
 		v.CheckedAt = t.UTC().Format(time.RFC3339)
@@ -173,6 +180,28 @@ func LongNote(a *rota.Account) string {
 		return "its long-lived token expired on " + day + "; runs without the account's home are back on the 8-hour token — `rota login --long` for another"
 	case left <= LongSoon:
 		return fmt.Sprintf("its long-lived token expires on %s, in %d days; `rota login --long` for another", day, int(left/(24*time.Hour)))
+	}
+	return ""
+}
+
+// LoginSoon is how close to its end a login has to be before a listing
+// mentions it: a few days, enough to sign in again at a convenient moment.
+const LoginSoon = 5 * 24 * time.Hour
+
+// LoginNote is what a listing should say about when an account's login
+// ends, or "" when that is far off or unknown.
+func LoginNote(a *rota.Account) string {
+	t := a.LoginUntil()
+	if t.IsZero() || a.Dead {
+		return ""
+	}
+	day := t.Format(time.DateOnly)
+	switch left := time.Until(t); {
+	case left <= 0:
+		return "its login ended on " + day + "; `rota login`, or /login in one of its windows, for a new one"
+	case left <= LoginSoon:
+		return fmt.Sprintf("its login ends on %s, in %d days; `rota login`, or /login in one of its windows, before then",
+			day, int(left/(24*time.Hour)))
 	}
 	return ""
 }

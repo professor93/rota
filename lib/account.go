@@ -186,6 +186,18 @@ func (a *Account) LongUntil() time.Time {
 	return time.UnixMilli(a.Long.ExpiresAt)
 }
 
+// LoginUntil is when the login itself ends — not the access token, which is
+// refreshed, but the refresh token behind it — or the zero time when the
+// provider has not said. Claude Code records it in the login it keeps, and
+// rota learns it from there.
+func (a *Account) LoginUntil() time.Time {
+	ms, err := strconv.ParseInt(a.Extra[claudeRefreshUntil], 10, 64)
+	if err != nil || ms <= 0 {
+		return time.Time{}
+	}
+	return time.UnixMilli(ms)
+}
+
 // ApplyLong stores a long-lived credential beside the ordinary one, which it
 // never touches. Only the token and its expiry are kept: whose account this
 // is was settled before the call, and a refresh token the provider may have

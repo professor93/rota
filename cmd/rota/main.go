@@ -651,6 +651,9 @@ func (c *cli) sayLongNotes(shown []*rota.Account) {
 		if note := wire.LongNote(a); note != "" {
 			fmt.Fprintf(c.out, "\n%s: %s\n", a, note)
 		}
+		if note := wire.LoginNote(a); note != "" {
+			fmt.Fprintf(c.out, "\n%s: %s\n", a, note)
+		}
 	}
 }
 
