@@ -266,7 +266,7 @@ Anything after an account id is passed to the vendor CLI's own login
 | `--order <place>` | a number, or `first`, `last`, `up`, `down`, `before:<id>`, `after:<id>`, `0`/`out` |
 | `--threshold <pct>` | the usage at which the rotation moves on, 1 to 100 |
 | `--cwd <dir>` | where this account's runs start |
-| `--config <dir>` | its own CLI configuration, and the private home its credentials are staged in |
+| `--config <dir>` | its own CLI configuration, and the private home its credentials are staged in; never another account's home, and for claude not changed while Claude Code runs in the present one |
 | `--sessions <where>` | where a claude account's conversations live: `shared`, `own`, or a directory |
 | `--remote-control on\|off` | a claude account's own `.claude.json`, which Claude Code's Remote Control needs — see *Remote Control* |
 | `--long forget` | throw away its long-lived token; the only value the flag takes |
@@ -2025,34 +2025,39 @@ What it does not share is its own running Claude Code: a daemon of its own,
 signed in with a login of its own, kept in Claude Code's credential store
 inside that directory — see *A login of its own*.
 
-**What accounts share, and what they never do.** By default an account shares
-your whole Claude Code world: settings, memory, skills, plugins, the
-configuration file with its MCP servers and trusted folders — and so also the
-identity record in that file — and the conversations at rest, unless the
-account keeps its own (*Where the conversations live*). What is never shared,
-in any mode, is everything that belongs to one login or one running Claude
-Code:
+**What accounts share, and what they never do.** Every account has its own
+login and its own daemon, and nothing an account's processes authenticate
+with is ever read by another's: two accounts running at once cannot confuse
+each other's tokens. Everything else is your world, shared by default:
+settings, memory, skills, plugins, the configuration file with its MCP
+servers and trusted folders — and so also the identity record in that file —
+and the conversations, unless the account keeps its own (*Where the
+conversations live*). Background sessions and agent teams are part of the
+conversations and follow that setting, so an account's agent view lists
+whatever conversations it shares. What is never shared, in any mode, is what
+belongs to one login or one daemon:
 
 | Never shared | Why |
 |---|---|
 | `.credentials.json`, and on macOS the keychain item named for the directory | the login and its refresh token |
 | `daemon*` | the daemon's lock, log, status and auth cooldown |
 | `sessions/` | the registry of live session processes and the keys that open them |
-| `jobs/` | the background sessions a daemon runs — what the agent view lists, resumes, replies to and deletes |
-| `teams/` | the agent teams a daemon orchestrates |
 | `bridge-spawn` | Remote Control's own state for this login |
 | `policy-limits.json`, `statsig`, `mcp-needs-auth-cache.json`, `telemetry` | per-login caches and spools: limits, feature flags, which MCP servers want a sign-in, what is waiting to be reported |
 | any `*.lock` | locks Claude Code takes for this directory's own processes |
 | `.claude.json` and `backups/` — with Remote Control on | the identity Remote Control acts as, and Claude Code's backups of that file |
 
-Shared, any of these would mix two accounts: one account's agent view would
-offer another's background sessions to resume and delete, on the wrong
-account's quota, and one window could attach to a session another account's
-daemon hosts. So an account's agent view shows its own background sessions
-and no other's, and one account running needs nothing from — and knows
-nothing of — another running beside it. MCP servers that sign in with OAuth
+Shared, any of these would let one account's processes sign in with
+another's login, or one window reach a session another account's daemon
+hosts and pay for it on the wrong quota. MCP servers that sign in with OAuth
 are authorized per account home in both modes, because those tokens live in
 each home's credential store.
+
+**One home, one account.** An account's home holds that account's login and
+no other: `rota set --config` and `PATCH config_dir` refuse a directory that
+is already another account's home, whatever its provider, and a store that
+already has two accounts in one home launches neither there until one is
+given another — each would read the other's login as a rotation of its own.
 
 A mirror built by an earlier rota that still links a name no longer shared
 loses that link — but only on the first launch that finds nothing of Claude
@@ -2063,7 +2068,11 @@ mirror is always rota's own, a real entry is the account's.
 Four things worth knowing:
 
 - `rota set <id> --config DIR` opts into a fully separate directory instead:
-  no mirror, and nothing shared with your own.
+  no mirror, and nothing shared with your own. Changing it, or clearing it
+  with `--clear`, takes the account's login out of the home it leaves —
+  keychain item first — so no copy of its refresh token stays behind, and the
+  new home is written from nothing on the next launch. It is refused while
+  anything of Claude Code's runs in the present home.
 - If the mirror cannot be built — symlinks refused on Windows without
   developer mode, an unwritable home — rota prints a warning and runs Claude
   Code anyway. The run still happens, and its login still decides who pays.
@@ -2156,58 +2165,90 @@ once — after the store is saved — by writing the new login into the home.
 
 - **Reading.** Before anything uses the account's tokens, the home's store
   is read. A rotation by Claude Code keeps the login's own
-  `refreshTokenExpiresAt` and is taken with no network call. A login with
-  another one — or any living login in the home of an account marked dead —
-  is somebody running `/login` inside that home: rota asks the provider whose
-  it is, with that login's own access token, and takes it when it is this
-  account's (a dead account comes back that way); somebody else's is not
-  taken, the account's own tokens stay as they were, and rota says so, naming
-  both. A login Claude Code gave up on — it blanks it after the provider
-  refuses it — marks the account dead when it was the account's current one.
+  `refreshTokenExpiresAt` and is taken with no network call. A login that
+  expires before the account's own token, or one rota wrote before a refresh
+  of its own, is behind: the account's current login goes in on the next
+  quiet launch. A login with another `refreshTokenExpiresAt` — or any living
+  login in the home of an account marked dead — is somebody running `/login`
+  inside that home: rota asks the provider whose it is, with that login's own
+  access token, and takes it when it is this account's (a dead account comes
+  back that way); somebody else's is not taken, the account's own tokens stay
+  as they were, and rota says so, naming both. A login Claude Code gave up
+  on — it blanks it after the provider refuses it — marks the account dead
+  when it was the account's current one. A store that is there and cannot be
+  read is not an empty one: see the hold, below.
+- **The hold.** Sometimes the home holds something rota cannot place: a
+  login made inside Claude Code that the provider cannot be asked about right
+  now (its access token has lapsed, say, the morning after), a store that
+  cannot be read while something runs there, or a macOS keychain that does
+  not answer. Then rota refreshes nothing for that account, writes nothing
+  into the home and stops nothing there, and says so in one line:
+  `the home holds a login made inside Claude Code that rota has not been able
+  to confirm yet; it is used as it is`. A launch joins that login as it is —
+  even for an account marked dead, since Claude Code starting there is what
+  makes it confirmable again — and as soon as the provider can say whose it
+  is, the next launch or listing takes it. Nothing for you to do but launch
+  it; if it never settles, `rota login` gives the account a fresh login. With
+  no usable login in the home, a run goes on a token only when it has a good
+  one — a long-lived token, or an access token that has not expired.
 - **Writing.** Nothing is written when the home already holds the account's
   current login. Otherwise the login goes in when nothing is alive: only the
   login entry is replaced, every other secret Claude Code keeps beside it —
   MCP servers' OAuth tokens among them — stays, and the file is written
-  privately through a rename. On macOS the keychain item is removed first and
-  the file written after; Claude Code moves the login back into the keychain
-  on its next refresh, and rota never writes a keychain item. A file left
-  beside a keychain item is stale and is removed. With Claude Code alive in
-  the home, a launch joins the login that is there and rota says when the
-  account's newer one takes over — when those sessions end, or at once in one
-  where you run `/login`; and when the home holds no usable login at all —
-  windows from before this version, on tokens in their environment — the
-  launch goes on a token too, without Remote Control, until they are closed.
-  A launch never starts a Claude Code that is not signed in.
+  privately through a rename. On macOS the new file is written and synced
+  first, then the keychain item is removed, then the file is renamed into
+  place — a removal that fails changes nothing. Claude Code moves the login
+  back into the keychain on its next refresh, and rota never writes a
+  keychain item. A file left beside a keychain item is stale and is removed.
+  With Claude Code alive in the home, a launch joins the login that is there
+  and rota says when the account's current one takes over — when those
+  sessions end, or at once in one where you run `/login`; and when the home
+  holds no usable login at all — windows from before this version, on tokens
+  in their environment — the launch goes on a token too, without Remote
+  Control, until they are closed. The account's refresh token then lives in
+  rota's store alone, so an expired one is refreshed for that run, as it
+  always was. A launch never starts a Claude Code that is not signed in.
 - **Refreshing.** Usage is read with the token the account has, while Claude
   Code runs or not; a 401 is read as a rotation and the home is read again
   before one more try. Only an expired token needs rota to refresh, and that
-  waits for a quiet home; until then the account keeps its last reading. A
-  refresh the provider refuses as dead is not believed until the home has
-  been read again — a sibling may have refreshed first.
+  waits for a quiet home out of the hold; until then the account keeps its
+  last reading. A refresh the provider refuses as dead is not believed until
+  the home has been read again — a sibling may have refreshed first, and a
+  sibling's login that cannot be confirmed means the account's copy was
+  stale, not the login dead. A store whose lock a run has released — the
+  reading `--with quota` takes after a run — rotates nothing at all.
 - **Changing route.** A launch remembers which route the account's last one
-  in the home took. When it changes — the first launch after this version,
-  say — and the home's daemon is running, that daemon was started on the
-  other route and would go on serving its old credential to every background
-  session, so it is stopped (`claude daemon stop --any`, with nothing
-  authenticating in its environment), and rota says so.
+  in the home took, and decides its own before anything else. When it is
+  another, and the home's daemon is running with nothing beside it but the
+  sessions it hosts, that daemon was started on the other route and would go
+  on serving its old credential to every background session, so it is
+  stopped (`claude daemon stop --any`, with nothing authenticating in its
+  environment), and rota says so. A daemon beside a window somebody has open
+  is left alone: stopping it would not make the home quiet. In a directory
+  you chose, with nothing remembered, the daemon may be anybody's and is
+  never stopped.
 - **Runs without the home.** A hermetic run and `--stateless` take a
   throwaway directory, so they go on a token in the environment: the
   long-lived one when there is one, else the account's own access token. An
-  expired one is refreshed only while nothing runs in the home; otherwise
-  the run is refused and told that a long-lived token is what such runs are
-  for.
+  expired one is refreshed while nothing runs in the home, or while what runs
+  there holds no login of its own; while a Claude Code there holds the
+  account's login, or in the hold, the run is refused and told that a
+  long-lived token is what such runs are for.
 - **Removing.** `rota remove` stops the account's daemon, waits a few
   seconds for the home to go quiet and refuses, naming what is still alive,
   if it does not; then the keychain item goes, and then the directory.
 
 Your own login — your `~/.claude`, and its keychain item — is never read or
 written. An account told that its configuration directory is your own
-`~/.claude` stays on a token in the environment for that reason. Two limits:
-Windows keeps the environment route in every case, and on macOS a home whose
-path is not plain ASCII uses the file alone, because the keychain item's name
-cannot be worked out without Unicode normalisation; rota says so once per
-launch, and rotations Claude Code keeps in the keychain cannot be followed
-there.
+`~/.claude` stays on a token in the environment for that reason. A rota
+started inside a session it launched inherits `CLAUDE_CONFIG_DIR` naming that
+account's home; such a value is an account's home and never yours, so the
+person's own directory is then `~/.claude`. Two limits: Windows keeps the
+environment route in every case, and on macOS a home whose path is not plain
+ASCII cannot keep a login at all, because the keychain item's name cannot be
+worked out without Unicode normalisation and rota could not follow it — such
+an account runs on a token, without Remote Control, and rota says so once per
+launch.
 
 #### Where the conversations live
 
@@ -2229,14 +2270,14 @@ rota set 2 --sessions shared       # back to the default
 | set | a directory | that directory, linked inside the one you chose |
 
 What moves is a fixed set of entries: `projects`, `file-history`, `todos`,
-`session-env`, `tasks`, `paste-cache`, `shell-snapshots` and
-`history.jsonl`. Those are the things a conversation is keyed by or
+`session-env`, `tasks`, `jobs`, `teams`, `paste-cache`, `shell-snapshots`
+and `history.jsonl`. Those are the things a conversation is keyed by or
 derived from — transcripts alone would resume into a session whose edits and
-todos had stayed behind. Everything else in the directory is settings,
-memory, skills and plugins, and goes on being shared whatever this says.
-Claude Code's own `sessions/`, `jobs/` and `teams/` are a different thing
-entirely: the registry of live processes, and what a daemon is running right
-now — never shared in any mode, and never moved with the conversations.
+todos had stayed behind — background sessions and agent teams among them.
+Everything else in the directory is settings, memory, skills and plugins,
+and goes on being shared whatever this says. Claude Code's own `sessions/` is
+a different thing entirely: the registry of live processes and their socket
+keys, never shared in any mode.
 
 The setting can be changed at any time, and the next launch converges on it:
 links are re-pointed, links the new mode does not want are removed, and a
@@ -2315,8 +2356,13 @@ ones destroyed on disk and still listed.
 
 The handover is the awkward one. It replaces rota with the CLI through
 `execve`, and Go opens every file close-on-exec, so the claim would be dropped
-at exactly the moment it starts to matter. The flag is cleared for that one
-file, and the kernel releases it when the CLI finally exits, however it exits.
+at exactly the moment it starts to matter. The flag is cleared for the
+handover alone, immediately before it, and the kernel releases the claim when
+the CLI finally exits, however it exits. Everywhere rota stays the parent — a
+run, an open session, a terminal on the server, `--share` — the claim keeps
+the flag and rota holds it until the run ends, so a child started meanwhile,
+another account's CLI or a shell, never inherits it and never keeps an
+account looking busy.
 
 The same lock holds the background maintenance off. A running server renews
 tokens and reads usage every two minutes, and both of those rotate a refresh
@@ -2541,7 +2587,16 @@ it into the store already there without touching the rest, and
 no Claude Code process is alive in that home, which lib cannot see and
 `rota/store` can. A login somebody made inside the home comes back from
 adoption as a `*NewLogin` for the application to check with the provider and
-`Accept` or `Refuse`; nothing of it is taken before.
+`Accept` or `Refuse`; nothing of it is taken before. A store that is there and
+cannot be read is `ErrUnreadableLogin`, never an empty one. `JoinHome` starts
+the CLI on whatever login a home holds, writing nothing — for a login the
+application must not touch yet. On macOS `Stage` and `Adopt` themselves keep
+to the environment route, because Claude Code keeps the login in a keychain
+item there that neither can read; the stored route on macOS goes through
+`StagePlan` and `AdoptFrom`, with the application handing over the item's
+content and removing the item before it writes, as `rota/store` does. A
+hermetic run of a command staged on the stored route is given the account's
+token on the way, since its throwaway directory holds no login.
 
 Choosing which account to spend is **not** in the library. lib
 authenticates accounts, builds command lines and runs them; it takes no view
@@ -2646,7 +2701,7 @@ type Meter          interface{ Quota(ctx context.Context, accessToken string) (*
 type Catalog        interface{ Models() []Model; Efforts() []string; Defaults() (model, effort string) }
 type AccountCatalog interface{ ModelsFor(a *Account, home string) []Model }   // the plan decides the list
 type Adopter        interface{ Adopt(a *Account, home string) error }         // the CLI rewrote its own file
-type HomeSharer     interface{ StoresLogin(a *Account, home string) bool; HoldsLogin(fsys fs.FS) bool } // many processes, one login
+type HomeSharer     interface{ StoresLogin(a *Account, home string) bool; HoldsLogin(fsys fs.FS) bool; Join(a *Account, home string) *Command } // many processes, one login
 type Delegator      interface{ LoginPlan(a *Account, home string) LoginPlan } // the CLI keeps its own credential
 ```
 
