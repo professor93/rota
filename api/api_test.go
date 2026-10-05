@@ -39,9 +39,9 @@ func TestMain(m *testing.M) {
 	}
 	// No keychain and no Claude Code daemon of anybody's is reached from here.
 	claudecode.StandIn()
-	// And no provider call a test did not stand in for reaches the real one.
-	rota.ClaudeEndpoints.Token, rota.ClaudeEndpoints.Profile, rota.ClaudeEndpoints.Usage =
-		claudecode.Unreachable, claudecode.Unreachable, claudecode.Unreachable
+	// And no provider call a test did not stand in for reaches the real one:
+	// every endpoint of every provider, whatever account a test makes.
+	offline()
 	// A claude run mirrors the Claude Code configuration directory this
 	// process is in. The tests get one of their own, so nothing here depends
 	// on — or reaches into — the directory of whoever runs them.
@@ -67,6 +67,15 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
+}
+
+// offline points every endpoint of every provider at an address nothing
+// answers on, so a made-up token never leaves the machine; a test that wants
+// an answer points the one it asks at a fake of its own.
+func offline() {
+	const u = claudecode.Unreachable
+	rota.ClaudeEndpoints.Authorize, rota.ClaudeEndpoints.Token, rota.ClaudeEndpoints.Profile, rota.ClaudeEndpoints.Usage = u, u, u, u
+	rota.CodexEndpoints.Authorize, rota.CodexEndpoints.Token = u, u
 }
 
 func flagValue(args []string, flag string) string {
