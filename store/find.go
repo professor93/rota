@@ -36,7 +36,7 @@ func (s *Store) Remove(id int) error {
 			if err := h.quiesce(); err != nil {
 				return err
 			}
-			if err := h.forget(); err != nil {
+			if err := h.dropLogin(); err != nil {
 				return err
 			}
 		}

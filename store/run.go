@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	rota "github.com/professor93/rota/lib"
@@ -23,9 +24,12 @@ import (
 //
 // The claim is the same one a run takes, for the same reason: this stages a
 // credential into a home whose CLI may already own it. It is returned rather
-// than released here because the caller is about to replace this process with
-// that CLI, and the claim has to outlive the replacing — a caller that does
-// not go through with the handover calls release instead.
+// than released here because the CLI is about to run on it: a caller that
+// starts the CLI as a child — a terminal, a shared session — holds it until
+// that child ends and then releases it; a caller that replaces this process
+// with the CLI calls KeepClaimsAcrossExec immediately before, so the claim
+// outlives the replacing; and a caller that does not go through with either
+// calls release.
 func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env []string, release func(), err error) {
 	cmd, release, err := s.prepare(ctx, a, true)
 	if err != nil {
@@ -164,6 +168,11 @@ func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.
 // saves the store, and returns the command with the claim still held. A
 // handover and a run are the same launch, differing in who waits for it.
 func (s *Store) prepare(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
+	// One home, one account: a home another account also has holds a
+	// credential this one would read as its own, and write over.
+	if err := s.oneHomeOneAccount(a); err != nil {
+		return nil, nil, err
+	}
 	if rota.SharedHome(a.Provider) {
 		return s.prepareShared(ctx, a, mirror)
 	}
@@ -174,7 +183,7 @@ func (s *Store) prepare(ctx context.Context, a *rota.Account, mirror bool) (*rot
 	// run would be rewriting. Not waited for: the store lock is still held
 	// here, and blocking on it would stop every other command until an agent
 	// finished.
-	release, ok := s.holdForExec(a)
+	release, ok := s.holdRun(a)
 	if !ok {
 		return nil, nil, fmt.Errorf("%w: %s keeps its own credential file, and two runs would spend the same refresh token", rota.ErrBusy, a)
 	}
@@ -216,7 +225,7 @@ func (s *Store) prepare(ctx context.Context, a *rota.Account, mirror bool) (*rot
 // this run takes its own claim. See claude.go for the rest.
 func (s *Store) prepareShared(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
 	h := s.claudeHome(a, s.claimed(a))
-	release, ok := s.holdForExec(a)
+	release, ok := s.holdRun(a)
 	if !ok {
 		return nil, nil, fmt.Errorf("%w: another rota process is changing %s's login right now; try again in a moment", rota.ErrBusy, a)
 	}
@@ -266,6 +275,11 @@ func (s *Store) mirrored(a *rota.Account, cmd *rota.Command, quiet bool) (*rota.
 	case merr != nil:
 		s.say(fmt.Sprintf("could not mirror Claude Code's configuration into %s (%v); "+
 			"running with Claude Code's own directory and daemon", dir, merr))
+		// Claude Code's own directory is the person's — not one a session
+		// rota launched handed down, which is another account's home.
+		if own := os.Getenv("CLAUDE_CONFIG_DIR"); own != "" && s.isAccountHome(own) {
+			cmd.Drop = append(cmd.Drop, "CLAUDE_CONFIG_DIR")
+		}
 	case dir != "" && !pointed:
 		// Appended rather than replacing: Environ drops every inherited
 		// value a command sets, so the child sees this one and only this one.
@@ -280,7 +294,7 @@ func (s *Store) mirrored(a *rota.Account, cmd *rota.Command, quiet bool) (*rota.
 // sends into: beside the accounts, not inside an account's private home,
 // because an open run belongs to rota rather than to the CLI it launched.
 func (s *Store) RunDir() (string, error) {
-	dir := filepath.Join(filepath.Dir(s.backend.HomeRoot()), "runs")
+	dir := filepath.Join(filepath.Dir(s.homeRoot), "runs")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -295,7 +309,7 @@ func (s *Store) RunDir() (string, error) {
 // somebody's working session — file names, error messages, whatever scrolled
 // past — and the directory it sits in is the last place to be relaxed about.
 func (s *Store) TerminalDir() (string, error) {
-	dir := filepath.Join(filepath.Dir(s.backend.HomeRoot()), "terminals")
+	dir := filepath.Join(filepath.Dir(s.homeRoot), "terminals")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
@@ -307,14 +321,40 @@ func (s *Store) TerminalDir() (string, error) {
 // within one.
 const runLock = ".rota-run.lock"
 
-// keepingAcrossExec is keepAcrossExec, as a variable so a test can see that a
-// claim is arranged to survive the handover rather than take the comment's
-// word for it. Testing the call and testing that it is made are two things,
-// and only the second one notices when it stops being made.
+// keepingAcrossExec is keepAcrossExec, as a variable so a test can see that
+// the handover arranges for the claims to survive it rather than take the
+// comment's word for it.
 var keepingAcrossExec = keepAcrossExec
 
+// heldClaims are the claim files this process holds right now, so that the
+// one moment they must outlive it — the handover — can find them.
+var (
+	heldMu     sync.Mutex
+	heldClaims = map[*os.File]bool{}
+)
+
+// KeepClaimsAcrossExec arranges for every claim this process holds to
+// survive the exec it is about to make, and is called by nothing but the
+// handover, immediately before it replaces this process with the vendor CLI.
+//
+// Go opens every file close-on-exec, which is right for every other moment:
+// a child started while a claim is held — another account's CLI, a shell on
+// the server's terminal page — must not inherit the claim and keep the
+// account looking busy long after its run ended. The handover is the one
+// exception, because there the CLI is the run, and the claim has to be held
+// by whatever is running rather than by the process image that took it. The
+// kernel releases it when the CLI finally exits, however it exits.
+func KeepClaimsAcrossExec() {
+	heldMu.Lock()
+	defer heldMu.Unlock()
+	for f := range heldClaims {
+		_ = keepingAcrossExec(f)
+	}
+}
+
 // claimFile claims an account whose CLI owns its credential file: shared or
-// exclusively.
+// exclusively. The claim stays close-on-exec, so no child of this process
+// holds it; KeepClaimsAcrossExec is the handover's own exception.
 //
 // ok is false when someone else holds it in a way that excludes this claim.
 // That is an answer rather than a failure — the caller wants to know whether
@@ -324,15 +364,15 @@ var keepingAcrossExec = keepAcrossExec
 // An account whose credential rota holds is never claimed: its token reaches
 // the CLI in its environment, so two runs share nothing and holding them apart
 // would cost the rotation its whole point.
-func (s *Store) claimFile(a *rota.Account, shared bool) (release func(), ok bool, held *os.File) {
+func (s *Store) claimFile(a *rota.Account, shared bool) (release func(), ok bool) {
 	if !rota.OwnsCredentials(a.Provider) {
-		return func() {}, true, nil
+		return func() {}, true
 	}
 	home := s.Home(a)
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		// Nowhere to put the lock is nowhere to stage a credential either,
 		// so let the caller fail on the real thing rather than on this.
-		return func() {}, true, nil
+		return func() {}, true
 	}
 	try := tryLockFile
 	if shared {
@@ -340,28 +380,31 @@ func (s *Store) claimFile(a *rota.Account, shared bool) (release func(), ok bool
 	}
 	held, got, err := try(filepath.Join(home, runLock))
 	if err != nil || !got {
-		return func() {}, false, nil
+		return func() {}, false
 	}
-	return func() { held.Close() }, true, held
+	heldMu.Lock()
+	heldClaims[held] = true
+	heldMu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			heldMu.Lock()
+			delete(heldClaims, held)
+			heldMu.Unlock()
+			_ = held.Close()
+		})
+	}, true
 }
 
-// holdForExec is the claim a run takes, for the one caller about to replace
-// this process with the vendor CLI as much as for one that waits for it: the
-// claim's close-on-exec flag is cleared so it survives the handover. Every
-// other hold leaves the flag set — a child spawned while a hold is live must
-// not inherit another account's lock and keep it long after this process
-// released its own copy.
+// holdRun is the claim a run takes, held by this process until release —
+// across the handover too, when KeepClaimsAcrossExec is called.
 //
 // It is exclusive for a CLI that keeps its credential file to one process at
 // a time, and shared for one whose home is shared (rota.SharedHome): many
 // windows and runs on one Claude Code account at once are the whole point,
 // and the rotation must never pass such an account over because it is busy.
-func (s *Store) holdForExec(a *rota.Account) (release func(), ok bool) {
-	release, ok, held := s.claimFile(a, rota.SharedHome(a.Provider))
-	if ok && held != nil {
-		_ = keepingAcrossExec(held)
-	}
-	return release, ok
+func (s *Store) holdRun(a *rota.Account) (release func(), ok bool) {
+	return s.claimFile(a, rota.SharedHome(a.Provider))
 }
 
 // holdIdle is the claim that means nothing else is using the account: taken
@@ -371,7 +414,7 @@ func (s *Store) holdForExec(a *rota.Account) (release func(), ok bool) {
 // written into the home ask for, and it is held for as long as this process
 // runs.
 func (s *Store) holdIdle(a *rota.Account) (release func(), ok bool) {
-	release, ok, _ = s.claimFile(a, false)
+	release, ok = s.claimFile(a, false)
 	if ok && rota.SharedHome(a.Provider) && len(claudeLive(s.Home(a))) > 0 {
 		release()
 		return func() {}, false
@@ -395,7 +438,7 @@ func (s *Store) Hold(a *rota.Account) (release func(), ok bool) { return s.holdI
 // it. It is a glance rather than a promise: the answer can be out of date the
 // moment it is given, and Run is what actually decides.
 func (s *Store) Busy(a *rota.Account) bool {
-	release, ok := s.holdForExec(a)
+	release, ok := s.holdRun(a)
 	release()
 	return !ok
 }

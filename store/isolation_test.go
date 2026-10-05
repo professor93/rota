@@ -144,7 +144,7 @@ func TestOneAccountsLiveSessionsDoNotMakeAnotherAlive(t *testing.T) {
 	os.RemoveAll(filepath.Join(s.Home(b), "sessions"))
 	os.Remove(filepath.Join(s.Home(b), "daemon.lock"))
 	alive(t, s.Home(a), "daemon.lock", os.Getpid())
-	release, ok := s.holdForExec(a)
+	release, ok := s.holdRun(a)
 	if !ok {
 		t.Fatal("claim")
 	}
@@ -157,48 +157,87 @@ func TestOneAccountsLiveSessionsDoNotMakeAnotherAlive(t *testing.T) {
 	}
 }
 
-// Removing one account touches neither another's home nor another's
-// keychain item, and seeding or reading one account's home never reads
-// another's store.
+// Launching and removing one account touches nothing of another's: not its
+// home, not its keychain item, not its login, and not its record in the
+// store. Each launch reads its own store and no other, and each removal
+// asks the keychain for its own item alone.
 func TestOneAccountsLoginNeverTouchesAnothers(t *testing.T) {
 	storedRouteHere(t)
 	personWorld(t)
 	k := fakeKeychain(t)
 	s := openTemp(t)
 	a, b := livingClaude(s, "uA"), livingClaude(s, "uB")
-	svcA, svcB := service(t, s.Home(a)), service(t, s.Home(b))
-	newer := storeLogin("A-bait", "R-bait", time.Now().Add(9*time.Hour).UnixMilli(), "1999999999000")
-	k.items[svcB] = newer
-	writeFile(t, filepath.Join(s.Home(b), ".credentials.json"), newer)
-	writeFile(t, filepath.Join(s.Home(b), "CLAUDE.md"), "B's")
+	homeA, homeB := s.Home(a), s.Home(b)
+	svcA, svcB := service(t, homeA), service(t, homeB)
+	writeFile(t, filepath.Join(homeA, "CLAUDE.md"), "A's")
+	writeFile(t, filepath.Join(homeB, "CLAUDE.md"), "B's")
 
+	// Each account's home holds a newer login of its own, as a rotation by
+	// Claude Code would leave it, in the keychain.
+	for _, x := range []*rota.Account{a, b} {
+		if _, err := launchEnv(t, s, x); err != nil {
+			t.Fatal(err)
+		}
+	}
+	k.items[svcA] = storeLogin("A-rotA", "R-rotA", time.Now().Add(9*time.Hour).UnixMilli(), "1999999999000")
+	k.items[svcB] = storeLogin("A-rotB", "R-rotB", time.Now().Add(9*time.Hour).UnixMilli(), "1999999999000")
+	snapshotB := func() (string, string, string) {
+		r, _ := readLogin(t, homeB)
+		item, _ := k.item(svcB)
+		return r + "|" + readFile(filepath.Join(homeB, "CLAUDE.md")), item, b.Token.Refresh + "|" + b.Staged
+	}
+	files, item, record := snapshotB()
+
+	from := len(k.asked())
 	if _, err := launchEnv(t, s, a); err != nil {
 		t.Fatal(err)
 	}
-	if a.Token.Refresh != "R-uA" {
-		t.Fatalf("A read B's store: %+v", a.Token)
+	if a.Token.Refresh != "R-rotA" {
+		t.Fatalf("A took its own rotation and nothing else: %q", a.Token.Refresh)
 	}
-	for _, q := range k.asked() {
-		if strings.HasSuffix(q, svcB) {
-			t.Fatalf("A's launch asked for B's item: %v", k.asked())
+	for _, q := range k.asked()[from:] {
+		if !strings.HasSuffix(q, svcA) {
+			t.Fatalf("A's launch asked for another item: %v", k.asked()[from:])
 		}
 	}
+	if f, i, r := snapshotB(); f != files || i != item || r != record {
+		t.Fatal("A's launch left B exactly as it was")
+	}
+
+	from = len(k.asked())
 	if err := s.Remove(a.ID); err != nil {
 		t.Fatal(err)
 	}
-	for _, q := range k.asked() {
+	for _, q := range k.asked()[from:] {
 		if !strings.HasSuffix(q, svcA) {
-			t.Fatalf("only A's item is ever asked for: %v", k.asked())
+			t.Fatalf("A's removal asked for another item: %v", k.asked()[from:])
 		}
 	}
-	if k.items[svcB] != newer {
-		t.Fatal("B's item is untouched")
+	if f, i, r := snapshotB(); f != files || i != item || r != record || s.Find(b.ID) == nil {
+		t.Fatal("A's removal left B exactly as it was")
 	}
-	if raw, err := os.ReadFile(filepath.Join(s.Home(b), "CLAUDE.md")); err != nil || string(raw) != "B's" {
-		t.Fatal("B's home is untouched")
+	if _, err := os.Stat(homeA); !os.IsNotExist(err) {
+		t.Fatal("A's home is gone")
 	}
-	if r, _ := readLogin(t, s.Home(b)); r != "R-bait" {
-		t.Fatal("B's login is untouched")
+
+	// And the other way round.
+	from = len(k.asked())
+	if _, err := launchEnv(t, s, b); err != nil {
+		t.Fatal(err)
+	}
+	if b.Token.Refresh != "R-rotB" {
+		t.Fatalf("B took its own rotation: %q", b.Token.Refresh)
+	}
+	if err := s.Remove(b.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range k.asked()[from:] {
+		if !strings.HasSuffix(q, svcB) {
+			t.Fatalf("B asked for another item: %v", k.asked()[from:])
+		}
+	}
+	if _, ok := k.item(svcB); ok {
+		t.Fatal("B's item went with B")
 	}
 }
 

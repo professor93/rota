@@ -29,6 +29,17 @@ func homeWith(login string) fstest.MapFS {
 	return fstest.MapFS{claudeCredentials: &fstest.MapFile{Data: []byte(`{"claudeAiOauth":` + login + `}`)}}
 }
 
+// onDisk is a platform on which Stage itself keeps a login in a home: any
+// but Windows, which keeps the environment route, and macOS, where only
+// StagePlan and AdoptFrom do, because the login lives in the keychain there.
+// The test sees that platform whichever it runs on.
+func onDisk(t *testing.T) {
+	t.Helper()
+	oldStored, oldDisk := storedLoginPlatform, diskLoginPlatform
+	storedLoginPlatform, diskLoginPlatform = true, true
+	t.Cleanup(func() { storedLoginPlatform, diskLoginPlatform = oldStored, oldDisk })
+}
+
 func envNames(env []string) []string {
 	var out []string
 	for _, e := range env {
@@ -42,9 +53,7 @@ func envNames(env []string) []string {
 // pointed at the home, and nothing that authenticates reaches it through the
 // environment — not rota's token, and not one the person's shell exported.
 func TestAClaudeAccountWithAHomeRunsOnALoginOfItsOwn(t *testing.T) {
-	if !storedLoginPlatform {
-		t.Skip("this platform keeps the environment route")
-	}
+	onDisk(t)
 	home := t.TempDir()
 	a := livingClaude()
 	a.Staged = stagedNone
@@ -225,11 +234,23 @@ func TestAdoptionReadsWhatTheHomeHolds(t *testing.T) {
 	blank := `{"accessToken":"","refreshToken":"","expiresAt":0}`
 
 	t.Run("nothing there", func(t *testing.T) {
-		for _, fsys := range []fstest.MapFS{{}, {claudeCredentials: {Data: []byte("{nope")}}, {claudeCredentials: {Data: []byte(`{"mcpOAuth":{}}`)}}} {
+		for _, fsys := range []fstest.MapFS{{}, {claudeCredentials: {Data: []byte(`{"mcpOAuth":{}}`)}},
+			{claudeCredentials: {Data: []byte(`{"claudeAiOauth":null}`)}}} {
 			a := livingClaude()
 			a.Staged = fingerprint("R1")
 			if err := AdoptFrom(a, fsys); err != nil || a.Staged != stagedNone || a.Token.Refresh != "R1" {
 				t.Fatalf("an empty home is recorded so the next staging writes: %+v %v", a, err)
+			}
+		}
+	})
+	t.Run("there and unreadable", func(t *testing.T) {
+		for _, body := range []string{"", "{nope", `{"claudeAiOauth":{"refreshToken":"R9"`, "[1]", `{"claudeAiOauth":"x"}`} {
+			a := livingClaude()
+			a.Staged = fingerprint("R1")
+			before := *a
+			err := AdoptFrom(a, fstest.MapFS{claudeCredentials: {Data: []byte(body)}})
+			if !errors.Is(err, ErrUnreadableLogin) || a.Staged != before.Staged || a.Token.Refresh != before.Token.Refresh || a.Token.Access != before.Token.Access || a.Dead {
+				t.Fatalf("%q is not an empty store; nothing changes: %+v %v", body, a, err)
 			}
 		}
 	})
@@ -272,6 +293,28 @@ func TestAdoptionReadsWhatTheHomeHolds(t *testing.T) {
 		a.Staged = fingerprint("R1")
 		if err := AdoptFrom(a, homeWith(login("R0", earlier, same))); err != nil || a.Token.Refresh != "R1" {
 			t.Fatalf("a login that expires before the account's is not newer: %+v %v", a, err)
+		}
+		if a.Staged != stagedNone {
+			t.Fatalf("and the home is behind, so the next staging writes the current one: %q", a.Staged)
+		}
+		if _, files, _ := (claudeProvider{}).Plan(context.Background(), a, "/h"); storedLoginPlatform && len(files) != 1 {
+			t.Fatalf("a write is planned: %+v", files)
+		}
+	})
+	t.Run("what rota wrote before a refresh of its own", func(t *testing.T) {
+		a := livingClaude()
+		a.Staged = fingerprint("R0")
+		if err := AdoptFrom(a, homeWith(login("R0", later, same))); err != nil || a.Token.Refresh != "R1" || a.Staged != stagedNone {
+			t.Fatalf("behind, not a rotation: %+v %v", a, err)
+		}
+	})
+	t.Run("a rotation when neither side knows when the login ends", func(t *testing.T) {
+		a := livingClaude()
+		delete(a.Extra, claudeRefreshUntil)
+		a.Staged = fingerprint("R1")
+		body := `{"accessToken":"A-R2","refreshToken":"R2","expiresAt":` + strconv.FormatInt(later, 10) + `}`
+		if err := AdoptFrom(a, homeWith(body)); err != nil || a.Token.Refresh != "R2" || a.Staged != fingerprint("R2") {
+			t.Fatalf("absent on both sides is the same login rotated: %+v %v", a, err)
 		}
 	})
 	t.Run("an older login after a fresh rota login", func(t *testing.T) {
@@ -377,9 +420,7 @@ func TestWritingTheLoginKeepsEverythingElseInTheStore(t *testing.T) {
 
 // Launch keeps what the store in the home holds beside the login.
 func TestStagingIntoAHomeKeepsItsOtherSecrets(t *testing.T) {
-	if !storedLoginPlatform {
-		t.Skip("this platform keeps the environment route")
-	}
+	onDisk(t)
 	home := t.TempDir()
 	if err := os.WriteFile(filepath.Join(home, claudeCredentials), []byte(`{"mcpOAuth":{"k":"v"}}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -399,9 +440,7 @@ func TestStagingIntoAHomeKeepsItsOtherSecrets(t *testing.T) {
 // not written over by the SDK's own staging: it comes back to the caller,
 // who has to find out whose it is first.
 func TestStagingHandsBackALoginSomebodyMadeInTheHome(t *testing.T) {
-	if !storedLoginPlatform {
-		t.Skip("this platform keeps the environment route")
-	}
+	onDisk(t)
 	home := t.TempDir()
 	foreign := `{"claudeAiOauth":{"accessToken":"X","refreshToken":"RX","refreshTokenExpiresAt":1777777777000,"expiresAt":` +
 		strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10) + `}}`
@@ -512,5 +551,79 @@ func TestAFreshLoginForgetsWhenTheLastOneEnded(t *testing.T) {
 	a.Apply(tok)
 	if _, ok := a.Extra[claudeRefreshUntil]; ok || a.Extra[claudeSubscription] != "max" {
 		t.Fatalf("the old expiry is forgotten, the plan kept: %v", a.Extra)
+	}
+}
+
+// On macOS Stage itself never keeps a login in a home, and Adopt reads none
+// back: the login lives in a keychain item there, which neither can see. An
+// application reaches the stored route there through StagePlan and
+// AdoptFrom, handing over the item's content itself.
+func TestOnMacOSOnlyThePlanKeepsALoginInAHome(t *testing.T) {
+	oldStored, oldDisk := storedLoginPlatform, diskLoginPlatform
+	storedLoginPlatform, diskLoginPlatform = true, false
+	t.Cleanup(func() { storedLoginPlatform, diskLoginPlatform = oldStored, oldDisk })
+	home := t.TempDir()
+	a := livingClaude()
+	a.Staged = stagedNone
+	cmd, err := Stage(a, home)
+	if err != nil || cmd.Env[0] != "CLAUDE_CODE_OAUTH_TOKEN=A1" {
+		t.Fatalf("the environment route: %+v %v", cmd, err)
+	}
+	if entries, _ := os.ReadDir(home); len(entries) != 0 {
+		t.Fatalf("nothing written: %v", entries)
+	}
+	os.WriteFile(filepath.Join(home, claudeCredentials), []byte(`{"claudeAiOauth":{"refreshToken":"R9","expiresAt":1}}`), 0o600)
+	if err := Adopt(a, home); err != nil || a.Token.Refresh != "R1" || a.Staged != stagedNone {
+		t.Fatalf("Adopt reads nothing: %+v %v", a, err)
+	}
+	if _, files, err := StagePlan(context.Background(), a, home); err != nil || len(files) != 1 || !StoresLogin(a, home) {
+		t.Fatalf("the plan still keeps the login in the home: %+v %v", files, err)
+	}
+}
+
+// A hermetic run takes an empty directory instead of the home, so a command
+// staged on the stored route — no token, the login in the home — is given
+// the account's token on the way, or Claude Code would start signed in as
+// nobody. The long-lived token when it is worth using.
+func TestAHermeticRunOfAStoredRouteCommandCarriesAToken(t *testing.T) {
+	a := livingClaude()
+	stored := identify(a, claudeStoredCommand("/home/a"))
+	got := hermeticCommand(withToken(a, stored), "/tmp/h")
+	if !slices.Contains(got.Env, "CLAUDE_CODE_OAUTH_TOKEN=A1") || !slices.Equal(configDirsIn(got.Env), []string{"/tmp/h"}) {
+		t.Fatalf("a token and the throwaway directory: %v", got.Env)
+	}
+	a.Long = &LongToken{Access: "LONG", ExpiresAt: time.Now().Add(300 * 24 * time.Hour).UnixMilli()}
+	if got := withToken(a, stored); !slices.Contains(got.Env, "CLAUDE_CODE_OAUTH_TOKEN=LONG") {
+		t.Fatalf("the long one: %v", got.Env)
+	}
+	given := &Command{Bin: "/x/claude", Env: []string{"CLAUDE_CODE_OAUTH_TOKEN=mine"}}
+	if got := withToken(a, given); got != given {
+		t.Fatal("a command that carries a token is left as it is")
+	}
+	if got := withToken(&Account{Provider: "codex"}, stored); got != stored {
+		t.Fatal("only claude")
+	}
+}
+
+// Joining a home is the stored route's command whatever the account's state
+// is, with nothing written — and nothing on a platform that keeps the
+// environment route.
+func TestJoiningAHomeWritesNothingAndHandsOverNothing(t *testing.T) {
+	home := t.TempDir()
+	a := livingClaude()
+	a.Dead = true
+	cmd := JoinHome(a, home)
+	if storedLoginPlatform && (cmd == nil || !slices.Equal(configDirsIn(cmd.Env), []string{home}) ||
+		slices.ContainsFunc(cmd.Env, func(e string) bool { return strings.HasPrefix(e, "CLAUDE_CODE_OAUTH_TOKEN=") })) {
+		t.Fatalf("pointed at the home, no token: %+v", cmd)
+	}
+	if entries, _ := os.ReadDir(home); len(entries) != 0 {
+		t.Fatalf("nothing written: %v", entries)
+	}
+	old := storedLoginPlatform
+	storedLoginPlatform = false
+	defer func() { storedLoginPlatform = old }()
+	if JoinHome(a, home) != nil || JoinHome(&Account{Provider: "codex"}, home) != nil {
+		t.Fatal("nothing to join on Windows, or for a provider whose home is not shared")
 	}
 }

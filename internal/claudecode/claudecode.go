@@ -38,6 +38,12 @@ var Security = runSecurity
 // ctx. A variable so tests stand in for Claude Code.
 var StopDaemon = runDaemonStop
 
+// Unreachable is an address no request reaches: what a test binary points
+// the provider's endpoints at until a test installs a fake, so a call nobody
+// stood in for fails here instead of reaching the real service with a test's
+// made-up token.
+const Unreachable = "http://127.0.0.1:1/unreachable"
+
 // StandIn replaces both runners with ones that touch nothing: the keychain
 // holds no item, and stopping a daemon fails. Every TestMain that can reach
 // a claude launch calls it, and a test that wants more installs its own.

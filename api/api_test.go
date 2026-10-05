@@ -38,9 +38,21 @@ func TestMain(m *testing.M) {
 	}
 	// No keychain and no Claude Code daemon of anybody's is reached from here.
 	claudecode.StandIn()
+	// And no provider call a test did not stand in for reaches the real one.
+	rota.ClaudeEndpoints.Token, rota.ClaudeEndpoints.Profile, rota.ClaudeEndpoints.Usage =
+		claudecode.Unreachable, claudecode.Unreachable, claudecode.Unreachable
 	// A claude run mirrors the Claude Code configuration directory this
 	// process is in. The tests get one of their own, so nothing here depends
 	// on — or reaches into — the directory of whoever runs them.
+	// Nor does anything here reach the person's own home: ~/.claude is what
+	// rota falls back to when CLAUDE_CONFIG_DIR names an account's home, and
+	// a test that fell back would read a stranger's files.
+	person, err := os.MkdirTemp("", "rota-person")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("HOME", person)
+	os.Setenv("USERPROFILE", person)
 	dir, err := os.MkdirTemp("", "rota-claude")
 	if err != nil {
 		panic(err)
@@ -1161,5 +1173,28 @@ func TestLoginIsOneEndpointUnderTwoNames(t *testing.T) {
 		if resp.StatusCode != 200 || fin.Status != "added" {
 			t.Fatalf("%s finishes it: %d %s", base, resp.StatusCode, raw)
 		}
+	}
+}
+
+// A claude account's config_dir does not change under a running Claude Code:
+// its processes share the login in the present home.
+func TestAConfigDirDoesNotChangeUnderARunningClaudeCode(t *testing.T) {
+	h := newHarness(t, Options{})
+	home := filepath.Join(h.dir, "homes", "claude-1")
+	if err := os.MkdirAll(filepath.Join(home, "sessions"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	rec := []byte(fmt.Sprintf(`{"pid":%d,"kind":"interactive"}`, os.Getpid()))
+	if err := os.WriteFile(filepath.Join(home, "sessions", "1.json"), rec, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(h.root, "config")
+	resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": config})
+	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "running") {
+		t.Fatalf("%d %s", resp.StatusCode, raw)
+	}
+	os.Remove(filepath.Join(home, "sessions", "1.json"))
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": config}); resp.StatusCode != 200 {
+		t.Fatalf("once it has stopped: %d %s", resp.StatusCode, raw)
 	}
 }

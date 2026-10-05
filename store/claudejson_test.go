@@ -151,6 +151,8 @@ func TestTurningRemoteControlOffPutsTheCopyAsideAndOnBringsItBack(t *testing.T) 
 func TestRemoteControlWaitsForTheHomeToBeQuiet(t *testing.T) {
 	src := personWorld(t)
 	s, a := claudeStore(t)
+	// A login Claude Code can keep, which Remote Control needs.
+	a.Token.Refresh, a.Token.ExpiresAt = "r", time.Now().Add(time.Hour).UnixMilli()
 	var said []string
 	s.Warn = func(m string) { said = append(said, m) }
 	if _, err := s.command(a, true); err != nil {
@@ -159,7 +161,7 @@ func TestRemoteControlWaitsForTheHomeToBeQuiet(t *testing.T) {
 	dst := s.ownHome(a)
 	alive(t, dst, "sessions/1.json", os.Getpid())
 	a.RemoteControl = true
-	if got := s.RemoteControlWaits(a); !strings.Contains(got, "takes effect when") {
+	if got := s.RemoteControlNow(a); got == nil || !strings.Contains(got.Error(), "takes effect when") {
 		t.Fatalf("rota set says it at once: %q", got)
 	}
 	if _, err := s.command(a, true); err != nil {
@@ -170,7 +172,7 @@ func TestRemoteControlWaitsForTheHomeToBeQuiet(t *testing.T) {
 		t.Fatalf("and the launch says it: %q", said)
 	}
 	os.Remove(filepath.Join(dst, "sessions", "1.json"))
-	if s.RemoteControlWaits(a) != "" {
+	if s.RemoteControlNow(a) != nil {
 		t.Fatal("nothing to wait for in a quiet home")
 	}
 	if _, err := s.command(a, true); err != nil {

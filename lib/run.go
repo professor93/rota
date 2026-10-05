@@ -1529,7 +1529,7 @@ func launch(ctx context.Context, a *Account, home string, cmd *Command, spec *Sp
 			os.RemoveAll(hd)
 			release()
 		}
-		runCmd = hermeticCommand(cmd, hd)
+		runCmd = hermeticCommand(withToken(a, cmd), hd)
 	}
 	child.Env = Environ(runCmd.BaseEnv, runCmd)
 	// Already resolved by the check: where the symlinks led is what was
@@ -1623,6 +1623,29 @@ func finishRun(l *launched, scanErr error) (*Result, error) {
 // behind — a daemonised server still holding its stdout — would otherwise
 // keep the run open for as long as it lives.
 const waitDelay = 5 * time.Second
+
+// withToken makes sure a claude command run away from its home carries a
+// credential. A command staged on the stored route has none — its login is
+// in the home it points at — and a hermetic run replaces that home with an
+// empty directory, which would leave Claude Code signed in as nobody. Such a
+// command is given the environment route's token instead: the long-lived one
+// when it is worth using, the access token otherwise. Everything else about
+// the command, the executable included, stays as the caller gave it.
+func withToken(a *Account, cmd *Command) *Command {
+	if Flavor(a.Provider) != "claude" {
+		return cmd
+	}
+	for _, e := range cmd.Env {
+		if strings.HasPrefix(e, "CLAUDE_CODE_OAUTH_TOKEN=") {
+			return cmd
+		}
+	}
+	env := claudeEnvCommand(a)
+	out := *cmd
+	out.Env = append(append([]string(nil), env.Env[0]), cmd.Env...)
+	out.Drop = append(append([]string(nil), cmd.Drop...), env.Drop...)
+	return &out
+}
 
 // hermeticCommand is cmd pointed at a throwaway config directory. An
 // account with a directory of its own already names one, and Environ

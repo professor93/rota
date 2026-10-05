@@ -337,8 +337,13 @@ func (claudeProvider) Quota(ctx context.Context, access string) (*Quota, error) 
 // Claude Code process is alive in that home, which this package cannot see;
 // an application that runs several processes per home plans instead
 // (StagePlan) and writes when it knows. rota's store does exactly that.
+//
+// On macOS Launch always takes the environment route: Claude Code keeps the
+// login in a keychain item there, which this package cannot read, so it
+// could not follow a rotation and would later present a spent refresh token.
+// The stored route on macOS goes through StagePlan and AdoptFrom.
 func (p claudeProvider) Launch(a *Account, home string) (*Command, error) {
-	if !claudeStored(a, home) {
+	if !claudeStored(a, home) || !diskLoginPlatform {
 		return claudeEnvCommand(a), nil
 	}
 	if err := p.AdoptFS(a, os.DirFS(home)); err != nil {

@@ -101,7 +101,7 @@ func (s *Store) mirrorClaude(a *rota.Account, quiet bool) (string, error) {
 		}
 		return a.ConfigDir, nil
 	}
-	src, srcJSON := claudeConfigSource()
+	src, srcJSON := s.personalSource()
 	dst := s.ownHome(a)
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		return dst, err
@@ -410,23 +410,4 @@ func sharedWithClaude(name string) bool {
 		return false
 	}
 	return true
-}
-
-// claudeConfigSource is the Claude Code configuration this process would
-// itself have used, and the .claude.json that belongs with it: inside the
-// directory when CLAUDE_CONFIG_DIR names one, beside the home directory
-// when it does not, which is where Claude Code looks for it.
-//
-// Reading the environment is this package's business and not the SDK's. What
-// is worth mirroring is the world the person running rota is actually in —
-// including one an outer CLAUDE_CONFIG_DIR has already moved.
-func claudeConfigSource() (dir, json string) {
-	if own := os.Getenv("CLAUDE_CONFIG_DIR"); own != "" {
-		return own, filepath.Join(own, ".claude.json")
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", ""
-	}
-	return filepath.Join(home, ".claude"), filepath.Join(home, ".claude.json")
 }

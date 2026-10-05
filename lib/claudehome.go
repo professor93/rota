@@ -83,6 +83,17 @@ var claudeCompeting = []string{
 // machine can see what Windows does.
 var storedLoginPlatform = runtime.GOOS != "windows"
 
+// diskLoginPlatform is whether this package's own on-disk conveniences —
+// Stage and Launch writing a login into a home, Adopt reading one back —
+// may take the stored route. macOS may not: Claude Code moves the login
+// into a keychain item there, which a file read cannot see, and an
+// application that adopted from the file and then refreshed would present a
+// refresh token Claude Code had already spent. On macOS the stored route is
+// reached through StagePlan and AdoptFrom, where the application hands over
+// the keychain item's content and removes the item before it writes — as
+// rota's store does.
+var diskLoginPlatform = runtime.GOOS != "darwin"
+
 // claudeStored reports whether this launch takes the stored route: there is
 // a home to keep the login in, the login is one Claude Code can keep — a
 // refresh token and an expiry, which is what makes it a login rather than a
@@ -161,9 +172,20 @@ func (claudeProvider) Plan(_ context.Context, a *Account, home string) (*Command
 	return cmd, []StagedFile{{Path: claudeCredentials, Mode: 0o600, Content: raw}}, nil
 }
 
-// StoresLogin reports whether staging this account into home takes the
-// stored route.
+// StoresLogin reports whether planning this account into home takes the
+// stored route (StagePlan; Stage too, except on macOS).
 func (claudeProvider) StoresLogin(a *Account, home string) bool { return claudeStored(a, home) }
+
+// Join is the stored route's command whatever state the account is in:
+// Claude Code pointed at the home, on whatever login is there, with nothing
+// written and nothing of the account's handed over. nil where this platform
+// keeps the environment route.
+func (claudeProvider) Join(_ *Account, home string) *Command {
+	if !storedLoginPlatform || home == "" {
+		return nil
+	}
+	return claudeStoredCommand(home)
+}
 
 // HoldsLogin reports whether a home's credential store holds a login Claude
 // Code can use: a refresh token and an expiry. Without either Claude Code
@@ -174,8 +196,14 @@ func (claudeProvider) HoldsLogin(fsys fs.FS) bool {
 	return ok && l.usable()
 }
 
-// Adopt reads back what Claude Code left in a home on this disk.
+// Adopt reads back what Claude Code left in a home on this disk. On macOS it
+// reads nothing, because Stage never stores a login there (see
+// diskLoginPlatform): an application that keeps one there itself reads it
+// with AdoptFrom, keychain item included.
 func (c claudeProvider) Adopt(a *Account, home string) error {
+	if !diskLoginPlatform {
+		return nil
+	}
 	return c.AdoptFS(a, os.DirFS(home))
 }
 
@@ -186,8 +214,12 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //
 // What it finds decides what the account believes about the home, recorded
 // in Staged:
-//   - nothing, or nothing readable: the home holds no login, and the next
-//     staging writes one;
+//   - no store, or a store with no login in it: the home holds no login, and
+//     the next staging writes one;
+//   - a store that is there and cannot be read — an empty or half-written
+//     file, a read that failed: nothing changes, and ErrUnreadableLogin says
+//     so. Claude Code may be in the middle of writing it, and a store taken
+//     for empty is one written over;
 //   - the login Claude Code blanks after the provider refused it: if it was
 //     the account's current login, the login is dead, and only a fresh one
 //     — `rota login`, or `/login` inside a window — brings it back; if it
@@ -196,7 +228,10 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //   - another refresh token of the same login: a rotation by Claude Code,
 //     taken when it is newer than what the account has. A refresh carries
 //     the login's refreshTokenExpiresAt through unchanged, so that is how a
-//     rotation is told apart, with no network call;
+//     rotation is told apart, with no network call. One that is not newer —
+//     it expires before the account's token, or it is what this package
+//     wrote before a refresh of its own — is behind: the home does not hold
+//     the account's current login, and the next staging writes it;
 //   - a new login — another refreshTokenExpiresAt, or any living login in
 //     the home of a dead account — which somebody made by running /login
 //     inside that home. Nothing of it is taken here, because the home says
@@ -204,7 +239,10 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //     for the application to check (NewLogin.Identify) and then Accept or
 //     Refuse.
 func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
-	l, ok := readClaudeLogin(fsys)
+	l, ok, err := loadClaudeLogin(fsys)
+	if err != nil {
+		return failf(ErrUnreadableLogin, "%s: the credential store in its home cannot be read: %v", a, err)
+	}
 	current := fingerprint(a.Token.Refresh)
 	switch {
 	case !ok:
@@ -248,6 +286,10 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 		return &NewLogin{Access: l.AccessToken, login: l}
 	}
 	if !a.cliRotated(l.RefreshToken) || int64(l.ExpiresAt) < a.Token.ExpiresAt {
+		// Behind: what is there is not the account's current login, and a
+		// Claude Code started on it would present a token the account has
+		// moved past. Recorded, so the next staging puts the current one in.
+		a.Staged = stagedNone
 		return nil
 	}
 	l.adopt(a)
@@ -375,13 +417,31 @@ func (l *claudeLogin) keep(a *Account) {
 // readClaudeLogin reads the login out of a home's credential store. ok is
 // false when there is no store, no login in it, or nothing readable.
 func readClaudeLogin(fsys fs.FS) (claudeLogin, bool) {
+	l, ok, err := loadClaudeLogin(fsys)
+	return l, ok && err == nil
+}
+
+// loadClaudeLogin tells the three answers apart: a login (ok), no login —
+// no store, or a store without one — and a store that is there and is not
+// one whole JSON object, which is err.
+func loadClaudeLogin(fsys fs.FS) (claudeLogin, bool, error) {
+	raw, err := fs.ReadFile(fsys, claudeCredentials)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return claudeLogin{}, false, nil
+	case err != nil:
+		return claudeLogin{}, false, err
+	}
 	var doc struct {
 		Login *claudeLogin `json:"claudeAiOauth"`
 	}
-	if !readJSONFS(fsys, claudeCredentials, &doc) || doc.Login == nil {
-		return claudeLogin{}, false
+	if err := decodeLenient(raw, &doc); err != nil {
+		return claudeLogin{}, false, err
 	}
-	return *doc.Login, true
+	if doc.Login == nil {
+		return claudeLogin{}, false, nil
+	}
+	return *doc.Login, true, nil
 }
 
 // claudeCredentialDoc is the credential store holding the account's login

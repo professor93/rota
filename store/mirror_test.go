@@ -534,8 +534,12 @@ func TestWhatTheAccountMadeForItselfIsNotReported(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, name := range []string{"cache.db", "daemon.lock", "daemon.log", ".credentials.json"} {
-		if err := os.WriteFile(filepath.Join(dst, name), []byte(name), 0o600); err != nil {
+	// What Claude Code would have left there: a cache, a daemon that has
+	// stopped, its log, and a credential store.
+	for name, body := range map[string]string{
+		"cache.db": "cache", "daemon.lock": `{"pid":2147483000}`, "daemon.log": "log", ".credentials.json": "{}",
+	} {
+		if err := os.WriteFile(filepath.Join(dst, name), []byte(body), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

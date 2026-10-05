@@ -89,19 +89,31 @@ func remoteControlWaits(a *rota.Account) string {
 		"the account's running sessions end", a)
 }
 
-// RemoteControlWaits says why an account's Remote Control setting is not in
-// effect and cannot be made so right now — Claude Code is running in its
-// home — or "" when it is in effect or the next launch puts it so.
-func (s *Store) RemoteControlWaits(a *rota.Account) string {
-	if rota.Flavor(a.Provider) != "claude" || a.ConfigDir != "" {
-		return "" // an account's own directory is its own world already
+// RemoteControlNow says whether an account's remote control setting can
+// work by its next launch. It is nil when it can, or when the setting is off
+// and already in effect. Otherwise it says why, as one of two verdicts:
+// rota.ErrUnsupported when the account does not run on a login of its own in
+// its home — Claude Code refuses Remote Control for a token in its
+// environment — and rota.ErrBusy when the setting is waiting for the
+// account's running sessions to end before its configuration file can
+// change.
+func (s *Store) RemoteControlNow(a *rota.Account) error {
+	if rota.Flavor(a.Provider) != "claude" {
+		return nil
+	}
+	if a.RemoteControl && !s.keepsLogin(a) {
+		return fmt.Errorf("%w: Remote Control needs %s's own stored login, and it does not run on one: %s",
+			rota.ErrUnsupported, a, s.whyNoLogin(a))
+	}
+	if a.ConfigDir != "" {
+		return nil // an account's own directory is its own world already
 	}
 	fi, err := os.Lstat(filepath.Join(s.ownHome(a), claudeConfigFile))
 	inEffect := err == nil && fi.Mode().IsRegular() && a.Extra[ownConfigKey] != ""
 	if inEffect == a.RemoteControl || !s.InUse(a) {
-		return ""
+		return nil
 	}
-	return remoteControlWaits(a)
+	return fmt.Errorf("%w: %s", rota.ErrBusy, remoteControlWaits(a))
 }
 
 // turnOwnConfigOn puts the account's own .claude.json in place: the one put

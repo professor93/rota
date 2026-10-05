@@ -52,6 +52,11 @@ type Store struct {
 	backend  Backend
 	unlock   func()
 	released bool
+	// homeRoot is the backend's HomeRoot made absolute once, when the store
+	// is opened. Every account's home is built from it, and a home's path is
+	// what Claude Code is pointed at and what its keychain item is named
+	// for: neither may depend on the directory rota happened to start in.
+	homeRoot string
 }
 
 func nowMS() int64 { return time.Now().UnixMilli() }
@@ -74,7 +79,10 @@ func NewStore(b Backend) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{backend: b, unlock: unlock}
+	s := &Store{backend: b, unlock: unlock, homeRoot: b.HomeRoot()}
+	if abs, err := filepath.Abs(s.homeRoot); err == nil {
+		s.homeRoot = abs
+	}
 	raw, err := b.Load()
 	if err != nil {
 		s.Close()
@@ -113,7 +121,7 @@ func (s *Store) Home(a *rota.Account) string {
 
 // ownHome is the directory rota reserves for an account under HomeRoot.
 func (s *Store) ownHome(a *rota.Account) string {
-	return filepath.Join(s.backend.HomeRoot(), a.Provider+"-"+strconv.Itoa(a.ID))
+	return filepath.Join(s.homeRoot, a.Provider+"-"+strconv.Itoa(a.ID))
 }
 
 // owns reports whether an account's home is rota's own to create and delete,
@@ -152,12 +160,23 @@ func (s *Store) CheckHome(a *rota.Account, roots ...string) error {
 			return err
 		}
 	}
+	// One home, one account, whatever the provider: two accounts told the
+	// same directory would each read the other's credential there as a
+	// rotation of their own, and take it.
+	if a.ConfigDir != "" {
+		dir := realDir(a.ConfigDir)
+		for _, o := range s.Accounts {
+			if o.ID != a.ID && realDir(s.Home(o)) == dir {
+				return rota.Invalid("config_dir %q is already %s's home, and a home holds one account's credential", a.ConfigDir, o)
+			}
+		}
+	}
 	return nil
 }
 
 func (s *Store) checkDir(a *rota.Account, what, path string, ownAllowed bool, roots []string) error {
 	dir := realDir(path)
-	homes := realDir(s.backend.HomeRoot())
+	homes := realDir(s.homeRoot)
 	own := ownAllowed && dir == realDir(s.ownHome(a))
 	if (within(homes, dir) && !own) || within(dir, filepath.Dir(homes)) {
 		return rota.Invalid("%s %q: that directory is rota's own", what, path)

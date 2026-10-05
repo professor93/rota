@@ -984,6 +984,12 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A claude account's login lives in its home: a new one means taking it
+	// out of the old one first, and not while anything runs there.
+	if err := st.MoveHome(a, want.ConfigDir); err != nil {
+		s.report(w, r, err)
+		return
+	}
 	a.Cwd, a.ConfigDir, a.Sessions, a.RemoteControl = want.Cwd, want.ConfigDir, want.Sessions, want.RemoteControl
 	if body.Threshold != nil {
 		a.Threshold = *body.Threshold
@@ -999,8 +1005,8 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.log.Info("rotation changed", "account", a.ID, "order", a.Order, "threshold", rotation.Cutoff(a))
-	if why := st.RemoteControlWaits(a); why != "" {
-		s.log.Warn(why)
+	if err := st.RemoteControlNow(a); err != nil {
+		s.log.Warn(err.Error())
 	}
 	view := wire.Describe(a)
 	view.Threshold = rotation.Cutoff(a)

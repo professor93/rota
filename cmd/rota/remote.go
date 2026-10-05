@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -70,14 +71,10 @@ func (c *cli) remoteControl(s *store.Store, a *rota.Account, ask remoteAsk) ([]s
 		fmt.Fprintf(c.err, "rota: remote control is on for %s from now on; `rota set %d --remote-control off` turns it off\n",
 			a, a.ID)
 	}
-	if !rota.StoresLogin(a, s.Home(a)) {
-		return nil, fmt.Errorf("%w: Remote Control needs the account's own stored login, and %s does not run on one "+
-			"(a dead login, a login without a refresh token, or Windows); Claude Code refuses it for a token in its environment",
-			rota.ErrUnsupported, a)
-	}
-	if why := s.RemoteControlWaits(a); why != "" {
-		return nil, fmt.Errorf("%w: %s; until then Remote Control would act as the wrong account, so this session is not started",
-			rota.ErrBusy, why)
+	if err := s.RemoteControlNow(a); errors.Is(err, rota.ErrBusy) {
+		return nil, fmt.Errorf("%w; until then Remote Control would act as the wrong account, so this session is not started", err)
+	} else if err != nil {
+		return nil, err
 	}
 	// Last, so nothing in the arguments before it can be read as its name.
 	if ask.name != "" {

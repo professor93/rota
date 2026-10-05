@@ -143,7 +143,7 @@ func identityName(id *rota.Identity) string {
 // scratch state, so they live beside the private homes rather than inside
 // the backend's own blob.
 func (s *Store) pendingPath() string {
-	return filepath.Join(s.backend.HomeRoot(), "pending.json")
+	return filepath.Join(s.homeRoot, "pending.json")
 }
 
 // loadPendings reads the parked logins, dropping any past their TTL. A

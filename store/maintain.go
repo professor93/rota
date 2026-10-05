@@ -28,6 +28,11 @@ import (
 // it is the right way round: a token half-rotated by two writers is not
 // recoverable, while a wait of a second is.
 func (s *Store) Maintain(ctx context.Context) []error {
+	// Without the lock nothing may rotate, so all that is left is reading:
+	// see Refresh.
+	if s.released {
+		return s.Refresh(ctx, false)
+	}
 	var errs []error
 	changed := false
 	for _, a := range s.Accounts {
@@ -83,18 +88,27 @@ func (s *Store) Maintain(ctx context.Context) []error {
 // maintainShared is Maintain for a claude account. Its home is read first,
 // whatever state the account is in — a dead one may have been signed in
 // again inside Claude Code, which is how rota learns of it. A login kept in
-// the home is refreshed only while nothing is alive there, and goes back
-// into the home at once; one rota alone holds is refreshed as it always was.
+// the home is refreshed only while nothing is alive there and the home is
+// not in the hold, and goes back into the home at once; one rota alone holds
+// is refreshed as it always was.
 func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, error) {
+	if !s.loginInHome(a) {
+		if a.Dead {
+			return false, nil
+		}
+		did, err := rota.Refresh(ctx, a)
+		return did, wrapAccount(a, err)
+	}
 	before := snapshot(a)
-	if err := s.claudeHome(a, true).adopt(ctx); err != nil {
+	h := s.claudeHome(a, s.claimed(a))
+	if err := h.adopt(ctx); err != nil {
 		return false, err
 	}
 	changed := before.differs(a)
-	if a.Dead {
+	if a.Dead || h.hold != "" {
 		return changed, nil
 	}
-	if !s.keepsLogin(a) {
+	if !rota.StoresLogin(a, h.home) {
 		did, err := rota.Refresh(ctx, a)
 		return changed || did, wrapAccount(a, err)
 	}
@@ -103,7 +117,8 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 		return changed, nil
 	}
 	defer release()
-	did, err := s.claudeHome(a, false).renew(ctx)
+	h.others = false
+	did, err := h.renew(ctx)
 	return changed || did, wrapAccount(a, err)
 }
 

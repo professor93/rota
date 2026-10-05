@@ -190,3 +190,61 @@ func TestLoggingInAgainWhileItRunsSaysWhatTheSessionsKeep(t *testing.T) {
 		t.Fatalf("%d %q %q", code, out, errOut)
 	}
 }
+
+// A claude account's home cannot change under a running Claude Code, and
+// when it does change its login goes with it: the old home keeps no copy of
+// the refresh token for anybody to present.
+func TestSettingAClaudeAccountsConfigMovesItsLogin(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps the environment route, and no login in a home")
+	}
+	rotaHome, home := seedLiving(t, "")
+	handover(t)
+	if _, errOut, code := call(t, "run", "1"); code != 0 {
+		t.Fatalf("%d %q", code, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".credentials.json")); err != nil {
+		t.Fatal("the home holds the login")
+	}
+	next := t.TempDir()
+	liveIn(t, home)
+	if _, errOut, code := call(t, "set", "1", "--config", next); code == 0 || !strings.Contains(errOut, "running") {
+		t.Fatalf("refused while it runs: %d %q", code, errOut)
+	}
+	if storedAccount(t, rotaHome)["config_dir"] != nil {
+		t.Fatal("nothing saved")
+	}
+	os.Remove(filepath.Join(home, "sessions", "1.json"))
+	if _, errOut, code := call(t, "set", "1", "--config", next); code != 0 {
+		t.Fatalf("%d %q", code, errOut)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".credentials.json")); !os.IsNotExist(err) {
+		t.Fatal("the old home's login is taken out")
+	}
+	if got := storedAccount(t, rotaHome); got["staged"] != "-" {
+		t.Fatalf("and the account forgets it: %v", got["staged"])
+	}
+}
+
+// A stateless run with --with quota reads usage after the run, on a store
+// whose lock the run released: nothing may rotate there. With a long token
+// and an expired access token the provider is asked for no refresh, and the
+// refresh token on disk stays the one it was.
+func TestAStatelessRunWithQuotaRotatesNothing(t *testing.T) {
+	seedLong(t, time.Now().Add(200*24*time.Hour), `,"token":{"accessToken":"SHORT","refreshToken":"r","expiresAt":1}`)
+	hits := claudeTokenEndpoint(t)
+	bin := t.TempDir()
+	fakecli.Install(t, bin, "claude", fakecli.Lines(`[{"type":"result","result":"OK","session_id":"s"}]`))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, errOut, code := call(t, "run", "1", "--stateless", "--with", "quota", "two plus two")
+	if code != 0 {
+		t.Fatalf("%d %q %q", code, out, errOut)
+	}
+	if *hits != 0 {
+		t.Fatalf("the token endpoint was asked %d times", *hits)
+	}
+	raw, _ := os.ReadFile(filepath.Join(os.Getenv("ROTA_HOME"), "accounts.json"))
+	if !strings.Contains(string(raw), `"refreshToken": "r"`) {
+		t.Fatalf("the refresh token is the one it was: %s", raw)
+	}
+}

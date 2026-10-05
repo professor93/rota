@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -195,14 +194,11 @@ func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, 
 	if err != nil {
 		return nil, err
 	}
-	// A dead lineage is refused, unless the account holds a long-lived token:
-	// that one is a credential of its own and the run works, so a request
-	// naming this account gets its run and the log gets the rest of the
-	// truth. The rotation never offers a dead account, so this can only be
-	// one the caller asked for by id.
-	if a.Dead && !a.LongValid() {
-		return nil, refuse(http.StatusConflict, "account "+strconv.Itoa(a.ID)+" needs re-auth")
-	}
+	// A dead lineage is the store's to refuse (409, with the reason), and not
+	// refused here first: a long-lived token is a credential of its own, and
+	// a claude account's home may hold a login somebody made inside Claude
+	// Code that revives it — both runs the store lets through. The rotation
+	// never offers a dead account, so this can only be one asked for by id.
 	// A server session is hermetic by default: no settings sources unless
 	// the request names them. The server's policy, not the SDK's — nil means
 	// "leave the CLI alone", which is right for a person at a terminal. Only

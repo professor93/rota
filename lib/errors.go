@@ -53,6 +53,12 @@ var (
 	// check needs and the two ways to settle it.
 	ErrNewLogin = errors.New("home holds a new login")
 
+	// ErrUnreadableLogin: an account's home has a credential store that is
+	// there and cannot be read — empty, half-written, or a read that failed.
+	// Nothing was changed. It is not the same as no store: the CLI may be in
+	// the middle of writing it, and taking it for empty would write over it.
+	ErrUnreadableLogin = errors.New("home's credential store cannot be read")
+
 	// ErrClosed: the session's stdin is shut, so nothing more can be sent
 	// into it. A run that has ended, or one the caller closed itself.
 	ErrClosed = errors.New("session is closed")

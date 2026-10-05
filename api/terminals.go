@@ -222,9 +222,7 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest) (*
 	if err != nil {
 		return nil, err
 	}
-	if a.Dead && !a.LongValid() {
-		return nil, refuse(http.StatusConflict, "account "+strconv.Itoa(a.ID)+" needs re-auth")
-	}
+	// A dead lineage is the store's to refuse, for the reasons run.go gives.
 	path, env, release, err := st.Prepare(r.Context(), a)
 	if err != nil {
 		return nil, err

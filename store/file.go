@@ -52,6 +52,11 @@ func NewFileBackend(dir string) (*FileBackend, error) {
 			return nil, err
 		}
 	}
+	// Absolute once, here: a relative ROTA_HOME would otherwise name a
+	// different store, and different homes, from every directory.
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
@@ -100,7 +105,14 @@ func (f *FileBackend) HomeRoot() string { return filepath.Join(f.Dir, "homes") }
 
 // writeAtomic lands a file at 0600 via a private temp file and a rename, so
 // a crash mid-write can never leave a truncated store behind.
-func writeAtomic(path string, data []byte) error {
+func writeAtomic(path string, data []byte) error { return writeAtomicThen(path, data, nil) }
+
+// writeAtomicThen is writeAtomic with one step between the new file being
+// whole on disk and its rename into place. When that step fails the
+// temporary file goes and nothing else has changed — which is the point of
+// putting a step there: something that must happen only once the new file
+// certainly exists, and must not happen if it cannot.
+func writeAtomicThen(path string, data []byte, beforeRename func() error) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -113,7 +125,10 @@ func writeAtomic(path string, data []byte) error {
 	_, werr := f.Write(data)
 	serr := f.Sync()
 	cerr := f.Close()
-	if err = errors.Join(werr, serr, cerr); err == nil {
+	if err = errors.Join(werr, serr, cerr); err == nil && beforeRename != nil {
+		err = beforeRename()
+	}
+	if err == nil {
 		err = os.Rename(tmp, path)
 	}
 	if err != nil {

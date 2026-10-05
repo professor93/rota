@@ -1050,7 +1050,9 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 	fmt.Fprintf(c.err, "rota: %s via %s\n", a, bin)
 	// execve keeps the process id, so the entry above goes on describing
 	// what is running and is cleaned up by the liveness check rather than
-	// by anything rota runs afterwards -- there is no afterwards.
+	// by anything rota runs afterwards -- there is no afterwards. The claim
+	// on the account goes with it: the CLI is the run now.
+	store.KeepClaimsAcrossExec()
 	err = execProcess(path, append([]string{bin}, args...), env)
 	release() // only reached when the handover did not happen
 	var ee *exec.ExitError
@@ -1468,6 +1470,12 @@ func (c *cli) set(args []string) error {
 			return err
 		}
 	}
+	// A claude account's login lives in its home, so a new home means
+	// taking it out of the old one first — and not while anything runs
+	// there. A refusal is returned before the store is saved.
+	if err := s.MoveHome(a, want.ConfigDir); err != nil {
+		return err
+	}
 	a.Cwd, a.ConfigDir, a.Sessions, a.RemoteControl = want.Cwd, want.ConfigDir, want.Sessions, want.RemoteControl
 	if given["threshold"] {
 		a.Threshold = *threshold
@@ -1488,8 +1496,8 @@ func (c *cli) set(args []string) error {
 	}
 	// Said at once rather than at the next launch: the person who just
 	// changed it is the one who wants to know it has not taken effect.
-	if why := s.RemoteControlWaits(a); why != "" {
-		fmt.Fprintf(c.err, "warning: %s\n", why)
+	if err := s.RemoteControlNow(a); err != nil {
+		fmt.Fprintf(c.err, "warning: %v\n", err)
 	}
 	if given["order"] && !c.json {
 		// A move changes the neighbours too, so the answer is the queue, not
@@ -1644,7 +1652,9 @@ the next one.
 --cwd is where its runs start when a request names no directory. --config is
 the account's own CLI configuration — its memory files, skills and settings —
 and the private home its credentials are staged in, which is why it must not
-be the project directory itself.
+be the project directory itself, nor another account's home. Changing it for
+a claude account takes the account's login out of the home it leaves, and is
+refused while Claude Code runs there.
 
 --long forget throws away the account's long-lived token, so the runs that
 used it — those without the account's home, and a dead login's — go back to

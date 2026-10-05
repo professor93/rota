@@ -348,6 +348,33 @@ type HomeSharer interface {
 	// fsys, holds a login the CLI can use — something a new process started
 	// there could sign in with.
 	HoldsLogin(fsys fs.FS) bool
+	// Join is how to start the CLI in home on whatever login is already
+	// there, writing nothing and handing over nothing of the account's — for
+	// a login the caller must not touch, one somebody made inside the CLI
+	// that has not been confirmed yet, say. nil where this platform does not
+	// keep logins in homes.
+	Join(a *Account, home string) *Command
+}
+
+// JoinHome is the command that starts an account's CLI on the login its home
+// already holds, whatever state the account itself is in, or nil when the
+// provider's home is not shared or this platform keeps no login in one. It
+// stages nothing and checks nothing: the account's own credential is not
+// involved.
+func JoinHome(a *Account, home string) *Command {
+	p, err := Lookup(a.Provider)
+	if err != nil {
+		return nil
+	}
+	hs, ok := p.(HomeSharer)
+	if !ok {
+		return nil
+	}
+	cmd := hs.Join(a, home)
+	if cmd == nil {
+		return nil
+	}
+	return identify(a, cmd)
 }
 
 // SharedHome reports whether a provider's homes are shared between many of

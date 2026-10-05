@@ -25,7 +25,15 @@ import (
 // a dead account in again inside it. Its usage is then read with the access
 // token it has, while Claude Code runs or not — reading usage spends
 // nothing. Only an expired token needs a refresh, and that waits for the
-// home to be quiet; until then the account keeps its last reading.
+// home to be quiet and out of the hold; until then the account keeps its
+// last reading.
+//
+// A store whose lock was released — a run has started since it was opened —
+// rotates nothing at all: no refresh, no claim, nothing written into a home.
+// It reads homes into memory and reads usage with tokens that have not
+// expired, and keeps the readings in memory, because a refresh token it
+// rotated there could never be saved, and the one it replaced would already
+// be spent.
 func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Account) []error {
 	if len(accounts) == 0 {
 		accounts = s.Accounts
@@ -39,6 +47,13 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		renewed []*claudeHome
 		held    []func()
 	)
+	// The claims taken for a refresh are let go when this returns, however
+	// it returns: a worker that panics must not leave an account claimed.
+	defer func() {
+		for _, release := range held {
+			release()
+		}
+	}()
 	report := func(changed bool, err error) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -61,15 +76,26 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 			report(false, fmt.Errorf("%s: panic while refreshing: %v", a, v))
 		}
 	}
+	reading := func(a *rota.Account, q *rota.Quota, err error) {
+		if err != nil {
+			report(true, fmt.Errorf("%s: quota: %w", a, err))
+			return
+		}
+		a.Quota, a.QuotaAt = q, rota.NowMS()
+		report(true, nil)
+	}
 	for _, a := range accounts {
 		shared := rota.SharedHome(a.Provider)
-		if shared {
+		var h *claudeHome
+		if shared && s.loginInHome(a) {
+			h = s.claudeHome(a, s.claimed(a))
+			h.warn = collect
 			before := snapshot(a)
-			if err := s.claudeHome(a, true).adopt(ctx); err != nil {
-				errs = append(errs, err)
+			if err := h.adopt(ctx); err != nil {
+				report(false, err)
 				continue
 			}
-			dirty = dirty || before.differs(a)
+			report(before.differs(a), nil)
 		}
 		if a.Dead || !rota.Metered(a.Provider) {
 			continue
@@ -78,24 +104,24 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		if !stale {
 			continue
 		}
-		if shared && s.keepsLogin(a) {
-			if !a.Expired() {
-				h := s.claudeHome(a, true)
-				h.warn = collect
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
-					defer guard(a)
+		switch {
+		case !a.Expired():
+			// A reading spends nothing, so it is taken whatever runs.
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer guard(a)
+				if h != nil {
 					q, err := h.usage(ctx)
-					if err != nil {
-						report(true, fmt.Errorf("%s: quota: %w", a, err))
-						return
-					}
-					a.Quota, a.QuotaAt = q, rota.NowMS()
-					report(true, nil)
-				}()
-				continue
-			}
+					reading(a, q, err)
+					return
+				}
+				q, err := rota.Usage(ctx, a)
+				reading(a, q, err)
+			}()
+		case s.released, h != nil && h.hold != "":
+			// Nothing may rotate here; the account keeps its last reading.
+		case h != nil:
 			// Expired: a refresh, which only a quiet home may have. The claim
 			// is kept until the new login is in the home.
 			release, idle := s.holdIdle(a)
@@ -103,77 +129,61 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 				continue
 			}
 			held = append(held, release)
-			h := s.claudeHome(a, false)
-			h.warn = collect
+			h.others = false
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer guard(a)
+				revived, err := h.refresh(ctx)
+				if err != nil {
+					report(a.Dead, err)
+					return
+				}
+				if !revived {
+					mu.Lock()
+					renewed = append(renewed, h)
+					mu.Unlock()
+				}
+				if a.Expired() {
+					report(true, nil) // revived into the hold: nothing to read with
+					return
+				}
+				q, err := rota.Usage(ctx, a)
+				reading(a, q, err)
+			}()
+		default:
+			// A running account is left alone: refreshing rotates the token
+			// its CLI is still holding, and a reading is not worth that. A
+			// claude account whose token rota alone holds — Windows, the
+			// person's own directory — has nothing in its home to protect, as
+			// ever.
+			release, idle := func() {}, true
+			if !shared {
+				release, idle = s.holdIdle(a)
+			}
+			if !idle {
+				continue
+			}
+			held = append(held, release)
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
 				defer guard(a)
 				changed, err := rota.Refresh(ctx, a)
-				if err != nil && a.Dead {
-					// Not believed until the home is read again: a sibling may
-					// have refreshed first.
-					if aerr := h.adopt(ctx); aerr == nil && !a.Dead {
-						changed, err = true, nil
-					}
-				}
 				if err != nil {
 					report(changed, err)
 					return
 				}
-				mu.Lock()
-				renewed = append(renewed, h)
-				mu.Unlock()
 				q, err := rota.Usage(ctx, a)
-				if err != nil {
-					report(true, fmt.Errorf("%s: quota: %w", a, err))
-					return
-				}
-				a.Quota, a.QuotaAt = q, rota.NowMS()
-				report(true, nil)
+				reading(a, q, err)
 			}()
-			continue
 		}
-		// A running account is left alone: refreshing rotates the token its
-		// CLI is still holding, and a reading is not worth that. A claude
-		// account whose token rota alone holds — Windows, a dead login run on
-		// a long token — has nothing in its home to protect, as ever.
-		release, idle := func() {}, true
-		if !shared {
-			release, idle = s.holdIdle(a)
-		}
-		if !idle {
-			continue
-		}
-		wg.Add(1)
-		go func(a *rota.Account) {
-			defer wg.Done()
-			defer release()
-			defer guard(a)
-			changed, err := rota.Refresh(ctx, a)
-			if err != nil {
-				report(changed, err)
-				return
-			}
-			q, err := rota.Usage(ctx, a)
-			if err != nil {
-				report(changed, fmt.Errorf("%s: quota: %w", a, err))
-				return
-			}
-			a.Quota, a.QuotaAt = q, rota.NowMS()
-			report(true, nil)
-		}(a)
 	}
 	wg.Wait()
-	defer func() {
-		for _, release := range held {
-			release()
-		}
-	}()
 	for _, msg := range said {
 		s.say(msg)
 	}
-	if !dirty {
+	if !dirty || s.released {
 		return errs
 	}
 	if err := s.Save(); err != nil {
