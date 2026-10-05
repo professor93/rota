@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	pids "github.com/professor93/rota/internal/proc"
 )
 
 // Instance is a vendor CLI or an editor running right now.
@@ -68,7 +70,7 @@ func IDEInstances(home string) []Instance {
 			PID              int      `json:"pid"`
 			IDEName          string   `json:"ideName"`
 		}
-		if jsonv2.Unmarshal(blob, &lock) != nil || !alive(lock.PID) {
+		if jsonv2.Unmarshal(blob, &lock) != nil || !pids.Alive(lock.PID) {
 			continue
 		}
 		in := Instance{Kind: lock.IDEName, PID: lock.PID}
@@ -160,7 +162,7 @@ func (r *Registry) Running() []Instance {
 	_ = r.change(func(list []Instance) []Instance {
 		live = make([]Instance, 0, len(list))
 		for _, in := range list {
-			if alive(in.PID) {
+			if pids.Alive(in.PID) {
 				live = append(live, in)
 			}
 		}

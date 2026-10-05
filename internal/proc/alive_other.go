@@ -1,6 +1,6 @@
 //go:build !unix
 
-package sessions
+package proc
 
 import (
 	"errors"
@@ -8,14 +8,14 @@ import (
 	"syscall"
 )
 
-// alive reports whether a process id still names a running process.
+// Alive reports whether a process id still names a running process.
 //
 // Signal 0 — the unix probe — is not a question Windows answers: sending it
 // through os.Process.Signal returns "not supported", which would read every
 // live run as dead and prune the whole registry. os.FindProcess is the probe
 // here instead: on Windows it opens the process, so an id that no longer
 // names one is an error rather than a handle.
-func alive(pid int) bool {
+func Alive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
