@@ -80,18 +80,10 @@ func (s *Store) mirrorClaude(a *rota.Account, quiet bool) (string, error) {
 		// An account told where its configuration lives was given a world of
 		// its own deliberately, and lib already points the CLI at it: a
 		// mirror would be a second CLAUDE_CONFIG_DIR and a second answer.
-		// What is still arranged there is a conversation directory the
-		// account was told to keep its transcripts in, and — with Remote
-		// Control on — who the account is, when that directory does not say.
-		if err := s.placeConversations(a, a.ConfigDir); err != nil {
-			return a.ConfigDir, err
-		}
-		if a.RemoteControl && quiet && !s.personalClaude(a) {
-			if err := claimIdentity(a, filepath.Join(a.ConfigDir, claudeConfigFile)); err != nil {
-				return a.ConfigDir, err
-			}
-		}
-		return a.ConfigDir, nil
+		// The one thing still arranged there is a conversation directory the
+		// account was told to keep its transcripts in, which is a choice
+		// about this account rather than about the world it reads.
+		return a.ConfigDir, s.placeConversations(a, a.ConfigDir)
 	}
 	src, srcJSON := s.personalSource()
 	dst := s.ownHome(a)

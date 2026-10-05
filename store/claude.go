@@ -53,10 +53,11 @@ import (
 // anywhere; it comes back only by a fresh login — `rota login`, or /login
 // inside one of its windows, which rota confirms and takes.
 //
-// In a directory the person chose, which may be their own, rota never takes
-// or replaces a login it cannot show is the account's: a login there it did
-// not write is confirmed with the provider first, and one that belongs to
-// somebody else is left exactly where it is.
+// Only the homes rota makes for its accounts hold a login of rota's. An
+// account told a configuration directory of the person's choosing runs on a
+// token in its environment, as every claude account did before: in that
+// directory rota reads no credential store and writes none, stops no daemon
+// and removes nothing.
 
 // Names inside a Claude Code configuration directory that rota reads to
 // tell whether anything is alive there, and the credential store it writes.
@@ -119,10 +120,6 @@ type claudeHome struct {
 	// rota wrote there and has refreshed away since: certainly spent, its
 	// successor in the account's hands.
 	spent bool
-	// foreign names the account a directory the person chose is signed in
-	// as instead, when the provider has said so; "" otherwise. That login is
-	// left exactly where it is.
-	foreign string
 }
 
 func (s *Store) claudeHome(a *rota.Account, others bool) *claudeHome {
@@ -294,31 +291,16 @@ func (s *Store) InUse(a *rota.Account) bool {
 
 /* ---------------------------------------------------- whose login, where --- */
 
-// personalClaude reports whether an account's home is the person's own
-// Claude Code directory: the directory the environment says is theirs (see
-// personalWorld), or ~/.claude — compared by file identity, so a second
-// spelling is the same directory. The login there is the person's own, and
-// rota never reads or writes it: such an account keeps the environment
-// route.
-func (s *Store) personalClaude(a *rota.Account) bool {
-	if a.ConfigDir == "" {
-		return false // rota's own home for it, which is never the person's
-	}
-	if dir, _ := s.personalDir(); sameDir(dir, a.ConfigDir) {
-		return true
-	}
-	return sameDir(defaultClaudeDir(), a.ConfigDir)
-}
-
 // loginInHome reports whether this account's login is one rota keeps in its
-// home at all, whatever state the login is in: the platform keeps logins in
-// homes (not Windows), the home is not the person's own, and on macOS its
-// path names a keychain item rota can find. An account for which it is
-// false runs on a token in its environment, as every claude account did
+// home at all, whatever state the login is in: the home is one rota made for
+// the account — never a directory the person chose, the person's own among
+// them — the platform keeps logins in homes (not Windows), and on macOS the
+// home's path names a keychain item rota can find. An account for which it
+// is false runs on a token in its environment, as every claude account did
 // before.
 func (s *Store) loginInHome(a *rota.Account) bool {
 	home := s.Home(a)
-	if rota.JoinHome(a, home) == nil || s.personalClaude(a) {
+	if !s.owns(a) || rota.JoinHome(a, home) == nil {
 		return false
 	}
 	if keychainKept {
@@ -341,10 +323,10 @@ func (s *Store) keepsLogin(a *rota.Account) bool {
 func (s *Store) whyNoLogin(a *rota.Account) string {
 	home := s.Home(a)
 	switch {
+	case !s.owns(a):
+		return "it runs on a token because its configuration directory is one you chose"
 	case rota.JoinHome(a, home) == nil:
 		return "this platform keeps Claude Code on a token in its environment"
-	case s.personalClaude(a):
-		return "its configuration directory is your own, whose login rota never touches"
 	case keychainKept && !nameable(home):
 		return "its home " + home + " is not a plain ASCII path, so the keychain item Claude Code would keep its login in cannot be found"
 	case a.Dead:
@@ -438,14 +420,8 @@ func (h *claudeHome) read() (fsys storeFS, ok bool) {
 // whose it is (confirm). A store that cannot be read is the hold while
 // anything runs there, and is read once more after a pause in a quiet home
 // before it is taken for empty.
-//
-// In a directory the person chose, any usable login there that is not the
-// account's current one nor the one rota recorded writing goes to the
-// provider first, whatever Staged says: that directory may be the person's
-// own, and their login must never be taken for a rotation of the account's,
-// or written over as an older one.
 func (h *claudeHome) adopt(ctx context.Context) error {
-	h.hold, h.usable, h.spent, h.foreign = "", false, false, ""
+	h.hold, h.usable, h.spent = "", false, false
 	if err := h.s.oneHomeOneAccount(h.a); err != nil {
 		return err
 	}
@@ -453,13 +429,7 @@ func (h *claudeHome) adopt(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
-	kind, nl := rota.ClaudeHomeLogin(h.a, fsys)
-	h.spent = kind == rota.HomeLoginWritten
-	if kind == rota.HomeLoginOther && !h.s.owns(h.a) {
-		h.usable = true
-		h.confirm(ctx, nl, true)
-		return nil
-	}
+	h.spent = rota.ClaudeHomeSpent(h.a, fsys)
 	err := rota.AdoptFrom(h.a, fsys)
 	if errors.Is(err, rota.ErrUnreadableLogin) {
 		if !h.quiet() {
@@ -475,9 +445,10 @@ func (h *claudeHome) adopt(ctx context.Context) error {
 			err = nil
 		}
 	}
+	var nl *rota.NewLogin
 	if errors.As(err, &nl) {
 		err = nil
-		h.confirm(ctx, nl, false)
+		h.confirm(ctx, nl)
 	}
 	if err != nil {
 		return err
@@ -489,26 +460,16 @@ func (h *claudeHome) adopt(ctx context.Context) error {
 // confirm settles a login found in the home that is not the account's own,
 // by asking the provider whose it is with that login's own access token. The
 // account's is taken — a dead account is alive again. Somebody else's is not
-// taken: in a home rota made it is said so and replaced when nothing runs
-// there; in a directory the person chose (chosen) it is left exactly where it
-// is. When the provider cannot be asked, for whatever reason, a lapsed
-// access token included, the home is in the hold.
-func (h *claudeHome) confirm(ctx context.Context, nl *rota.NewLogin, chosen bool) {
+// taken: it is said so, and replaced when nothing runs there. When the
+// provider cannot be asked, for whatever reason, a lapsed access token
+// included, the home is in the hold.
+func (h *claudeHome) confirm(ctx context.Context, nl *rota.NewLogin) {
 	id, err := nl.Identify(ctx)
 	switch {
 	case err != nil:
 		h.hold = fmt.Sprintf("Claude Code in its home holds a login made there that rota has not been able to confirm yet (%v)", err)
 	case rota.MatchIdentity([]*rota.Account{h.a}, h.a.Provider, id) != nil:
 		nl.Accept(h.a)
-	case chosen:
-		h.a.StagedSuperseded()
-		h.foreign = id.Email
-		if h.foreign == "" {
-			h.foreign = id.UUID
-		}
-		if h.foreign == "" {
-			h.foreign = "another account"
-		}
 	default:
 		h.warn(nl.Refuse(h.a, id).Error())
 	}
@@ -583,17 +544,13 @@ func (h *claudeHome) remember(route string) {
 }
 
 // lastRoute is the route the account's last launch in this home took. With
-// nothing remembered, a home rota made was last launched by a rota that knew
-// only the environment; a directory the person chose may have been anybody's,
-// and its route is unknown ("").
+// nothing remembered, the home was last launched by a rota that knew only
+// the environment.
 func (h *claudeHome) lastRoute() string {
 	if r := h.a.Extra[routeKey]; r != "" {
 		return r
 	}
-	if h.s.owns(h.a) {
-		return routeEnv
-	}
-	return ""
+	return routeEnv
 }
 
 // retireFor stops the home's daemon when this launch takes another route
@@ -610,7 +567,7 @@ func (h *claudeHome) lastRoute() string {
 // would not make the home quiet, only take its background work away.
 func (h *claudeHome) retireFor(route string) {
 	last := h.lastRoute()
-	if last == "" || last == route {
+	if last == route {
 		return
 	}
 	if what, alive := daemonAlive(h.home); alive && !h.daemonAlone() {
@@ -681,8 +638,7 @@ func (h *claudeHome) renew(ctx context.Context) (bool, error) {
 // home, when it may.
 func (h *claudeHome) writeRefreshed(ctx context.Context) error {
 	if fsys, ok := h.read(); ok {
-		kind, _ := rota.ClaudeHomeLogin(h.a, fsys)
-		h.spent = kind == rota.HomeLoginWritten
+		h.spent = rota.ClaudeHomeSpent(h.a, fsys)
 	}
 	if !h.mayWrite() {
 		return nil
@@ -695,14 +651,14 @@ func (h *claudeHome) writeRefreshed(ctx context.Context) error {
 }
 
 // mayWrite reports whether rota may write the account's login into the home
-// now: never in the hold or over another account's login in a directory the
-// person chose; when nothing is alive there; and, the one exception to that,
-// when the home still holds the very login rota itself refreshed away. That
-// login is certainly spent — the provider issued its successor, which the
-// account holds — so every window still on it is signed out at its next
-// refresh anyway, and leaving it there only makes sure of that.
+// now: never in the hold; when nothing is alive there; and, the one
+// exception to that, when the home still holds the very login rota itself
+// refreshed away. That login is certainly spent — the provider issued its
+// successor, which the account holds — so every window still on it is
+// signed out at its next refresh anyway, and leaving it there only makes
+// sure of that.
 func (h *claudeHome) mayWrite() bool {
-	if h.hold != "" || h.foreign != "" {
+	if h.hold != "" {
 		return false
 	}
 	return h.quiet() || h.spent
@@ -762,7 +718,7 @@ func nonEmpty(s, otherwise string) string {
 // it was. Claude Code moves the login back into the keychain itself on its
 // next refresh.
 func (h *claudeHome) seed(files []rota.StagedFile) error {
-	if h.hold != "" || h.foreign != "" {
+	if h.hold != "" {
 		return nil
 	}
 	for _, f := range files {
@@ -800,7 +756,7 @@ func (h *claudeHome) seed(files []rota.StagedFile) error {
 // before. Only when nothing is alive, and never in the hold.
 func (h *claudeHome) tidy() {
 	svc, ok := h.service()
-	if !ok || h.hold != "" || h.foreign != "" {
+	if !ok || h.hold != "" {
 		return
 	}
 	path := filepath.Join(h.home, claudeCredentials)
@@ -823,16 +779,13 @@ func (h *claudeHome) tidy() {
 func (h *claudeHome) launch(ctx context.Context, mirror bool) (*rota.Command, error) {
 	a := h.a
 	if !h.s.loginInHome(a) {
-		if keychainKept && rota.JoinHome(a, h.home) != nil && !h.s.personalClaude(a) && !nameable(h.home) {
+		if keychainKept && h.s.owns(a) && rota.JoinHome(a, h.home) != nil && !nameable(h.home) {
 			h.warn(fmt.Sprintf("%s: %s; it runs on a token in its environment, without Remote Control", a, h.s.whyNoLogin(a)))
 		}
 		if err := h.s.mayLaunch(a); err != nil {
 			return nil, err
 		}
-		if !mirror {
-			return tokenRun(ctx, a)
-		}
-		return h.launchOnToken(ctx)
+		return h.launchUnkept(ctx, mirror)
 	}
 	if err := h.adopt(ctx); err != nil {
 		return nil, err
@@ -845,8 +798,6 @@ func (h *claudeHome) launch(ctx context.Context, mirror bool) (*rota.Command, er
 		}
 	}
 	switch {
-	case h.foreign != "":
-		return h.launchAside(ctx, mirror)
 	case !mirror:
 		return h.envRun(ctx)
 	case h.hold != "":
@@ -899,26 +850,6 @@ func (h *claudeHome) launchHeld() (*rota.Command, error) {
 		return nil, err
 	}
 	return h.s.mirrored(a, cmd, h.quiet())
-}
-
-// launchAside launches an account whose chosen directory is signed in as
-// somebody else: that login is left exactly where it is, and the run goes on
-// the account's own token in its environment.
-func (h *claudeHome) launchAside(ctx context.Context, mirror bool) (*rota.Command, error) {
-	a := h.a
-	h.warn(fmt.Sprintf("%s: its configuration directory %s holds another account's login (%s), which rota leaves alone; "+
-		"it runs on a token in its environment", a, h.home, h.foreign))
-	if err := h.tokenNow(ctx); err != nil {
-		return nil, err
-	}
-	cmd, err := rota.Stage(a, "")
-	if err != nil || !mirror {
-		return cmd, err
-	}
-	h.remember(routeEnv)
-	// Not quiet, so nothing about the directory's own .claude.json changes:
-	// it is somebody else's world as much as the login is.
-	return h.s.mirrored(a, cmd, false)
 }
 
 // launchStored launches an account whose login lives in its home.
@@ -1040,8 +971,37 @@ func (h *claudeHome) tokenNow(ctx context.Context) error {
 // holds, refreshed as it always was, with the home's daemon retired if it
 // was started on the account's stored login.
 func (h *claudeHome) launchOnToken(ctx context.Context) (*rota.Command, error) {
-	a := h.a
 	h.retireFor(routeEnv)
+	cmd, err := h.onToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	h.remember(routeEnv)
+	return h.s.mirrored(h.a, cmd, h.quiet())
+}
+
+// launchUnkept launches an account whose login rota keeps in no home — a
+// directory the person chose, Windows, a home whose path names no keychain
+// item — on a token in its environment, refreshed as it always was. Nothing
+// of rota's login was ever in that home, so nothing there changes for it:
+// no daemon is stopped and no route remembered, and in a directory the
+// person chose not even what runs there is asked.
+func (h *claudeHome) launchUnkept(ctx context.Context, mirror bool) (*rota.Command, error) {
+	if !mirror {
+		return tokenRun(ctx, h.a)
+	}
+	cmd, err := h.onToken(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return h.s.mirrored(h.a, cmd, h.s.owns(h.a) && h.quiet())
+}
+
+// onToken is the environment route's command for the account, its token
+// refreshed first when the launch is going to use it — never a dead one's —
+// and the store saved after any change.
+func (h *claudeHome) onToken(ctx context.Context) (*rota.Command, error) {
+	a := h.a
 	changed, err := refreshForLaunch(ctx, a)
 	if changed {
 		if serr := h.s.Save(); serr != nil {
@@ -1051,12 +1011,7 @@ func (h *claudeHome) launchOnToken(ctx context.Context) (*rota.Command, error) {
 	if err != nil {
 		return nil, err
 	}
-	cmd, err := rota.Stage(a, "")
-	if err != nil {
-		return nil, err
-	}
-	h.remember(routeEnv)
-	return h.s.mirrored(a, cmd, h.quiet())
+	return rota.Stage(a, "")
 }
 
 // envRun readies a run that takes no home — a hermetic one — on the
@@ -1083,7 +1038,7 @@ func (h *claudeHome) envRun(ctx context.Context) (*rota.Command, error) {
 			return nil, fmt.Errorf("%w: %s: %s, and its access token has expired; a long-lived token (`rota login --long`) "+
 				"is what runs without the account's home are for", rota.ErrBusy, a, nonEmpty(h.hold, "it was not refreshed"))
 		}
-	case h.usable && h.foreign == "":
+	case h.usable:
 		return nil, fmt.Errorf("%w: %s's login is held by the Claude Code running in its home (%s), and its access token "+
 			"has expired; a run without its home cannot be handed a fresh one while that runs — a long-lived token "+
 			"(`rota login --long`) is what such runs are for", rota.ErrBusy, a, strings.Join(h.live(), ", "))
@@ -1110,24 +1065,11 @@ func tokenRun(ctx context.Context, a *rota.Account) (*rota.Command, error) {
 
 // dropOwnLogin removes the account's login from its home, keychain item
 // first: once the file is gone nothing here would name the item again. It
-// touches nothing where rota keeps no login (Windows, a home whose path
-// names no keychain item, the person's own directory). In a home rota made
-// the login there goes whatever it is; in a directory the person chose it
-// goes only when it is provably this account's — its current refresh token,
-// or the one rota recorded writing — because a login rota cannot show is
-// the account's may be the person's own.
+// touches nothing where rota keeps no login — a directory the person chose,
+// Windows, a home whose path names no keychain item.
 func (h *claudeHome) dropOwnLogin() error {
 	if !h.s.loginInHome(h.a) {
 		return nil
-	}
-	if !h.s.owns(h.a) {
-		fsys, ok := h.read()
-		if !ok {
-			return fmt.Errorf("%s: %s, so whose login its directory holds cannot be told; nothing was removed", h.a, h.hold)
-		}
-		if kind, _ := rota.ClaudeHomeLogin(h.a, fsys); kind != rota.HomeLoginCurrent && kind != rota.HomeLoginWritten {
-			return nil
-		}
 	}
 	if svc, ok := h.service(); ok {
 		ctx, cancel := keychainContext()
@@ -1172,23 +1114,28 @@ func (h *claudeHome) quiesce() error {
 	}
 }
 
-// MoveHome gives a claude account another home — a new configuration
-// directory, or rota's own again when configDir is "" — and saves it. It
-// does nothing when the home stays where it is or the provider keeps no
-// login in a home; the caller sets ConfigDir then, as for any other account.
+// MoveHome gives a claude account another home — a directory the person
+// chose, or rota's own again when configDir is "" — and saves it. It does
+// nothing when the home stays where it is or the provider keeps no login in
+// a home; the caller sets ConfigDir then, as for any other account. It goes
+// before every other change a command makes to the account, because what it
+// saves would carry them.
 //
-// Where rota keeps the account's login in its home, the home is read first:
+// Leaving a home rota keeps the account's login in, that home is read first:
 // Claude Code may have rotated the login there since rota last looked, and
 // that rotation would otherwise be deleted with the home's copy, leaving the
 // account with a spent token. What the reading took is saved before anything
 // is removed. A home in the hold, or one where Claude Code runs, is refused:
-// its processes share the login there. Then the login is taken out of the
-// old home — keychain item first, and in a directory the person chose only
-// when it is provably the account's — so no second copy of one refresh token
-// is left for anybody to present; the account forgets what it knew about
-// that home, so the new one is written from nothing on its first launch and
-// its daemon's route is its own. A step that fails leaves the account and
-// the old home as they were before it.
+// its processes share the login there. Then the login is taken out of that
+// home, keychain item first, so no second copy of one refresh token is left
+// for anybody to present; in a directory the person chose the account goes on
+// with the tokens it holds, refreshed by rota as before. Leaving a directory
+// the person chose reads and removes nothing: no login of rota's is there.
+//
+// Either way the account forgets what it knew about the old home, so a home
+// rota keeps its login in is written from nothing on its first launch there
+// and its daemon's route is its own. A step that fails leaves the account
+// and the old home as they were before it.
 func (s *Store) MoveHome(ctx context.Context, a *rota.Account, configDir string) error {
 	if !rota.SharedHome(a.Provider) {
 		return nil

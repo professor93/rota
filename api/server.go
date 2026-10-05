@@ -976,19 +976,31 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		s.report(w, r, err)
 		return
 	}
-	// The move is made before anything is written into the account, so a
-	// refused move leaves the store as it was.
+	// Remote Control needs the home rota keeps for an account.
+	if err := st.CheckRemoteControl(&want); err != nil {
+		s.report(w, r, err)
+		return
+	}
+	// A refused move is refused before anything is changed.
 	if body.Order != nil {
-		if _, err := rotation.Move(st.Accounts, a, place); err != nil {
+		if err := rotation.CheckMove(st.Accounts, a, place); err != nil {
 			s.report(w, r, err)
 			return
 		}
 	}
 	// A claude account's login lives in its home: a new one means taking it
-	// out of the old one first, and not while anything runs there.
+	// out of the old one first, and not while anything runs there. It goes
+	// before every other change, because it saves the store on its way:
+	// whatever it saves must be nothing else of this request.
 	if err := st.MoveHome(r.Context(), a, want.ConfigDir); err != nil {
 		s.report(w, r, err)
 		return
+	}
+	if body.Order != nil {
+		if _, err := rotation.Move(st.Accounts, a, place); err != nil {
+			s.report(w, r, err)
+			return
+		}
 	}
 	a.Cwd, a.ConfigDir, a.Sessions, a.RemoteControl = want.Cwd, want.ConfigDir, want.Sessions, want.RemoteControl
 	if body.Threshold != nil {

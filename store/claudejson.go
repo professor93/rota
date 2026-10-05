@@ -3,7 +3,6 @@ package store
 import (
 	"bytes"
 	"encoding/json/jsontext"
-	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -101,6 +100,9 @@ func (s *Store) RemoteControlNow(a *rota.Account) error {
 	if rota.Flavor(a.Provider) != "claude" {
 		return nil
 	}
+	if err := s.CheckRemoteControl(a); err != nil {
+		return err
+	}
 	if a.RemoteControl && !s.keepsLogin(a) {
 		return fmt.Errorf("%w: Remote Control needs %s's own stored login, and it does not run on one: %s",
 			rota.ErrUnsupported, a, s.whyNoLogin(a))
@@ -114,6 +116,19 @@ func (s *Store) RemoteControlNow(a *rota.Account) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", rota.ErrBusy, remoteControlWaits(a))
+}
+
+// CheckRemoteControl refuses Remote Control for an account told a
+// configuration directory of the person's choosing: rota keeps no login
+// there, so the account runs on a token in its environment, which Claude
+// Code refuses Remote Control for. It is asked of the account as it is about
+// to be, before the setting is saved, and is nil for everything else.
+func (s *Store) CheckRemoteControl(a *rota.Account) error {
+	if !a.RemoteControl || rota.Flavor(a.Provider) != "claude" || s.owns(a) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s cannot have Remote Control: it runs on a token because its configuration directory is one "+
+		"you chose, and Remote Control needs the home rota keeps for an account (clear `--config`)", rota.ErrInvalidRequest, a)
 }
 
 // turnOwnConfigOn puts the account's own .claude.json in place: the one put
@@ -372,31 +387,6 @@ func setIdentity(obj *jsonObject, a *rota.Account) bool {
 		obj.set("oauthAccount", id.compact())
 	}
 	return changed
-}
-
-// claimIdentity gives the .claude.json of a directory the person chose an
-// identity when it has none — and touches it in no other way: that file is
-// the account's own world, given deliberately.
-func claimIdentity(a *rota.Account, path string) error {
-	if a.UUID == "" {
-		return nil
-	}
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		raw, err = []byte("{}"), nil
-	}
-	if err != nil {
-		return err
-	}
-	obj, ok := parseObject(raw)
-	if !ok {
-		return nil
-	}
-	if _, has := obj.get("oauthAccount"); has {
-		return nil
-	}
-	setIdentity(obj, a)
-	return writeAtomic(path, obj.indented())
 }
 
 /* --------------------------------------------- a JSON object, in order --- */

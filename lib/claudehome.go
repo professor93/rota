@@ -228,10 +228,12 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //   - another refresh token of the same login: a rotation by Claude Code,
 //     taken when it is newer than what the account has. A refresh carries
 //     the login's refreshTokenExpiresAt through unchanged, so that is how a
-//     rotation is told apart, with no network call. One that is not newer —
-//     it expires before the account's token, or it is what this package
-//     wrote before a refresh of its own — is behind: the home does not hold
-//     the account's current login, and the next staging writes it;
+//     rotation is told apart, with no network call. One that is not newer is
+//     behind: the home does not hold the account's current login, and the
+//     next staging writes it. What this package itself wrote there before a
+//     refresh of its own stays recorded as that write — it is what proves
+//     the login there spent (ClaudeHomeSpent) — and any other older login is
+//     recorded as nothing of the account's;
 //   - a new login — another refreshTokenExpiresAt, or any living login in
 //     the home of a dead account — which somebody made by running /login
 //     inside that home. Nothing of it is taken here, because the home says
@@ -285,10 +287,18 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 	case l.refreshUntil() != a.Extra[claudeRefreshUntil]:
 		return &NewLogin{Access: l.AccessToken, login: l}
 	}
-	if !a.cliRotated(l.RefreshToken) || int64(l.ExpiresAt) < a.Token.ExpiresAt {
-		// Behind: what is there is not the account's current login, and a
-		// Claude Code started on it would present a token the account has
-		// moved past. Recorded, so the next staging puts the current one in.
+	if fingerprint(l.RefreshToken) == a.Staged {
+		// Behind, and the very login this package wrote: the account has
+		// refreshed it away since. Staged already says the home does not
+		// hold the current login, and goes on saying which one it does hold,
+		// because that is the only proof that login is spent — a look at the
+		// home must not erase what the write that replaces it relies on.
+		return nil
+	}
+	if int64(l.ExpiresAt) < a.Token.ExpiresAt {
+		// Behind: an older login, not this package's write. A Claude Code
+		// started on it would present a token the account has moved past.
+		// Recorded, so the next staging puts the current one in.
 		a.Staged = stagedNone
 		return nil
 	}
@@ -296,47 +306,17 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 	return nil
 }
 
-// HomeLogin is what a home's credential store holds, measured against one
-// account and what is recorded about writing there.
-type HomeLogin int
-
-const (
-	// HomeLoginNone: no login Claude Code could use — no store, no login in
-	// it, a blanked one, or a store that cannot be read.
-	HomeLoginNone HomeLogin = iota
-	// HomeLoginCurrent: the account's current refresh token.
-	HomeLoginCurrent
-	// HomeLoginWritten: the login this package recorded writing there
-	// (Staged), which the account has since replaced by refreshing it. That
-	// login is spent: the provider issued its successor.
-	HomeLoginWritten
-	// HomeLoginOther: anything else — a rotation by the CLI, a login somebody
-	// made inside it, another account's — about which the home alone proves
-	// nothing.
-	HomeLoginOther
-)
-
-// ClaudeHomeLogin says what a home holds for an account, and for
-// HomeLoginOther hands back the login as a *NewLogin to be confirmed with the
-// provider (Identify) and then taken (Accept) or left (Refuse). It reads
-// only, and changes nothing.
-//
-// AdoptFS decides about such a login by its own rules — a rotation it takes,
-// an older login it lets be written over. An application that must never
-// take or replace a login it cannot prove is the account's — in a directory
-// a person chose, which may be their own — asks this first, and confirms
-// whatever comes back as other.
-func ClaudeHomeLogin(a *Account, fsys fs.FS) (HomeLogin, *NewLogin) {
+// ClaudeHomeSpent reports whether a home's credential store holds the login
+// this package recorded writing there (Staged) and the account has since
+// refreshed away. That login is certainly spent — the provider issued its
+// successor, which the account holds — so every Claude Code process still
+// on it is signed out at its next refresh anyway, and an application may
+// write the account's current login over it even while something runs
+// there. It reads only, and changes nothing.
+func ClaudeHomeSpent(a *Account, fsys fs.FS) bool {
 	l, ok := readClaudeLogin(fsys)
-	switch {
-	case !ok || !l.usable():
-		return HomeLoginNone, nil
-	case l.RefreshToken == a.Token.Refresh:
-		return HomeLoginCurrent, nil
-	case a.Staged != "" && a.Staged != stagedNone && fingerprint(l.RefreshToken) == a.Staged:
-		return HomeLoginWritten, nil
-	}
-	return HomeLoginOther, &NewLogin{Access: l.AccessToken, login: l}
+	return ok && l.usable() && l.RefreshToken != a.Token.Refresh &&
+		a.Staged != "" && a.Staged != stagedNone && fingerprint(l.RefreshToken) == a.Staged
 }
 
 // adopt takes the whole login into the account.

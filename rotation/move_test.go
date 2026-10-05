@@ -148,6 +148,24 @@ func TestMoveUpOrDownNeedsAPlaceInTheQueue(t *testing.T) {
 	eq(t, ids(Queue(list)), []int{1, 2, 3})
 }
 
+// CheckMove gives Move's answer and changes nothing, whatever the answer.
+func TestCheckMoveAnswersAsMoveWouldAndChangesNothing(t *testing.T) {
+	list := three()
+	for _, c := range []struct {
+		id    int
+		place string
+		ok    bool
+	}{{4, "up", false}, {1, "before:1", false}, {1, "after:9", false}, {3, "first", true}, {4, "before:2", true}, {2, "out", true}} {
+		p, _ := ParsePlace(c.place)
+		if err := CheckMove(list, rota.FindID(list, c.id), p); (err == nil) != c.ok || (err != nil && !errors.Is(err, rota.ErrInvalidRequest)) {
+			t.Fatalf("%d to %s: %v", c.id, c.place, err)
+		}
+		if got := orders(list); got[1] != 1 || got[2] != 2 || got[3] != 3 || got[4] != 0 {
+			t.Fatalf("%d to %s changed the queue: %v", c.id, c.place, got)
+		}
+	}
+}
+
 func TestMoveBeforeAndAfterAnotherAccount(t *testing.T) {
 	list := three()
 	mustMove(t, list, 4, "before:2")

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,9 +11,11 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/professor93/rota/internal/claudecode"
 	"github.com/professor93/rota/internal/fakecli"
 	rota "github.com/professor93/rota/lib"
 )
@@ -223,6 +226,122 @@ func TestSettingAClaudeAccountsConfigMovesItsLogin(t *testing.T) {
 	}
 	if got := storedAccount(t, rotaHome); got["staged"] != "-" {
 		t.Fatalf("and the account forgets it: %v", got["staged"])
+	}
+}
+
+// An account told a directory of the person's choosing runs on a token, so
+// Remote Control is refused for it, saying why in one sentence: by `rota run
+// --remote-control`, by `rota set --remote-control on`, and by naming such a
+// directory for an account that has it on. Nothing is saved.
+func TestRemoteControlIsRefusedForAChosenDirectory(t *testing.T) {
+	dir := t.TempDir()
+	rotaHome, _ := seedLiving(t, fmt.Sprintf(`,"config_dir":%q`, dir))
+	handedTo := handover(t)
+	const why = "it runs on a token because its configuration directory is one you chose, and Remote Control needs the home rota keeps for an account (clear `--config`)"
+	if _, errOut, code := call(t, "run", "1", "--remote-control"); code == 0 || !strings.Contains(errOut, why) || len(*handedTo) != 0 {
+		t.Fatalf("run refused: %d %q", code, errOut)
+	}
+	if _, errOut, code := call(t, "set", "1", "--remote-control", "on"); code == 0 || !strings.Contains(errOut, why) {
+		t.Fatalf("set refused: %d %q", code, errOut)
+	}
+	if _, on := storedAccount(t, rotaHome)["remoteControl"]; on {
+		t.Fatal("nothing saved")
+	}
+	if _, errOut, code := call(t, "set", "1", "--clear", "--remote-control", "on"); code != 0 {
+		t.Fatalf("its own home may have it: %d %q", code, errOut)
+	}
+	if _, errOut, code := call(t, "set", "1", "--config", dir); code == 0 || !strings.Contains(errOut, "--remote-control off") {
+		t.Fatalf("nor may it name such a directory while it has it: %d %q", code, errOut)
+	}
+	if got := storedAccount(t, rotaHome); got["config_dir"] != nil || got["remoteControl"] != true {
+		t.Fatalf("nothing saved: %v", got)
+	}
+}
+
+// `rota remove 1 2` asks about both before it touches either: with a window
+// open in account 2's home, account 1's daemon is not stopped, and neither
+// account goes.
+func TestRemovingTwoAccountsStopsNothingWhenOneCannotGo(t *testing.T) {
+	rotaHome := t.TempDir()
+	t.Setenv("ROTA_HOME", rotaHome)
+	until := time.Now().Add(time.Hour).UnixMilli()
+	doc := fmt.Sprintf(`{"accounts":[`+
+		`{"id":1,"provider":"claude","email":"a@b.c","order":1,"token":{"accessToken":"A1","refreshToken":"r1","expiresAt":%d}},`+
+		`{"id":2,"provider":"claude","email":"d@e.f","order":2,"token":{"accessToken":"A2","refreshToken":"r2","expiresAt":%d}}`+
+		`],"nextId":3,"ordered":true}`, until, until)
+	if err := os.WriteFile(filepath.Join(rotaHome, "accounts.json"), []byte(doc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	one, two := filepath.Join(rotaHome, "homes", "claude-1"), filepath.Join(rotaHome, "homes", "claude-2")
+	if err := os.MkdirAll(one, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	daemon := fmt.Sprintf(`{"pid":%d,"kind":"daemon"}`, os.Getpid())
+	if err := os.WriteFile(filepath.Join(one, "daemon.lock"), []byte(daemon), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	liveIn(t, two)
+	var stops atomic.Int64
+	claudecode.StopDaemon = func(context.Context, string, []string) error { stops.Add(1); return nil }
+	t.Cleanup(claudecode.StandIn)
+	_, errOut, code := call(t, "remove", "1", "2")
+	if code == 0 || !strings.Contains(errOut, "close it before removing") {
+		t.Fatalf("refused: %d %q", code, errOut)
+	}
+	if stops.Load() != 0 {
+		t.Fatal("and nothing was stopped")
+	}
+	raw, _ := os.ReadFile(filepath.Join(rotaHome, "accounts.json"))
+	var stored struct {
+		Accounts []struct {
+			ID int `json:"id"`
+		} `json:"accounts"`
+	}
+	if json.Unmarshal(raw, &stored) != nil || len(stored.Accounts) != 2 {
+		t.Fatalf("both still there: %s", raw)
+	}
+	if _, err := os.Stat(one); err != nil {
+		t.Fatal("and account 1's home with them")
+	}
+}
+
+// rota set moves a claude account's home before it changes anything else:
+// moving it saves the store on its way, and a move that then fails must have
+// saved nothing else of the command — here a place in the queue.
+func TestSetMovesTheHomeBeforeAnythingElse(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Getuid() == 0 {
+		t.Skip("needs a directory its owner cannot delete from, and the environment route keeps no login to move")
+	}
+	rotaHome, home := seedLiving(t, "")
+	handover(t)
+	if _, errOut, code := call(t, "run", "1"); code != 0 {
+		t.Fatalf("%d %q", code, errOut)
+	}
+	// The login cannot be taken out of the old home, after the move has
+	// already read and saved it.
+	if err := os.Chmod(home, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(home, 0o700) })
+	if _, errOut, code := call(t, "set", "1", "--config", t.TempDir(), "--order", "out"); code == 0 {
+		t.Fatalf("the move fails: %q", errOut)
+	}
+	if got := storedAccount(t, rotaHome); got["order"] != float64(1) || got["config_dir"] != nil {
+		t.Fatalf("and nothing else of the command was saved: %v %v", got["order"], got["config_dir"])
+	}
+	// A move in the queue that is refused is refused before the home moves.
+	os.Chmod(home, 0o700)
+	if _, errOut, code := call(t, "set", "1", "--order", "out"); code != 0 {
+		t.Fatalf("%d %q", code, errOut)
+	}
+	if _, errOut, code := call(t, "set", "1", "--config", t.TempDir(), "--order", "up"); code == 0 || !strings.Contains(errOut, "out of the rotation") {
+		t.Fatalf("refused: %d %q", code, errOut)
+	}
+	if storedAccount(t, rotaHome)["config_dir"] != nil {
+		t.Fatal("the home did not move")
+	}
+	if _, err := os.Stat(filepath.Join(home, ".credentials.json")); err != nil {
+		t.Fatal("and its login is where it was")
 	}
 }
 

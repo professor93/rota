@@ -90,6 +90,25 @@ type Moved struct {
 	Shifted  []*rota.Account
 }
 
+// CheckMove says why Move would refuse this place for a, or nil, and
+// changes nothing: a command that has something to do before its move —
+// something it saves — asks first, so a refused move leaves nothing of the
+// command behind.
+func CheckMove(accounts []*rota.Account, a *rota.Account, p Place) error {
+	mine := *a
+	copies := make([]*rota.Account, len(accounts))
+	for i, x := range accounts {
+		if x == a {
+			copies[i] = &mine
+			continue
+		}
+		c := *x
+		copies[i] = &c
+	}
+	_, err := Move(copies, &mine, p)
+	return err
+}
+
 // Move puts a at the place and renumbers the queue so that it reads 1..N
 // with nothing shared and nothing skipped. Accounts outside the queue stay
 // outside it. On error nothing has changed.

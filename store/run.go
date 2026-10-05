@@ -175,9 +175,24 @@ func (s *Store) prepare(ctx context.Context, a *rota.Account, mirror bool) (*rot
 	if err := s.oneHomeOneAccount(a); err != nil {
 		return nil, nil, err
 	}
+	launch := s.prepareAlone
 	if rota.SharedHome(a.Provider) {
-		return s.prepareShared(ctx, a, mirror)
+		launch = s.prepareShared
 	}
+	cmd, release, err := launch(ctx, a, mirror)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Everything rota launches, whatever its CLI, is told whose Claude Code
+	// directory is the person's, so a rota started anywhere inside it — in a
+	// shell a codex session opened, say — knows without guessing.
+	cmd.Env = append(cmd.Env, claudeHomeVar+"="+s.handDown())
+	return cmd, release, nil
+}
+
+// prepareAlone is prepare for an account whose CLI keeps its credential file
+// to one process at a time.
+func (s *Store) prepareAlone(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
 	if err := s.mayLaunch(a); err != nil {
 		return nil, nil, err
 	}
@@ -232,11 +247,6 @@ func (s *Store) prepareShared(ctx context.Context, a *rota.Account, mirror bool)
 		return nil, nil, fmt.Errorf("%w: another rota process is changing %s's login right now; try again in a moment", rota.ErrBusy, a)
 	}
 	cmd, err := h.launch(ctx, mirror)
-	if err == nil {
-		// Everything rota launches is told whose Claude Code directory is the
-		// person's, so a rota started inside it knows without guessing.
-		cmd.Env = append(cmd.Env, claudeHomeVar+"="+s.handDown())
-	}
 	// Whatever happened, the account may have changed — a rotation adopted,
 	// a refresh, a login found dead — and none of it may be lost.
 	if serr := s.Save(); serr != nil {
@@ -461,23 +471,45 @@ func (s *Store) Busy(a *rota.Account) bool {
 	return !ok
 }
 
-// Removable says why an account cannot be removed right now — a run holds
-// it — or nil. Deleting the directory a running agent works from is worse
-// than making somebody wait, and nothing is undoable once the files are
-// gone.
+// Removable says why an account cannot be removed right now, or nil, and
+// changes nothing: a command removing several accounts asks it of every one
+// of them before any is touched. Deleting the directory a running agent
+// works from is worse than making somebody wait, and nothing is undoable
+// once the files are gone.
 //
-// A claude account's home is made quiet first: its daemon is stopped, which
-// ends the background sessions it hosts, and the home is given a few seconds;
-// only then is the claim asked about, so a daemon that held it would be
-// stopped rather than refuse the removal. Whatever still runs is named.
+// A claude account in a home rota made is refused while a window is open
+// there — an interactive session, or a record nobody can read — which no
+// removal may close; and while a run holds its claim with no daemon alive
+// that could be what holds it. Its daemon and the background sessions the
+// daemon hosts are no reason to refuse: Remove stops them. A claude account
+// in a directory the person chose is never refused: rota keeps no login
+// there and removes nothing, so nothing running there is harmed.
 func (s *Store) Removable(a *rota.Account) error {
-	if rota.SharedHome(a.Provider) && !s.personalClaude(a) {
-		if err := s.claudeHome(a, false).quiesce(); err != nil {
-			return err
+	if rota.SharedHome(a.Provider) {
+		if !s.owns(a) {
+			return nil
+		}
+		home := s.Home(a)
+		var open []string
+		for _, t := range claudeLiveThings(home) {
+			if !t.hosted {
+				open = append(open, t.what)
+			}
+		}
+		if len(open) > 0 {
+			return fmt.Errorf("%w: Claude Code is running in %s's home (%s); close it before removing the account",
+				rota.ErrBusy, a, strings.Join(open, ", "))
+		}
+		if _, daemon := daemonAlive(home); daemon {
+			return nil // what holds the claim may be the daemon, which Remove stops
 		}
 	}
 	if s.claimed(a) {
-		return fmt.Errorf("%w: %s is running; stop it before removing the account", rota.ErrBusy, a)
+		return errRunning(a)
 	}
 	return nil
+}
+
+func errRunning(a *rota.Account) error {
+	return fmt.Errorf("%w: %s is running; stop it before removing the account", rota.ErrBusy, a)
 }

@@ -514,6 +514,19 @@ func TestRemoteControlIsSetOverHTTP(t *testing.T) {
 		!strings.Contains(string(raw), "Claude Code") {
 		t.Fatalf("codex: %d %s", resp.StatusCode, raw)
 	}
+	// An account told a directory of the caller's choosing runs on a token,
+	// and is refused it, however the two are asked for.
+	config := filepath.Join(h.root, "config")
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": config, "remote_control": true}); resp.StatusCode != 400 ||
+		!strings.Contains(string(raw), "configuration directory is one you chose") {
+		t.Fatalf("both at once: %d %s", resp.StatusCode, raw)
+	}
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": config}); resp.StatusCode != 200 {
+		t.Fatalf("%d %s", resp.StatusCode, raw)
+	}
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"remote_control": true}); resp.StatusCode != 400 {
+		t.Fatalf("afterwards: %d %s", resp.StatusCode, raw)
+	}
 }
 
 // A run that names no directory of its own starts in the account's.
@@ -1204,9 +1217,25 @@ func TestAConfigDirDoesNotChangeUnderARunningClaudeCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := filepath.Join(h.root, "config")
-	resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": config})
+	resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": config, "order": "out"})
 	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "running") {
 		t.Fatalf("%d %s", resp.StatusCode, raw)
+	}
+	_, raw = h.do("GET", "/v1/accounts", nil)
+	var doc struct {
+		Accounts []struct {
+			ID        int    `json:"id"`
+			Order     int    `json:"order"`
+			ConfigDir string `json:"config_dir"`
+		} `json:"accounts"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil || len(doc.Accounts) == 0 {
+		t.Fatalf("%v %s", err, raw)
+	}
+	for _, a := range doc.Accounts {
+		if a.ID == 1 && (a.Order == 0 || a.ConfigDir != "") {
+			t.Fatalf("nothing of the request was kept: %s", raw)
+		}
 	}
 	os.Remove(filepath.Join(home, "sessions", "1.json"))
 	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"config_dir": config}); resp.StatusCode != 200 {

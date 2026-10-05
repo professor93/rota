@@ -88,10 +88,10 @@ Default provider is claude. Accounts live in $ROTA_HOME or ~/.rota (0600).
 A claude account runs on a login of its own, kept in Claude Code's own
 credential store inside the account's home, where Claude Code refreshes it:
 rota reads back what Claude Code rotated, and writes or refreshes the login
-only while nothing runs in that home. Your own login — your Claude Code
-directory, ~/.claude or your CLAUDE_CONFIG_DIR, and its keychain item — is
-never read or written, and a login in a directory you name with --config is
-replaced only when it is provably the account's.`
+only while nothing runs in that home. An account given a directory with
+--config runs on a token there, as before, without Remote Control, and rota
+reads, writes and removes no login in it. Your own login — ~/.claude or your
+CLAUDE_CONFIG_DIR, and its keychain item — is never read or written.`
 
 const shortUsage = "rota " + wire.Version + ` — several AI coding CLIs, several accounts, one rotation
 
@@ -1463,20 +1463,32 @@ func (c *cli) set(args []string) error {
 	if err := s.CheckHome(&want); err != nil {
 		return usageErr("%v", err)
 	}
-	// The move goes next, before anything is written into the account: a
-	// refusal — up from outside the queue, before an id that is not in it —
-	// must also leave the store as it was.
-	var moved rotation.Moved
+	// Remote Control needs the home rota keeps for an account.
+	if err := s.CheckRemoteControl(&want); err != nil {
+		if a.RemoteControl && !given["remote-control"] {
+			return usageErr("%v; `--remote-control off` with it turns Remote Control off", err)
+		}
+		return usageErr("%v", err)
+	}
+	// So may the move — up from outside the queue, before an id that is not
+	// in it — asked before anything is changed.
 	if given["order"] {
-		if moved, err = rotation.Move(s.Accounts, a, place); err != nil {
+		if err := rotation.CheckMove(s.Accounts, a, place); err != nil {
 			return err
 		}
 	}
 	// A claude account's login lives in its home, so a new home means
 	// taking it out of the old one first — and not while anything runs
-	// there. A refusal is returned before the store is saved.
+	// there. It goes before every other change, because it saves the store
+	// on its way: whatever it saves must be nothing else of this command.
 	if err := s.MoveHome(context.Background(), a, want.ConfigDir); err != nil {
 		return err
+	}
+	var moved rotation.Moved
+	if given["order"] {
+		if moved, err = rotation.Move(s.Accounts, a, place); err != nil {
+			return err
+		}
 	}
 	a.Cwd, a.ConfigDir, a.Sessions, a.RemoteControl = want.Cwd, want.ConfigDir, want.Sessions, want.RemoteControl
 	if given["threshold"] {
@@ -1654,9 +1666,11 @@ the next one.
 --cwd is where its runs start when a request names no directory. --config is
 the account's own CLI configuration — its memory files, skills and settings —
 and the private home its credentials are staged in, which is why it must not
-be the project directory itself, nor another account's home. Changing it for
-a claude account takes the account's login out of the home it leaves, and is
-refused while Claude Code runs there.
+be the project directory itself, nor another account's home. A claude
+account given one runs on a token there, as before, without Remote Control,
+and rota reads, writes and removes no login in it. Giving one takes the
+account's login out of the home rota kept it in, and is refused while Claude
+Code runs there; --clear gives the account that home back.
 
 --long forget throws away the account's long-lived token, so the runs that
 used it — those without the account's home, and a dead login's — go back to
@@ -1670,7 +1684,8 @@ names, and by default the file is your own, shared by every account. The
 copy starts from yours and keeps gaining what yours gains, but MCP servers
 and trusted folders added inside the account stay its own. off puts the copy
 aside and shares yours again. While Claude Code runs in the account's home
-the change waits for those sessions to end, and rota says so.
+the change waits for those sessions to end, and rota says so. An account with
+--config cannot have it: it runs on a token, which Remote Control refuses.
 
 --sessions is where a claude account's conversations live. shared is the
 default: every account reads the ones in your own Claude Code directory and

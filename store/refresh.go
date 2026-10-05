@@ -160,9 +160,9 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		default:
 			// A running account is left alone: refreshing rotates the token
 			// its CLI is still holding, and a reading is not worth that. A
-			// claude account whose token rota alone holds — Windows, the
-			// person's own directory — has nothing in its home to protect, as
-			// ever.
+			// claude account whose token rota alone holds — Windows, a
+			// directory the person chose — has nothing in its home to
+			// protect, as ever.
 			release, idle := func() {}, true
 			if !shared {
 				release, idle = s.holdIdle(a)

@@ -2,12 +2,15 @@ package store
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	rota "github.com/professor93/rota/lib"
 )
 
 // configOf reads a .claude.json as a map.
@@ -249,34 +252,33 @@ func TestTheAccountsOwnConfigurationKeepsUpByAddingOnly(t *testing.T) {
 	}
 }
 
-// An account with a directory of its own is given an identity there only
-// when the file has none, and only with Remote Control on.
-func TestAChosenDirectoryIsOnlyGivenAnIdentityItLacks(t *testing.T) {
+// A directory the person chose is never given an identity, nor is its
+// .claude.json changed in any other way — not even for an account an older
+// store holds with Remote Control on, which it cannot have there and is
+// refused, in the one sentence that says why.
+func TestAChosenDirectorysConfigurationIsNeverChanged(t *testing.T) {
 	personWorld(t)
 	s, a := claudeStore(t)
 	a.ConfigDir = t.TempDir()
 	path := filepath.Join(a.ConfigDir, ".claude.json")
 	writeFile(t, path, `{"theirs": 1}`)
-	if _, err := s.command(a, true); err != nil {
-		t.Fatal(err)
+	for _, on := range []bool{false, true} {
+		a.RemoteControl = on
+		if _, err := s.command(a, true); err != nil {
+			t.Fatal(err)
+		}
+		if got := readFile(path); got != `{"theirs": 1}` {
+			t.Fatalf("untouched with remote control %v: %s", on, got)
+		}
 	}
-	if _, ok := configOf(t, path)["oauthAccount"]; ok {
-		t.Fatal("left alone with Remote Control off")
+	err := s.CheckRemoteControl(a)
+	if !errors.Is(err, rota.ErrInvalidRequest) || !strings.Contains(err.Error(),
+		"it runs on a token because its configuration directory is one you chose, and Remote Control needs the home rota keeps for an account (clear `--config`)") {
+		t.Fatalf("refused: %v", err)
 	}
-	a.RemoteControl = true
-	if _, err := s.command(a, true); err != nil {
-		t.Fatal(err)
-	}
-	cfg := configOf(t, path)
-	if cfg["theirs"] != float64(1) || cfg["oauthAccount"].(map[string]any)["accountUuid"] != "c1" {
-		t.Fatalf("given an identity: %v", cfg)
-	}
-	writeFile(t, path, `{"oauthAccount": {"accountUuid": "set-by-claude"}}`)
-	if _, err := s.command(a, true); err != nil {
-		t.Fatal(err)
-	}
-	if configOf(t, path)["oauthAccount"].(map[string]any)["accountUuid"] != "set-by-claude" {
-		t.Fatal("an identity already there is not touched")
+	a.ConfigDir = ""
+	if err := s.CheckRemoteControl(a); err != nil {
+		t.Fatalf("its own home may have it: %v", err)
 	}
 }
 

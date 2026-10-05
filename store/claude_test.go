@@ -809,10 +809,13 @@ func TestAHomeWithANonASCIIPathRunsOnATokenOnMacOS(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
 	k := fakeKeychain(t)
-	s := openTemp(t)
+	s, err := Open(filepath.Join(t.TempDir(), "projét"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
 	words := said(s)
 	a := livingClaude(s, "u1")
-	a.ConfigDir = filepath.Join(t.TempDir(), "projét")
 	env, err := launchEnv(t, s, a)
 	if err != nil || !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=A-u1") {
 		t.Fatalf("on a token: %v %v", err, env)
@@ -820,7 +823,7 @@ func TestAHomeWithANonASCIIPathRunsOnATokenOnMacOS(t *testing.T) {
 	if got := k.asked(); len(got) != 0 {
 		t.Fatalf("nothing asked of the keychain: %v", got)
 	}
-	if _, err := os.Stat(filepath.Join(a.ConfigDir, ".credentials.json")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(s.Home(a), ".credentials.json")); !os.IsNotExist(err) {
 		t.Fatal("nothing written")
 	}
 	if len(*words) != 1 || !strings.Contains((*words)[0], "ASCII") || !strings.Contains((*words)[0], "Remote Control") {
@@ -1103,16 +1106,18 @@ func TestTheDaemonIsStoppedOnlyForARouteChangeThatLeavesTheHomeQuiet(t *testing.
 	})
 }
 
-// In a directory the person chose, nothing remembered about the route is
-// nothing known: a daemon running there may be anybody's, and is left alone.
-func TestADaemonInAChosenDirectoryWithNoRouteRememberedIsLeftAlone(t *testing.T) {
+// A daemon in a directory the person chose is left alone, whatever route an
+// older store remembers for it: no login of rota's is kept there, so no
+// route of rota's ever changed.
+func TestADaemonInAChosenDirectoryIsLeftAloneWhateverIsRemembered(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
 	d := fakeDaemons(t)
 	s := openTemp(t)
 	a := livingClaude(s, "u1")
 	a.ConfigDir = t.TempDir()
-	alive(t, a.ConfigDir, "daemon.lock", os.Getpid())
+	a.Extra[routeKey] = routeStored
+	hosted(t, a.ConfigDir, "daemon.lock", os.Getpid())
 	if _, err := launchEnv(t, s, a); err != nil {
 		t.Fatal(err)
 	}
@@ -1173,35 +1178,70 @@ func TestRemovingAnAccountStillAliveIsRefusedWithWhatIsAlive(t *testing.T) {
 	}
 }
 
-// In a directory the person chose, only the account's own login goes — its
-// current refresh token, or the one rota recorded writing — and everything
-// else there stays. A login rota cannot show is the account's is left: it
-// may be the person's own.
-func TestRemovingAnAccountFromAChosenDirectoryTakesOnlyItsOwnLogin(t *testing.T) {
+// Removing an account whose directory the person chose removes nothing from
+// it, whoever's login is there — the account's own included, which rota
+// never put there — asks nothing of the keychain, and stops nothing that
+// runs there.
+func TestRemovingAnAccountFromAChosenDirectoryRemovesNothingThere(t *testing.T) {
 	claudeWorld(t)
-	for _, c := range []struct {
-		what, store string
-		goes        bool
-	}{
-		{"its own", storeLogin("A-u1", "R-u1", later(time.Hour), "1999999999000"), true},
-		{"somebody else's", storeLogin("A-x", "R-x", later(time.Hour), "1999999999000"), false},
-		{"nothing usable", "{}", false},
+	k := fakeKeychain(t)
+	d := fakeDaemons(t)
+	for _, login := range []string{
+		storeLogin("A-u1", "R-u1", later(time.Hour), "1999999999000"),
+		storeLogin("A-x", "R-x", later(time.Hour), "1999999999000"),
+		"{}",
 	} {
 		s := openTemp(t)
 		a := livingClaude(s, "u1")
 		a.ConfigDir = t.TempDir()
-		writeFile(t, filepath.Join(a.ConfigDir, ".credentials.json"), c.store)
+		writeFile(t, filepath.Join(a.ConfigDir, ".credentials.json"), login)
 		writeFile(t, filepath.Join(a.ConfigDir, "CLAUDE.md"), "mine")
+		hosted(t, a.ConfigDir, "daemon.lock", os.Getpid())
+		alive(t, a.ConfigDir, "sessions/1.json", os.Getpid())
 		if err := s.Remove(a.ID); err != nil {
 			t.Fatal(err)
 		}
-		_, err := os.Stat(filepath.Join(a.ConfigDir, ".credentials.json"))
-		if gone := os.IsNotExist(err); gone != c.goes {
-			t.Fatalf("%s: gone=%v", c.what, gone)
+		if readFile(filepath.Join(a.ConfigDir, ".credentials.json")) != login || readFile(filepath.Join(a.ConfigDir, "CLAUDE.md")) != "mine" {
+			t.Fatal("everything there stays")
 		}
-		if _, err := os.Stat(filepath.Join(a.ConfigDir, "CLAUDE.md")); err != nil {
-			t.Fatal("the rest stays")
-		}
+	}
+	if len(k.asked()) != 0 || d.stops() != 0 {
+		t.Fatalf("nothing asked, nothing stopped: %v %d", k.asked(), d.stops())
+	}
+}
+
+// Asking whether an account can be removed changes nothing. A daemon is no
+// reason to refuse, and the asking does not stop it — Remove does. A window
+// open in the home, a record nobody can read, or a claim held with no
+// daemon that could be what holds it refuses.
+func TestAskingWhetherAnAccountCanBeRemovedStopsNothing(t *testing.T) {
+	claudeWorld(t)
+	d := fakeDaemons(t)
+	s := openTemp(t)
+	withDaemon, withWindow, unreadable, claimed := livingClaude(s, "u1"), livingClaude(s, "u2"), livingClaude(s, "u3"), livingClaude(s, "u4")
+	hosted(t, s.Home(withDaemon), "daemon.lock", os.Getpid())
+	hosted(t, s.Home(withDaemon), "sessions/1.json", os.Getpid())
+	if err := s.Removable(withDaemon); err != nil {
+		t.Fatalf("a daemon is Remove's to stop: %v", err)
+	}
+	alive(t, s.Home(withWindow), "sessions/1.json", os.Getpid())
+	if err := s.Removable(withWindow); !errors.Is(err, rota.ErrBusy) || !strings.Contains(err.Error(), "close it") {
+		t.Fatalf("a window open there: %v", err)
+	}
+	writeFile(t, filepath.Join(s.Home(unreadable), "sessions", "9.json"), "{torn")
+	if err := s.Removable(unreadable); !errors.Is(err, rota.ErrBusy) {
+		t.Fatalf("a record nobody can read: %v", err)
+	}
+	release, ok := s.holdRun(claimed)
+	if !ok {
+		t.Fatal("claim")
+	}
+	defer release()
+	if err := s.Removable(claimed); !errors.Is(err, rota.ErrBusy) {
+		t.Fatalf("a claim with no daemon to hold it: %v", err)
+	}
+	if d.stops() != 0 {
+		t.Fatal("and nothing was stopped")
 	}
 }
 
@@ -1384,22 +1424,37 @@ func TestMovingAClaudeAccountsHomeRemovesItsLoginFromTheOldOne(t *testing.T) {
 	if b.Token.Refresh != "R-rot" || b.ConfigDir != next {
 		t.Fatalf("saved: %q %q", b.Token.Refresh, b.ConfigDir)
 	}
-	// And it refreshes with the successor, which is the token the provider
-	// still honours.
-	f.set(func(f *anthropic) {
-		f.refresh = func() (int, any) {
-			return 200, map[string]any{"access_token": "A-next", "refresh_token": "R-next", "expires_in": 3600}
-		}
-	})
+	// In the directory it chose it runs on a token, as before 1.3: refreshed
+	// by rota with the successor, which is the token the provider still
+	// honours, and nothing written there.
+	f.set(func(f *anthropic) { f.refresh = refreshesTo("A-next", "R-next") })
 	expire(b)
-	if _, err := launchEnv(t, s2, b); err != nil || b.Dead || b.Token.Refresh != "R-next" || f.refreshes.Load() != 1 {
-		t.Fatalf("refreshed with R-rot: %v dead=%v %q", err, b.Dead, b.Token.Refresh)
+	env, err := launchEnv(t, s2, b)
+	if err != nil || b.Dead || b.Token.Refresh != "R-next" || f.refreshes.Load() != 1 || !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=A-next") {
+		t.Fatalf("refreshed with R-rot, and run on a token: %v dead=%v %q %v", err, b.Dead, b.Token.Refresh, env)
 	}
-	if r, _ := readLogin(t, next); r != "R-next" {
-		t.Fatalf("the new home is written: %q", r)
+	if _, err := os.Stat(filepath.Join(next, ".credentials.json")); !os.IsNotExist(err) {
+		t.Fatal("a directory the person chose is never written")
 	}
 	if err := s2.MoveHome(ctx, b, next); err != nil {
 		t.Fatal("staying where it is is nothing")
+	}
+	// Back into the home rota keeps for it: nothing is read or removed in
+	// the chosen directory, the account forgets what it knew, and its own
+	// home is written on its next launch.
+	b.Extra[routeKey] = routeEnv
+	before := len(k.asked())
+	if err := s2.MoveHome(ctx, b, ""); err != nil {
+		t.Fatal(err)
+	}
+	if b.ConfigDir != "" || b.Staged != "-" || b.Extra[routeKey] != "" || len(k.asked()) != before {
+		t.Fatalf("forgotten, and nothing asked: %q %q %q", b.ConfigDir, b.Staged, b.Extra[routeKey])
+	}
+	if env, err := launchEnv(t, s2, b); err != nil || hasVar(env, "CLAUDE_CODE_OAUTH_TOKEN") {
+		t.Fatalf("on its stored login again: %v %v", err, env)
+	}
+	if r, _ := readLogin(t, s2.Home(b)); r != "R-next" {
+		t.Fatalf("its own home is written: %q", r)
 	}
 }
 

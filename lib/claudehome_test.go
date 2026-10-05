@@ -302,10 +302,18 @@ func TestAdoptionReadsWhatTheHomeHolds(t *testing.T) {
 		}
 	})
 	t.Run("what rota wrote before a refresh of its own", func(t *testing.T) {
-		a := livingClaude()
-		a.Staged = fingerprint("R0")
-		if err := AdoptFrom(a, homeWith(login("R0", later, same))); err != nil || a.Token.Refresh != "R1" || a.Staged != stagedNone {
-			t.Fatalf("behind, not a rotation: %+v %v", a, err)
+		for _, exp := range []int64{later, earlier} {
+			a := livingClaude()
+			a.Staged = fingerprint("R0")
+			if err := AdoptFrom(a, homeWith(login("R0", exp, same))); err != nil || a.Token.Refresh != "R1" {
+				t.Fatalf("behind, not a rotation: %+v %v", a, err)
+			}
+			if a.Staged != fingerprint("R0") || !ClaudeHomeSpent(a, homeWith(login("R0", exp, same))) {
+				t.Fatalf("and still recorded as rota's own write, which proves it spent: %q", a.Staged)
+			}
+			if _, files, _ := (claudeProvider{}).Plan(context.Background(), a, "/h"); storedLoginPlatform && len(files) != 1 {
+				t.Fatalf("a write is planned: %+v", files)
+			}
 		}
 	})
 	t.Run("a rotation when neither side knows when the login ends", func(t *testing.T) {
@@ -628,10 +636,11 @@ func TestJoiningAHomeWritesNothingAndHandsOverNothing(t *testing.T) {
 	}
 }
 
-// What a home holds, measured against the account: nothing usable, its
-// current login, the one rota recorded writing and has refreshed away since
-// (spent), or something else — handed back to be confirmed.
-func TestWhatAHomeHoldsIsMeasuredAgainstTheAccount(t *testing.T) {
+// A home holds a spent login only when it holds the very login rota recorded
+// writing there and the account has refreshed away since: not nothing, not
+// the account's current login, not anything else — and with nothing
+// recorded, an older login proves nothing.
+func TestOnlyTheLoginRotaWroteAndRefreshedAwayIsSpent(t *testing.T) {
 	a := livingClaude()
 	login := func(refresh string) string {
 		return `{"accessToken":"A-` + refresh + `","refreshToken":"` + refresh + `","expiresAt":5}`
@@ -639,22 +648,21 @@ func TestWhatAHomeHoldsIsMeasuredAgainstTheAccount(t *testing.T) {
 	a.Staged = fingerprint("R0")
 	for i, c := range []struct {
 		fsys fstest.MapFS
-		want HomeLogin
+		want bool
 	}{
-		{fstest.MapFS{}, HomeLoginNone},
-		{homeWith(`{"accessToken":"","refreshToken":"","expiresAt":0}`), HomeLoginNone},
-		{fstest.MapFS{claudeCredentials: {Data: []byte("{torn")}}, HomeLoginNone},
-		{homeWith(login("R1")), HomeLoginCurrent},
-		{homeWith(login("R0")), HomeLoginWritten},
-		{homeWith(login("R9")), HomeLoginOther},
+		{fstest.MapFS{}, false},
+		{homeWith(`{"accessToken":"","refreshToken":"","expiresAt":0}`), false},
+		{fstest.MapFS{claudeCredentials: {Data: []byte("{torn")}}, false},
+		{homeWith(login("R1")), false},
+		{homeWith(login("R0")), true},
+		{homeWith(login("R9")), false},
 	} {
-		got, nl := ClaudeHomeLogin(a, c.fsys)
-		if got != c.want || (got == HomeLoginOther) != (nl != nil) {
-			t.Fatalf("case %d: got %v %v", i, got, nl)
+		if got := ClaudeHomeSpent(a, c.fsys); got != c.want {
+			t.Fatalf("case %d: got %v", i, got)
 		}
 	}
 	a.Staged = stagedNone
-	if got, _ := ClaudeHomeLogin(a, homeWith(login("R0"))); got != HomeLoginOther {
+	if ClaudeHomeSpent(a, homeWith(login("R0"))) {
 		t.Fatal("with nothing recorded, an older login proves nothing")
 	}
 }

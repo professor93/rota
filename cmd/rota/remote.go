@@ -64,6 +64,11 @@ func (c *cli) remoteControl(s *store.Store, a *rota.Account, ask remoteAsk) ([]s
 		return nil, usageErr("--remote-control is Claude Code's, and %s is a %s account", a, a.Provider)
 	}
 	if !a.RemoteControl {
+		on := *a
+		on.RemoteControl = true
+		if err := s.CheckRemoteControl(&on); err != nil {
+			return nil, err
+		}
 		a.RemoteControl = true
 		if err := s.Save(); err != nil {
 			return nil, err

@@ -125,9 +125,11 @@ func (s *Store) ownHome(a *rota.Account) string {
 }
 
 // owns reports whether an account's home is rota's own to create and delete,
-// rather than a directory the person chose.
+// rather than a directory the person chose: no ConfigDir, or one that is the
+// home rota reserves for the account by another path — through a link, or
+// a second spelling on a volume that ignores case.
 func (s *Store) owns(a *rota.Account) bool {
-	return a.ConfigDir == "" || realDir(a.ConfigDir) == realDir(s.ownHome(a))
+	return a.ConfigDir == "" || realDir(a.ConfigDir) == realDir(s.ownHome(a)) || sameDir(a.ConfigDir, s.ownHome(a))
 }
 
 // CheckHome refuses a directory an account names that would put it inside

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -116,7 +117,7 @@ func TestAHomeOnceOnTheStoredRouteShowingNoLoginWhileAliveIsHeld(t *testing.T) {
 
 // On a volume that ignores case, …/Shared and …/shared are one directory.
 // It is one home: a second account cannot be told it, two that were are not
-// launched there, and ~/.Claude is the person's own as ~/.claude is.
+// launched there, and a second spelling of rota's own homes is rota's.
 func TestOneDirectoryUnderTwoSpellingsIsOneHome(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
@@ -140,14 +141,13 @@ func TestOneDirectoryUnderTwoSpellingsIsOneHome(t *testing.T) {
 	if _, err := launchEnv(t, s, b); err == nil || !strings.Contains(err.Error(), a.String()) {
 		t.Fatalf("not launched there: %v", err)
 	}
-	home, _ := os.UserHomeDir()
-	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+	c := livingClaude(s, "uC")
+	c.ConfigDir = strings.ToUpper(s.homeRoot[:1]) + s.homeRoot[1:] + "/claude-" + strconv.Itoa(c.ID)
+	if err := os.MkdirAll(s.ownHome(c), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	c := livingClaude(s, "uC")
-	c.ConfigDir = filepath.Join(home, ".Claude")
-	if !s.personalClaude(c) || s.loginInHome(c) {
-		t.Fatal("~/.Claude is the person's own")
+	if !s.owns(c) || !s.loginInHome(c) {
+		t.Fatal("its own home under a second spelling is still the home rota keeps its login in")
 	}
 	if err := s.CheckHome(&rota.Account{ID: 99, Provider: "claude", ConfigDir: strings.ToUpper(s.homeRoot[:1]) + s.homeRoot[1:] + "/claude-1"}); err == nil {
 		t.Fatal("nor does a second spelling of rota's own homes get past the rule")
@@ -216,6 +216,30 @@ func TestWhoseDirectoryIsThePersonsIsToldDownNotGuessed(t *testing.T) {
 			if !slices.Contains(cmd.Env, claudeHomeVar+"="+c.handedDown) {
 				t.Fatalf("on the environment route too: %v", cmd.Env)
 			}
+			// And every other provider's launch says it as well: a rota
+			// started in a shell a codex session opened inherits that
+			// session's ROTA_ACCOUNT_ID and whatever CLAUDE_CONFIG_DIR the
+			// outer environment had, and still finds the person's own.
+			x := s.add("codex")
+			x.Token = rota.Token{Access: "c", Refresh: "rc", ExpiresAt: later(time.Hour)}
+			x.Extra = map[string]string{"id_token": "h.p.s"}
+			cmd, release, err = s.prepare(context.Background(), x, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			release()
+			nested := rota.Environ(os.Environ(), cmd)
+			if !slices.Contains(nested, claudeHomeVar+"="+c.handedDown) {
+				t.Fatalf("a codex launch tells it down too: %v", cmd.Env)
+			}
+			for _, e := range nested {
+				if k, v, _ := strings.Cut(e, "="); k == claudeHomeVar || k == "ROTA_ACCOUNT_ID" || k == "CLAUDE_CONFIG_DIR" {
+					t.Setenv(k, v)
+				}
+			}
+			if got := PersonalClaudeDir(); got != c.want {
+				t.Fatalf("a rota nested in a codex session: %q, want %q", got, c.want)
+			}
 		})
 	}
 }
@@ -249,109 +273,97 @@ func TestTheLoginInThePersonsOwnDirectoryIsNeverTouched(t *testing.T) {
 	}
 }
 
-// In a directory the person chose — not known to be theirs — a login rota
-// did not write is confirmed first, whatever is recorded. Somebody else's is
-// left exactly where it is, keychain item and file, and the account runs on
-// its own token beside it, said once; moving or removing the account leaves
-// it too. The account's own is taken, at the cost of one reading of the
-// profile. One nobody can confirm is the hold.
-func TestAChosenDirectorysLoginIsNeverReplacedUnlessItIsTheAccounts(t *testing.T) {
+// An account told a directory of the person's choosing runs on a token in
+// its environment, as in 1.2, whatever is in that directory — somebody's
+// login, its keychain item, a daemon, a window, a .claude.json, and a route
+// or a Remote Control setting an older store remembers. Launching it,
+// running it without its home, refreshing its expired token, listing,
+// maintaining, moving it to another such directory and removing it read no
+// credential store there, ask nothing of the keychain, write nothing, stop
+// nothing and change no .claude.json. Its own token is refreshed by rota as
+// it always was, and Remote Control is refused for it.
+func TestAChosenDirectoryRunsOnATokenAndRotaTouchesNothingThere(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
 	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) { f.refresh = refreshesTo("A-new", "R-new") })
 	k := fakeKeychain(t)
+	d := fakeDaemons(t)
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	dir := t.TempDir()
+	a.ConfigDir = dir
+	a.RemoteControl = true
+	a.Extra[routeKey] = routeStored
 	somebody := storeLogin("A-sb", "R-sb", later(5*time.Hour), "1888888888000")
+	svc := service(t, dir)
+	k.items[svc] = somebody
+	cred, cfg := filepath.Join(dir, ".credentials.json"), filepath.Join(dir, ".claude.json")
+	writeFile(t, cred, somebody)
+	writeFile(t, cfg, `{"theirs": 1}`)
+	hosted(t, dir, "daemon.lock", os.Getpid())
+	alive(t, dir, "sessions/1.json", os.Getpid())
+	expire(a)
+	ctx := context.Background()
 
-	t.Run("somebody else's", func(t *testing.T) {
-		f.set(func(f *anthropic) { f.profile = profileOf("A-sb", "u9") })
-		s := openTemp(t)
-		words := said(s)
-		a := livingClaude(s, "u1")
-		a.ConfigDir = t.TempDir()
-		a.StagedWritten() // whatever is recorded, it is not this login
-		svc := service(t, a.ConfigDir)
-		k.items[svc] = somebody
-		writeFile(t, filepath.Join(a.ConfigDir, ".credentials.json"), somebody)
-		env, err := launchEnv(t, s, a)
-		if err != nil || !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=A-u1") {
-			t.Fatalf("on its own token: %v %v", err, env)
-		}
-		if len(*words) != 1 || !strings.Contains((*words)[0], "another account's login") || !strings.Contains((*words)[0], "u9@x") {
-			t.Fatalf("said once: %q", *words)
-		}
-		if v, _ := k.item(svc); v != somebody || readFile(filepath.Join(a.ConfigDir, ".credentials.json")) != somebody {
-			t.Fatal("left exactly where it is")
-		}
-		next := t.TempDir()
-		if err := s.MoveHome(context.Background(), a, next); err != nil {
-			t.Fatal(err)
-		}
-		if v, _ := k.item(svc); v != somebody {
-			t.Fatal("a move leaves it")
-		}
-	})
-	t.Run("the account's own, rotated", func(t *testing.T) {
-		f.profiles.Store(0)
-		f.set(func(f *anthropic) { f.profile = profileOf("A-rot", "u1") })
-		s := openTemp(t)
-		a := livingClaude(s, "u1")
-		a.ConfigDir = t.TempDir()
-		if _, err := launchEnv(t, s, a); err != nil {
-			t.Fatal(err)
-		}
-		k.items[service(t, a.ConfigDir)] = storeLogin("A-rot", "R-rot", later(5*time.Hour), "1999999999000")
-		if _, err := launchEnv(t, s, a); err != nil {
-			t.Fatal(err)
-		}
-		if a.Token.Refresh != "R-rot" || f.profiles.Load() != 1 {
-			t.Fatalf("taken, once confirmed: %q %d", a.Token.Refresh, f.profiles.Load())
-		}
-	})
-	t.Run("one nobody can confirm", func(t *testing.T) {
-		f.set(func(f *anthropic) { f.profile = func(string) (int, any) { return 503, nil } })
-		s := openTemp(t)
-		a := livingClaude(s, "u1")
-		a.ConfigDir = t.TempDir()
-		k.items[service(t, a.ConfigDir)] = somebody
-		env, err := launchEnv(t, s, a)
-		if err != nil || hasVar(env, "CLAUDE_CODE_OAUTH_TOKEN") {
-			t.Fatalf("the hold joins it: %v %v", err, env)
-		}
-		if v, _ := k.item(service(t, a.ConfigDir)); v != somebody {
-			t.Fatal("and leaves it")
-		}
-	})
+	env, err := launchEnv(t, s, a)
+	if err != nil || !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=A-new") || !slices.Equal(configDirs(env), []string{dir}) {
+		t.Fatalf("on its own token, refreshed by rota, in its directory: %v %v", err, env)
+	}
+	if a.Token.Refresh != "R-new" || f.refreshes.Load() != 1 || f.profiles.Load() != 0 {
+		t.Fatalf("refreshed as it always was, nobody's login confirmed: %q %d %d", a.Token.Refresh, f.refreshes.Load(), f.profiles.Load())
+	}
+	cmd, release, err := s.prepare(ctx, a, false)
+	if err != nil || !slices.Contains(cmd.Env, "CLAUDE_CODE_OAUTH_TOKEN=A-new") {
+		t.Fatalf("and without its home: %v", err)
+	}
+	release()
+	s.Refresh(ctx, true, a)
+	s.Maintain(ctx)
+	if err := s.RemoteControlNow(a); !errors.Is(err, rota.ErrInvalidRequest) || !strings.Contains(err.Error(), "one you chose") {
+		t.Fatalf("no Remote Control there: %v", err)
+	}
+	other := t.TempDir()
+	if err := s.MoveHome(ctx, a, other); err != nil || a.ConfigDir != other {
+		t.Fatalf("moving between two such directories reads and removes nothing: %v", err)
+	}
+	if err := s.Remove(a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := k.asked(); len(got) != 0 {
+		t.Fatalf("nothing asked of the keychain: %v", got)
+	}
+	if v, _ := k.item(svc); v != somebody || readFile(cred) != somebody || readFile(cfg) != `{"theirs": 1}` {
+		t.Fatal("everything there is as it was")
+	}
+	if d.stops() != 0 {
+		t.Fatal("nothing stopped")
+	}
 }
 
 /* --------------------------------------------------------------- smaller --- */
 
-// Where rota keeps no login in a home — a home whose path names no keychain
-// item on macOS, or Windows — it has none to remove there, and nothing that
-// runs there holds one of rota's: removing or moving the account deletes no
-// credential file, and a move is not refused.
+// Where rota keeps no login in a home it made — a home whose path names no
+// keychain item, or Windows — nothing that runs there holds one of rota's:
+// moving the account is not refused, and deletes no credential file.
 func TestWhereRotaKeepsNoLoginItRemovesNone(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
-	fakeKeychain(t)
-	s := openTemp(t)
+	k := fakeKeychain(t)
+	s, err := Open(filepath.Join(t.TempDir(), "projét"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
 	a := livingClaude(s, "u1")
-	dir := filepath.Join(t.TempDir(), "projét")
-	a.ConfigDir = dir
-	writeFile(t, filepath.Join(dir, ".credentials.json"), storeLogin("A-x", "R-x", later(time.Hour), "1"))
-	alive(t, dir, "sessions/1.json", os.Getpid())
+	home := s.Home(a)
+	writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-x", "R-x", later(time.Hour), "1"))
+	alive(t, home, "sessions/1.json", os.Getpid())
 	if err := s.MoveHome(context.Background(), a, t.TempDir()); err != nil {
 		t.Fatalf("not refused: %v", err)
 	}
-	if readLogin2(t, dir) != "R-x" {
-		t.Fatal("a move deletes no credential file")
-	}
-	a.ConfigDir = dir
-	os.Remove(filepath.Join(dir, "sessions", "1.json"))
-	if err := s.Remove(a.ID); err != nil {
-		t.Fatal(err)
-	}
-	if readLogin2(t, a.ConfigDir) != "R-x" {
-		t.Fatal("no credential file deleted")
+	if readLogin2(t, home) != "R-x" || len(k.asked()) != 0 {
+		t.Fatal("a move deletes no credential file, and asks nothing")
 	}
 }
 
@@ -391,6 +403,36 @@ func TestASpentLoginRotaRefreshedAwayIsWrittenOverEvenWhileSomethingRuns(t *test
 	}
 	if readLogin2(t, s.Home(b)) != "R-u2-next" {
 		t.Fatal("the spent login is replaced")
+	}
+}
+
+// A look at the home does not erase what the spent-login write relies on.
+// rota refreshed and saved, and the write into the home never happened; a
+// listing read the home; then something started there. The launch still
+// knows the home holds the very login rota refreshed away, and writes the
+// successor over it.
+func TestALookAtTheHomeKeepsWhatTheSpentLoginWriteNeeds(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	fakeAnthropic(t)
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	if _, err := launchEnv(t, s, a); err != nil {
+		t.Fatal(err)
+	}
+	a.Token.Refresh = "R-u1-next" // refreshed and saved; the write never happened
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if errs := s.Refresh(context.Background(), true, a); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	alive(t, s.Home(a), "sessions/1.json", os.Getpid())
+	if _, err := launchEnv(t, s, a); err != nil {
+		t.Fatal(err)
+	}
+	if readLogin2(t, s.Home(a)) != "R-u1-next" {
+		t.Fatalf("the successor is written: %q", readLogin2(t, s.Home(a)))
 	}
 }
 
