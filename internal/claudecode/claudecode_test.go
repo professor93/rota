@@ -3,6 +3,7 @@ package claudecode
 import (
 	"context"
 	"errors"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -82,10 +83,15 @@ func TestTheKeychainIsReadAndDeletedAndNothingElse(t *testing.T) {
 	}
 }
 
-// Inside a test binary the real programs refuse to run at all.
-func TestTheRealRunnersRefuseInsideATest(t *testing.T) {
-	if _, _, err := runSecurity(context.Background(), "find-generic-password"); err == nil {
-		t.Fatal("security must not run from a test")
+// Inside a test binary the real programs never run: the keychain holds no
+// item, wherever one exists, and no daemon is stopped.
+func TestTheRealRunnersRunNothingInsideATest(t *testing.T) {
+	out, code, err := runSecurity(context.Background(), "find-generic-password", "-s", "anything")
+	if runtime.GOOS == "darwin" && (err != nil || code != Absent || len(out) != 0) {
+		t.Fatalf("an empty keychain: %q %d %v", out, code, err)
+	}
+	if runtime.GOOS != "darwin" && err == nil {
+		t.Fatal("there is no keychain to ask here")
 	}
 	if err := runDaemonStop(context.Background(), t.TempDir(), nil); !errors.Is(err, errInTest) {
 		t.Fatalf("claude must not run from a test: %v", err)

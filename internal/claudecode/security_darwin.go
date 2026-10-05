@@ -15,7 +15,11 @@ import (
 // who may read it, and the item is Claude Code's to write.
 func runSecurity(ctx context.Context, args ...string) ([]byte, int, error) {
 	if inTest() {
-		return nil, 0, errInTest
+		// A test binary sees an empty keychain and runs nothing: the
+		// keychain is a person's, and no test of this module or of a program
+		// built on it — which cannot reach this package to replace the
+		// runner — may read or delete an item there.
+		return nil, Absent, nil
 	}
 	out, err := exec.CommandContext(ctx, "/usr/bin/security", args...).Output()
 	var ee *exec.ExitError

@@ -5,11 +5,12 @@
 //
 // Both are other programs — /usr/bin/security and claude itself — so both
 // are reached through a function variable, and every test in the module
-// that could reach them replaces it. The real runners also refuse outright
-// inside a test binary. A test that forgot to stand in for them must fail
-// rather than read a real keychain or stop a real daemon: those are a
-// person's login and a person's background work, and no test is worth
-// either.
+// that could reach them replaces it. The real runners also run nothing
+// inside a test binary — the keychain answers that it holds no item, and
+// stopping a daemon fails — so a test that forgot to stand in for them, or a
+// test of a program built on rota, which cannot reach this package at all,
+// never reads a real keychain or stops a real daemon: those are a person's
+// login and a person's background work, and no test is worth either.
 package claudecode
 
 import (
