@@ -442,6 +442,7 @@ func unset(t *testing.T, names ...string) {
 func TestThePersonsOwnDirectoryIsTheOneToldDown(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // where Windows finds the home directory
 	inherited, told := t.TempDir(), t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", inherited)
 	a := &rota.Account{ID: 1, Provider: "claude"}
