@@ -1129,6 +1129,10 @@ func TestADaemonInAChosenDirectoryIsLeftAloneWhateverIsRemembered(t *testing.T) 
 // Removing a claude account stops its daemon first, waits for the home to go
 // quiet, and takes the keychain item before the directory.
 func TestRemovingAClaudeAccountStopsItsDaemonAndTakesTheKeychainItemFirst(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The daemon is still stopped there: TestRemovingStopsTheDaemonBeforeItAsksAboutTheClaim.
+		t.Skip("Windows keeps claude on a token in its environment, so its home holds no login and no keychain item to take first")
+	}
 	claudeWorld(t)
 	k := fakeKeychain(t)
 	d := fakeDaemons(t)

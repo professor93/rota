@@ -152,6 +152,9 @@ func TestTurningRemoteControlOffPutsTheCopyAsideAndOnBringsItBack(t *testing.T) 
 // While Claude Code runs in the home nothing is switched, either way, and
 // the person is told when the setting takes effect.
 func TestRemoteControlWaitsForTheHomeToBeQuiet(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps claude on a token in its environment, where Remote Control never works, so there is nothing for it to wait for")
+	}
 	src := personWorld(t)
 	s, a := claudeStore(t)
 	// A login Claude Code can keep, which Remote Control needs.

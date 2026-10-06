@@ -171,7 +171,9 @@ func TestARunWithoutItsHomeOnALongTokenAsksTheProviderForNothing(t *testing.T) {
 // A launch in the account's home runs on its own stored login, and an
 // expired one is refreshed first. When the provider refuses that refresh
 // for good, the login is dead — and the long token is the one exception, as
-// it is for any dead login: the run happens on it, and says so.
+// it is for any dead login: the run happens on it, and says so. Windows keeps
+// claude on a token in its environment, and a long token worth using is that
+// token from the start: nothing is refreshed first, so nothing dies.
 func TestALaunchWhoseLoginDiesOnRefreshFallsBackToItsLongToken(t *testing.T) {
 	f := &claudeFake{refuse: true}
 	newClaudeFake(t, f)
@@ -189,11 +191,17 @@ func TestALaunchWhoseLoginDiesOnRefreshFallsBackToItsLongToken(t *testing.T) {
 	if err != nil || !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=LONG-SECRET") {
 		t.Fatalf("the run goes ahead on the long token: %v %v", err, env)
 	}
-	if n := f.refreshes.Load(); n != 1 || !a.Dead {
-		t.Fatalf("refreshes=%d dead=%v", n, a.Dead)
-	}
-	if len(said) == 0 || !strings.Contains(said[0], "long-lived token") {
-		t.Fatalf("and says it: %q", said)
+	if runtime.GOOS == "windows" {
+		if n := f.refreshes.Load(); n != 0 || a.Dead {
+			t.Fatalf("the long token at once, no refresh: refreshes=%d dead=%v", n, a.Dead)
+		}
+	} else {
+		if n := f.refreshes.Load(); n != 1 || !a.Dead {
+			t.Fatalf("refreshes=%d dead=%v", n, a.Dead)
+		}
+		if len(said) == 0 || !strings.Contains(said[0], "long-lived token") {
+			t.Fatalf("and says it: %q", said)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(s.Home(a), ".credentials.json")); !os.IsNotExist(err) {
 		t.Fatalf("a dead login is never written into the home: %v", err)

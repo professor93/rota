@@ -134,11 +134,19 @@ func TestRunWithRemoteControlRefusesAnAccountNotOnItsOwnLogin(t *testing.T) {
 
 // `rota set --remote-control on|off` is the setting itself; --clear resets
 // it with the rest; and while Claude Code runs in the home rota says at once
-// that it waits.
+// that it waits. Windows keeps Claude Code on a token in its environment,
+// which Remote Control refuses: the setting is kept there too, and rota says
+// at once, every time it is turned on, that it cannot work on that platform.
 func TestSetRemoteControl(t *testing.T) {
+	const onToken = "warning: not supported by this provider: Remote Control needs claude/a@b.c's own stored login, " +
+		"and it does not run on one: this platform keeps Claude Code on a token in its environment\n"
+	quiet, waits := "", "takes effect when the account's running sessions end"
+	if runtime.GOOS == "windows" {
+		quiet, waits = onToken, onToken
+	}
 	rotaHome, home := seedLiving(t, "")
 	out, errOut, code := call(t, "set", "1", "--remote-control", "on")
-	if code != 0 || !strings.Contains(out, "remote      on") || errOut != "" {
+	if code != 0 || !strings.Contains(out, "remote      on") || errOut != quiet {
 		t.Fatalf("%d %q %q", code, out, errOut)
 	}
 	if storedAccount(t, rotaHome)["remoteControl"] != true {
@@ -155,7 +163,7 @@ func TestSetRemoteControl(t *testing.T) {
 		t.Fatal("--clear resets it")
 	}
 	liveIn(t, home)
-	if _, errOut, _ := call(t, "set", "1", "--remote-control", "on"); !strings.Contains(errOut, "takes effect when the account's running sessions end") {
+	if _, errOut, _ := call(t, "set", "1", "--remote-control", "on"); !strings.Contains(errOut, waits) {
 		t.Fatalf("said at once: %q", errOut)
 	}
 	if _, errOut, code := call(t, "set", "1", "--remote-control", "maybe"); code == 0 || !strings.Contains(errOut, "on or off") {

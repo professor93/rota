@@ -1207,6 +1207,9 @@ func TestLoginIsOneEndpointUnderTwoNames(t *testing.T) {
 // A claude account's config_dir does not change under a running Claude Code:
 // its processes share the login in the present home.
 func TestAConfigDirDoesNotChangeUnderARunningClaudeCode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps claude on a token in its environment, so no login in the home is shared by what runs there and the directory may change")
+	}
 	h := newHarness(t, Options{})
 	home := filepath.Join(h.dir, "homes", "claude-1")
 	if err := os.MkdirAll(filepath.Join(home, "sessions"), 0o700); err != nil {
