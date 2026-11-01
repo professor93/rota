@@ -45,9 +45,10 @@ import (
 // The one file of a Claude Code configuration directory this package reads
 // and writes, and the entry in it that is the login. On macOS Claude Code
 // keeps the credential store in the keychain first and in this file only
-// when the keychain item is absent; an application reading a home there
-// hands Adopt an fs.FS that answers .credentials.json with the keychain
-// item. rota's store does.
+// when the keychain item is absent or refused a write; an application
+// reading a home there hands Adopt an fs.FS that answers .credentials.json
+// with the keychain item, or with the file when that is the newer login.
+// rota's store does.
 const (
 	claudeCredentials = ".credentials.json"
 	claudeOAuthKey    = "claudeAiOauth"

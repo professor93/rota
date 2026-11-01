@@ -2268,7 +2268,10 @@ home whose daemon has given up is the one exception: see *Stranded*, below.
   first, then the keychain item is removed, then the file is renamed into
   place — a removal that fails changes nothing. Claude Code moves the login
   back into the keychain on its next refresh, and rota never writes a
-  keychain item. A file left beside a keychain item is stale and is removed.
+  keychain item. A file left beside a keychain item is stale and is removed,
+  unless its login is the newer of the two: when the keychain refuses a write
+  Claude Code keeps the login in the file, so that is the one rota reads, and
+  the older item is removed instead, when nothing is alive.
   With Claude Code alive in the home, a launch joins the login that is there
   and rota says when the account's current one takes over — when those
   sessions end, or at once in one where you run `/login`; and when the home

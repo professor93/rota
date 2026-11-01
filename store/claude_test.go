@@ -801,6 +801,122 @@ func TestAStaleFileBesideAKeychainItemIsRemoved(t *testing.T) {
 	}
 }
 
+// A file beside a keychain item is not always the stale one: when the keychain
+// refuses a write Claude Code keeps the login in the file instead, and a failed
+// delete can leave the older item behind. The newer login is the one the
+// provider still honours, so that is what adoption takes; and a quiet home is
+// left so that Claude Code reads it too, with the file kept and the item gone.
+func TestAFileNewerThanTheKeychainItemIsTheLogin(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	k := fakeKeychain(t)
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	home := s.Home(a)
+	svc := service(t, home)
+	a.Token.ExpiresAt = later(-2 * time.Hour)
+	a.StagedWritten()
+	k.items[svc] = storeLogin("A-u1", "R-u1", a.Token.ExpiresAt, "1999999999000")
+	writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-new", "R-new", later(6*time.Hour), "1999999999000"))
+	if _, err := launchEnv(t, s, a); err != nil {
+		t.Fatal(err)
+	}
+	if a.Token.Refresh != "R-new" || !a.StagedCurrent() {
+		t.Fatalf("the newer login is taken: %+v", a.Token)
+	}
+	if r, _ := readLogin(t, home); r != "R-new" {
+		t.Fatalf("the file stays: %q", r)
+	}
+	if _, ok := k.item(svc); ok {
+		t.Fatal("and the older item goes, or Claude Code would go on reading it")
+	}
+}
+
+// Only a login beats the item: a file holding a blanked login, or nothing that
+// can be read, is not newer whatever it says; nor is any file beside an item
+// Claude Code blanked, because that is what it did to the login it was using.
+func TestOnlyALoginInTheFileBeatsTheKeychainItem(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	for _, c := range []struct {
+		what       string
+		file, item func(a *rota.Account) string
+		refresh    string
+	}{
+		{"as old as the item",
+			func(a *rota.Account) string { return storeLogin("A-f", "R-f", a.Token.ExpiresAt, "1999999999000") },
+			func(a *rota.Account) string { return storeLogin("A-u1", "R-u1", a.Token.ExpiresAt, "1999999999000") }, "R-u1"},
+		{"a blanked login that claims to be newer",
+			func(a *rota.Account) string { return storeLogin("", "", later(9*time.Hour), "1999999999000") },
+			func(a *rota.Account) string { return storeLogin("A-u1", "R-u1", a.Token.ExpiresAt, "1999999999000") }, "R-u1"},
+		{"half a file",
+			func(a *rota.Account) string { return `{"claudeAiOauth":{"refreshToken":"R-f"` },
+			func(a *rota.Account) string { return storeLogin("A-u1", "R-u1", a.Token.ExpiresAt, "1999999999000") }, "R-u1"},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			k := fakeKeychain(t)
+			s := openTemp(t)
+			a := livingClaude(s, "u1")
+			home := s.Home(a)
+			svc := service(t, home)
+			a.Staged = ""
+			k.items[svc] = c.item(a)
+			writeFile(t, filepath.Join(home, ".credentials.json"), c.file(a))
+			if _, err := launchEnv(t, s, a); err != nil {
+				t.Fatal(err)
+			}
+			if a.Token.Refresh != c.refresh {
+				t.Fatalf("the item is the login: %q", a.Token.Refresh)
+			}
+			if _, err := os.Stat(filepath.Join(home, ".credentials.json")); !os.IsNotExist(err) {
+				t.Fatalf("the file is gone: %v", err)
+			}
+			if _, ok := k.item(svc); !ok {
+				t.Fatal("and the item stays")
+			}
+		})
+	}
+	t.Run("beside an item Claude Code blanked", func(t *testing.T) {
+		k := fakeKeychain(t)
+		s := openTemp(t)
+		a := livingClaude(s, "u1")
+		home := s.Home(a)
+		a.StagedWritten()
+		k.items[service(t, home)] = `{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}`
+		writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-old", "R-old", later(time.Hour), "1999999999000"))
+		if err := s.claudeHome(a, false).adopt(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if !a.Dead {
+			t.Fatal("the login was refused, and an old file does not undo that")
+		}
+	})
+}
+
+// However the login was read, a write has to get the item out of the way, or
+// Claude Code goes on reading it.
+func TestAWriteRemovesTheItemEvenWhenTheFileWasTheNewerCopy(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	k := fakeKeychain(t)
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	home := s.Home(a)
+	svc := service(t, home)
+	k.items[svc] = storeLogin("A-item", "R-item", later(-2*time.Hour), "1999999999000")
+	writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-file", "R-file", later(time.Hour), "1999999999000"))
+	a.StagedSuperseded() // a fresh login with rota, say: whatever is there is older
+	if _, err := launchEnv(t, s, a); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := readLogin(t, home); r != "R-u1" {
+		t.Fatalf("the account's login is written: %q", r)
+	}
+	if _, ok := k.item(svc); ok {
+		t.Fatal("and the item is gone")
+	}
+}
+
 // A home whose path is not plain ASCII cannot take the stored route on macOS
 // at all: the keychain item Claude Code would keep its login in cannot be
 // named, so rota could not follow it. It runs on a token, says so once, asks

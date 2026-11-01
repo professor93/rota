@@ -482,9 +482,14 @@ func keychainContext() (context.Context, context.CancelFunc) {
 }
 
 // readStore reads the home's credential store the way Claude Code does: the
-// keychain item when there is one, and the file only when there is not. A
-// keychain that cannot be read is errKeychain; a file that cannot be read
-// is the read's own error, which adoption takes for an unreadable store.
+// keychain item when there is one, and the file only when there is not —
+// except that a login in the file newer than the item's is read instead. When
+// the keychain refuses a write Claude Code keeps the login in the file, and an
+// item it could not delete is left behind, older, holding a refresh token the
+// provider has replaced. inKeychain says an item exists, whichever was read,
+// because a write has to get it out of the way either way. A keychain that
+// cannot be read is errKeychain; a file that cannot be read is the read's own
+// error, which adoption takes for an unreadable store.
 func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
 	if svc, ok := h.service(); ok {
 		ctx, cancel := keychainContext()
@@ -494,6 +499,9 @@ func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
 			return nil, false, fmt.Errorf("%w: the item %q that holds its login: %v", errKeychain, svc, err)
 		}
 		if found {
+			if file, err := os.ReadFile(filepath.Join(h.home, claudeCredentials)); err == nil && fileIsNewer(file, raw) {
+				return file, true, nil
+			}
 			return raw, true, nil
 		}
 	}
@@ -502,6 +510,27 @@ func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
 		return nil, false, nil
 	}
 	return raw, false, err
+}
+
+// fileIsNewer reports whether a credential file holds a later login than the
+// keychain item beside it. Only a login can be: an item Claude Code blanked
+// says the login was refused, whatever is in the file, and a file with no
+// refresh token or no expiry has nothing to offer.
+func fileIsNewer(file, item []byte) bool {
+	expiry := func(raw []byte) float64 {
+		var store struct {
+			Login struct {
+				Refresh string  `json:"refreshToken"`
+				Expires float64 `json:"expiresAt"`
+			} `json:"claudeAiOauth"`
+		}
+		if rota.UnmarshalLenient(raw, &store) != nil || store.Login.Refresh == "" {
+			return 0
+		}
+		return store.Login.Expires
+	}
+	held := expiry(item)
+	return held > 0 && expiry(file) > held
 }
 
 // read is the home as adoption sees it: its files, with the store answered
@@ -880,10 +909,13 @@ func (h *claudeHome) seed(files []rota.StagedFile) error {
 	return nil
 }
 
-// tidy removes a credential file left beside a keychain item. Claude Code
-// reads the item and never the file while both exist, so the file is stale
-// by definition — and a stale one has pinned an old token in live sessions
-// before. Only when nothing is alive, and never in the hold.
+// tidy leaves one copy where a credential file sits beside a keychain item.
+// Claude Code reads the item and never the file while both exist, so a file no
+// newer than the item is stale, and a stale one has pinned an old token in live
+// sessions before: it goes. A newer file is the login, written there because
+// the keychain refused it, so it stays and the item goes instead, or Claude
+// Code would go on presenting a refresh token that was replaced. Only when
+// nothing is alive, and never in the hold.
 func (h *claudeHome) tidy() {
 	svc, ok := h.service()
 	if !ok || h.hold != "" {
@@ -895,9 +927,15 @@ func (h *claudeHome) tidy() {
 	}
 	ctx, cancel := keychainContext()
 	defer cancel()
-	if _, found, err := claudecode.Read(ctx, svc); err == nil && found {
-		_ = os.Remove(path)
+	item, found, err := claudecode.Read(ctx, svc)
+	if err != nil || !found {
+		return
 	}
+	if file, err := os.ReadFile(path); err == nil && fileIsNewer(file, item) {
+		_ = claudecode.Delete(ctx, svc)
+		return
+	}
+	_ = os.Remove(path)
 }
 
 /* ------------------------------------------------------------- launching --- */
