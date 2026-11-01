@@ -44,13 +44,19 @@ func readyPID(t *testing.T, path string) int {
 	return 0
 }
 
-// gone waits a moment for a process to have left the process table: a killed
-// orphan is reaped by whoever adopted it, a little later than it dies.
+// gone waits a moment for a process to have died. A killed orphan is reaped by
+// whoever adopted it, a little later than it dies, and where nothing reaps, as
+// under a test binary that is a container's first process, it stays a zombie.
 func gone(pid int) bool {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
 			return true
+		}
+		if raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil {
+			if i := bytes.LastIndexByte(raw, ')'); i > 0 && i+2 < len(raw) && raw[i+2] == 'Z' {
+				return true
+			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
