@@ -98,7 +98,7 @@ const (
 // confinement — is the spec Run would have used, checked the same way.
 //
 // The caller owns the session until it ends: Close shuts stdin, Wait returns
-// the result, and cancelling ctx kills the CLI and its children. A consumer
+// the result, and cancelling ctx stops the CLI and its children. A consumer
 // must drain Notices, or notices are dropped.
 func Start(ctx context.Context, a *Account, home string, cmd *Command, spec Spec, lim *Limits, events io.Writer) (*Session, error) {
 	var missing []string
@@ -135,8 +135,9 @@ func Start(ctx context.Context, a *Account, home string, cmd *Command, spec Spec
 		// Nothing was ever said to this child, so there is no result to keep:
 		// stop it, let go of what the launch took, and report the failure.
 		_ = s.hand(nil) // ends the writer, which owns stdin
-		killGroup(l.child)
+		l.halt.stop()
 		_ = l.child.Wait()
+		l.halt.settle()
 		l.stop()
 		l.done()
 		spec.cleanup()

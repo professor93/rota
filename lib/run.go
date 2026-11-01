@@ -1398,7 +1398,7 @@ func (s *Spec) cleanup() {
 // other door. Every event line the CLI
 // prints is copied to events as it arrives (pass nil to discard, or an
 // http.ResponseWriter to stream), and the terminal result event is parsed
-// into the returned Result. Cancelling ctx kills the CLI, which is how a
+// into the returned Result. Cancelling ctx stops the CLI, which is how a
 // server stops work when its client goes away.
 //
 // A nil cmd means rota stages the CLI itself, which is what a caller with
@@ -1446,8 +1446,10 @@ type launched struct {
 	res    *Result
 	cp     caps
 	start  time.Time
-	// stop cancels the kill-on-cancel hook; done releases what the launch
-	// took — the timeout, the hermetic config directory.
+	// halt stops the CLI; stop cancels the hook that does so on cancel; done
+	// releases what the launch took — the timeout, the hermetic config
+	// directory.
+	halt *stopper
 	stop func() bool
 	done func()
 }
@@ -1552,13 +1554,14 @@ func launch(ctx context.Context, a *Account, home string, cmd *Command, spec *Sp
 	cp := lim.caps()
 	stderr := &tailBuffer{limit: cp.stderr}
 	child.Stderr = stderr
-	// Kill the whole group: these CLIs spawn helpers that would otherwise
+	// Stop the whole group: these CLIs spawn helpers that would otherwise
 	// outlive a cancelled request.
 	setPgid(child)
+	halt := newStopper(child)
 	if err := child.Start(); err != nil {
 		return fail(err)
 	}
-	stop := context.AfterFunc(ctx, func() { killGroup(child) })
+	stop := context.AfterFunc(ctx, halt.stop)
 
 	res := &Result{Account: a.ID, Provider: a.Provider, Model: pl.model, Effort: pl.effort}
 	if spec.IncludeArgv {
@@ -1574,7 +1577,7 @@ func launch(ctx context.Context, a *Account, home string, cmd *Command, spec *Sp
 	}
 	return &launched{
 		ctx: ctx, child: child, stdin: stdin, stdout: stdout, stderr: stderr,
-		res: res, cp: cp, start: time.Now(), stop: stop, done: done,
+		res: res, cp: cp, start: time.Now(), halt: halt, stop: stop, done: done,
 	}, nil
 }
 
@@ -1585,15 +1588,16 @@ func finishRun(l *launched, scanErr error) (*Result, error) {
 	if errors.Is(scanErr, bufio.ErrTooLong) {
 		// One event outgrew the line cap: a bound was hit, not a failure.
 		res.Truncated, scanErr = true, nil
-		killGroup(child)
+		l.halt.stop()
 		_, _ = io.Copy(io.Discard, l.stdout)
 	} else if scanErr != nil || res.Truncated {
 		// Nobody is reading stdout any more, and a child that fills its
 		// pipe blocks for ever — Wait would never return. Stop it.
-		killGroup(child)
+		l.halt.stop()
 		_, _ = io.Copy(io.Discard, l.stdout)
 	}
 	waitErr := child.Wait()
+	l.halt.settle()
 	res.DurationMS = time.Since(l.start).Milliseconds()
 	res.Stderr = strings.TrimSpace(l.stderr.String())
 	if l.stderr.dropped > 0 {

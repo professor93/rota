@@ -92,7 +92,7 @@ func (s *Store) mayLaunch(a *rota.Account) error {
 // What this call does persist is what it changed itself, before the CLI
 // started: a token it refreshed, and whatever staging adopted.
 //
-// Cancelling ctx kills the CLI; lim caps what the spec may ask for, and may
+// Cancelling ctx stops the CLI; lim caps what the spec may ask for, and may
 // be nil.
 //
 // An account whose CLI owns that file may run only once at a time, and a

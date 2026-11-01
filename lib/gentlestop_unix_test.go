@@ -1,0 +1,242 @@
+//go:build unix
+
+package rota
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/professor93/rota/internal/fakecli"
+)
+
+// graced makes the kill come after d, for as long as the test runs.
+func graced(t *testing.T, d time.Duration) {
+	t.Helper()
+	old := killGrace
+	killGrace = d
+	t.Cleanup(func() { killGrace = old })
+}
+
+// readyPID waits for a fake to say it is up and returns its pid.
+func readyPID(t *testing.T, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return pid
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("%s never came up", path)
+	return 0
+}
+
+// gone waits a moment for a process to have left the process table: a killed
+// orphan is reaped by whoever adopted it, a little later than it dies.
+func gone(pid int) bool {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if errors.Is(syscall.Kill(pid, 0), syscall.ESRCH) {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
+
+func fakeRun(ctx context.Context, bin string) (*Result, error) {
+	a := &Account{ID: 1, Provider: "claude"}
+	a.Token.Access = "tok"
+	var out bytes.Buffer
+	return Run(ctx, a, "", &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}},
+		Spec{Prompt: "p", flavorOverride: "claude"}, nil, &out)
+}
+
+// Cancelling a run asks the CLI to stop before anything kills it. Claude Code
+// rotates its refresh token, and a process killed between the provider
+// accepting a refresh and the store saving it destroys the login for the whole
+// home. One that shuts down when asked gets to, and the run is not held up by
+// the grace it did not need.
+func TestACancelledRunLetsItsCLIStopByItself(t *testing.T) {
+	dir := t.TempDir()
+	ready, stopped := filepath.Join(dir, "ready"), filepath.Join(dir, "stopped")
+	bin := fakecli.Install(t, dir, "polite-cli", fakecli.Spec{Term: "exit", TermTouch: stopped, Ready: ready, Sleep: "30s"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type outcome struct {
+		res *Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := fakeRun(ctx, bin)
+		done <- outcome{res, err}
+	}()
+	readyPID(t, ready)
+	start := time.Now()
+	cancel()
+	o := <-done
+	if took := time.Since(start); took >= killGrace {
+		t.Fatalf("a CLI that stops when asked waits for nothing: %v", took)
+	}
+	if !errors.Is(o.err, context.Canceled) {
+		t.Fatalf("a cancelled run says so: %v", o.err)
+	}
+	if _, err := os.Stat(stopped); err != nil {
+		t.Fatalf("the CLI got to shut down: %v", err)
+	}
+	if o.res == nil || o.res.ExitCode != 0 {
+		t.Fatalf("and exited by itself: %+v", o.res)
+	}
+}
+
+// One that takes no notice is killed once the grace is over, and the run ends
+// then rather than never.
+func TestACancelledRunKillsACLIThatIgnoresTheAsking(t *testing.T) {
+	graced(t, 300*time.Millisecond)
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	bin := fakecli.Install(t, dir, "deaf-cli", fakecli.Spec{Term: "ignore", Ready: ready, Sleep: "30s"})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := fakeRun(ctx, bin)
+		done <- err
+	}()
+	pid := readyPID(t, ready)
+	start := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("a cancelled run says so: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a CLI that ignores the asking must not hold the run")
+	}
+	if took := time.Since(start); took < killGrace {
+		t.Fatalf("it had its grace first: %v", took)
+	}
+	if !gone(pid) {
+		t.Fatal("and is dead")
+	}
+}
+
+// The asking goes to the group, so a helper hears it too, and a helper that
+// stays behind after the CLI has gone is killed when the grace is over: the
+// run still leaves nothing running.
+func TestAStopReachesTheHelpersInTheGroup(t *testing.T) {
+	graced(t, 300*time.Millisecond)
+	dir := t.TempDir()
+	heard, deafReady, ready := filepath.Join(dir, "heard"), filepath.Join(dir, "deaf-ready"), filepath.Join(dir, "ready")
+	politeReady := filepath.Join(dir, "polite-ready")
+	polite := fakecli.Install(t, dir, "polite-helper", fakecli.Spec{Term: "exit", TermTouch: heard, Ready: politeReady, Sleep: "30s"})
+	deaf := fakecli.Install(t, dir, "deaf-helper", fakecli.Spec{Term: "ignore", Ready: deafReady, Sleep: "30s", Spawn: polite})
+	bin := fakecli.Install(t, dir, "parent-cli", fakecli.Spec{Term: "exit", TermTouch: filepath.Join(dir, "parent"), Ready: ready, Sleep: "30s", Spawn: deaf})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := fakeRun(ctx, bin)
+		done <- err
+	}()
+	readyPID(t, ready)
+	helper := readyPID(t, deafReady)
+	readyPID(t, politeReady)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run ends")
+	}
+	if !gone(helper) {
+		t.Fatal("a helper that ignored the asking is gone when the run is over")
+	}
+	if _, err := os.Stat(heard); err != nil {
+		t.Fatalf("and one that heard it stopped by itself: %v", err)
+	}
+}
+
+// Stopping twice asks once and cannot deadlock Wait, and a stop that comes
+// after the CLI was waited for signals nothing: that pid is no longer ours.
+func TestAStopAsksOnceAndCannotHoldUpWait(t *testing.T) {
+	graced(t, 200*time.Millisecond)
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	bin := fakecli.Install(t, dir, "deaf-cli", fakecli.Spec{Term: "ignore", Ready: ready, Sleep: "30s"})
+	c := exec.CommandContext(context.Background(), bin)
+	setPgid(c)
+	halt := newStopper(c)
+	if err := c.Start(); err != nil {
+		t.Fatal(err)
+	}
+	readyPID(t, ready)
+	halt.stop()
+	armed := halt.kill
+	halt.stop()
+	if halt.kill != armed {
+		t.Fatal("one kill, however often it is asked for")
+	}
+	done := make(chan struct{})
+	go func() {
+		_ = c.Wait()
+		halt.settle()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Wait must end")
+	}
+	halt.stop()
+	if !c.ProcessState.Exited() && c.ProcessState.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+		t.Fatalf("killed: %v", c.ProcessState)
+	}
+
+	quiet := newStopper(exec.CommandContext(context.Background(), bin))
+	quiet.settle()
+	quiet.stop() // never started, and already over: nothing to signal
+}
+
+// A run that outgrows a bound has its CLI stopped too, and a CLI that neither
+// listens nor stops writing cannot pin it: what it still prints is drained
+// until the kill.
+func TestARunThatHitsABoundEndsEvenIfItsCLIIgnoresTheAsking(t *testing.T) {
+	graced(t, 300*time.Millisecond)
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	bin := fakecli.Install(t, dir, "loud-cli", fakecli.Spec{Term: "ignore", Ready: ready,
+		Stdout: []string{strings.Repeat("x", 4096), "{{sleep:30s}}"}})
+	a := &Account{ID: 1, Provider: "claude"}
+	a.Token.Access = "tok"
+	var out bytes.Buffer
+	done := make(chan error, 1)
+	go func() {
+		_, err := Run(context.Background(), a, "", &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}},
+			Spec{Prompt: "p", flavorOverride: "claude"}, &Limits{MaxBufferedOutput: 1024}, &out)
+		done <- err
+	}()
+	pid := readyPID(t, ready)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the run ends")
+	}
+	if !gone(pid) {
+		t.Fatal("and the CLI with it")
+	}
+}

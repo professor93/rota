@@ -14,12 +14,15 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -62,6 +65,17 @@ type Spec struct {
 	// mid-turn can then prove what happened to them instead of racing a
 	// timer. Later turns are answered as they come.
 	EchoHold int `json:"echo_hold,omitempty"`
+	// Term is what the fake does about SIGTERM. "exit" finishes as a CLI
+	// shutting down cleanly does: it creates TermTouch and exits with Exit.
+	// "ignore" takes no notice. Empty leaves it to the runtime, which dies.
+	Term      string `json:"term,omitempty"`
+	TermTouch string `json:"term_touch,omitempty"`
+	// Spawn is the path of another fake to start and leave running, in the
+	// fake's own process group, as a CLI starts a helper.
+	Spawn string `json:"spawn,omitempty"`
+	// Ready names a file the fake writes its pid to once Term and Spawn are
+	// in force, so a test can signal it without racing its start.
+	Ready string `json:"ready,omitempty"`
 }
 
 // Result is a Spec that answers as the claude CLI does in print mode: one
@@ -158,6 +172,29 @@ func Maybe() {
 }
 
 func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	switch spec.Term {
+	case "ignore":
+		signal.Ignore(syscall.SIGTERM)
+	case "exit":
+		term := make(chan os.Signal, 1)
+		signal.Notify(term, syscall.SIGTERM)
+		go func() {
+			<-term
+			_ = os.WriteFile(spec.TermTouch, nil, 0o600)
+			os.Exit(spec.Exit)
+		}()
+	}
+	if spec.Spawn != "" {
+		// Nothing of this fake's is passed on, so the helper holds no pipe of
+		// the run's open: only the group keeps it within reach.
+		if err := exec.Command(spec.Spawn).Start(); err != nil {
+			fmt.Fprintln(stderr, "fake cli:", err)
+			return 70
+		}
+	}
+	if spec.Ready != "" {
+		_ = os.WriteFile(spec.Ready, []byte(strconv.Itoa(os.Getpid())), 0o600)
+	}
 	if spec.Tty {
 		return atty(spec, stdin, stdout)
 	}

@@ -616,7 +616,10 @@ out, or name the account.
 
 `{"stream": true}` switches the reply to Server-Sent Events; ask for
 `Accept: application/x-ndjson` to get one JSON object per line instead.
-Closing the connection kills the CLI and everything it started. What travels
+Closing the connection stops the CLI and everything it started: on Linux and
+macOS it is asked with SIGTERM and killed three seconds later if it has not
+gone, because Claude Code rotates its refresh token and a process killed in the
+middle of saving one loses the login. What travels
 down it is rota's vocabulary, not the vendor's — see below.
 
 Files can travel with the request — either `"files": [{"path":"a.txt",
