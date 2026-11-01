@@ -168,17 +168,17 @@ func TestAHomeIsStrandedOnlyWhenEverythingSaysSo(t *testing.T) {
 		}, false},
 		{"its lock cannot be read", func(t *testing.T, s *Store, a *rota.Account, home string) {
 			writeFile(t, filepath.Join(home, "daemon.lock"), `{"pid":`)
-		}, false},
+		}, true},
 		{"a window is open beside it", func(t *testing.T, s *Store, a *rota.Account, home string) {
 			alive(t, home, "sessions/1.json", os.Getpid())
-		}, false},
+		}, true},
 		{"another rota run holds the account", func(t *testing.T, s *Store, a *rota.Account, home string) {
 			release, ok := s.holdRun(a)
 			if !ok {
 				t.Fatal("the claim")
 			}
 			t.Cleanup(release)
-		}, false},
+		}, true},
 		{"only what it hosts is beside it", func(t *testing.T, s *Store, a *rota.Account, home string) {
 			hosted(t, home, "sessions/1.json", os.Getpid())
 		}, true},
@@ -264,9 +264,9 @@ func TestAStaleStatusFileDoesNothing(t *testing.T) {
 	}
 }
 
-// The rule stands everywhere else: with a window open beside the daemon, that
-// window is a refresher that has not given up, and nothing changes.
-func TestAWindowBesideAGivenUpDaemonKeepsTheHomeItsOwn(t *testing.T) {
+// The rule stands everywhere else: a window beside a daemon that has not given
+// up on this token keeps the home its own, however expired the token.
+func TestAWindowBesideADaemonThatHasNotGivenUpKeepsTheHomeItsOwn(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
 	f := fakeAnthropic(t)
@@ -274,6 +274,7 @@ func TestAWindowBesideAGivenUpDaemonKeepsTheHomeItsOwn(t *testing.T) {
 	s := openTemp(t)
 	a := livingClaude(s, "u1")
 	home := stranded(t, s, a)
+	os.Remove(filepath.Join(home, "daemon-auth-status.json"))
 	alive(t, home, "sessions/1.json", os.Getpid())
 	s.Maintain(context.Background())
 	s.Refresh(context.Background(), true, a)
@@ -535,7 +536,7 @@ func TestARescueReadsTheHomeAgainOnceItHoldsTheLock(t *testing.T) {
 	home := stranded(t, s, a)
 	h := looked(t, s, a)
 	writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-own", "R-own", later(8*time.Hour), "1999999999000"))
-	if _, err := h.renew(context.Background()); err != nil {
+	if _, err := h.mend(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if f.refreshes.Load() != 0 || a.Token.Refresh != "R-own" {

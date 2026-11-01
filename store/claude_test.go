@@ -883,12 +883,12 @@ func TestOnlyALoginInTheFileBeatsTheKeychainItem(t *testing.T) {
 		home := s.Home(a)
 		a.StagedWritten()
 		k.items[service(t, home)] = `{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}`
-		writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-old", "R-old", later(time.Hour), "1999999999000"))
+		writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-new", "R-new", later(2*time.Hour), "1999999999000"))
 		if err := s.claudeHome(a, false).adopt(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if !a.Dead {
-			t.Fatal("the login was refused, and an old file does not undo that")
+		if a.Dead || a.Token.Refresh != "R-new" {
+			t.Fatalf("a blanked item is older than a file that holds a login: %v %q", a.Dead, a.Token.Refresh)
 		}
 	})
 }

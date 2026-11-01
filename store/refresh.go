@@ -25,8 +25,9 @@ import (
 // a dead account in again inside it. Its usage is then read with the access
 // token it has, while Claude Code runs or not — reading usage spends
 // nothing. Only an expired token needs a refresh, and that waits for the
-// home to be quiet or stranded, and out of the hold; until then the account
-// keeps its last reading.
+// home to be quiet and out of the hold; until then the account keeps its last
+// reading. What a home is owed although something is alive there comes first
+// and has nothing to do with readings: see Rescue.
 //
 // A store whose lock was released — a run has started since it was opened —
 // rotates nothing at all: no refresh, no claim, nothing written into a home.
@@ -84,21 +85,14 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		a.Quota, a.QuotaAt = q, rota.NowMS()
 		report(true, nil)
 	}
+	// Before any worker starts, because a rescue saves the store, and a save
+	// reads every account.
+	homes := s.lookIn(ctx, accounts, collect, report)
 	for _, a := range accounts {
 		shared := rota.SharedHome(a.Provider)
-		var h *claudeHome
-		if shared && s.loginInHome(a) {
-			// A store without its lock tries no claim at all — even a moment's
-			// exclusive try can refuse a launch's shared one — and takes the
-			// home for busy instead.
-			h = s.claudeHome(a, s.released || s.claimed(a))
-			h.warn = collect
-			before := snapshot(a)
-			if err := h.adopt(ctx); err != nil {
-				report(false, err)
-				continue
-			}
-			report(before.differs(a), nil)
+		h, kept := homes[a]
+		if kept && h == nil {
+			continue // its home could not be read, which is reported
 		}
 		if a.Dead || !rota.Metered(a.Provider) {
 			continue
@@ -127,21 +121,12 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 				q, err := rota.Usage(ctx, a)
 				reading(a, q, err)
 			}()
-		case s.released, h != nil && h.hold != "":
+		case s.released, h != nil && (h.hold != "" || h.blanked):
 			// Nothing may rotate here; the account keeps its last reading.
 		case h != nil:
-			// Expired: a refresh, which only a quiet home may have, or a
-			// stranded one. The claim is kept until the new login is in the
-			// home. A stranded home has none to give, its daemon being alive:
-			// the store's lock already keeps out a second rota, and rescue
-			// holds off Claude Code in its place.
-			var release func()
-			var ok bool
-			if h.stranded() {
-				release, ok = h.rescue(ctx)
-			} else {
-				release, ok = s.holdIdle(a)
-			}
+			// Expired: a refresh, which only a quiet home may have. The claim
+			// is kept until the new login is in the home.
+			release, ok := s.holdIdle(a)
 			if !ok {
 				continue
 			}
@@ -160,6 +145,7 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 					report(true, nil) // refused, with a login in the home waiting to be confirmed
 					return
 				}
+				h.owe()
 				mu.Lock()
 				renewed = append(renewed, h)
 				mu.Unlock()
@@ -221,6 +207,72 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		}
 	}
 	return errs
+}
+
+// Rescue looks at the homes of the given claude accounts (all when none are
+// given) and does what they are owed although something may be alive there, and
+// nothing else: it is the look every listing starts with, for the listing that
+// reads no usage. A home that is owed nothing costs a read of its store and asks
+// no provider anything. Anything that changed is saved.
+//
+// A rescue must not depend on what a person asked to see: --short, or a reading
+// that is still fresh, is no reason to leave a home signed out.
+func (s *Store) Rescue(ctx context.Context, accounts ...*rota.Account) []error {
+	if len(accounts) == 0 {
+		accounts = s.Accounts
+	}
+	var errs []error
+	dirty := false
+	s.lookIn(ctx, accounts, s.say, func(changed bool, err error) {
+		dirty = dirty || changed
+		if err != nil {
+			errs = append(errs, err)
+		}
+	})
+	if dirty && !s.released {
+		if err := s.Save(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
+}
+
+// lookIn reads the home of every claude account whose login lives in one and
+// mends what wants it (mend), one account at a time. It returns each such
+// account's look, nil when its home could not be read; warn takes the looks'
+// remarks and report what became of each.
+func (s *Store) lookIn(ctx context.Context, accounts []*rota.Account, warn func(string), report func(changed bool, err error)) map[*rota.Account]*claudeHome {
+	homes := make(map[*rota.Account]*claudeHome, len(accounts))
+	for _, a := range accounts {
+		if !rota.SharedHome(a.Provider) || !s.loginInHome(a) {
+			continue
+		}
+		homes[a] = nil
+		// A store without its lock tries no claim at all — even a moment's
+		// exclusive try can refuse a launch's shared one — and takes the home
+		// for busy instead.
+		h := s.claudeHome(a, s.released || s.claimed(a))
+		h.warn = warn
+		before := snapshot(a)
+		if err := h.adopt(ctx); err != nil {
+			report(false, err)
+			continue
+		}
+		report(before.differs(a), nil)
+		func() {
+			// A provider panicking here would otherwise kill the process, and
+			// with it every run in flight. The lock has gone by now, by mend's
+			// own defer.
+			defer func() {
+				if v := recover(); v != nil {
+					report(false, fmt.Errorf("%s: panic while rescuing: %v", a, v))
+				}
+			}()
+			report(h.mend(ctx))
+		}()
+		homes[a] = h
+	}
+	return homes
 }
 
 // usage reads the account's usage with the access token it has. A 401 is

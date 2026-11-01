@@ -103,6 +103,10 @@ func (f *FileBackend) Lock() (func(), error) {
 
 func (f *FileBackend) HomeRoot() string { return filepath.Join(f.Dir, "homes") }
 
+// renameFile is the last step of a write, a variable so a test can see what
+// follows when it fails.
+var renameFile = os.Rename
+
 // writeAtomic lands a file at 0600 via a private temp file and a rename, so
 // a crash mid-write can never leave a truncated store behind.
 func writeAtomic(path string, data []byte) error { return writeAtomicThen(path, data, nil) }
@@ -129,7 +133,7 @@ func writeAtomicThen(path string, data []byte, beforeRename func() error) error 
 		err = beforeRename()
 	}
 	if err == nil {
-		err = os.Rename(tmp, path)
+		err = renameFile(tmp, path)
 	}
 	if err != nil {
 		_ = os.Remove(tmp) // best effort; the real file is untouched

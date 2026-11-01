@@ -349,9 +349,12 @@ type orderBackend struct {
 	// then runs once, right after that save: what happens between the save
 	// and the write into the home.
 	then func()
+	// dead is whether any save has carried an account marked dead.
+	dead bool
 }
 
 func (o *orderBackend) Save(b []byte) error {
+	o.dead = o.dead || bytes.Contains(b, []byte(`"dead"`))
 	first := !o.saved && o.want != "" && bytes.Contains(b, []byte(o.want))
 	if first {
 		o.saved = true
