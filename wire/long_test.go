@@ -53,6 +53,42 @@ func TestDescribeCarriesTheLongTokensDateAndNeverTheToken(t *testing.T) {
 	}
 }
 
+// The STATUS cell says when a login ends only in its last three days, in the
+// fewest words that will do, and says it is over once it is. A dead account has
+// its own reason to give, and one with no known end has nothing to say.
+func TestTheStatusCellSaysWhenALoginEnds(t *testing.T) {
+	at := func(d time.Duration) map[string]string {
+		return map[string]string{"refresh_token_expires_at": strconv.FormatInt(time.Now().Add(d).UnixMilli(), 10)}
+	}
+	for _, c := range []struct {
+		left time.Duration
+		says string
+	}{
+		{30 * 24 * time.Hour, ""},
+		{4 * 24 * time.Hour, ""},
+		{LoginClose + time.Minute, ""},
+		{LoginClose - time.Minute, "login ends in 2d"},
+		{36 * time.Hour, "login ends in 1d"},
+		{5*time.Hour + time.Minute, "login ends in 5h"},
+		{20*time.Minute + time.Second, "login ends in 20m"},
+		{time.Second, "login ends in 1m"},
+		{-time.Minute - time.Second, "login ended 1m ago"},
+		{-3*time.Hour - time.Minute, "login ended 3h ago"},
+		{-49 * time.Hour, "login ended 2d ago"},
+	} {
+		a := &rota.Account{ID: 1, Provider: "claude", Extra: at(c.left)}
+		if got := LoginStatus(a); got != c.says {
+			t.Fatalf("%v left: %q, want %q", c.left, got, c.says)
+		}
+	}
+	if got := LoginStatus(&rota.Account{ID: 1, Provider: "claude"}); got != "" {
+		t.Fatalf("unknown is unsaid: %q", got)
+	}
+	if got := LoginStatus(&rota.Account{ID: 1, Provider: "claude", Dead: true, Extra: at(time.Hour)}); got != "" {
+		t.Fatalf("a dead account says why it is dead: %q", got)
+	}
+}
+
 // When the login itself ends is shown beside the long token's date, and said
 // in a listing only in its last few days.
 func TestWhenTheLoginEndsIsShownAndSaidOnlyNearTheEnd(t *testing.T) {

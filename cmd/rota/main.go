@@ -611,6 +611,9 @@ func (c *cli) list(args []string) error {
 			// token, a lost reply and a revoked credential all read alike.
 			status += " (" + a.WhyDead() + ")"
 		}
+		if note := wire.LoginStatus(a); note != "" {
+			status += " (" + note + ")"
+		}
 		// One window per line, all of them in the USAGE cell.
 		g.add(place(a), strconv.Itoa(a.ID), a.Provider, a.Label(), strings.Join(windows(a.Quota), "\n"),
 			strconv.Itoa(rotation.Cutoff(a))+"%", checkedAgo(a), status)

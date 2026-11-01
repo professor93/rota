@@ -2594,7 +2594,9 @@ that names no account at all. So log the account in normally first.
 while it is within thirty days of expiry, and one more if it lapses — after
 which those runs are back on the eight-hour token. It says the same about the
 ordinary login in its last five days, when Claude Code has recorded when it
-ends. `--json` and `GET /v1/accounts` carry `long_until` and `login_until`
+ends, and in the last three the STATUS column says so too — `ok (login ends in
+2d)`, then `ok (login ended 3h ago)` once it is over, because sessions that
+outlive a login stop making progress and cannot recover by themselves. `--json` and `GET /v1/accounts` carry `long_until` and `login_until`
 (RFC 3339); the token itself is never printed, logged or sent anywhere.
 `rota set <id> --long forget` throws it away, leaving the ordinary login
 alone.

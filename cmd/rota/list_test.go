@@ -121,6 +121,38 @@ func TestListShowsWhyADeadAccountNeedsReauth(t *testing.T) {
 	}
 }
 
+// A login about to end says so in the STATUS cell, whatever state the account
+// is otherwise in; nothing changes shape, and a login far from its end adds
+// nothing.
+func TestListSaysInTheStatusCellWhenALoginEnds(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	now := time.Now()
+	writeStore(t, home, fmt.Sprintf(`{"ordered":true,"nextId":4,"accounts":[
+		{"id":1,"provider":"claude","email":"a@x","order":1,"token":{"accessToken":"t"},"quotaAt":%[1]d,
+		 "extra":{"refresh_token_expires_at":"%[2]d"}},
+		{"id":2,"provider":"claude","email":"b@x","order":2,"token":{"accessToken":"t"},"quotaAt":%[1]d,
+		 "extra":{"refresh_token_expires_at":"%[3]d"}},
+		{"id":3,"provider":"claude","email":"c@x","order":3,"token":{"accessToken":"t"},"quotaAt":%[1]d,
+		 "extra":{"refresh_token_expires_at":"%[4]d"}}]}`,
+		now.UnixMilli(), now.Add(50*time.Hour).UnixMilli(), now.Add(-2*time.Hour-time.Minute).UnixMilli(), now.Add(30*24*time.Hour).UnixMilli()))
+	out, _, code := call(t, "list")
+	if code != 0 {
+		t.Fatalf("%d %q", code, out)
+	}
+	if !strings.Contains(out, "ok (login ends in 2d)") || !strings.Contains(out, "ok (login ended 2h ago)") {
+		t.Fatalf("both said beside the status:\n%s", out)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if strings.Contains(line, "c@x") && strings.Contains(line, "login") {
+			t.Fatalf("a month away adds nothing: %q", line)
+		}
+		if strings.HasPrefix(line, "│ # ") && strings.Join(cells(line), " ") != "# ID CLI ACCOUNT USAGE UNTIL CHECKED STATUS" {
+			t.Fatalf("no new column: %q", line)
+		}
+	}
+}
+
 // An account marked dead by a rota that kept no reason does not read as if
 // nothing were known: the cell says that much.
 func TestListSaysSoWhenNoReasonWasKept(t *testing.T) {
