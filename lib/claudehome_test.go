@@ -673,9 +673,13 @@ func TestOnlyTheLoginRotaWroteAndRefreshedAwayIsSpent(t *testing.T) {
 // signed in as nobody, as CLAUDE_CODE_SIMPLE does by not reading the store.
 func TestEveryRouteDropsWhatWouldChangeHowClaudeCodeSignsIn(t *testing.T) {
 	names := []string{"CLAUDE_CODE_SIMPLE", "ANTHROPIC_PROFILE", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE",
-		"CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN"}
+		"CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+		"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID", "CLAUDECODE"}
+	// Exact names and nothing like them: these two share a prefix with what is
+	// dropped and have nothing to do with signing in.
+	kept := []string{"CLAUDE_CODE_USE_POWERSHELL_TOOL", "ANTHROPIC_MODEL"}
 	var inherited []string
-	for _, n := range names {
+	for _, n := range append(slices.Clone(names), kept...) {
 		inherited = append(inherited, n+"=x")
 	}
 	for what, env := range map[string][]string{
@@ -686,6 +690,11 @@ func TestEveryRouteDropsWhatWouldChangeHowClaudeCodeSignsIn(t *testing.T) {
 		for _, n := range names {
 			if slices.Contains(envNames(env), n) {
 				t.Fatalf("%s keeps %s: %v", what, n, env)
+			}
+		}
+		for _, n := range kept {
+			if !slices.Contains(envNames(env), n) {
+				t.Fatalf("%s drops %s: %v", what, n, env)
 			}
 		}
 	}

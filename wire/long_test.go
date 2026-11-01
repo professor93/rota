@@ -66,8 +66,8 @@ func TestTheStatusCellSaysWhenALoginEnds(t *testing.T) {
 	}{
 		{30 * 24 * time.Hour, ""},
 		{4 * 24 * time.Hour, ""},
-		{LoginClose + time.Minute, ""},
-		{LoginClose - time.Minute, "login ends in 2d"},
+		{loginClose + time.Minute, ""},
+		{loginClose - time.Minute, "login ends in 2d"},
 		{36 * time.Hour, "login ends in 1d"},
 		{5*time.Hour + time.Minute, "login ends in 5h"},
 		{20*time.Minute + time.Second, "login ends in 20m"},

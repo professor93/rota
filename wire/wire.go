@@ -206,10 +206,10 @@ func LoginNote(a *rota.Account) string {
 	return ""
 }
 
-// LoginClose is how close to its end a login has to be before the STATUS
+// loginClose is how close to its end a login has to be before the STATUS
 // column says so: three days, when Claude Code starts warning too. Sessions
 // that outlive a login stop making progress and cannot recover by themselves.
-const LoginClose = 3 * 24 * time.Hour
+const loginClose = 3 * 24 * time.Hour
 
 // LoginStatus is what a listing's status adds about when an account's login
 // ends: a few words in its last days and once it is over, and "" otherwise,
@@ -226,7 +226,7 @@ func LoginStatus(a *rota.Account) string {
 		return fmt.Sprintf("login ends in %dm", max(int(left.Minutes()), 1))
 	case left < 24*time.Hour:
 		return fmt.Sprintf("login ends in %dh", int(left.Hours()))
-	case left <= LoginClose:
+	case left <= loginClose:
 		return fmt.Sprintf("login ends in %dd", int(left.Hours())/24)
 	}
 	return ""

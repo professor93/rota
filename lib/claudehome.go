@@ -54,10 +54,13 @@ const (
 	claudeOAuthKey    = "claudeAiOauth"
 )
 
-// claudeCleared is why an account whose login Claude Code blanked is dead:
-// that is what it does to a login once the provider has refused its refresh
-// token, and what its "Login expired · Please run /login" means.
-const claudeCleared = "Claude Code cleared the login in its home after the provider refused its refresh token"
+// claudeCleared is why an account whose login Claude Code blanked is dead. It
+// blanks a login when a refresh of its own comes back refused, which is Claude
+// Code's verdict and not proof the login is over, and "Login expired · Please
+// run /login" is no proof either: rota has refreshed a login successfully after
+// that message. An application that holds the account's own refresh token should
+// present it once before it takes this for the answer, as rota's store does.
+const claudeCleared = "Claude Code cleared the login in its home after a refresh of its own was refused"
 
 // ClaudeCredentialVars are the inherited variables that would give Claude
 // Code a credential, send one somewhere else, or move its credential store —
@@ -74,7 +77,10 @@ func ClaudeCredentialVars() []string {
 // quietly bill another account or read another account's login. A stray
 // ANTHROPIC_BASE_URL alone would send an OAuth token to a third party,
 // CLAUDE_SECURESTORAGE_CONFIG_DIR would point the store at somebody else's,
-// and CLAUDE_CODE_SIMPLE would not read the store at all.
+// and CLAUDE_CODE_SIMPLE would not read the store at all. CLAUDECODE says a
+// process runs inside Claude Code, which a run on an account does not by being
+// started from one. They are exact names, as code.claude.com/docs/en/env-vars
+// documents them, and never prefixes.
 var claudeCompeting = []string{
 	"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_PROFILE",
 	"ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
@@ -84,6 +90,7 @@ var claudeCompeting = []string{
 	"CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES",
 	"CLAUDE_CODE_SUBSCRIPTION_TYPE", "CLAUDE_CODE_RATE_LIMIT_TIER",
 	"CLAUDE_CODE_SIMPLE", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+	"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID", "CLAUDECODE",
 }
 
 // storedLoginPlatform is whether this platform takes the stored route at
@@ -229,10 +236,12 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //     file, a read that failed: nothing changes, and ErrUnreadableLogin says
 //     so. Claude Code may be in the middle of writing it, and a store taken
 //     for empty is one written over;
-//   - the login Claude Code blanks after the provider refused it: if it was
-//     the account's current login, the login is dead, and only a fresh one
-//     — `rota login`, or `/login` inside a window — brings it back; if it
-//     was an older one, the home simply holds nothing usable;
+//   - the login Claude Code blanks when a refresh of its own was refused: if
+//     it was the account's current login, the login is dead, and only a fresh
+//     one — `rota login`, or `/login` inside a window — brings it back; if it
+//     was an older one, the home simply holds nothing usable. rota's store
+//     does not bring this to AdoptFS for the current login until the
+//     account's own refresh token has been presented once (store/claude.go);
 //   - the account's own refresh token: in sync;
 //   - another refresh token of the same login: a rotation by Claude Code,
 //     taken when it is newer than what the account has. A refresh carries
