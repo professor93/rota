@@ -430,6 +430,119 @@ func TestARescueOnMacOSTakesTheKeychainItemOutOfTheWay(t *testing.T) {
 	}
 }
 
+// While rota refreshes a stranded home and writes the login in, it holds the
+// lock Claude Code's own processes take around a refresh, so the daemon's
+// re-check cannot present the same refresh token beside it, and finds the new
+// login when it gets the lock. The lock goes when the login is in the home.
+func TestARescueHoldsClaudeCodesRefreshLock(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	f := fakeAnthropic(t)
+	for _, c := range []struct {
+		what string
+		do   func(s *Store, a *rota.Account)
+	}{
+		{"maintenance", func(s *Store, a *rota.Account) { s.Maintain(context.Background()) }},
+		{"a listing", func(s *Store, a *rota.Account) { s.Refresh(context.Background(), true, a) }},
+		{"a launch", func(s *Store, a *rota.Account) { launchEnv(t, s, a) }},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			s, ob := orderedStore(t)
+			a := livingClaude(s, "u1")
+			home := stranded(t, s, a)
+			lock := filepath.Join(home, claudeRefreshLock)
+			held := false
+			f.set(func(f *anthropic) {
+				inner := refreshesTo("A-new", "R-new")
+				f.refresh = func() (int, any) {
+					_, err := os.Stat(lock)
+					held = err == nil
+					return inner()
+				}
+			})
+			ob.watch(s, a, "R-new")
+			var whileSaved error
+			ob.then = func() { _, whileSaved = os.Stat(lock) }
+			c.do(s, a)
+			if !held {
+				t.Fatal("held while the token is presented")
+			}
+			if whileSaved != nil {
+				t.Fatalf("and still held once the store has it: %v", whileSaved)
+			}
+			if r, _ := readLogin(t, home); r != "R-new" {
+				t.Fatalf("the home holds it: %q", r)
+			}
+			if _, err := os.Stat(lock); !os.IsNotExist(err) {
+				t.Fatalf("and the lock is gone: %v", err)
+			}
+		})
+	}
+}
+
+// A lock somebody holds means Claude Code is refreshing right now, so this
+// look leaves it to them. One left behind by a process that died, which
+// nobody has touched for a minute, is taken, as Claude Code takes it.
+func TestARescueWaitsForAClaudeCodeThatIsRefreshing(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) { f.refresh = refreshesTo("A-new", "R-new") })
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	home := stranded(t, s, a)
+	lock := filepath.Join(home, claudeRefreshLock)
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if errs := s.Maintain(context.Background()); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	s.Refresh(context.Background(), true, a)
+	if _, err := launchEnv(t, s, a); err != nil {
+		t.Fatal(err)
+	}
+	if f.refreshes.Load() != 0 || a.Token.Refresh != "R-u1" {
+		t.Fatalf("left to whoever holds it: %d %q", f.refreshes.Load(), a.Token.Refresh)
+	}
+	if _, err := os.Stat(lock); err != nil {
+		t.Fatalf("and that lock is not rota's to touch: %v", err)
+	}
+	old := time.Now().Add(-2 * refreshLockStale)
+	if err := os.Chtimes(lock, old, old); err != nil {
+		t.Fatal(err)
+	}
+	if errs := s.Maintain(context.Background()); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	if f.refreshes.Load() != 1 || a.Token.Refresh != "R-new" {
+		t.Fatalf("a dead holder's lock is taken: %d %q", f.refreshes.Load(), a.Token.Refresh)
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Fatalf("and let go: %v", err)
+	}
+}
+
+// The home is read again under the lock: a daemon that got through a moment
+// before is taken, with no refresh of rota's beside it.
+func TestARescueReadsTheHomeAgainOnceItHoldsTheLock(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) { f.refresh = refreshesTo("A-new", "R-new") })
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	home := stranded(t, s, a)
+	h := looked(t, s, a)
+	writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-own", "R-own", later(8*time.Hour), "1999999999000"))
+	if _, err := h.renew(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if f.refreshes.Load() != 0 || a.Token.Refresh != "R-own" {
+		t.Fatalf("the daemon's own refresh is taken: %d %q", f.refreshes.Load(), a.Token.Refresh)
+	}
+}
+
 // A provider that cannot be reached leaves a listing with nothing worse than
 // the error it reports for any account, and the account as it was.
 func TestAListingReportsARescueThatDidNotGetThrough(t *testing.T) {

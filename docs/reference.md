@@ -2300,7 +2300,10 @@ home whose daemon has given up is the one exception: see *Stranded*, below.
   given up, and the home stays its own. A launch heals it too: when the refresh
   does not get through it joins the home as it always did. A refusal goes as
   any refusal does: the home is read again first, a sibling's login is taken,
-  and otherwise the account is dead.
+  and otherwise the account is dead. While it refreshes and writes, rota holds
+  Claude Code's own refresh lock (`.oauth_refresh.lock` in the home), because
+  the daemon's re-check goes on trying by itself; a lock somebody holds leaves
+  this look to them, and the home is read again once rota has it.
 - **Changing route.** A launch remembers which route the account's last one
   in the home took, and decides its own before anything else. When it is
   another, and the home's daemon is running with nothing beside it but the

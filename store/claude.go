@@ -80,6 +80,7 @@ const (
 	claudeCredentials = ".credentials.json"
 	claudeDaemonLock  = "daemon.lock"
 	claudeDaemonAuth  = "daemon-auth-status.json"
+	claudeRefreshLock = ".oauth_refresh.lock"
 	claudeSessionsDir = "sessions"
 )
 
@@ -112,6 +113,9 @@ var (
 	// than that, counted back from the expiry, was written about an earlier
 	// token and says nothing about this one.
 	tokenLife = 8 * time.Hour
+	// refreshLockStale is how long Claude Code's refresh lock may go untouched
+	// before Claude Code itself takes it for a dead holder's.
+	refreshLockStale = time.Minute
 )
 
 // errKeychain marks a keychain that could not be read, which is not the
@@ -321,6 +325,39 @@ func daemonGaveUp(home string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.UnixMilli(int64(status.Since)), true
+}
+
+// rescue readies a refresh of a stranded home and reports whether to go on.
+// release is always safe to call, and is kept until the new login is in the
+// home.
+//
+// A home that is stranded has no claim to give, but the daemon's re-check of
+// the store goes on trying to refresh by itself, silently, every thirty
+// seconds, and any window that starts there will too. All of them take one
+// lock around a refresh, a directory beside the store that Claude Code calls
+// stale after a minute untouched; rota takes the same one here, so nothing of
+// Claude Code's can present the refresh token beside it. A lock somebody holds
+// means Claude Code is refreshing right now, and the look leaves it to them.
+// Once it is held the home is read again, as Claude Code does, because a
+// refresh may have finished a moment ago.
+func (h *claudeHome) rescue(ctx context.Context) (release func(), ok bool) {
+	if !h.stranded() {
+		return func() {}, false
+	}
+	lock := filepath.Join(h.home, claudeRefreshLock)
+	if fi, err := os.Stat(lock); err == nil && time.Since(fi.ModTime()) > refreshLockStale {
+		_ = os.Remove(lock)
+	}
+	if os.Mkdir(lock, 0o700) != nil {
+		return func() {}, false
+	}
+	release = func() { _ = os.Remove(lock) }
+	if h.adopt(ctx) != nil || !h.stranded() {
+		release()
+		return func() {}, false
+	}
+	h.rescuing = true
+	return release, true
 }
 
 // claimed reports whether a run holds this account's claim, shared or not:
@@ -692,10 +729,11 @@ func (h *claudeHome) renew(ctx context.Context) (bool, error) {
 	}
 	rescue := !h.quiet()
 	if rescue {
-		if !h.stranded() {
+		release, ok := h.rescue(ctx)
+		defer release()
+		if !ok {
 			return false, nil
 		}
-		h.rescuing = true
 	}
 	changed, err := h.refresh(ctx)
 	if rescue && err != nil && !a.Dead {

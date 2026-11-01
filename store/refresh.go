@@ -132,18 +132,21 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		case h != nil:
 			// Expired: a refresh, which only a quiet home may have, or a
 			// stranded one. The claim is kept until the new login is in the
-			// home. A stranded home has none to give, its daemon being alive,
-			// and the store's lock already keeps out a second rota.
+			// home. A stranded home has none to give, its daemon being alive:
+			// the store's lock already keeps out a second rota, and rescue
+			// holds off Claude Code in its place.
+			var release func()
+			var ok bool
 			if h.stranded() {
-				h.rescuing = true
+				release, ok = h.rescue(ctx)
 			} else {
-				release, idle := s.holdIdle(a)
-				if !idle {
-					continue
-				}
-				held = append(held, release)
-				h.others = false
+				release, ok = s.holdIdle(a)
 			}
+			if !ok {
+				continue
+			}
+			held = append(held, release)
+			h.others = false
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
