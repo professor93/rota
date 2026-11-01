@@ -131,6 +131,19 @@ func (a *Account) Label() string {
 	return "account-" + strconv.Itoa(a.ID)
 }
 
+// WhyDead is why the account needs a login, in words for a person, or "" while
+// it is alive. Every path that kills an account keeps a reason now; one an
+// older rota marked has none, and says that much.
+func (a *Account) WhyDead() string {
+	switch {
+	case !a.Dead:
+		return ""
+	case a.DeadReason != "":
+		return a.DeadReason
+	}
+	return "an earlier rota marked it dead and kept no reason"
+}
+
 // String is "provider/label".
 func (a *Account) String() string { return a.Provider + "/" + a.Label() }
 

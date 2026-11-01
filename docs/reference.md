@@ -2223,8 +2223,9 @@ home whose daemon has given up is the one exception: see *Stranded*, below.
   back that way); somebody else's is not taken, the account's own tokens stay
   as they were, and rota says so, naming both. A login Claude Code gave up
   on — it blanks it after the provider refuses it — marks the account dead
-  when it was the account's current one. A store that is there and cannot be
-  read is not an empty one: see the hold, below.
+  when it was the account's current one, and the account says so beside
+  `re-auth needed`. A store that is there and cannot be read is not an empty
+  one: see the hold, below.
 - **The hold.** Sometimes the home holds something rota cannot place: a
   login made inside Claude Code that the provider cannot be asked about right
   now (its access token has lapsed, say, the morning after), a store that

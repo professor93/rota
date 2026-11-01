@@ -666,3 +666,58 @@ func TestOnlyTheLoginRotaWroteAndRefreshedAwayIsSpent(t *testing.T) {
 		t.Fatal("with nothing recorded, an older login proves nothing")
 	}
 }
+
+// A login Claude Code cleared says so, in words a person can act on: the
+// provider refused it, and it was Claude Code that emptied the store. A refusal
+// rota heard itself is the better record and stays; an account marked dead with
+// no reason at all gets this one once the home shows it.
+func TestAClearedLoginSaysWhyTheAccountIsDead(t *testing.T) {
+	blank := homeWith(`{"accessToken":"","refreshToken":"","expiresAt":0}`)
+	login := func() *Account {
+		a := &Account{ID: 1, Provider: "claude", Token: Token{Refresh: "R1", ExpiresAt: 1}}
+		a.StagedWritten()
+		return a
+	}
+
+	a := login()
+	if err := AdoptFrom(a, blank); err != nil || !a.Dead {
+		t.Fatalf("%v %v", err, a.Dead)
+	}
+	for _, word := range []string{"Claude Code", "cleared", "refused"} {
+		if !strings.Contains(a.DeadReason, word) {
+			t.Fatalf("%q in %q", word, a.DeadReason)
+		}
+	}
+
+	a = login()
+	a.Dead, a.DeadReason = true, "invalid_grant: refresh token reused"
+	if err := AdoptFrom(a, blank); err != nil || a.DeadReason != "invalid_grant: refresh token reused" {
+		t.Fatalf("what the provider said is kept: %v %q", err, a.DeadReason)
+	}
+
+	a = login()
+	a.Dead = true
+	if err := AdoptFrom(a, blank); err != nil || !strings.Contains(a.DeadReason, "cleared") {
+		t.Fatalf("a reason nobody kept is filled in: %v %q", err, a.DeadReason)
+	}
+
+	a = login()
+	a.Dead, a.Staged = true, stagedNone
+	if err := AdoptFrom(a, blank); err != nil || !strings.Contains(a.DeadReason, "cleared") {
+		t.Fatalf("whatever the home was last known to hold: %v %q", err, a.DeadReason)
+	}
+}
+
+// Every dead account has something to say for itself, and one marked by a rota
+// that kept no reason says that rather than nothing.
+func TestADeadAccountAlwaysSaysWhy(t *testing.T) {
+	if why := (&Account{}).WhyDead(); why != "" {
+		t.Fatalf("a living account has no reason: %q", why)
+	}
+	if why := (&Account{Dead: true, DeadReason: "invalid_grant"}).WhyDead(); why != "invalid_grant" {
+		t.Fatalf("the reason kept: %q", why)
+	}
+	if why := (&Account{Dead: true}).WhyDead(); why == "" {
+		t.Fatal("none kept is still something to say")
+	}
+}

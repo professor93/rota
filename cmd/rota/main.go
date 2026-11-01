@@ -609,9 +609,7 @@ func (c *cli) list(args []string) error {
 			status = "re-auth needed"
 			// Why it died, beside the verdict: otherwise a reused refresh
 			// token, a lost reply and a revoked credential all read alike.
-			if a.DeadReason != "" {
-				status += " (" + a.DeadReason + ")"
-			}
+			status += " (" + a.WhyDead() + ")"
 		}
 		// One window per line, all of them in the USAGE cell.
 		g.add(place(a), strconv.Itoa(a.ID), a.Provider, a.Label(), strings.Join(windows(a.Quota), "\n"),

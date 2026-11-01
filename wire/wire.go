@@ -129,7 +129,7 @@ func Sessions(v string) string {
 func Describe(a *rota.Account) Account {
 	v := Account{ID: a.ID, Provider: a.Provider, Email: a.Email, UUID: a.UUID, Status: a.Status(),
 		Metered: rota.Metered(a.Provider), Order: a.Order, Threshold: a.Threshold, Percent: a.Percent(),
-		Cwd: a.Cwd, ConfigDir: a.ConfigDir, Sessions: a.Sessions, RemoteControl: a.RemoteControl, DeadReason: a.DeadReason}
+		Cwd: a.Cwd, ConfigDir: a.ConfigDir, Sessions: a.Sessions, RemoteControl: a.RemoteControl, DeadReason: a.WhyDead()}
 	if t := a.LongUntil(); !t.IsZero() {
 		v.LongUntil = t.UTC().Format(time.RFC3339)
 	}

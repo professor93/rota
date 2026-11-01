@@ -53,6 +53,11 @@ const (
 	claudeOAuthKey    = "claudeAiOauth"
 )
 
+// claudeCleared is why an account whose login Claude Code blanked is dead:
+// that is what it does to a login once the provider has refused its refresh
+// token, and what its "Login expired · Please run /login" means.
+const claudeCleared = "Claude Code cleared the login in its home after the provider refused its refresh token"
+
 // ClaudeCredentialVars are the inherited variables that would give Claude
 // Code a credential, send one somewhere else, or move its credential store —
 // the token variable itself included — as a copy. It is for a caller that
@@ -251,12 +256,15 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 		a.Staged = stagedNone
 		return nil
 	case l.RefreshToken == "":
-		if current != "" && a.Staged == current {
-			a.Dead, a.DeadReason = true,
-				"Claude Code found this login expired and signed it out of the account's home"
-			return nil
+		held := current != "" && a.Staged == current
+		if held {
+			a.Dead = true
+		} else {
+			a.Staged = stagedNone
 		}
-		a.Staged = stagedNone
+		if a.Dead && a.DeadReason == "" {
+			a.DeadReason = claudeCleared
+		}
 		return nil
 	case l.ExpiresAt == 0:
 		// A refresh token with no expiry is not a login Claude Code keeps;

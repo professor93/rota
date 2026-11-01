@@ -78,12 +78,8 @@ func (s *Store) mayLaunch(a *rota.Account) error {
 		return rota.WrapReauth(a)
 	}
 	if s.Warn != nil {
-		why := a.DeadReason
-		if why == "" {
-			why = "the provider refused its refresh token"
-		}
 		s.Warn(fmt.Sprintf("%s: its login is dead (%s), so usage is unknown and the rotation skips it; "+
-			"running on its long-lived token, good until %s", a, why, a.LongUntil().Format(time.DateOnly)))
+			"running on its long-lived token, good until %s", a, a.WhyDead(), a.LongUntil().Format(time.DateOnly)))
 	}
 	return nil
 }

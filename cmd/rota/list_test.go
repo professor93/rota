@@ -120,3 +120,19 @@ func TestListShowsWhyADeadAccountNeedsReauth(t *testing.T) {
 		t.Fatalf("json carries the reason as its own field:\n%s", out)
 	}
 }
+
+// An account marked dead by a rota that kept no reason does not read as if
+// nothing were known: the cell says that much.
+func TestListSaysSoWhenNoReasonWasKept(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	writeStore(t, home, fmt.Sprintf(`{"ordered":true,"nextId":2,"accounts":[
+		{"id":1,"provider":"claude","email":"a@x","order":1,"token":{"accessToken":"t"},"quotaAt":%d,"dead":true}]}`, time.Now().UnixMilli()))
+	out, _, code := call(t, "list")
+	if code != 0 {
+		t.Fatalf("%d %q", code, out)
+	}
+	if !strings.Contains(out, "re-auth needed (") || !strings.Contains(out, "kept no reason") {
+		t.Fatalf("the status cell has something to say:\n%s", out)
+	}
+}
