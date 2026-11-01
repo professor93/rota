@@ -70,6 +70,9 @@ type Spec struct {
 	// "ignore" takes no notice. Empty leaves it to the runtime, which dies.
 	Term      string `json:"term,omitempty"`
 	TermTouch string `json:"term_touch,omitempty"`
+	// TermDelay is how long "exit" takes to finish, as a helper still closing
+	// up does after the CLI that started it has gone.
+	TermDelay string `json:"term_delay,omitempty"`
 	// Spawn is the path of another fake to start and leave running, in the
 	// fake's own process group, as a CLI starts a helper.
 	Spawn string `json:"spawn,omitempty"`
@@ -180,6 +183,9 @@ func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		signal.Notify(term, syscall.SIGTERM)
 		go func() {
 			<-term
+			if d, err := time.ParseDuration(spec.TermDelay); err == nil {
+				time.Sleep(d)
+			}
 			_ = os.WriteFile(spec.TermTouch, nil, 0o600)
 			os.Exit(spec.Exit)
 		}()

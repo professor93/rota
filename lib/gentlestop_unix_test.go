@@ -177,6 +177,65 @@ func TestAStopReachesTheHelpersInTheGroup(t *testing.T) {
 	}
 }
 
+// A helper that goes a moment after the CLI costs that moment and no more: the
+// group is looked at again and again rather than once, so a stop does not wait
+// out a grace nothing needs. Under a container's first process, where this
+// test also runs, nothing reaps that helper, and a group of only zombies has
+// nothing left in it either.
+func TestAStopEndsAsSoonAsTheGroupHasGone(t *testing.T) {
+	graced(t, 2*time.Second)
+	dir := t.TempDir()
+	helperReady, ready := filepath.Join(dir, "helper-ready"), filepath.Join(dir, "ready")
+	helper := fakecli.Install(t, dir, "slow-helper", fakecli.Spec{Term: "exit", TermDelay: "150ms",
+		TermTouch: filepath.Join(dir, "helper"), Ready: helperReady, Sleep: "30s"})
+	bin := fakecli.Install(t, dir, "parent-cli", fakecli.Spec{Term: "exit", TermTouch: filepath.Join(dir, "parent"),
+		Ready: ready, Sleep: "30s", Spawn: helper})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := fakeRun(ctx, bin)
+		done <- err
+	}()
+	readyPID(t, ready)
+	pid := readyPID(t, helperReady)
+	start := time.Now()
+	cancel()
+	<-done
+	if took := time.Since(start); took >= killGrace {
+		t.Fatalf("nothing was left to wait for: %v", took)
+	}
+	if !gone(pid) {
+		t.Fatal("and the helper had its moment and went")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "helper")); err != nil {
+		t.Fatalf("by itself: %v", err)
+	}
+}
+
+// What /proc says about a process is read from after the last parenthesis,
+// because a process names itself and the name may hold anything.
+func TestAProcessIsReadFromTheLineProcKeepsForIt(t *testing.T) {
+	for _, c := range []struct {
+		line  string
+		state byte
+		group int
+		ok    bool
+	}{
+		{"12 (sleep) S 1 12 12 0 -1", 'S', 12, true},
+		{"12 (a b) Z 1 900 900 0 -1", 'Z', 900, true},
+		{"12 (odd) R 7 7) Z 1 44 44 0", 'Z', 44, true},
+		{"12 (cut", 0, 0, false},
+		{"12 (cut) S 1", 0, 0, false},
+		{"12 (nan) S 1 x y", 0, 0, false},
+	} {
+		state, group, ok := procStat([]byte(c.line))
+		if ok != c.ok || state != c.state || group != c.group {
+			t.Fatalf("%q: %c %d %v", c.line, state, group, ok)
+		}
+	}
+}
+
 // Stopping twice asks once and cannot deadlock Wait, and a stop that comes
 // after the CLI was waited for signals nothing: that pid is no longer ours.
 func TestAStopAsksOnceAndCannotHoldUpWait(t *testing.T) {

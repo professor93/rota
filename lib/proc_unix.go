@@ -3,8 +3,11 @@
 package rota
 
 import (
+	"bytes"
 	"errors"
+	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -17,6 +20,9 @@ import (
 // than waitDelay, so the group is gone before exec's own last resort reaches
 // for the CLI alone. A variable so a test need not wait.
 var killGrace = 3 * time.Second
+
+// settlePoll is how often a stop that is waiting for a group looks at it.
+const settlePoll = 50 * time.Millisecond
 
 // setPgid puts the CLI in its own process group, so killing it takes the
 // helpers it spawned with it.
@@ -70,10 +76,11 @@ func (s *stopper) stop() {
 }
 
 // settle is what a stop owes once the CLI has been waited for. Nothing is left
-// to do when the group is gone. A helper that stayed behind keeps it, and has
-// the rest of the grace, because it may be the one in the middle of a refresh;
-// the kill is then waited for, a bounded wait, so a stopped run still leaves
-// nothing running when it returns.
+// to do when the group is gone, and it is looked for again and again, because
+// what the CLI started usually goes a moment after it does. A helper that
+// stayed behind keeps the group, and has the rest of the grace, because it may
+// be the one in the middle of a refresh; the kill is then waited for, a bounded
+// wait, so a stopped run still leaves nothing running when it returns.
 func (s *stopper) settle() {
 	s.mu.Lock()
 	s.over = true
@@ -82,8 +89,71 @@ func (s *stopper) settle() {
 	if kill == nil {
 		return
 	}
-	if errors.Is(syscall.Kill(-s.c.Process.Pid, 0), syscall.ESRCH) && kill.Stop() {
-		return
+	look := time.NewTicker(settlePoll)
+	defer look.Stop()
+	for {
+		if groupGone(s.c.Process.Pid) && kill.Stop() {
+			close(s.killed)
+			return
+		}
+		select {
+		case <-s.killed:
+			return
+		case <-look.C:
+		}
 	}
-	<-s.killed
+}
+
+// groupGone reports whether nothing that can still act is left in a process
+// group. A zombie stays in its group until it is reaped, and under a
+// container's first process, which reaps nothing, that is for ever: a group of
+// only zombies has gone too. Telling one takes /proc, so where there is none
+// such a group is taken for alive and costs the rest of the grace; that is
+// macOS and the BSDs, where an init always reaps.
+func groupGone(group int) bool {
+	if errors.Is(syscall.Kill(-group, 0), syscall.ESRCH) {
+		return true
+	}
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return false
+	}
+	zombies := false
+	for _, e := range entries {
+		if _, err := strconv.Atoi(e.Name()); err != nil {
+			continue
+		}
+		raw, err := os.ReadFile("/proc/" + e.Name() + "/stat")
+		if err != nil {
+			continue // ended between the listing and now
+		}
+		state, g, ok := procStat(raw)
+		switch {
+		case !ok || g != group:
+		case state != 'Z':
+			return false
+		default:
+			zombies = true
+		}
+	}
+	return zombies
+}
+
+// procStat reads a process's state and process group from its line in
+// /proc/<pid>/stat. They are counted from the last parenthesis, because the
+// name before it is the process's own and may hold anything.
+func procStat(raw []byte) (state byte, group int, ok bool) {
+	i := bytes.LastIndexByte(raw, ')')
+	if i < 0 {
+		return 0, 0, false
+	}
+	fields := bytes.Fields(raw[i+1:]) // state, parent, group, ...
+	if len(fields) < 3 || len(fields[0]) != 1 {
+		return 0, 0, false
+	}
+	group, err := strconv.Atoi(string(fields[2]))
+	if err != nil {
+		return 0, 0, false
+	}
+	return fields[0][0], group, true
 }
