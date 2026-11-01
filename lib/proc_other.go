@@ -19,4 +19,8 @@ func (s *stopper) stop() {
 	}
 }
 
+// asked is false because a kill here leaves its own exit to judge the run by,
+// which is what it always was.
+func (s *stopper) asked() bool { return false }
+
 func (s *stopper) settle() {}

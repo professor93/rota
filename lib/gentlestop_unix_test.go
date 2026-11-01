@@ -104,8 +104,67 @@ func TestACancelledRunLetsItsCLIStopByItself(t *testing.T) {
 	if _, err := os.Stat(stopped); err != nil {
 		t.Fatalf("the CLI got to shut down: %v", err)
 	}
-	if o.res == nil || o.res.ExitCode != 0 {
-		t.Fatalf("and exited by itself: %+v", o.res)
+	if o.res == nil {
+		t.Fatal("and the run still has a result")
+	}
+}
+
+// A run rota stopped is an error whatever the CLI's exit code, as it was when
+// such a CLI was killed: one that shuts down cleanly when asked exits 0, and
+// that says nothing about the work it was stopped in the middle of.
+func TestARunRotaStoppedIsAnErrorWhateverItsCLIExitsWith(t *testing.T) {
+	dir := t.TempDir()
+	t.Run("cancelled", func(t *testing.T) {
+		ready := filepath.Join(dir, "ready-cancelled")
+		bin := fakecli.Install(t, dir, "clean-cli", fakecli.Spec{Term: "exit", TermTouch: filepath.Join(dir, "c"), Ready: ready, Sleep: "30s"})
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		type outcome struct {
+			res *Result
+			err error
+		}
+		done := make(chan outcome, 1)
+		go func() {
+			res, err := fakeRun(ctx, bin)
+			done <- outcome{res, err}
+		}()
+		readyPID(t, ready)
+		cancel()
+		o := <-done
+		if !errors.Is(o.err, context.Canceled) || o.res == nil {
+			t.Fatalf("%v %+v", o.err, o.res)
+		}
+		if !o.res.IsError || o.res.ExitCode != -1 {
+			t.Fatalf("stopped: is_error=%v exit=%d", o.res.IsError, o.res.ExitCode)
+		}
+	})
+	t.Run("truncated", func(t *testing.T) {
+		ready := filepath.Join(dir, "ready-truncated")
+		bin := fakecli.Install(t, dir, "clean-loud-cli", fakecli.Spec{Term: "exit", TermTouch: filepath.Join(dir, "t"), Ready: ready,
+			Stdout: []string{strings.Repeat("x", 4096), "{{sleep:30s}}"}})
+		a := &Account{ID: 1, Provider: "claude"}
+		a.Token.Access = "tok"
+		var out bytes.Buffer
+		res, err := Run(context.Background(), a, "", &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}},
+			Spec{Prompt: "p", flavorOverride: "claude"}, &Limits{MaxBufferedOutput: 1024}, &out)
+		if err != nil || res == nil || !res.Truncated {
+			t.Fatalf("%v %+v", err, res)
+		}
+		if !res.IsError || res.ExitCode != -1 {
+			t.Fatalf("stopped: is_error=%v exit=%d", res.IsError, res.ExitCode)
+		}
+	})
+}
+
+// A CLI that finishes by itself is judged by what it exits with, as ever.
+func TestARunNobodyStoppedKeepsItsCLIsExit(t *testing.T) {
+	dir := t.TempDir()
+	for _, code := range []int{0, 3} {
+		bin := fakecli.Install(t, dir, "plain-cli-"+strconv.Itoa(code), fakecli.Spec{Exit: code})
+		res, err := fakeRun(context.Background(), bin)
+		if err != nil || res == nil || res.ExitCode != code || res.IsError != (code != 0) {
+			t.Fatalf("exit %d: %v %+v", code, err, res)
+		}
 	}
 }
 

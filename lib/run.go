@@ -1604,6 +1604,11 @@ func finishRun(l *launched, scanErr error) (*Result, error) {
 		res.Truncated = true // the stderr bound is a bound like the others
 	}
 	res.ExitCode = child.ProcessState.ExitCode()
+	if l.halt.asked() {
+		// A run rota stopped is an error whatever the CLI exits with: one that
+		// shuts down cleanly when asked exits 0, with its work unfinished.
+		res.ExitCode, res.IsError = -1, true
+	}
 
 	if l.ctx.Err() != nil {
 		return res, l.ctx.Err()
