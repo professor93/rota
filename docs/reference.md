@@ -161,7 +161,7 @@ rota login <login-id> <code>  # finish it with the code from the page
 rota login <login-id>         # finish a delegated login, which takes no code (grok)
 rota login 2                  # sign account 2 in through its own CLI
 rota list                     # every account, in rotation order, with usage
-rota list --short             # the same, without asking any provider anything
+rota list --short             # the same, reading no usage from any provider
 rota list --sessions          # ...and what is running, and what could resume
 rota list claude -r           # one provider, forcing a quota refresh
 rota run "summarize this repo"     # ask whichever account the rotation picks
@@ -218,7 +218,7 @@ Anything after an account id is passed to the vendor CLI's own login
 | | |
 |---|---|
 | `-r`, `--refresh` | read the quotas now, rather than using the five-minute cache |
-| `-s`, `--short` | what is already known, asking no provider anything |
+| `-s`, `--short` | what is already known, reading no usage; a home that needs rescuing is rescued all the same (see *Stranded*) |
 | `--sessions` | also what the CLIs are running and what could be resumed |
 | `--all` | with `--sessions`: every conversation, not five per account |
 
@@ -1912,8 +1912,9 @@ Vertex, Foundry, Mantle and Claude Platform on AWS switches,
 `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`,
 `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_OAUTH_SCOPES`,
 `CLAUDE_CODE_SUBSCRIPTION_TYPE`, `CLAUDE_CODE_RATE_LIMIT_TIER`,
-`CLAUDE_CODE_SIMPLE`, which reads no stored login at all, and
-`CLAUDE_SECURESTORAGE_CONFIG_DIR`). A launch on
+`CLAUDE_CODE_SIMPLE`, which reads no stored login at all,
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, `ANTHROPIC_FEDERATION_RULE_ID`,
+`ANTHROPIC_ORGANIZATION_ID` and `CLAUDECODE`), each by its exact name. A launch on
 the account's stored login drops `CLAUDE_CODE_OAUTH_TOKEN` as well, so no
 token reaches the child at all.
 
@@ -2212,8 +2213,9 @@ the login, or rewrite the home's `.claude.json`. Alive means a rota run
 holding the account, a `daemon.lock` naming a live process, or a
 `sessions/<pid>.json` naming one — and a record nobody can read counts as
 alive. When nothing is alive, rota may refresh, and a refresh is followed at
-once — after the store is saved — by writing the new login into the home. A
-home whose daemon has given up is the one exception: see *Stranded*, below.
+once — after the store is saved — by writing the new login into the home.
+There are two exceptions, a home whose daemon has given up and a store Claude
+Code blanked: see *Stranded* and *Blanked*, below.
 
 - **Reading.** Before anything uses the account's tokens, the home's store
   is read. A rotation by Claude Code keeps the login's own
@@ -2227,11 +2229,10 @@ home whose daemon has given up is the one exception: see *Stranded*, below.
   inside that home: rota asks the provider whose it is, with that login's own
   access token, and takes it when it is this account's (a dead account comes
   back that way); somebody else's is not taken, the account's own tokens stay
-  as they were, and rota says so, naming both. A login Claude Code gave up
-  on — it blanks it after the provider refuses it — marks the account dead
-  when it was the account's current one, and the account says so beside
-  `re-auth needed`. A store that is there and cannot be read is not an empty
-  one: see the hold, below.
+  as they were, and rota says so, naming both. A login Claude Code blanked is
+  not taken for the end of the account when it was the account's current one:
+  see *Blanked*, below. A store that is there and cannot be read is not an
+  empty one: see the hold, below.
 - **The hold.** Sometimes the home holds something rota cannot place: a
   login made inside Claude Code that the provider cannot be asked about right
   now (its access token has lapsed, say, the morning after), a store that
@@ -2256,12 +2257,14 @@ home whose daemon has given up is the one exception: see *Stranded*, below.
   says so in its reason, and it still launches in its home on that login,
   since starting Claude Code there is what makes it confirmable; once
   confirmed, it is alive again. Otherwise only `rota login`, or `/login`
-  inside one of its windows, brings it back.
+  inside one of its windows, brings it back. A dead account in the hold whose
+  access token has lapsed is left to `rota run` for the same reason, and rota
+  presents nothing for it.
 - **Writing.** Nothing is written when the home already holds the account's
-  current login. Otherwise the login goes in when nothing is alive — or, the
-  one exception, when the home still holds the very login rota refreshed
-  away: that one is spent, and every window on it would be signed out at its
-  next refresh anyway. Only the
+  current login. Otherwise the login goes in when nothing is alive, when rota
+  is rescuing the home (*Stranded*, *Blanked*), or when the home still holds
+  the very login rota refreshed away: that one is spent, and every window on it
+  would be signed out at its next refresh anyway. Only the
   login entry is replaced, every other secret Claude Code keeps beside it —
   MCP servers' OAuth tokens among them — stays, and the file is written
   privately through a rename. On macOS the new file is written and synced
@@ -2271,7 +2274,16 @@ home whose daemon has given up is the one exception: see *Stranded*, below.
   keychain item. A file left beside a keychain item is stale and is removed,
   unless its login is the newer of the two: when the keychain refuses a write
   Claude Code keeps the login in the file, so that is the one rota reads, and
-  the older item is removed instead, when nothing is alive.
+  the older item is removed instead, when nothing is alive. A blanked item is
+  older than any file that holds a login, and a blanked file never wins: rota
+  takes the file's login, and since Claude Code reads the item and never the
+  file while an item exists, the blanked item goes even with something alive,
+  once what it kept beside the login is in the file.
+  From the moment the provider answers a refresh of rota's, the home's login
+  is spent, so a home that cannot then be read or written is an error naming
+  the account. A write is tried a few times, under the refresh lock when there
+  is one, what is owed is saved with the token, and the next look of any kind
+  finishes it with no other refresh.
   With Claude Code alive in the home, a launch joins the login that is there
   and rota says when the account's current one takes over — when those
   sessions end, or at once in one where you run `/login`; and when the home
@@ -2285,8 +2297,10 @@ home whose daemon has given up is the one exception: see *Stranded*, below.
 - **Refreshing.** Usage is read with the token the account has, while Claude
   Code runs or not; a 401 is read as a rotation and the home is read again
   before one more try. Only an expired token needs rota to refresh, and that
-  waits for a quiet home out of the hold, or a stranded one; until then the
-  account keeps its last reading. A refresh the provider refuses as dead is not believed until
+  waits for a quiet home out of the hold; until then the account keeps its
+  last reading. *Stranded* and *Blanked* come first, at every look, and have
+  nothing to do with readings: a reading still fresh, or `--short`, does not
+  put them off. A refresh the provider refuses as dead is not believed until
   the home has been read again — a sibling may have refreshed first, and its
   login, confirmed, is taken. A store whose lock a run has released — the
   reading `--with quota` takes after a run — rotates nothing at all, and does
@@ -2294,26 +2308,51 @@ home whose daemon has given up is the one exception: see *Stranded*, below.
 - **Stranded.** Claude Code's daemon refreshes the login itself, and now and
   then the refresh fails, on a plain `~/.claude` as much as in a home of
   rota's. When the access token has run out by then, the daemon writes
-  `{"status":"auth_required"}` into `daemon-auth-status.json`, the sessions it
-  hosts say `Login expired · Please run /login`, and it waits for a newer login
-  to appear in the store — while rota, seeing something alive, waited for it
-  to go away. The login is alive all that time, and nobody needs to log in. So
-  rota refreshes such a home although it is alive, writes the login in under
-  the running daemon, and says so in one line. It takes all of this: rota
+  `{"status":"auth_required"}` into `daemon-auth-status.json` and the sessions
+  it hosts say `Login expired · Please run /login`. It goes on retrying every
+  thirty seconds without logging a failure, while rota, seeing something alive,
+  waited for it to go away. The login can be alive all that time. So rota
+  refreshes such a home although it is alive, writes the login into the store
+  under whatever is running, and says so in one line. rota expects Claude Code
+  to read the login from its store, as its code path suggests it does; no live
+  daemon has been observed recovering this way. It takes all of this: rota
   keeps the login in that home, the account is alive and out of the hold, the
-  home holds the account's own current login, the store's lock is held, the
-  daemon and the sessions it hosts are all that runs there, the status file
-  says `auth_required` about the token that ran out, and that token truly
-  expired at least ten minutes ago. The status file outlives recovery, so on
-  its own it means nothing, and one older than the token that ran out means
-  nothing either. A window open beside the daemon is a refresher that has not
-  given up, and the home stays its own. A launch heals it too: when the refresh
-  does not get through it joins the home as it always did. A refusal goes as
-  any refusal does: the home is read again first, a sibling's login is taken,
-  and otherwise the account is dead. While it refreshes and writes, rota holds
-  Claude Code's own refresh lock (`.oauth_refresh.lock` in the home), because
-  the daemon's re-check goes on trying by itself; a lock somebody holds leaves
-  this look to them, and the home is read again once rota has it.
+  home holds the account's own current login, the store's lock is held,
+  something is alive there, the status file says `auth_required` about the
+  token that ran out, and that token truly expired at least ten minutes ago.
+  What else runs there does not matter: a window open for days, or a run
+  holding the account, has had its chance by then. The status file outlives
+  recovery, so on its own it means nothing, and one older than the token that
+  ran out means nothing either. It is also all rota has to go on: where Claude
+  Code does not write it, on its storage-v5 path say, a home is not found
+  stranded. A launch heals it too: when the refresh does not get through it
+  joins the home as it always did. A refusal goes as any refusal does: the home
+  is read again first, a sibling's login is taken, and otherwise the account is
+  dead.
+- **Blanked.** When a refresh of its own comes back refused, Claude Code
+  empties the login in its store, keeping everything else. That is its verdict,
+  and it has been measured not to be final: a daemon reported no token for days
+  on a login whose next refresh by rota worked. So when the login it blanked
+  was the account's current one, and the account is not dead and holds its own
+  refresh token, rota presents that token once before calling it dead, whether
+  the home is alive or quiet. Nothing in the home is at risk, because the home
+  holds no login any more, and no status file is needed. On success the login
+  goes in; rota expects whatever is running there to find it, and no live
+  process has been observed doing so. On a refusal the account is dead, says
+  why, and the token is never presented again. A failure that says nothing
+  about the login, a provider that cannot be reached, leaves the account alive
+  and says so, and the next look tries again; until then a launch goes on a
+  token that is good or does not go, because Claude Code started there would
+  not be signed in. A blanked login that is not the account's current one is a
+  home with nothing usable in it, as ever. An account marked dead before it got
+  this chance stays dead: `rota login`, or `/login` inside one of its windows.
+- **The refresh lock.** Through all of that rota holds Claude Code's own
+  refresh lock (`.oauth_refresh.lock` in the home), for one account at a time,
+  from reading the home again until the login is in it, and touches it every
+  five seconds as Claude Code's own holders do, because Claude Code takes a
+  lock for dead after a minute untouched. A lock somebody holds leaves this look
+  to them. A lock somebody took meanwhile is theirs, and is neither touched nor
+  removed.
 - **Changing route.** A launch remembers which route the account's last one
   in the home took, and decides its own before anything else. When it is
   another, and the home's daemon is running with nothing beside it but the
@@ -2549,8 +2588,9 @@ Measured, not assumed — from live accounts:
 
 rota refreshes a token within five minutes of expiry, and only while running
 a command — and a claude login kept in its home only while nothing of Claude
-Code's runs there, because then Claude Code refreshes it itself. A refresh is never retried: if the reply was lost, the retry would
-reuse a rotated token and kill the lineage. Treat `re-auth needed` as normal
+Code's runs there, because then Claude Code refreshes it itself, unless that
+home is stranded or blanked. A refresh is never retried within one look: if the
+reply was lost, the retry would reuse a rotated token and kill the lineage. Treat `re-auth needed` as normal
 rather than as a fault. The refusal that ended the lineage is kept: `rota
 list` shows it in parentheses after `re-auth needed` — `re-auth needed
 (invalid_grant: refresh token reused)` — and JSON carries it as `deadReason`.
