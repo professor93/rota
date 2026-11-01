@@ -50,6 +50,12 @@ func (a *Account) StagedSuperseded() { a.Staged = stagedNone }
 // there as a rotation by the CLI rather than as its own write.
 func (a *Account) StagedWritten() { a.Staged = fingerprint(a.Token.Refresh) }
 
+// StagedCurrent reports whether the account's current login is what its home
+// holds, as the last adoption or write recorded.
+func (a *Account) StagedCurrent() bool {
+	return a.Token.Refresh != "" && a.Staged == fingerprint(a.Token.Refresh)
+}
+
 // Apply folds a provider's token response into the account: a new access
 // token, a rotated refresh token, a name, whatever extra state the provider
 // asked to keep. An absent refresh token means "keep the old one", never

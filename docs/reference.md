@@ -2206,7 +2206,8 @@ the login, or rewrite the home's `.claude.json`. Alive means a rota run
 holding the account, a `daemon.lock` naming a live process, or a
 `sessions/<pid>.json` naming one — and a record nobody can read counts as
 alive. When nothing is alive, rota may refresh, and a refresh is followed at
-once — after the store is saved — by writing the new login into the home.
+once — after the store is saved — by writing the new login into the home. A
+home whose daemon has given up is the one exception: see *Stranded*, below.
 
 - **Reading.** Before anything uses the account's tokens, the home's store
   is read. A rotation by Claude Code keeps the login's own
@@ -2274,12 +2275,32 @@ once — after the store is saved — by writing the new login into the home.
 - **Refreshing.** Usage is read with the token the account has, while Claude
   Code runs or not; a 401 is read as a rotation and the home is read again
   before one more try. Only an expired token needs rota to refresh, and that
-  waits for a quiet home out of the hold; until then the account keeps its
-  last reading. A refresh the provider refuses as dead is not believed until
+  waits for a quiet home out of the hold, or a stranded one; until then the
+  account keeps its last reading. A refresh the provider refuses as dead is not believed until
   the home has been read again — a sibling may have refreshed first, and its
   login, confirmed, is taken. A store whose lock a run has released — the
   reading `--with quota` takes after a run — rotates nothing at all, and does
   not so much as try an account's claim.
+- **Stranded.** Claude Code's daemon refreshes the login itself, and now and
+  then the refresh fails, on a plain `~/.claude` as much as in a home of
+  rota's. When the access token has run out by then, the daemon writes
+  `{"status":"auth_required"}` into `daemon-auth-status.json`, the sessions it
+  hosts say `Login expired · Please run /login`, and it waits for a newer login
+  to appear in the store — while rota, seeing something alive, waited for it
+  to go away. The login is alive all that time, and nobody needs to log in. So
+  rota refreshes such a home although it is alive, writes the login in under
+  the running daemon, and says so in one line. It takes all of this: rota
+  keeps the login in that home, the account is alive and out of the hold, the
+  home holds the account's own current login, the store's lock is held, the
+  daemon and the sessions it hosts are all that runs there, the status file
+  says `auth_required` about the token that ran out, and that token truly
+  expired at least ten minutes ago. The status file outlives recovery, so on
+  its own it means nothing, and one older than the token that ran out means
+  nothing either. A window open beside the daemon is a refresher that has not
+  given up, and the home stays its own. A launch heals it too: when the refresh
+  does not get through it joins the home as it always did. A refusal goes as
+  any refusal does: the home is read again first, a sibling's login is taken,
+  and otherwise the account is dead.
 - **Changing route.** A launch remembers which route the account's last one
   in the home took, and decides its own before anything else. When it is
   another, and the home's daemon is running with nothing beside it but the

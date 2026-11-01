@@ -88,9 +88,9 @@ func (s *Store) Maintain(ctx context.Context) []error {
 // maintainShared is Maintain for a claude account. Its home is read first,
 // whatever state the account is in — a dead one may have been signed in
 // again inside Claude Code, which is how rota learns of it. A login kept in
-// the home is refreshed only while nothing is alive there and the home is
-// not in the hold, and goes back into the home at once; one rota alone holds
-// is refreshed as it always was.
+// the home is refreshed only while nothing is alive there, or the home is
+// stranded, and it is not in the hold, and goes back into the home at once;
+// one rota alone holds is refreshed as it always was.
 func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, error) {
 	if !s.loginInHome(a) {
 		if a.Dead {
@@ -110,6 +110,12 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 	}
 	if !rota.StoresLogin(a, h.home) {
 		did, err := rota.Refresh(ctx, a)
+		return changed || did, wrapAccount(a, err)
+	}
+	if h.stranded() {
+		// Its daemon is alive, so there is no claim to take; the store's lock
+		// already keeps out a second rota.
+		did, err := h.renew(ctx)
 		return changed || did, wrapAccount(a, err)
 	}
 	release, idle := s.holdIdle(a)

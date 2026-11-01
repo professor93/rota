@@ -48,6 +48,21 @@ import (
 // confirmable again, and presenting the account's own refresh token might
 // present one that login already replaced.
 //
+// One exception to the rule, because the rule alone deadlocks. Claude Code's
+// daemon refreshes the login every eight hours or so, and now and then the
+// refresh fails. When the access token has run out by then the daemon writes
+// auth_required into daemon-auth-status.json, the sessions it hosts say
+// "Login expired · Please run /login", and from then on all it has been seen
+// to do is wait for a newer login to appear in the store, while rota, seeing
+// something alive, waits for it to go away. The login is alive all that time.
+// So a home that is stranded (see stranded) may be refreshed although it is
+// alive, and the login is written in under the running daemon, whose re-check
+// of the store takes it. Stranded is deliberately narrow: the daemon and what
+// it hosts are all that runs there, the home holds the account's own login,
+// and the status file is about the token that ran out, because the file
+// outlives recovery and says nothing on its own. A window open beside the
+// daemon is a refresher that has not given up, and the home stays its own.
+//
 // A refresh token the provider refused is never presented again. An account
 // whose token was refused is dead, and a dead account is never refreshed
 // anywhere; it comes back only by a fresh login — `rota login`, or /login
@@ -64,6 +79,7 @@ import (
 const (
 	claudeCredentials = ".credentials.json"
 	claudeDaemonLock  = "daemon.lock"
+	claudeDaemonAuth  = "daemon-auth-status.json"
 	claudeSessionsDir = "sessions"
 )
 
@@ -88,6 +104,14 @@ var (
 	// before it is read once more and, still unreadable, taken for empty: a
 	// writer that was just finishing has finished.
 	unreadablePause = 300 * time.Millisecond
+	// strandedGrace is how long past its real expiry a token must be before a
+	// daemon that gave up on it is taken at its word: long enough that a
+	// daemon still able to refresh has done so.
+	strandedGrace = 10 * time.Minute
+	// tokenLife is how long an access token lasts, about: a status file older
+	// than that, counted back from the expiry, was written about an earlier
+	// token and says nothing about this one.
+	tokenLife = 8 * time.Hour
 )
 
 // errKeychain marks a keychain that could not be read, which is not the
@@ -120,6 +144,10 @@ type claudeHome struct {
 	// rota wrote there and has refreshed away since: certainly spent, its
 	// successor in the account's hands.
 	spent bool
+	// rescuing is whether this look is refreshing a stranded home, which goes
+	// on deciding for the write that follows: once the refresh has answered,
+	// the token is good and the home is no longer stranded.
+	rescuing bool
 }
 
 func (s *Store) claudeHome(a *rota.Account, others bool) *claudeHome {
@@ -256,6 +284,43 @@ func (h *claudeHome) daemonAlone() bool {
 		}
 	}
 	return true
+}
+
+// stranded reports whether Claude Code's daemon has given up on the login in
+// this home, which is the one reason a home with something alive in it may be
+// refreshed. All of it has to hold, of a home adopt has just read: rota keeps
+// the account's login here, it is alive, and the home holds that very login,
+// out of the hold; the store's lock is still held; the daemon and what it
+// hosts are all that runs here, because anything else is a refresher that has
+// not given up; the daemon says auth_required, about the token that ran out;
+// and that token truly expired at least strandedGrace ago, by its real expiry
+// and not by Expired, which counts a margin before it.
+func (h *claudeHome) stranded() bool {
+	a := h.a
+	if h.s.released || h.hold != "" || !h.usable || !h.s.keepsLogin(a) || !a.StagedCurrent() || !h.daemonAlone() {
+		return false
+	}
+	since, ok := daemonGaveUp(h.home)
+	expired := time.UnixMilli(a.Token.ExpiresAt)
+	return ok && !rota.Now().Before(expired.Add(strandedGrace)) && since.Add(tokenLife).After(expired)
+}
+
+// daemonGaveUp reads when the daemon in a home last gave up on its login, from
+// the status file it leaves there. A file that is missing, cannot be read, or
+// says anything else says nothing.
+func daemonGaveUp(home string) (time.Time, bool) {
+	raw, err := os.ReadFile(filepath.Join(home, claudeDaemonAuth))
+	if err != nil {
+		return time.Time{}, false
+	}
+	var status struct {
+		Status string  `json:"status"`
+		Since  float64 `json:"since"`
+	}
+	if rota.UnmarshalLenient(raw, &status) != nil || status.Status != "auth_required" || status.Since <= 0 {
+		return time.Time{}, false
+	}
+	return time.UnixMilli(int64(status.Since)), true
 }
 
 // claimed reports whether a run holds this account's claim, shared or not:
@@ -614,17 +679,31 @@ func (h *claudeHome) stopDaemon() error {
 /* ------------------------------------------------- refreshing and writing --- */
 
 // renew refreshes the account's login when it has expired, the home is not
-// in the hold, the account is not dead and nothing is alive there, and puts
-// the new login into the home at once — after the store has it on disk,
-// because from the moment the provider answers, the refresh token the home
-// holds is spent. That spent login is also why the write is made even if
-// something started in the home meanwhile (see mayWrite).
+// in the hold, the account is not dead and nothing is alive there — or all
+// that is alive has given up on it (stranded) — and puts the new login into
+// the home at once, after the store has it on disk, because from the moment
+// the provider answers, the refresh token the home holds is spent. That spent
+// login is also why the write is made even if something started in the home
+// meanwhile (see mayWrite).
 func (h *claudeHome) renew(ctx context.Context) (bool, error) {
 	a := h.a
-	if !a.Expired() || a.Dead || h.hold != "" || !h.quiet() {
+	if !a.Expired() || a.Dead || h.hold != "" {
 		return false, nil
 	}
+	rescue := !h.quiet()
+	if rescue {
+		if !h.stranded() {
+			return false, nil
+		}
+		h.rescuing = true
+	}
 	changed, err := h.refresh(ctx)
+	if rescue && err != nil && !a.Dead {
+		// Nothing has changed: the home is as stranded as it was, and whatever
+		// asked goes on as it would have.
+		h.warn(fmt.Sprintf("%s: Claude Code's daemon has given up on refreshing the login in its home, and rota could not refresh it either: %v", a, err))
+		return changed, nil
+	}
 	if err != nil || !changed || a.Dead || h.hold != "" {
 		return changed, err
 	}
@@ -644,6 +723,12 @@ func (h *claudeHome) writeRefreshed(ctx context.Context) error {
 		return nil
 	}
 	_, files, err := rota.StagePlan(ctx, h.a, h.home)
+	if err == nil && len(files) == 0 && h.rescuing {
+		// The refresh token did not rotate, so the home reads as current, but
+		// the access token did, and that is what the daemon is waiting for.
+		h.a.StagedSuperseded()
+		_, files, err = rota.StagePlan(ctx, h.a, h.home)
+	}
 	if err != nil {
 		return err
 	}
@@ -651,17 +736,18 @@ func (h *claudeHome) writeRefreshed(ctx context.Context) error {
 }
 
 // mayWrite reports whether rota may write the account's login into the home
-// now: never in the hold; when nothing is alive there; and, the one
-// exception to that, when the home still holds the very login rota itself
-// refreshed away. That login is certainly spent — the provider issued its
-// successor, which the account holds — so every window still on it is
-// signed out at its next refresh anyway, and leaving it there only makes
-// sure of that.
+// now: never in the hold; when nothing is alive there; and, the two
+// exceptions to that, when the home still holds the very login rota itself
+// refreshed away, or this look refreshed a stranded home. The first login is
+// certainly spent — the provider issued its successor, which the account
+// holds — so every window still on it is signed out at its next refresh
+// anyway, and leaving it there only makes sure of that. And a rescue is for
+// nothing until the daemon can read what it was waiting for.
 func (h *claudeHome) mayWrite() bool {
 	if h.hold != "" {
 		return false
 	}
-	return h.quiet() || h.spent
+	return h.quiet() || h.spent || h.rescuing
 }
 
 // refresh asks the provider for a new token. It is the only way rota
@@ -680,7 +766,13 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 	if a.Dead || h.hold != "" {
 		return false, fmt.Errorf("%w: %s is not refreshed: %s", rota.ErrBusy, a, nonEmpty(h.hold, "its login is dead"))
 	}
+	rescue := h.rescuing
+	h.rescuing = false
 	changed, err = rota.Refresh(ctx, a)
+	if rescue && changed && err == nil {
+		h.rescuing = true
+		h.warn(fmt.Sprintf("%s: Claude Code's daemon had given up on refreshing the login in its home, so rota refreshed it", a))
+	}
 	if err == nil || !a.Dead {
 		return changed, err
 	}
@@ -707,7 +799,7 @@ func nonEmpty(s, otherwise string) string {
 }
 
 // seed writes the account's login into its home. It is only ever called
-// when nothing is alive there, and never in the hold.
+// when rota may write there (mayWrite), and never in the hold.
 //
 // The login replaces only itself in the store: Claude Code keeps the OAuth
 // tokens of MCP servers and secrets of its own beside it. The new file is
@@ -867,7 +959,10 @@ func (h *claudeHome) launchHeld() (*rota.Command, error) {
 // On the stored route nothing is written when the home already holds the
 // account's current login. Otherwise the login goes in when rota may write
 // (mayWrite); when it may not, the launch joins the login that is there and
-// the person is told when the account's takes over.
+// the person is told when the account's takes over. A stranded home is
+// refreshed here like a quiet one, and the launch joins the login just
+// written; a refresh that did not get through leaves the launch to join the
+// home as it found it.
 func (h *claudeHome) launchStored(ctx context.Context) (*rota.Command, error) {
 	a := h.a
 	route := routeEnv

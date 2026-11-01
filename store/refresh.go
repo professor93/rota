@@ -25,8 +25,8 @@ import (
 // a dead account in again inside it. Its usage is then read with the access
 // token it has, while Claude Code runs or not — reading usage spends
 // nothing. Only an expired token needs a refresh, and that waits for the
-// home to be quiet and out of the hold; until then the account keeps its
-// last reading.
+// home to be quiet or stranded, and out of the hold; until then the account
+// keeps its last reading.
 //
 // A store whose lock was released — a run has started since it was opened —
 // rotates nothing at all: no refresh, no claim, nothing written into a home.
@@ -130,14 +130,20 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		case s.released, h != nil && h.hold != "":
 			// Nothing may rotate here; the account keeps its last reading.
 		case h != nil:
-			// Expired: a refresh, which only a quiet home may have. The claim
-			// is kept until the new login is in the home.
-			release, idle := s.holdIdle(a)
-			if !idle {
-				continue
+			// Expired: a refresh, which only a quiet home may have, or a
+			// stranded one. The claim is kept until the new login is in the
+			// home. A stranded home has none to give, its daemon being alive,
+			// and the store's lock already keeps out a second rota.
+			if h.stranded() {
+				h.rescuing = true
+			} else {
+				release, idle := s.holdIdle(a)
+				if !idle {
+					continue
+				}
+				held = append(held, release)
+				h.others = false
 			}
-			held = append(held, release)
-			h.others = false
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
