@@ -516,8 +516,9 @@ func (c *cli) list(args []string) error {
 		recent = 0
 	}
 	force := flags["-r"] || flags["--refresh"]
-	// --short is the listing that costs nothing: what is already known,
-	// in rotation order, and no provider asked anything.
+	// --short is the listing that costs nothing: what is already known, in
+	// rotation order, and no provider asked anything unless a home needs
+	// rescuing, which no choice of output may put off.
 	short := flags["-s"] || flags["--short"]
 	s, err := c.openStore()
 	if err != nil {
@@ -547,7 +548,9 @@ func (c *cli) list(args []string) error {
 		return nil
 	}
 	var errs []error
-	if !short {
+	if short {
+		errs = s.Rescue(context.Background(), shown...)
+	} else {
 		errs = s.Refresh(context.Background(), force, shown...)
 	}
 
@@ -589,8 +592,8 @@ func (c *cli) list(args []string) error {
 	// in the rotation, and CLI is which one it drives.
 	if short {
 		// The reading's age belongs beside it here more than anywhere else:
-		// --short asks no provider anything, so what it shows may be hours
-		// old and nothing else on the line would say so.
+		// --short reads no usage, so what it shows may be hours old and
+		// nothing else on the line would say so.
 		g := grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "CHECKED"}}
 		for _, a := range shown {
 			g.add(place(a), strconv.Itoa(a.ID), a.Provider, a.Label(), headline(a), checkedAgo(a))
@@ -599,6 +602,9 @@ func (c *cli) list(args []string) error {
 		c.sayLongNotes(shown)
 		if withSessions {
 			c.showSessions(sessions.Scan(s, recent))
+		}
+		for _, e := range errs {
+			fmt.Fprintf(c.err, "warning: %v\n", e)
 		}
 		return nil
 	}
