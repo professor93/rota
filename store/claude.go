@@ -52,16 +52,18 @@ import (
 // daemon refreshes the login every eight hours or so, and now and then the
 // refresh fails. When the access token has run out by then the daemon writes
 // auth_required into daemon-auth-status.json, the sessions it hosts say
-// "Login expired · Please run /login", and from then on all it has been seen
-// to do is wait for a newer login to appear in the store, while rota, seeing
-// something alive, waits for it to go away. The login is alive all that time.
-// So a home that is stranded (see stranded) may be refreshed although it is
-// alive, and the login is written in under the running daemon, whose re-check
-// of the store takes it. Stranded is deliberately narrow: the daemon and what
-// it hosts are all that runs there, the home holds the account's own login,
-// and the status file is about the token that ran out, because the file
-// outlives recovery and says nothing on its own. A window open beside the
-// daemon is a refresher that has not given up, and the home stays its own.
+// "Login expired · Please run /login", and from then on it waits for a newer
+// login to appear in the store, while rota, seeing something alive, waits for
+// it to go away. The login is alive all that time. So a home that is stranded
+// (see stranded) may be refreshed although it is alive, and the login is
+// written in under the running daemon, whose re-check of the store takes it.
+// Stranded is deliberately narrow: the daemon and what it hosts are all that
+// runs there, the home holds the account's own login, and the status file is
+// about the token that ran out, because the file outlives recovery and says
+// nothing on its own. A window open beside the daemon is a refresher that has
+// not given up, and the home stays its own. One owner at a time still holds:
+// rota takes Claude Code's own refresh lock for as long as it is the owner
+// (see rescue).
 //
 // A refresh token the provider refused is never presented again. An account
 // whose token was refused is dead, and a dead account is never refreshed
