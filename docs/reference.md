@@ -1907,10 +1907,13 @@ first, Python the last — so the child only ever sees one. For `claude`,
 `ANTHROPIC_BASE_URL` is dropped too: a stray one would send the OAuth token
 to whatever host it names — and with it every variable that would sign
 Claude Code in some other way or move its credential store
-(`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, the Bedrock and Vertex switches,
+(`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE`, the Bedrock,
+Vertex, Foundry, Mantle and Claude Platform on AWS switches,
 `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`,
-`CLAUDE_CODE_OAUTH_SCOPES`, `CLAUDE_CODE_SUBSCRIPTION_TYPE`,
-`CLAUDE_CODE_RATE_LIMIT_TIER`, `CLAUDE_SECURESTORAGE_CONFIG_DIR`). A launch on
+`CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_OAUTH_SCOPES`,
+`CLAUDE_CODE_SUBSCRIPTION_TYPE`, `CLAUDE_CODE_RATE_LIMIT_TIER`,
+`CLAUDE_CODE_SIMPLE`, which reads no stored login at all, and
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`). A launch on
 the account's stored login drops `CLAUDE_CODE_OAUTH_TOKEN` as well, so no
 token reaches the child at all.
 

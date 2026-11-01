@@ -71,15 +71,18 @@ func ClaudeCredentialVars() []string {
 // some other way, send its credential somewhere else, or move its
 // credential store: every route drops them, so a shell profile cannot
 // quietly bill another account or read another account's login. A stray
-// ANTHROPIC_BASE_URL alone would send an OAuth token to a third party, and
-// CLAUDE_SECURESTORAGE_CONFIG_DIR would point the store at somebody else's.
+// ANTHROPIC_BASE_URL alone would send an OAuth token to a third party,
+// CLAUDE_SECURESTORAGE_CONFIG_DIR would point the store at somebody else's,
+// and CLAUDE_CODE_SIMPLE would not read the store at all.
 var claudeCompeting = []string{
-	"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+	"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_PROFILE",
 	"ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
-	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
+	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+	"CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
 	"CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
-	"CLAUDE_CODE_OAUTH_SCOPES", "CLAUDE_CODE_SUBSCRIPTION_TYPE", "CLAUDE_CODE_RATE_LIMIT_TIER",
-	"CLAUDE_SECURESTORAGE_CONFIG_DIR",
+	"CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES",
+	"CLAUDE_CODE_SUBSCRIPTION_TYPE", "CLAUDE_CODE_RATE_LIMIT_TIER",
+	"CLAUDE_CODE_SIMPLE", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
 }
 
 // storedLoginPlatform is whether this platform takes the stored route at

@@ -667,6 +667,30 @@ func TestOnlyTheLoginRotaWroteAndRefreshedAwayIsSpent(t *testing.T) {
 	}
 }
 
+// Every route drops what would take Claude Code off the account's login: these
+// are documented at code.claude.com/docs/en/env-vars, and a shell profile that
+// sets any of them must not quietly sign a run in some other way, or leave it
+// signed in as nobody, as CLAUDE_CODE_SIMPLE does by not reading the store.
+func TestEveryRouteDropsWhatWouldChangeHowClaudeCodeSignsIn(t *testing.T) {
+	names := []string{"CLAUDE_CODE_SIMPLE", "ANTHROPIC_PROFILE", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE",
+		"CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN"}
+	var inherited []string
+	for _, n := range names {
+		inherited = append(inherited, n+"=x")
+	}
+	for what, env := range map[string][]string{
+		"the stored route":      Environ(inherited, claudeStoredCommand(t.TempDir())),
+		"the environment route": Environ(inherited, claudeEnvCommand(&Account{Provider: "claude"})),
+		"a caller's own":        Environ(inherited, &Command{Drop: ClaudeCredentialVars()}),
+	} {
+		for _, n := range names {
+			if slices.Contains(envNames(env), n) {
+				t.Fatalf("%s keeps %s: %v", what, n, env)
+			}
+		}
+	}
+}
+
 // A login Claude Code cleared says so, in words a person can act on: the
 // provider refused it, and it was Claude Code that emptied the store. A refusal
 // rota heard itself is the better record and stays; an account marked dead with
