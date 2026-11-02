@@ -40,6 +40,11 @@ Usage:
 
   rota login [provider]         start a new account: prints a login id and a URL
   rota login --long             ...ask instead for a token that lasts a year
+  rota login --key [--label name]   an account on a Claude Console API key,
+                                read hidden from the terminal or one line of
+                                stdin; it starts out of the rotation
+  rota login <account-id> --token   a token from ` + "`claude setup-token`" + `,
+                                read the same way, as that account's long one
   rota login <login-id> [code]  finish that login (no code for device flows)
   rota login <account-id>       sign an existing account in through its own CLI
   rota list [provider] [-r]     accounts with usage (-r forces a quota refresh)
@@ -320,6 +325,12 @@ func looksLikeLoginID(s string) bool {
 // credential or the vendor CLI keeps its own. rota already knows which, so
 // it decides, and nobody has to remember which verb a provider wants.
 func (c *cli) login(args []string) error {
+	// A pasted credential's flags come out before anything else reads the
+	// arguments: --label's value could be a provider's name. See paste.go.
+	args, paste, err := takePasted(args)
+	if err != nil {
+		return err
+	}
 	// A provider name is taken out first because it can also be written
 	// --provider=x, and because naming one always means "start a new one".
 	name, rest := takeProvider(args)
@@ -330,6 +341,14 @@ func (c *cli) login(args []string) error {
 	// not which account is named: `rota login --long` with nothing else is
 	// still a beginning, and would otherwise read as a login id.
 	rest, long := takeLong(rest)
+	switch {
+	case paste.key:
+		return c.loginKey(name, long, rest, paste.label)
+	case paste.labelled:
+		return usageErr("--label names an account an API key makes: rota login --key --label <name>")
+	case paste.token:
+		return c.loginToken(name, long, rest)
+	}
 	if name != "" || long || len(rest) == 0 {
 		if rest, _, err := splitFlags(rest); err != nil {
 			return err
@@ -380,6 +399,8 @@ func (c *cli) login(args []string) error {
 
 const loginUsage = `usage: rota login [provider]             start a new account there
        rota login --long                 a year-long token for an account already here
+       rota login --key [--label name]   an account on a Claude Console API key, read from stdin
+       rota login <account-id> --token   a token from ` + "`claude setup-token`" + `, as its long-lived one
        rota login <login-id> [code]      finish that login
        rota login <account-id> [options] sign it in through its own CLI
 
@@ -621,7 +642,7 @@ func (c *cli) list(args []string) error {
 			status += " (" + note + ")"
 		}
 		// One window per line, all of them in the USAGE cell.
-		g.add(place(a), strconv.Itoa(a.ID), a.Provider, a.Label(), strings.Join(windows(a.Quota), "\n"),
+		g.add(place(a), strconv.Itoa(a.ID), a.Provider, a.Label(), strings.Join(usageLines(a), "\n"),
 			strconv.Itoa(rotation.Cutoff(a))+"%", checkedAgo(a), status)
 	}
 	g.render(c.out)
@@ -1620,6 +1641,9 @@ func (c *cli) show(a *rota.Account, home string) error {
 	if rota.Flavor(a.Provider) == "claude" {
 		fmt.Fprintf(c.out, "  sessions    %s\n", conversations(a))
 	}
+	if a.APIKey() {
+		fmt.Fprintln(c.out, "  credential  an API key, paid per token; no usage to read and no Remote Control")
+	}
 	if a.Long != nil {
 		fmt.Fprintf(c.out, "  long token  %s\n", longLine(a))
 	}
@@ -2279,13 +2303,29 @@ func checkedAgo(a *rota.Account) string {
 
 // headline renders the one usage number the rotation judges an account by.
 func headline(a *rota.Account) string {
-	if !rota.Metered(a.Provider) {
+	if a.APIKey() {
+		return apiKeyUsage
+	}
+	if !a.Metered() {
 		return "n/a"
 	}
 	if a.QuotaAt == 0 {
 		return "?"
 	}
 	return fmt.Sprintf("%.0f%%", a.Percent())
+}
+
+// apiKeyUsage is what USAGE says of an account on an API key: it is paid per
+// token and has no limits to read, so it has no percentage either, and the
+// rotation treats it as unmetered.
+const apiKeyUsage = "api key"
+
+// usageLines is an account's USAGE cell, one line per window.
+func usageLines(a *rota.Account) []string {
+	if a.APIKey() {
+		return []string{apiKeyUsage}
+	}
+	return windows(a.Quota)
 }
 
 // windows renders a quota one line per window, most important first. A

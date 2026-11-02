@@ -13,4 +13,8 @@ import "os"
 
 func isTerminal(*os.File) bool { return false }
 
+// canHideInput says this platform cannot turn a terminal's echo off, so a
+// pasted credential is not read from one here.
+const canHideInput = false
+
 func noEcho(_ *os.File, read func() (string, error)) (string, error) { return read() }

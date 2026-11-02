@@ -83,6 +83,9 @@ func rawMode(fd uintptr) (restore func(), err error) {
 	return func() { once.Do(func() { _ = setTermios(fd, before) }) }, nil
 }
 
+// canHideInput says this platform can turn a terminal's echo off (noEcho).
+const canHideInput = true
+
 // errNotATerminal is what rawMode answers for a descriptor that is not one,
 // so a caller can say so in its own words rather than passing on an errno.
 var errNotATerminal = errors.New("not a terminal")

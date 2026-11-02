@@ -39,6 +39,7 @@ rota login                     # sign a Claude account in (prints a URL)
 rota login codex               # ...or another provider: codex, grok
 rota login <login-id> <code>   # finish with the code from the browser
 rota login --long              # ...a token for an account here that lasts a year
+rota login --key               # an account on a Claude Console API key, pasted hidden; run by id
 rota list                      # every account, in rotation order, with usage
 
 rota "explain this repo"       # ask — the rotation picks the account

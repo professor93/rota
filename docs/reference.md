@@ -157,6 +157,8 @@ rota 2 "summarize this repo"  # ...on account 2
 rota login                    # start a claude login: prints an id and a URL
 rota login codex              # ...for another provider
 rota login --long             # a year-long token for an account already here
+rota login --key              # an account on a Claude Console API key, pasted, not shown
+rota login 2 --token          # paste a `claude setup-token` token as account 2's long-lived one
 rota login <login-id> <code>  # finish it with the code from the page
 rota login <login-id>         # finish a delegated login, which takes no code (grok)
 rota login 2                  # sign account 2 in through its own CLI
@@ -208,7 +210,14 @@ every way an account is signed in.
 | | |
 |---|---|
 | `--long` | ask for a year-long token for an account already here — see *A token that outlives the window* |
+| `--key` | an account of its own on a Claude Console API key, read with echo off from the terminal, or as one line of standard input — see *An account on an API key* |
+| `--label <name>` | with `--key`: what to call the account; otherwise it is `api key ...` and the key's last four characters |
+| `--token` | after an account id: a token from `claude setup-token`, read the same way, stored as that account's long-lived token |
 | `--provider <name>` | the provider, spelled out where a bare name would read as something else |
+
+Neither `--key` nor `--token` takes its credential on the command line, where
+every process on the machine and the shell's history could read it: written
+there, it is refused without being repeated.
 
 Anything after an account id is passed to the vendor CLI's own login
 (`--region mainland-cn`, say).
@@ -591,7 +600,7 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame |
 | `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
-| `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead |
+| `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"status":"long","long_until":"..."}`. Neither comes back or is logged |
 | `POST` | `/v1/login/{id}` | control | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"status":"long","long_until":"..."}` |
 | `POST` | `/v1/auth` | control | what `POST /v1/login` was called before the API and the command agreed on one word; kept working for anything already calling it |
 | `POST` | `/v1/auth/{id}` | control | likewise for `POST /v1/login/{id}` |
@@ -1885,7 +1894,7 @@ dropping it silently, and never advertises it.
 
 | Provider | Login | Quota reported | Launches |
 |---|---|---|---|
-| `claude` | OAuth + PKCE, paste code | 5-hour, 7-day, per-model | `claude` |
+| `claude` | OAuth + PKCE, paste code; or paste a Console API key | 5-hour, 7-day, per-model; none for a key | `claude` |
 | `codex` | OAuth + PKCE, paste redirect URL | none published | `codex` |
 | `grok` | paste an API key, or delegate the login | none published | `grok` |
 | `kimi` | delegated: its own CLI signs in | none published | `kimi` |
@@ -1899,7 +1908,7 @@ How each credential reaches its CLI:
 
 | Provider | Route | Verified |
 |---|---|---|
-| `claude` | the account's own login, in Claude Code's credential store inside a private `CLAUDE_CONFIG_DIR`; `CLAUDE_CODE_OAUTH_TOKEN` for a run with no home, a dead login on a long token, and Windows | the environment route live; the stored route built on Claude Code's measured behaviour, to be confirmed live |
+| `claude` | the account's own login, in Claude Code's credential store inside a private `CLAUDE_CONFIG_DIR`; `CLAUDE_CODE_OAUTH_TOKEN` for a run with no home, a dead login on a long token, and Windows; `ANTHROPIC_API_KEY` for an account on an API key, always | the environment route live; the stored route built on Claude Code's measured behaviour, to be confirmed live |
 | `codex` | private `CODEX_HOME` holding `auth.json` | yes — live |
 | `kimi` | private `KIMI_CODE_HOME`, the CLI's own credential inside it | flags verified against the real CLI; the login itself is Kimi's to complete |
 | `grok` | `XAI_API_KEY` + private `GROK_HOME` | flags verified against the real CLI; no account to test a run |
@@ -2177,7 +2186,9 @@ token, which Remote Control refuses. `rota run --remote-control`, `rota set
 `it runs on a token because its configuration directory is one you chose, and
 Remote Control needs the home rota keeps for an account (clear --config)` —
 and so does naming such a directory for an account that has it on. Its
-`.claude.json` is never touched.
+`.claude.json` is never touched. An account on an API key is refused the same
+three ways, by name — `runs on an API key, and Claude Code's Remote Control
+refuses API keys: it needs a claude.ai login` — see *An account on an API key*.
 
 One caveat is Claude Code's own: a login in another configuration directory
 on the same machine can interrupt one account's Remote Control.
@@ -2579,7 +2590,9 @@ inherited.
 
 ## Quota
 
-Only claude publishes a usage endpoint. Readings are cached for **five
+Only claude publishes a usage endpoint, and only for a login: a claude
+account on an API key has none, is never asked about, and shows `api key`
+under USAGE. Readings are cached for **five
 minutes** and refreshed on the first request past that age; `list -r` and
 `?refresh=1` force one. Both listings say when each account's limits were
 last read, and distinguish *not read yet* from *this provider has no limits
@@ -2615,6 +2628,7 @@ Measured, not assumed — from live accounts:
 | `codex` | 10 days | rotates on **every** refresh; a reused one is rejected permanently |
 | `kimi` | **15 minutes** | not published |
 | `grok` | never | n/a — it is an API key |
+| `claude` on an API key | never | n/a — it is an API key |
 
 rota refreshes a token within five minutes of expiry, and only while running
 a command — and a claude login kept in its home only while nothing of Claude
@@ -2685,6 +2699,80 @@ is worth far more to a thief than an eight-hour one. If that file ever
 leaves your machine, revoke the token from the provider's account settings —
 and treat the file the way you treat a private key.
 
+The same token can be made by Claude Code itself, with `claude setup-token`,
+and pasted instead of approved through rota:
+
+```sh
+claude setup-token            # Claude Code's own: prints a token, sk-ant-oat…
+rota login 12 --token         # paste it; it is not shown as you type
+```
+
+It goes on the account you name, into exactly the field `rota login --long`
+fills, good for a year from now. Such a token is inference-only and cannot say
+whose it is, so rota cannot check that you named the right account: name the
+one you approved as. It never creates an account, an account on an API key
+takes none, and an API key pasted here is refused by name.
+
+### An account on an API key
+
+A key from the Claude Console makes a claude account of its own, billed per
+token to that Console's API credit rather than to a plan:
+
+```sh
+rota login --key                    # paste it; it is not shown as you type
+rota login --key --label "work credit"
+echo "$KEY" | rota login --key      # or one line of standard input
+```
+
+```
+Added claude account 7 (api key ...WXYZ): it runs on an API key, and every run on it is paid for from that key's credit.
+It is out of the rotation, so it runs only by id (`rota 7 "..."`); `rota set 7 --order last` puts it in.
+Claude Code asks once, the first time it opens on this account, whether to use the key: say yes.
+```
+
+The key is never taken from the command line, never printed, logged or put in
+an error; `--label` names the account, and otherwise its last four characters
+are the only part of it anything shows. It is stored in `accounts.json` beside
+every other credential, mode 0600. It is checked once, at login, with one
+request to the API's model list: a `401` or `403` refuses it, and nothing is
+stored; anything else — no network, a timeout, a server error — takes it with a
+warning. A key starts `sk-ant-api` and a `claude setup-token` token
+`sk-ant-oat`, which is how Claude Code itself tells them apart; rota reads the
+prefix only to refuse the wrong one with a sentence. The account is named by a
+fingerprint of the key, so pasting the same key again is the same account — a
+new `--label` renames it, and nothing else you chose about it changes.
+
+**It starts out of the rotation** (order 0), because every run on it costs
+money: it runs when you name it, and `rota set <id> --order <place>` puts it in
+the queue like any other account. In the queue it is unmetered — no usage is
+ever read for it, so it is never spent — and USAGE says `api key` rather than a
+percentage nobody measured.
+
+It runs like any claude account, in its own home, with your settings and
+conversations as the `--sessions` setting says, its own daemon, hermetic and
+headless runs included — on the environment route, with the key in
+`ANTHROPIC_API_KEY`, which Claude Code sends as `X-Api-Key`. Every other
+credential variable — `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, the
+Bedrock and Vertex switches, a base URL and the rest — is dropped, so the key
+is the only one. No login is written into its home, nothing is refreshed, and
+a long-lived token is never used for it.
+
+What it cannot do:
+
+- **Remote Control.** Claude Code refuses API keys for it, so `--remote-control`
+  and `rota set --remote-control on` refuse such an account by name.
+- **Usage.** There is no usage endpoint for a key; the Console shows what it spent.
+- **A long-lived token.** That is a claude.ai login's, and this is not one.
+- **claude.ai features** that need a login, such as claude.ai connectors.
+
+The first time Claude Code opens interactively on such an account it asks
+whether to use the key, once, and remembers the answer in its `.claude.json` —
+by default your own, which every account shares — keeping the key's last
+twenty characters there, as it does for any key in `ANTHROPIC_API_KEY`. Say
+yes. `/config` has the toggle to change it later. A headless run (`rota 7
+"..."`) uses the key without asking. The agent the CLI starts can read its own
+environment, key included, as it can read the token of any other account.
+
 ## Storage
 
 By default `~/.rota/accounts.json`, mode 0600, written atomically, with an
@@ -2730,6 +2818,18 @@ q, _ := rota.Usage(ctx, a)            // nil when the provider publishes none
 res, _ := rota.Run(ctx, a, home, nil, rota.Spec{Prompt: "hi", Model: "sonnet"}, nil, os.Stdout)
 fmt.Println(res.Result, res.SessionID, res.CostUSD)
 ```
+
+A credential somebody pasted needs no `Begin`. `LoginKey(ctx, "claude", key)`
+checks a Console API key once against `ClaudeEndpoints.Models` (within
+`ClaudeKeyCheckTimeout`) and returns a token marked `CredentialAPIKey`, named by
+a fingerprint of the key; only the API's `401`/`403` is an error, and any other
+failure to ask comes back as `unverified` beside the token. `NewAccount` makes
+it an account whose `APIKey()` is true, whose `Metered()` is false, which
+`Usage` never asks about and which `Stage` launches with `ANTHROPIC_API_KEY`
+alone. `PasteLong("claude", token)` turns a `claude setup-token` token into the
+one `BeginLong` would have obtained, for `Account.ApplyLong` on whichever
+account the caller knows it belongs to. A provider offers either by
+implementing `KeyTaker`.
 
 `Run` is one question and one answer. `Start` is the same request left open:
 set `Spec.Input` alongside `Stream` and the CLI keeps its standard input, so
