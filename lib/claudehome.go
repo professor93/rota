@@ -58,8 +58,12 @@ const (
 // blanks a login when a refresh of its own comes back refused, which is Claude
 // Code's verdict and not proof the login is over, and "Login expired · Please
 // run /login" is no proof either: rota has refreshed a login successfully after
-// that message. An application that holds the account's own refresh token should
-// present it once before it takes this for the answer, as rota's store does.
+// that message. AdoptFS marks the account dead all the same, because it reads
+// and never refreshes. rota's own store looks first: it reads the store's
+// claudeAiOauth entry itself, and while the account's current login is blanked
+// it leaves AdoptFS out and presents the account's refresh token once with
+// Refresh. An application that wants the same does it the same way, before it
+// calls AdoptFS for that home.
 const claudeCleared = "Claude Code cleared the login in its home after a refresh of its own was refused"
 
 // ClaudeCredentialVars are the inherited variables that would give Claude
@@ -239,9 +243,9 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //   - the login Claude Code blanks when a refresh of its own was refused: if
 //     it was the account's current login, the login is dead, and only a fresh
 //     one — `rota login`, or `/login` inside a window — brings it back; if it
-//     was an older one, the home simply holds nothing usable. rota's store
-//     does not bring this to AdoptFS for the current login until the
-//     account's own refresh token has been presented once (store/claude.go);
+//     was an older one, the home simply holds nothing usable. Whether to
+//     present the account's own refresh token first is the application's
+//     call, made before AdoptFS: see claudeCleared;
 //   - the account's own refresh token: in sync;
 //   - another refresh token of the same login: a rotation by Claude Code,
 //     taken when it is newer than what the account has. A refresh carries
