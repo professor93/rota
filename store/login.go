@@ -4,7 +4,10 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	rota "github.com/professor93/rota/lib"
 )
@@ -125,6 +128,79 @@ func (s *Store) attachLong(l *rota.Login, tok *rota.Token) (*rota.Account, error
 	if a == nil {
 		return nil, rota.Invalid("the long-lived token was approved as %s, which is not a %s account rota holds; log it in first with `rota login %s`, then ask for the long token again",
 			identityName(tok.Identity), l.Provider, l.Provider)
+	}
+	a.ApplyLong(tok)
+	return a, s.Save()
+}
+
+// LoginKey adds or updates the account an API key belongs to, and saves the
+// store. Nothing is parked: there is no second step. added reports whether a
+// new account was made, and unverified why the key could not be checked,
+// when it could not — it is stored all the same (rota.LoginKey).
+//
+// A new key account starts out of the rotation, at order 0: every run on it
+// is paid for, so it runs only when somebody names it, until somebody puts it
+// in. Pasting the same key again is the same account, and changes nothing
+// anybody chose about it; a label renames it.
+func (s *Store) LoginKey(ctx context.Context, provider, key, label string) (a *rota.Account, added bool, unverified, err error) {
+	label = strings.TrimSpace(label)
+	if err := checkLabel(label); err != nil {
+		return nil, false, nil, err
+	}
+	tok, unverified, err := rota.LoginKey(ctx, provider, key)
+	if err != nil {
+		return nil, false, nil, err
+	}
+	if provider == "" {
+		provider = rota.DefaultProvider
+	}
+	a = rota.MatchIdentity(s.Accounts, provider, tok.Identity)
+	if a == nil {
+		a = s.add(provider)
+		added = true
+		a.Order = 0
+		// Order 0 is a decision from here on, which a store that has never
+		// been ordered would otherwise reverse the first time it is opened.
+		s.Ordered = true
+		// A home left by an older account must never be this one's.
+		if err := os.RemoveAll(s.Home(a)); err != nil {
+			return nil, false, nil, err
+		}
+	}
+	a.Apply(tok)
+	a.Quota, a.QuotaAt = nil, 0
+	if label != "" {
+		a.Name = label
+	}
+	return a, added, unverified, s.Save()
+}
+
+// checkLabel refuses a name that would not read as one: a line of its own,
+// short enough for a table.
+func checkLabel(label string) error {
+	if utf8.RuneCountInString(label) > 64 || strings.ContainsFunc(label, unicode.IsControl) {
+		return rota.Invalid("a label is one line of at most 64 characters")
+	}
+	return nil
+}
+
+// PasteLong puts a long-lived token somebody pasted — `claude setup-token`
+// printed it — on the account with this id, as `rota login --long` would, and
+// saves the store. It creates nothing: such a token cannot say whose it is,
+// so it goes where it is put and nowhere else. An account that runs on an API
+// key takes none: the token is a claude.ai login's, and the key is billed to
+// somebody else.
+func (s *Store) PasteLong(id int, token string) (*rota.Account, error) {
+	a := s.Find(id)
+	if a == nil {
+		return nil, rota.WrapNoAccount(id)
+	}
+	if a.APIKey() {
+		return nil, rota.Invalid("%s runs on an API key; a token from `claude setup-token` belongs on the claude.ai account it was made for", a)
+	}
+	tok, err := rota.PasteLong(a.Provider, token)
+	if err != nil {
+		return nil, err
 	}
 	a.ApplyLong(tok)
 	return a, s.Save()

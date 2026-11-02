@@ -124,6 +124,9 @@ func (s *Store) RemoteControlNow(a *rota.Account) error {
 // Code refuses Remote Control for. It is asked of the account as it is about
 // to be, before the setting is saved, and is nil for everything else.
 func (s *Store) CheckRemoteControl(a *rota.Account) error {
+	if a.RemoteControl && a.APIKey() {
+		return rota.WrapRemoteControlKey(a)
+	}
 	if !a.RemoteControl || rota.Flavor(a.Provider) != "claude" || s.owns(a) {
 		return nil
 	}

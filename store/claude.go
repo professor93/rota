@@ -697,10 +697,10 @@ func (s *Store) InUse(a *rota.Account) bool {
 // them — the platform keeps logins in homes (not Windows), and on macOS the
 // home's path names a keychain item rota can find. An account for which it
 // is false runs on a token in its environment, as every claude account did
-// before.
+// before — or, for an account that runs on an API key, on its key.
 func (s *Store) loginInHome(a *rota.Account) bool {
 	home := s.Home(a)
-	if !s.owns(a) || rota.JoinHome(a, home) == nil {
+	if a.APIKey() || !s.owns(a) || rota.JoinHome(a, home) == nil {
 		return false
 	}
 	if keychainKept {
@@ -723,6 +723,8 @@ func (s *Store) keepsLogin(a *rota.Account) bool {
 func (s *Store) whyNoLogin(a *rota.Account) string {
 	home := s.Home(a)
 	switch {
+	case a.APIKey():
+		return "it runs on an API key, which Remote Control refuses"
 	case !s.owns(a):
 		return "it runs on a token because its configuration directory is one you chose"
 	case rota.JoinHome(a, home) == nil:
@@ -1344,7 +1346,7 @@ func (h *claudeHome) tidy() {
 func (h *claudeHome) launch(ctx context.Context, mirror bool) (*rota.Command, error) {
 	a := h.a
 	if !h.s.loginInHome(a) {
-		if keychainKept && h.s.owns(a) && rota.JoinHome(a, h.home) != nil && !nameable(h.home) {
+		if keychainKept && !a.APIKey() && h.s.owns(a) && rota.JoinHome(a, h.home) != nil && !nameable(h.home) {
 			h.warn(fmt.Sprintf("%s: %s; it runs on a token in its environment, without Remote Control", a, h.s.whyNoLogin(a)))
 		}
 		if err := h.s.mayLaunch(a); err != nil {

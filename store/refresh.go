@@ -94,7 +94,7 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		if kept && h == nil {
 			continue // its home could not be read, which is reported
 		}
-		if a.Dead || !rota.Metered(a.Provider) {
+		if a.Dead || !a.Metered() {
 			continue
 		}
 		stale := force || a.QuotaAt == 0 || time.Since(time.UnixMilli(a.QuotaAt)) > QuotaTTL
