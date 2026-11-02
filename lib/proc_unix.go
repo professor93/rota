@@ -75,14 +75,6 @@ func (s *stopper) stop() {
 	})
 }
 
-// asked reports whether this stopper asked the CLI to stop, which is what makes
-// its run one rota stopped.
-func (s *stopper) asked() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.kill != nil
-}
-
 // settle is what a stop owes once the CLI has been waited for. Nothing is left
 // to do when the group is gone, and it is looked for again and again, because
 // what the CLI started usually goes a moment after it does. A helper that

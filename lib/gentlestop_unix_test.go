@@ -104,56 +104,43 @@ func TestACancelledRunLetsItsCLIStopByItself(t *testing.T) {
 	if _, err := os.Stat(stopped); err != nil {
 		t.Fatalf("the CLI got to shut down: %v", err)
 	}
-	if o.res == nil {
-		t.Fatal("and the run still has a result")
+	if o.res == nil || o.res.ExitCode != 0 {
+		t.Fatalf("and exited by itself: %+v", o.res)
 	}
 }
 
-// A run rota stopped is an error whatever the CLI's exit code, as it was when
-// such a CLI was killed: one that shuts down cleanly when asked exits 0, and
-// that says nothing about the work it was stopped in the middle of.
-func TestARunRotaStoppedIsAnErrorWhateverItsCLIExitsWith(t *testing.T) {
+// The only results that differ from 1.3.0's are a CLI's own doing: one that
+// handles the SIGTERM it is now asked with, and exits 0, reports that exit,
+// where 1.3.0 killed it and reported -1. With nothing else to tell it apart
+// from a CLI that exited 0 by itself just before it was asked, a failed events
+// writer then returns the writer's error, where 1.3.0 returned nil and IsError.
+// Telling the two apart needs the process's state before the signal, which
+// /proc gives on Linux and nothing in Go's syscall package gives on macOS.
+func TestOnlyACLIThatHandlesTheAskingChangesItsResult(t *testing.T) {
 	dir := t.TempDir()
-	t.Run("cancelled", func(t *testing.T) {
-		ready := filepath.Join(dir, "ready-cancelled")
-		bin := fakecli.Install(t, dir, "clean-cli", fakecli.Spec{Term: "exit", TermTouch: filepath.Join(dir, "c"), Ready: ready, Sleep: "30s"})
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		type outcome struct {
-			res *Result
-			err error
+	for i, c := range stopCases() {
+		if c.what == "its events writer failed after it ended" {
+			continue // it ends by itself, and is in the matrix as it is
 		}
-		done := make(chan outcome, 1)
-		go func() {
-			res, err := fakeRun(ctx, bin)
-			done <- outcome{res, err}
-		}()
-		readyPID(t, ready)
-		cancel()
-		o := <-done
-		if !errors.Is(o.err, context.Canceled) || o.res == nil {
-			t.Fatalf("%v %+v", o.err, o.res)
+		c.fake.Term = "exit"
+		c.exit, c.isError = 0, false
+		if c.what == "its events writer failed" {
+			c.err = errSink
 		}
-		if !o.res.IsError || o.res.ExitCode != -1 {
-			t.Fatalf("stopped: is_error=%v exit=%d", o.res.IsError, o.res.ExitCode)
-		}
-	})
-	t.Run("truncated", func(t *testing.T) {
-		ready := filepath.Join(dir, "ready-truncated")
-		bin := fakecli.Install(t, dir, "clean-loud-cli", fakecli.Spec{Term: "exit", TermTouch: filepath.Join(dir, "t"), Ready: ready,
-			Stdout: []string{strings.Repeat("x", 4096), "{{sleep:30s}}"}})
-		a := &Account{ID: 1, Provider: "claude"}
-		a.Token.Access = "tok"
-		var out bytes.Buffer
-		res, err := Run(context.Background(), a, "", &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}},
-			Spec{Prompt: "p", flavorOverride: "claude"}, &Limits{MaxBufferedOutput: 1024}, &out)
-		if err != nil || res == nil || !res.Truncated {
-			t.Fatalf("%v %+v", err, res)
-		}
-		if !res.IsError || res.ExitCode != -1 {
-			t.Fatalf("stopped: is_error=%v exit=%d", res.IsError, res.ExitCode)
-		}
-	})
+		t.Run(c.what, func(t *testing.T) {
+			res, err := runStopCase(t, dir, i, c)
+			if res == nil {
+				t.Fatalf("a result: %v", err)
+			}
+			if c.err == nil && err != nil || c.err != nil && !errors.Is(err, c.err) {
+				t.Fatalf("error %v, want %v", err, c.err)
+			}
+			if res.ExitCode != c.exit || res.IsError != c.isError || res.Truncated != c.truncated {
+				t.Fatalf("exit=%d is_error=%v truncated=%v, want %d %v %v",
+					res.ExitCode, res.IsError, res.Truncated, c.exit, c.isError, c.truncated)
+			}
+		})
+	}
 }
 
 // A CLI that finishes by itself is judged by what it exits with, as ever.
