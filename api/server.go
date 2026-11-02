@@ -1071,6 +1071,14 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 		// the same endpoint with the same code: which login this is was
 		// settled here and is remembered with it.
 		Long bool `json:"long"`
+		// Key is an API key, pasted: the login it makes has no second step,
+		// and Label, when given, names the account. Token is a token from
+		// `claude setup-token`, which goes on the account named by Account as
+		// its long-lived token. Neither ever comes back, or is logged.
+		Key     string `json:"key"`
+		Label   string `json:"label"`
+		Token   string `json:"token"`
+		Account int    `json:"account"`
 	}
 	// An empty body is fine: it means the default provider. A broken one
 	// is not read as empty.
@@ -1082,11 +1090,33 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, body.Provider+" is not offered for login yet")
 		return
 	}
+	switch {
+	case body.Key != "" && (body.Token != "" || body.Long || body.Account != 0):
+		fail(w, http.StatusBadRequest, "key makes an account of its own: it takes no token, long or account")
+		return
+	case body.Token != "" && (body.Long || body.Label != "" || body.Provider != ""):
+		fail(w, http.StatusBadRequest, "token goes on the account named by account, and takes nothing else")
+		return
+	case body.Token != "" && body.Account < 1:
+		fail(w, http.StatusBadRequest, "token needs the account it belongs on: {\"account\":1,\"token\":\"...\"}")
+		return
+	case body.Key == "" && body.Label != "":
+		fail(w, http.StatusBadRequest, "label names an account a key makes; it takes a key")
+		return
+	}
 	st, ok := s.open(w)
 	if !ok {
 		return
 	}
 	defer st.Close()
+	if body.Key != "" {
+		s.loginKey(w, r, st, body.Provider, body.Key, body.Label)
+		return
+	}
+	if body.Token != "" {
+		s.pasteLong(w, r, st, body.Account, body.Token)
+		return
+	}
 	beginning := st.BeginLogin
 	if body.Long {
 		beginning = st.BeginLongLogin
@@ -1097,6 +1127,41 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, l)
+}
+
+// loginKey makes or updates the account an API key belongs to. A key the API
+// could not be asked about is taken, and the answer carries why as a warning.
+func (s *Server) loginKey(w http.ResponseWriter, r *http.Request, st *store.Store, provider, key, label string) {
+	a, added, unverified, err := st.LoginKey(r.Context(), provider, key, label)
+	if err != nil {
+		s.report(w, r, err)
+		return
+	}
+	status := "updated"
+	if added {
+		status = "added"
+	}
+	doc := map[string]any{"id": a.ID, "provider": a.Provider, "uuid": a.UUID, "label": a.Label(),
+		"status": status, "credential": a.Credential, "order": a.Order}
+	if unverified != nil {
+		doc["warning"] = unverified.Error()
+		s.log.Warn("api key taken unchecked", "account", a.ID, "err", unverified)
+	}
+	s.log.Info("api key login", "account", a.ID, "provider", a.Provider, "status", status)
+	writeJSON(w, http.StatusOK, doc)
+}
+
+// pasteLong puts a pasted setup token on an account as its long-lived token.
+func (s *Server) pasteLong(w http.ResponseWriter, r *http.Request, st *store.Store, id int, token string) {
+	a, err := st.PasteLong(id, token)
+	if err != nil {
+		s.report(w, r, err)
+		return
+	}
+	s.log.Info("long-lived token stored", "account", a.ID, "provider", a.Provider,
+		"until", a.LongUntil().UTC().Format(time.RFC3339))
+	writeJSON(w, http.StatusOK, map[string]any{"id": a.ID, "provider": a.Provider, "email": a.Email,
+		"uuid": a.UUID, "status": "long", "long_until": a.LongUntil().UTC().Format(time.RFC3339)})
 }
 
 func (s *Server) loginFinish(w http.ResponseWriter, r *http.Request) {
