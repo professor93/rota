@@ -1581,18 +1581,35 @@ func launch(ctx context.Context, a *Account, home string, cmd *Command, spec *Sp
 	}, nil
 }
 
+// sinkFailed is the caller's events writer failing while events still come,
+// that is while the CLI is running: rota stops the run for it, as for a bound.
+type sinkFailed struct{ error }
+
+func (e sinkFailed) Unwrap() error { return e.error }
+
 // finishRun is what a run owes its result once stdout has ended: stop a child
 // nobody is reading any more, wait for it, and turn its exit into a verdict.
+//
+// A run rota stopped for a limit — the buffered output, the line cap, or an
+// events writer that failed mid-stream — returns what it did when such a CLI was
+// killed outright: no error, exit code -1, IsError, whatever the CLI exits with
+// once asked, because Claude Code handles SIGTERM itself and would otherwise
+// report a clean exit for a run it never finished. rota knows it made that stop,
+// so nothing about the process is asked. A CLI that exits by itself at the very
+// moment a limit trips reads as stopped too. A cancelled or timed-out run keeps
+// the CLI's own exit: its error already says what happened.
 func finishRun(l *launched, scanErr error) (*Result, error) {
 	res, child := l.res, l.child
+	limited := false
 	if errors.Is(scanErr, bufio.ErrTooLong) {
 		// One event outgrew the line cap: a bound was hit, not a failure.
-		res.Truncated, scanErr = true, nil
+		res.Truncated, scanErr, limited = true, nil, true
 		l.halt.stop()
 		_, _ = io.Copy(io.Discard, l.stdout)
 	} else if scanErr != nil || res.Truncated {
 		// Nobody is reading stdout any more, and a child that fills its
 		// pipe blocks for ever — Wait would never return. Stop it.
+		limited = res.Truncated || errors.As(scanErr, new(sinkFailed))
 		l.halt.stop()
 		_, _ = io.Copy(io.Discard, l.stdout)
 	}
@@ -1607,6 +1624,10 @@ func finishRun(l *launched, scanErr error) (*Result, error) {
 
 	if l.ctx.Err() != nil {
 		return res, l.ctx.Err()
+	}
+	if limited {
+		res.ExitCode, res.IsError = -1, true
+		return res, nil
 	}
 	if waitErr != nil {
 		var ee *exec.ExitError
@@ -1726,7 +1747,7 @@ func scanEvents(r io.Reader, out io.Writer, keep bool, cp caps, res *Result) err
 		if out != nil {
 			scratch = append(append(scratch[:0], sc.Bytes()...), '\n')
 			if _, err := out.Write(scratch); err != nil {
-				return err
+				return sinkFailed{err}
 			}
 			if f, ok := out.(interface{ Flush() }); ok {
 				f.Flush()

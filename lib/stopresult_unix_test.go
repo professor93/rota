@@ -56,6 +56,20 @@ func stopCases() []stopCase {
 	}
 }
 
+func checkStopCase(t *testing.T, res *Result, err error, c stopCase) {
+	t.Helper()
+	if res == nil {
+		t.Fatalf("a result: %v", err)
+	}
+	if c.err == nil && err != nil || c.err != nil && !errors.Is(err, c.err) {
+		t.Fatalf("error %v, want %v", err, c.err)
+	}
+	if res.ExitCode != c.exit || res.IsError != c.isError || res.Truncated != c.truncated {
+		t.Fatalf("exit=%d is_error=%v truncated=%v, want %d %v %v",
+			res.ExitCode, res.IsError, res.Truncated, c.exit, c.isError, c.truncated)
+	}
+}
+
 func runStopCase(t *testing.T, dir string, i int, c stopCase) (*Result, error) {
 	t.Helper()
 	bin := fakecli.Install(t, dir, "stop-case-"+string(rune('a'+i)), c.fake)
@@ -83,16 +97,32 @@ func TestARunEndedBeforeItsCLIGivesWhatItAlwaysGave(t *testing.T) {
 	for i, c := range stopCases() {
 		t.Run(c.what, func(t *testing.T) {
 			res, err := runStopCase(t, dir, i, c)
-			if res == nil {
-				t.Fatalf("a result: %v", err)
-			}
-			if c.err == nil && err != nil || c.err != nil && !errors.Is(err, c.err) {
-				t.Fatalf("error %v, want %v", err, c.err)
-			}
-			if res.ExitCode != c.exit || res.IsError != c.isError || res.Truncated != c.truncated {
-				t.Fatalf("exit=%d is_error=%v truncated=%v, want %d %v %v",
-					res.ExitCode, res.IsError, res.Truncated, c.exit, c.isError, c.truncated)
-			}
+			checkStopCase(t, res, err, c)
 		})
+	}
+}
+
+// Claude Code handles SIGTERM itself, so for a real run this is the common case.
+// A run rota stopped for a limit, the buffered output, the line cap or an events
+// writer that failed while the CLI was running, gives exactly what 1.3.0 gave
+// whatever the CLI exits with after the asking: rota knows it made that stop. A
+// cancelled or timed-out run keeps the CLI's own exit, since its error already
+// says what happened.
+func TestARunStoppedForALimitGivesWhatItAlwaysGaveWhateverItsCLIExitsWith(t *testing.T) {
+	dir := t.TempDir()
+	for _, exit := range []int{0, 3} {
+		for i, c := range stopCases() {
+			if c.what == "its events writer failed after it ended" {
+				continue // it ends by itself, and is pinned above
+			}
+			c.fake.Term, c.fake.Exit = "exit", exit
+			if c.cancel > 0 || c.spec.TimeoutSeconds > 0 {
+				c.exit, c.isError = exit, false
+			}
+			t.Run(c.what, func(t *testing.T) {
+				res, err := runStopCase(t, dir, i+10*exit, c)
+				checkStopCase(t, res, err, c)
+			})
+		}
 	}
 }

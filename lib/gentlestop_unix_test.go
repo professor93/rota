@@ -109,40 +109,6 @@ func TestACancelledRunLetsItsCLIStopByItself(t *testing.T) {
 	}
 }
 
-// The only results that differ from 1.3.0's are a CLI's own doing: one that
-// handles the SIGTERM it is now asked with, and exits 0, reports that exit,
-// where 1.3.0 killed it and reported -1. With nothing else to tell it apart
-// from a CLI that exited 0 by itself just before it was asked, a failed events
-// writer then returns the writer's error, where 1.3.0 returned nil and IsError.
-// Telling the two apart needs the process's state before the signal, which
-// /proc gives on Linux and nothing in Go's syscall package gives on macOS.
-func TestOnlyACLIThatHandlesTheAskingChangesItsResult(t *testing.T) {
-	dir := t.TempDir()
-	for i, c := range stopCases() {
-		if c.what == "its events writer failed after it ended" {
-			continue // it ends by itself, and is in the matrix as it is
-		}
-		c.fake.Term = "exit"
-		c.exit, c.isError = 0, false
-		if c.what == "its events writer failed" {
-			c.err = errSink
-		}
-		t.Run(c.what, func(t *testing.T) {
-			res, err := runStopCase(t, dir, i, c)
-			if res == nil {
-				t.Fatalf("a result: %v", err)
-			}
-			if c.err == nil && err != nil || c.err != nil && !errors.Is(err, c.err) {
-				t.Fatalf("error %v, want %v", err, c.err)
-			}
-			if res.ExitCode != c.exit || res.IsError != c.isError || res.Truncated != c.truncated {
-				t.Fatalf("exit=%d is_error=%v truncated=%v, want %d %v %v",
-					res.ExitCode, res.IsError, res.Truncated, c.exit, c.isError, c.truncated)
-			}
-		})
-	}
-}
-
 // A CLI that finishes by itself is judged by what it exits with, as ever.
 func TestARunNobodyStoppedKeepsItsCLIsExit(t *testing.T) {
 	dir := t.TempDir()
