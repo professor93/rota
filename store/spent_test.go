@@ -99,10 +99,13 @@ func TestARefusalThatCouldNotBeSavedIsStillNeverPresentedAgain(t *testing.T) {
 	}
 }
 
-// A reply that never arrives may be a refresh the provider made: the token may
-// already be replaced, and presenting it again is presenting a spent one. So a
-// rescue whose request went and got no answer is treated as final, and says so.
-func TestARescueWhoseReplyWasLostIsNotPresentedAgain(t *testing.T) {
+// A request that got no answer says nothing about the login, any more than an
+// error the provider answered with: the account stays alive, says so, and the
+// next look tries again, as every other refresh of rota's does. Dead would not
+// stop a second presentation in a stranded home, whose daemon presents the same
+// token every thirty seconds, and in a blanked one it would send the person to
+// log in, which is what a rescue is for sparing them.
+func TestARescueWhoseReplyWasLostIsTriedAgain(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
 	for _, c := range []struct {
@@ -117,16 +120,24 @@ func TestARescueWhoseReplyWasLostIsNotPresentedAgain(t *testing.T) {
 			f.set(func(f *anthropic) { f.refresh = func() (int, any) { return hangUp, nil } })
 			s, ob := orderedStore(t)
 			a := livingClaude(s, "u1")
-			c.make(t, s, a)
-			s.Rescue(context.Background(), a)
-			if f.refreshes.Load() != 1 || !a.Dead || !strings.Contains(a.WhyDead(), "answer") {
-				t.Fatalf("presented once and given up: %d %v %q", f.refreshes.Load(), a.Dead, a.WhyDead())
+			home := c.make(t, s, a)
+			if err := s.Save(); err != nil {
+				t.Fatal(err)
 			}
+			errs := s.Rescue(context.Background(), a)
+			if f.refreshes.Load() != 1 || a.Dead || len(errs) != 1 || !strings.Contains(errs[0].Error(), a.String()) {
+				t.Fatalf("presented once, alive, and said: %d %v %v", f.refreshes.Load(), a.Dead, errs)
+			}
+			if ob.dead {
+				t.Fatal("nothing dead reached the disk")
+			}
+			f.set(func(f *anthropic) { f.refresh = refreshesTo("A-new", "R-new") })
 			again, b := reopen(t, s, ob)
-			again.Maintain(context.Background())
-			again.Rescue(context.Background(), b)
-			if f.refreshes.Load() != 1 {
-				t.Fatalf("never again: %d", f.refreshes.Load())
+			if errs := again.Rescue(context.Background(), b); len(errs) != 0 {
+				t.Fatal(errs)
+			}
+			if r, _ := readLogin(t, home); r != "R-new" || f.refreshes.Load() != 2 || b.Dead {
+				t.Fatalf("the next look gets through: %q %d %v", r, f.refreshes.Load(), b.Dead)
 			}
 		})
 	}

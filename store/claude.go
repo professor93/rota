@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -87,9 +86,7 @@ import (
 // whose token was refused is dead, and a dead account is never refreshed
 // anywhere; it comes back only by a fresh login — `rota login`, or /login
 // inside one of its windows, which rota confirms and takes. The process keeps
-// the refusal too, until a save gets it to the disk (see spentTokens). A rescue
-// that went out and got no answer counts the same: the reply may have been a
-// refresh, and the token spent.
+// the refusal too, until a save gets it to the disk (see spentTokens).
 //
 // Every write that deletes the keychain item reads it again first and leaves
 // it alone if it is not what rota read: /login writes it without the refresh
@@ -225,8 +222,6 @@ type claudeHome struct {
 	// lock, which goes on deciding for the write that follows: once the refresh
 	// has answered, the token is good and the home is no longer stranded.
 	rescuing bool
-	// lost is whether this look's rescue went to the provider and got no answer.
-	lost bool
 }
 
 func (s *Store) claudeHome(a *rota.Account, others bool) *claudeHome {
@@ -530,7 +525,7 @@ func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 		// Nothing has changed: the home is as it was, and the next look tries again.
 		return changed, notThrough{fmt.Errorf("%s: %s, and rota could not refresh it just now, so the next look tries again: %w", a, what, err)}
 	}
-	if cleared && a.Dead && h.hold == "" && !h.lost {
+	if cleared && a.Dead && h.hold == "" {
 		a.DeadReason = fmt.Sprintf("Claude Code cleared the login in its home, and the provider refused rota's own refresh token too (%s)", a.DeadReason)
 	}
 	if !changed {
@@ -1182,25 +1177,17 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 	}
 	presented := spentKey(h.home, a.Token.Refresh)
 	if why, ok := spentTokens.Load(presented); ok {
-		// Refused, or sent with no answer, earlier in this process, and not on
-		// disk yet: it is not presented again.
+		// Refused earlier in this process, and not on disk yet: it is not
+		// presented again.
 		a.Dead, a.DeadReason = true, why.(string)
 		return true, rota.WrapReauth(a)
 	}
 	rescue := h.rescuing
-	h.rescuing, h.lost = false, false
+	h.rescuing = false
 	changed, err = rota.Refresh(ctx, a)
 	if rescue && changed && err == nil {
 		h.rescuing = true
 		h.owe()
-	}
-	if rescue && err != nil && !a.Dead && !answered(err) {
-		// The request went and nothing came back. The provider may have
-		// refreshed and the reply been lost, and then the token is spent: a
-		// second presentation is a reused token, which can cost the login.
-		a.Dead, a.DeadReason = true, fmt.Sprintf("rota presented its refresh token and the answer never arrived (%v), "+
-			"so the token may already have been replaced, and it is not presented again", err)
-		changed, h.lost = true, true
 	}
 	if a.Dead {
 		spentTokens.Store(presented, a.DeadReason)
@@ -1223,26 +1210,16 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 	return true, err
 }
 
-// spentTokens are the refresh tokens this process has presented and must not
-// present again, refused or sent with no answer, by home and a hash of the token,
-// with why. The account says so on disk once a save gets through; until then,
-// and for the rest of the process, this does.
+// spentTokens are the refresh tokens the provider refused in this process, by
+// home and a hash of the token, with why. The account says so on disk once a
+// save gets through; until then, and for the rest of the process, this does.
+// A failure the provider did not answer is not one: like any refresh of rota's
+// that does not get through, it is tried again by the next look.
 var spentTokens sync.Map
 
 func spentKey(home, refresh string) string {
 	sum := sha256.Sum256([]byte(refresh))
 	return home + "\x00" + hex.EncodeToString(sum[:])
-}
-
-// answered reports whether a failed refresh got an answer from the provider: an
-// error it sent back, which says the token was not taken. A request refused
-// before it was sent, by a dial that failed, was never seen either. Anything else
-// went out and came back with nothing, and may have been a refresh.
-func answered(err error) bool {
-	var oe *rota.OAuthError
-	var he *rota.HTTPError
-	var ne *net.OpError
-	return errors.As(err, &oe) || errors.As(err, &he) || errors.As(err, &ne) && ne.Op == "dial"
 }
 
 // saveFirmly saves a change that must reach the disk, trying again a moment
