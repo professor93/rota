@@ -2269,7 +2269,10 @@ Code blanked: see *Stranded* and *Blanked*, below.
   MCP servers' OAuth tokens among them — stays, and the file is written
   privately through a rename. On macOS the new file is written and synced
   first, then the keychain item is removed, then the file is renamed into
-  place — a removal that fails changes nothing. Claude Code moves the login
+  place — a removal that fails changes nothing. The item is read once more
+  just before it is removed, and left alone if it is not what rota read: `/login`
+  writes it without Claude Code's refresh lock, and a fresh login written in
+  that moment is the next look's to take. Claude Code moves the login
   back into the keychain on its next refresh, and rota never writes a
   keychain item. A file left beside a keychain item is stale and is removed,
   unless its login is the newer of the two: when the keychain refuses a write
@@ -2339,9 +2342,13 @@ Code blanked: see *Stranded* and *Blanked*, below.
   holds no login any more, and no status file is needed. On success the login
   goes in; rota expects whatever is running there to find it, and no live
   process has been observed doing so. On a refusal the account is dead, says
-  why, and the token is never presented again. A failure that says nothing
-  about the login, a provider that cannot be reached, leaves the account alive
-  and says so, and the next look tries again; until then a launch goes on a
+  why, and the token is never presented again: the refusal is saved, tried
+  again if the save fails, and kept by the process until it is. An error the
+  provider answered with, or a request that could not be sent at all, leaves
+  the account alive and says so, and the next look tries again. A request that
+  went out and got no answer may have been a refresh whose reply was lost,
+  which would make the token spent, so it is treated as final and the account
+  says so; the same goes for a stranded home's rescue; until then a launch goes on a
   token that is good or does not go, because Claude Code started there would
   not be signed in. A blanked login that is not the account's current one is a
   home with nothing usable in it, as ever. An account marked dead before it got
