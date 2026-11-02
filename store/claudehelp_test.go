@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -102,10 +103,13 @@ func readLogin(t *testing.T, home string) (refresh string, doc map[string]any) {
 // security was asked. findCode and deleteCode, when set, are what security
 // answers instead of the truth.
 type keychain struct {
-	mu         sync.Mutex
-	items      map[string]string
-	log        []string
-	onDelete   func(service string)
+	mu       sync.Mutex
+	items    map[string]string
+	log      []string
+	onDelete func(service string)
+	// onFind runs before each read is answered, with the lock held: it may
+	// change items directly, as Claude Code writing the item would.
+	onFind     func(service string)
 	findCode   int
 	deleteCode int
 }
@@ -127,6 +131,9 @@ func fakeKeychain(t *testing.T) *keychain {
 		k.log = append(k.log, args[0]+" "+svc)
 		switch args[0] {
 		case "find-generic-password":
+			if k.onFind != nil {
+				k.onFind(svc)
+			}
 			if k.findCode != 0 {
 				return nil, k.findCode, nil
 			}
@@ -224,6 +231,10 @@ func stopsClean(home string) {
 	}
 }
 
+// hangUp, as a status, makes the fake read the request and close the
+// connection without a word.
+const hangUp = -1
+
 // anthropic stands in for the provider: its token, profile and usage
 // endpoints, each counted.
 type anthropic struct {
@@ -265,6 +276,13 @@ func fakeAnthropic(t *testing.T) *anthropic {
 			if usage != nil {
 				status, body = usage(r.Header.Get("Authorization"))
 			}
+		}
+		if status == hangUp {
+			// The request arrived and no answer ever leaves: a lost reply.
+			if conn, _, err := w.(http.Hijacker).Hijack(); err == nil {
+				conn.Close()
+			}
+			return
 		}
 		w.WriteHeader(status)
 		if body != nil {
@@ -351,9 +369,15 @@ type orderBackend struct {
 	then func()
 	// dead is whether any save has carried an account marked dead.
 	dead bool
+	// failSaves is how many of the next saves fail, all of them below zero.
+	failSaves int
 }
 
 func (o *orderBackend) Save(b []byte) error {
+	if o.failSaves != 0 {
+		o.failSaves--
+		return errors.New("the disk is full")
+	}
 	o.dead = o.dead || bytes.Contains(b, []byte(`"dead"`))
 	first := !o.saved && o.want != "" && bytes.Contains(b, []byte(o.want))
 	if first {

@@ -3,9 +3,12 @@ package store
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
@@ -83,7 +86,14 @@ import (
 // A refresh token the provider refused is never presented again. An account
 // whose token was refused is dead, and a dead account is never refreshed
 // anywhere; it comes back only by a fresh login — `rota login`, or /login
-// inside one of its windows, which rota confirms and takes.
+// inside one of its windows, which rota confirms and takes. The process keeps
+// the refusal too, until a save gets it to the disk (see spentTokens). A rescue
+// that went out and got no answer counts the same: the reply may have been a
+// refresh, and the token spent.
+//
+// Every write that deletes the keychain item reads it again first and leaves
+// it alone if it is not what rota read: /login writes it without the refresh
+// lock, and a fresh login is the next look's to take.
 //
 // From the moment the provider answers a refresh of rota's, the home's login is
 // spent, so the write that follows is owed until it is done, and owing it is on
@@ -154,6 +164,28 @@ var (
 // same as one that holds no item.
 var errKeychain = errors.New("the keychain could not be read")
 
+// errItemChanged marks a keychain item that changed between rota reading it and
+// deleting it to write the login: /login writes the item without Claude Code's
+// refresh lock, and a fresh login there is not rota's to delete.
+var errItemChanged = errors.New("the keychain item changed while rota was writing the login, so it was left alone and nothing was written")
+
+// dropItemAsJudged deletes the home's keychain item, after reading it once more
+// and finding it is still what rota judged; an item that has gone needs no delete.
+func dropItemAsJudged(svc string, judged []byte) error {
+	ctx, cancel := keychainContext()
+	defer cancel()
+	now, found, err := claudecode.Read(ctx, svc)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: the item %q: %v", errKeychain, svc, err)
+	case !found:
+		return nil
+	case !bytes.Equal(now, judged):
+		return errItemChanged
+	}
+	return claudecode.Delete(ctx, svc)
+}
+
 // claudeHome is one look at a claude account's home, for the length of one
 // launch, refresh or removal.
 type claudeHome struct {
@@ -186,10 +218,15 @@ type claudeHome struct {
 	// blankItem is the keychain item as readStore last found it, when Claude
 	// Code blanked it and a file beside it holds a login.
 	blankItem []byte
+	// item is the keychain item as readStore last found it, nil when there was
+	// none: what a write that deletes it has judged, and must find still there.
+	item []byte
 	// rescuing is whether this look is writing the login under the refresh
 	// lock, which goes on deciding for the write that follows: once the refresh
 	// has answered, the token is good and the home is no longer stranded.
 	rescuing bool
+	// lost is whether this look's rescue went to the provider and got no answer.
+	lost bool
 }
 
 func (s *Store) claudeHome(a *rota.Account, others bool) *claudeHome {
@@ -493,14 +530,16 @@ func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 		// Nothing has changed: the home is as it was, and the next look tries again.
 		return changed, notThrough{fmt.Errorf("%s: %s, and rota could not refresh it just now, so the next look tries again: %w", a, what, err)}
 	}
-	if cleared && a.Dead && h.hold == "" {
+	if cleared && a.Dead && h.hold == "" && !h.lost {
 		a.DeadReason = fmt.Sprintf("Claude Code cleared the login in its home, and the provider refused rota's own refresh token too (%s)", a.DeadReason)
 	}
 	if !changed {
 		return false, err
 	}
-	if serr := h.s.Save(); serr != nil {
-		return true, fmt.Errorf("refusing to go on: the store could not be saved after a token change: %w", serr)
+	if serr := h.s.saveFirmly(); serr != nil {
+		// A refusal not saved is still kept by this process (see spentTokens),
+		// so no later look of it presents the token again.
+		return true, fmt.Errorf("%s: refusing to go on: the store could not be saved after a token change: %w", a, serr)
 	}
 	if err != nil || !h.rescuing {
 		return true, err // refused, or a sibling got there first
@@ -536,10 +575,9 @@ func (h *claudeHome) uncover() error {
 		return err
 	}
 	svc, _ := h.service()
+	judged := h.blankItem
 	err = writeAtomicThen(filepath.Join(h.home, claudeCredentials), merged, func() error {
-		ctx, cancel := keychainContext()
-		defer cancel()
-		return claudecode.Delete(ctx, svc)
+		return dropItemAsJudged(svc, judged)
 	})
 	if err != nil {
 		return fmt.Errorf("%s: could not take the keychain item Claude Code blanked out of the way of its login: %w", h.a, err)
@@ -756,7 +794,7 @@ func keychainContext() (context.Context, context.CancelFunc) {
 // cannot be read is errKeychain; a file that cannot be read is the read's own
 // error, which adoption takes for an unreadable store.
 func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
-	h.blankItem = nil
+	h.blankItem, h.item = nil, nil
 	if svc, ok := h.service(); ok {
 		ctx, cancel := keychainContext()
 		defer cancel()
@@ -765,6 +803,7 @@ func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
 			return nil, false, fmt.Errorf("%w: the item %q that holds its login: %v", errKeychain, svc, err)
 		}
 		if found {
+			h.item = raw
 			if file, err := os.ReadFile(filepath.Join(h.home, claudeCredentials)); err == nil && fileIsNewer(file, raw) {
 				if l, ok := storedLogin(raw); ok && l.Refresh == "" {
 					h.blankItem = raw
@@ -1141,12 +1180,30 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 	if a.Dead || h.hold != "" {
 		return false, fmt.Errorf("%w: %s is not refreshed: %s", rota.ErrBusy, a, nonEmpty(h.hold, "its login is dead"))
 	}
+	presented := spentKey(h.home, a.Token.Refresh)
+	if why, ok := spentTokens.Load(presented); ok {
+		// Refused, or sent with no answer, earlier in this process, and not on
+		// disk yet: it is not presented again.
+		a.Dead, a.DeadReason = true, why.(string)
+		return true, rota.WrapReauth(a)
+	}
 	rescue := h.rescuing
-	h.rescuing = false
+	h.rescuing, h.lost = false, false
 	changed, err = rota.Refresh(ctx, a)
 	if rescue && changed && err == nil {
 		h.rescuing = true
 		h.owe()
+	}
+	if rescue && err != nil && !a.Dead && !answered(err) {
+		// The request went and nothing came back. The provider may have
+		// refreshed and the reply been lost, and then the token is spent: a
+		// second presentation is a reused token, which can cost the login.
+		a.Dead, a.DeadReason = true, fmt.Sprintf("rota presented its refresh token and the answer never arrived (%v), "+
+			"so the token may already have been replaced, and it is not presented again", err)
+		changed, h.lost = true, true
+	}
+	if a.Dead {
+		spentTokens.Store(presented, a.DeadReason)
 	}
 	if err == nil || !a.Dead {
 		return changed, err
@@ -1164,6 +1221,41 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 		return true, nil
 	}
 	return true, err
+}
+
+// spentTokens are the refresh tokens this process has presented and must not
+// present again, refused or sent with no answer, by home and a hash of the token,
+// with why. The account says so on disk once a save gets through; until then,
+// and for the rest of the process, this does.
+var spentTokens sync.Map
+
+func spentKey(home, refresh string) string {
+	sum := sha256.Sum256([]byte(refresh))
+	return home + "\x00" + hex.EncodeToString(sum[:])
+}
+
+// answered reports whether a failed refresh got an answer from the provider: an
+// error it sent back, which says the token was not taken. A request refused
+// before it was sent, by a dial that failed, was never seen either. Anything else
+// went out and came back with nothing, and may have been a refresh.
+func answered(err error) bool {
+	var oe *rota.OAuthError
+	var he *rota.HTTPError
+	var ne *net.OpError
+	return errors.As(err, &oe) || errors.As(err, &he) || errors.As(err, &ne) && ne.Op == "dial"
+}
+
+// saveFirmly saves a change that must reach the disk, trying again a moment
+// later when the first save fails.
+func (s *Store) saveFirmly() error {
+	var err error
+	for try := 1; try <= seedTries; try++ {
+		if err = s.Save(); err == nil {
+			return nil
+		}
+		time.Sleep(seedPause)
+	}
+	return err
 }
 
 func nonEmpty(s, otherwise string) string {
@@ -1201,13 +1293,12 @@ func (h *claudeHome) seed(files []rota.StagedFile) error {
 			return err
 		}
 		svc, named := h.service()
+		judged := h.item
 		dropItem := func() error {
 			if !named || !inKeychain {
 				return nil
 			}
-			ctx, cancel := keychainContext()
-			defer cancel()
-			if err := claudecode.Delete(ctx, svc); err != nil {
+			if err := dropItemAsJudged(svc, judged); err != nil {
 				return fmt.Errorf("%s: could not remove the keychain item %q before writing its login: %w", h.a, svc, err)
 			}
 			return nil
@@ -1215,12 +1306,13 @@ func (h *claudeHome) seed(files []rota.StagedFile) error {
 		// The item goes before the rename, so a rename that fails leaves the home
 		// with no login and this the only copy of what stood beside it: it is
 		// tried again from here rather than read back from a store that is gone.
+		// An item somebody wrote meanwhile stops it at once.
 		for try := 1; ; try++ {
 			err = writeAtomicThen(filepath.Join(h.home, f.Path), merged, dropItem)
 			if err == nil {
 				break
 			}
-			if try == seedTries {
+			if try == seedTries || errors.Is(err, errItemChanged) {
 				return err
 			}
 			time.Sleep(seedPause)
