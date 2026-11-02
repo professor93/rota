@@ -28,13 +28,19 @@ import (
 // Account is one account as shown to people and programs: no secrets, health
 // and quota rendered.
 type Account struct {
-	ID       int         `json:"id"`
-	Provider string      `json:"provider"`
-	Email    string      `json:"email,omitempty"`
-	UUID     string      `json:"uuid,omitempty"`
-	Status   rota.Status `json:"status"`
-	Windows  []Window    `json:"windows,omitempty"`
-	Note     string      `json:"note,omitempty"`
+	ID       int    `json:"id"`
+	Provider string `json:"provider"`
+	Email    string `json:"email,omitempty"`
+	UUID     string `json:"uuid,omitempty"`
+	// Name is what a person called the account, when somebody did.
+	Name string `json:"name,omitempty"`
+	// Credential is the kind of credential the account runs on when it is
+	// not the provider's ordinary login: "apikey" for a pasted API key. The
+	// credential itself is never here.
+	Credential string      `json:"credential,omitempty"`
+	Status     rota.Status `json:"status"`
+	Windows    []Window    `json:"windows,omitempty"`
+	Note       string      `json:"note,omitempty"`
 	// DeadReason is why a re-auth status was reached — the refusal in the
 	// server's or rota's own words. Empty unless the lineage is dead.
 	DeadReason string `json:"deadReason,omitempty"`
@@ -66,8 +72,10 @@ type Account struct {
 	// token, not the access token refreshed under it — RFC 3339, and absent
 	// when the provider has not said.
 	LoginUntil string `json:"login_until,omitempty"`
-	// Metered says whether this provider publishes a usage endpoint at all.
-	// When it does not, there are no limits to report and no check to make.
+	// Metered says whether this account's usage can be read at all: its
+	// provider publishes a usage endpoint, and it is not an API key, which
+	// has none. When it cannot, there are no limits to report and no check
+	// to make.
 	Metered bool `json:"metered"`
 	// CheckedAt is when the quota was last read from the provider, RFC 3339;
 	// empty when it never was. CheckedAgo is the same instant rendered as
@@ -127,8 +135,8 @@ func Sessions(v string) string {
 
 // Describe renders an account for display. It does no network calls.
 func Describe(a *rota.Account) Account {
-	v := Account{ID: a.ID, Provider: a.Provider, Email: a.Email, UUID: a.UUID, Status: a.Status(),
-		Metered: rota.Metered(a.Provider), Order: a.Order, Threshold: a.Threshold, Percent: a.Percent(),
+	v := Account{ID: a.ID, Provider: a.Provider, Email: a.Email, UUID: a.UUID, Name: a.Name, Credential: a.Credential,
+		Status: a.Status(), Metered: a.Metered(), Order: a.Order, Threshold: a.Threshold, Percent: a.Percent(),
 		Cwd: a.Cwd, ConfigDir: a.ConfigDir, Sessions: a.Sessions, RemoteControl: a.RemoteControl, DeadReason: a.WhyDead()}
 	if t := a.LongUntil(); !t.IsZero() {
 		v.LongUntil = t.UTC().Format(time.RFC3339)
