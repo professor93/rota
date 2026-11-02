@@ -54,6 +54,6 @@ func TestMain(m *testing.M) {
 // an answer points the one it asks at a fake of its own.
 func offline() {
 	const u = claudecode.Unreachable
-	rota.ClaudeEndpoints.Authorize, rota.ClaudeEndpoints.Token, rota.ClaudeEndpoints.Profile, rota.ClaudeEndpoints.Usage = u, u, u, u
+	rota.ClaudeEndpoints.Authorize, rota.ClaudeEndpoints.Token, rota.ClaudeEndpoints.Profile, rota.ClaudeEndpoints.Usage, rota.ClaudeEndpoints.Models = u, u, u, u, u
 	rota.CodexEndpoints.Authorize, rota.CodexEndpoints.Token = u, u
 }

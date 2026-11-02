@@ -26,6 +26,14 @@ type Account struct {
 	// rather than to rota: rota gives it a private directory and the CLI
 	// signs itself in there. There is no token here to expire or refresh.
 	Delegated bool `json:"delegated,omitzero"`
+	// Credential is what kind of credential Token.Access is, when it is not
+	// the provider's ordinary login: CredentialAPIKey for an API key somebody
+	// pasted. Empty for everything a login obtains.
+	Credential string `json:"credential,omitempty"`
+	// Name is what a person called the account, shown in place of anything
+	// the provider says about it. Empty for most: an e-mail names an account
+	// well enough, and an API key carries none.
+	Name string `json:"name,omitempty"`
 	// Extra holds provider-specific state that must survive restarts — a
 	// device id, an id_token. Untyped, so adding a provider never changes
 	// this struct.
@@ -120,11 +128,31 @@ func (a *Account) SessionsDir() string {
 	return a.Sessions
 }
 
-// Label is the account's display name: email, else a uuid prefix, else id.
+// CredentialAPIKey is the Credential of an account that runs on an API key a
+// person pasted rather than on a login: billed by the provider per token, with
+// no usage endpoint, no refresh and no expiry. See LoginKey.
+const CredentialAPIKey = "apikey"
+
+// APIKey reports whether the account runs on an API key rather than a login.
+func (a *Account) APIKey() bool { return a.Credential == CredentialAPIKey }
+
+// Metered reports whether usage can be read for this account at all: its
+// provider publishes a usage endpoint, and the account has a login that
+// endpoint answers. An API key has no plan and so no limits to read.
+func (a *Account) Metered() bool { return !a.APIKey() && Metered(a.Provider) }
+
+// Label is the account's display name: the name a person gave it, else its
+// email, else — for an API key — "api key" and the key's last four
+// characters, else a uuid prefix, else its id. Those four characters are the
+// only part of a key anything here ever shows.
 func (a *Account) Label() string {
 	switch {
+	case a.Name != "":
+		return a.Name
 	case a.Email != "":
 		return a.Email
+	case a.APIKey() && len(a.Token.Access) > 8:
+		return "api key ..." + a.Token.Access[len(a.Token.Access)-4:]
 	case a.UUID != "":
 		return truncate(a.UUID, 12)
 	}
@@ -223,6 +251,11 @@ func (a *Account) ApplyLong(t *Token) {
 // refresh token means "keep the old one", never "clear it".
 func (a *Account) apply(t *Token) {
 	a.Delegated = t.Delegated
+	// Only ever set, never cleared: a refresh says nothing about what kind of
+	// credential the account holds, and a key is never refreshed anyway.
+	if t.Credential != "" {
+		a.Credential = t.Credential
+	}
 	a.Token.Access = t.Access
 	if t.Refresh != "" {
 		a.Token.Refresh = t.Refresh
@@ -295,6 +328,9 @@ func (a *Account) CheckProject() error {
 	if a.RemoteControl && Flavor(a.Provider) != "claude" {
 		return failf(ErrInvalidRequest,
 			"remote control is Claude Code's: a %s account has no Remote Control to give its own configuration file for", a.Provider)
+	}
+	if a.RemoteControl && a.APIKey() {
+		return WrapRemoteControlKey(a)
 	}
 	for _, d := range []struct{ what, path string }{
 		{"config_dir", a.ConfigDir},

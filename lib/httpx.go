@@ -93,11 +93,15 @@ func (e *HTTPError) Error() string {
 // *HTTPError that still carries the body, because OAuth verdicts
 // (authorization_pending, invalid_grant) arrive as JSON with a 4xx status.
 // The User-Agent is filled in only when the caller set none.
-func do(req *http.Request) ([]byte, error) {
+func do(req *http.Request) ([]byte, error) { return doWith(HTTPClient, req) }
+
+// doWith is do through a given client — HTTPClient with one thing changed,
+// for the one request that must not follow a redirect.
+func doWith(client *http.Client, req *http.Request) ([]byte, error) {
 	if req.Header.Get("User-Agent") == "" {
 		req.Header.Set("User-Agent", UserAgent)
 	}
-	resp, err := HTTPClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}

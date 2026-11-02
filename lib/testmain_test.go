@@ -15,8 +15,8 @@ import (
 func TestMain(m *testing.M) {
 	fakecli.Maybe()
 	const unreachable = "http://127.0.0.1:1/unreachable"
-	ClaudeEndpoints.Authorize, ClaudeEndpoints.Token, ClaudeEndpoints.Profile, ClaudeEndpoints.Usage =
-		unreachable, unreachable, unreachable, unreachable
+	ClaudeEndpoints.Authorize, ClaudeEndpoints.Token, ClaudeEndpoints.Profile, ClaudeEndpoints.Usage, ClaudeEndpoints.Models =
+		unreachable, unreachable, unreachable, unreachable, unreachable
 	CodexEndpoints.Authorize, CodexEndpoints.Token = unreachable, unreachable
 	os.Exit(m.Run())
 }

@@ -26,6 +26,10 @@ type Token struct {
 	// isolated directory it keeps them in. Access is empty for such a
 	// token, and nothing about it expires or refreshes here.
 	Delegated bool `json:"delegated,omitzero"`
+	// Credential says what kind of credential Access is when it is not the
+	// provider's ordinary login: CredentialAPIKey for a key a person pasted
+	// (LoginKey). Empty for every token a login or a refresh obtains.
+	Credential string `json:"credential,omitempty"`
 	// Identity is set only when the token response itself carried it.
 	Identity *Identity `json:"identity,omitzero"`
 	// Extra carries provider state the account must remember across runs —

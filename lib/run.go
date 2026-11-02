@@ -1660,12 +1660,15 @@ func withToken(a *Account, cmd *Command) *Command {
 	if Flavor(a.Provider) != "claude" {
 		return cmd
 	}
+	// The credential the environment route would set — the token, or an API
+	// key — already set is the command's own, and stays the only one.
+	env := claudeEnvCommand(a)
+	name, _, _ := strings.Cut(env.Env[0], "=")
 	for _, e := range cmd.Env {
-		if strings.HasPrefix(e, "CLAUDE_CODE_OAUTH_TOKEN=") {
+		if strings.HasPrefix(e, name+"=") {
 			return cmd
 		}
 	}
-	env := claudeEnvCommand(a)
 	out := *cmd
 	out.Env = append(append([]string(nil), env.Env[0]), cmd.Env...)
 	out.Drop = append(append([]string(nil), cmd.Drop...), env.Drop...)

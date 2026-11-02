@@ -119,7 +119,7 @@ var diskLoginPlatform = runtime.GOOS != "darwin"
 // refresh token and an expiry, which is what makes it a login rather than a
 // bare token — and it is not dead.
 func claudeStored(a *Account, home string) bool {
-	return storedLoginPlatform && home != "" && !a.Dead &&
+	return storedLoginPlatform && home != "" && !a.Dead && !a.APIKey() &&
 		a.Token.Refresh != "" && a.Token.ExpiresAt != 0
 }
 
@@ -127,6 +127,9 @@ func claudeStored(a *Account, home string) bool {
 // CLAUDE_CODE_OAUTH_TOKEN, and the account's own configuration directory
 // when it names one.
 func claudeEnvCommand(a *Account) *Command {
+	if a.APIKey() {
+		return claudeKeyCommand(a)
+	}
 	// A long-lived token wins whenever the account has one worth using. A
 	// token in the environment cannot be replaced inside a process that
 	// already holds it — Claude Code refuses by design to adopt another
@@ -148,6 +151,25 @@ func claudeEnvCommand(a *Account) *Command {
 		env = append(env, "CLAUDE_CONFIG_DIR="+a.ConfigDir)
 	}
 	return &Command{Bin: "claude", Env: env, Drop: dropList(claudeCompeting...)}
+}
+
+// claudeKeyCommand is the environment route for an account that runs on an
+// API key: the key in ANTHROPIC_API_KEY, which Claude Code sends as X-Api-Key,
+// and nothing else that could authenticate. CLAUDE_CODE_OAUTH_TOKEN is
+// dropped with the rest, and a long-lived token the account somehow holds is
+// not used: a key account is billed to its key and to nothing else.
+func claudeKeyCommand(a *Account) *Command {
+	env := []string{"ANTHROPIC_API_KEY=" + a.Token.Access}
+	if a.ConfigDir != "" {
+		env = append(env, "CLAUDE_CONFIG_DIR="+a.ConfigDir)
+	}
+	var drop []string
+	for _, v := range ClaudeCredentialVars() {
+		if v != "ANTHROPIC_API_KEY" {
+			drop = append(drop, v)
+		}
+	}
+	return &Command{Bin: "claude", Env: env, Drop: drop}
 }
 
 // claudeStoredCommand is the stored route: Claude Code pointed at the home
@@ -199,9 +221,10 @@ func (claudeProvider) StoresLogin(a *Account, home string) bool { return claudeS
 // Join is the stored route's command whatever state the account is in:
 // Claude Code pointed at the home, on whatever login is there, with nothing
 // written and nothing of the account's handed over. nil where this platform
-// keeps the environment route.
-func (claudeProvider) Join(_ *Account, home string) *Command {
-	if !storedLoginPlatform || home == "" {
+// keeps the environment route, and for an account that runs on an API key,
+// which no login in a home stands for.
+func (claudeProvider) Join(a *Account, home string) *Command {
+	if !storedLoginPlatform || home == "" || a.APIKey() {
 		return nil
 	}
 	return claudeStoredCommand(home)
@@ -263,6 +286,11 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //     for the application to check (NewLogin.Identify) and then Accept or
 //     Refuse.
 func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
+	if a.APIKey() {
+		// A key account keeps no login in its home, so nothing found there is
+		// its own — and a login somebody made there is not a key.
+		return nil
+	}
 	l, ok, err := loadClaudeLogin(fsys)
 	if err != nil {
 		return failf(ErrUnreadableLogin, "%s: the credential store in its home cannot be read: %v", a, err)

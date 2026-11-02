@@ -128,6 +128,44 @@ func (l *Login) exchange(ctx context.Context, p Provider, code string) (*Token, 
 	return lp.CompleteLong(ctx, trimSpace(code), l.State)
 }
 
+// LoginKey makes a login out of an API key somebody pasted: no browser and
+// nothing to finish. The token it returns is the key itself, marked
+// CredentialAPIKey, and names the account by a fingerprint of the key, so the
+// same key pasted twice is the same account (MatchIdentity) and a different
+// one is another.
+//
+// The provider is asked once whether the key is good. Its refusal refuses the
+// key, as an ErrInvalidRequest saying so; any other failure to ask takes the
+// key unchecked, and unverified says why, for the caller to pass on. Neither
+// error, nor anything else here, carries the key.
+func LoginKey(ctx context.Context, provider, key string) (t *Token, unverified, err error) {
+	p, err := Lookup(provider)
+	if err != nil {
+		return nil, nil, err
+	}
+	kt, ok := p.(KeyTaker)
+	if !ok {
+		return nil, nil, failf(ErrInvalidRequest, "%s takes no pasted API key", p.Name())
+	}
+	return kt.TakeKey(ctx, trimSpace(key))
+}
+
+// PasteLong turns a long-lived token somebody pasted — one the vendor CLI
+// printed, `claude setup-token` for Claude Code — into the token a long login
+// (BeginLong) would have obtained, for Account.ApplyLong. Such a token cannot
+// say whose it is, so the caller decides which account it belongs on.
+func PasteLong(provider, token string) (*Token, error) {
+	p, err := Lookup(provider)
+	if err != nil {
+		return nil, err
+	}
+	kt, ok := p.(KeyTaker)
+	if !ok {
+		return nil, failf(ErrInvalidRequest, "%s takes no pasted long-lived token", p.Name())
+	}
+	return kt.TakeLong(trimSpace(token))
+}
+
 // NewAccount builds an account from a finished login. The id is the
 // caller's to assign — rota never invents one here.
 func NewAccount(id int, provider string, t *Token) *Account {
@@ -175,8 +213,13 @@ func Refresh(ctx context.Context, a *Account) (changed bool, err error) {
 }
 
 // Usage reads what an account has left, or (nil, nil) when its provider
-// publishes no usage endpoint. It does not cache; a polling caller keeps its own reading.
+// publishes no usage endpoint — or the account runs on an API key, which has
+// no plan and so no limits for one to read. It does not cache; a polling
+// caller keeps its own reading.
 func Usage(ctx context.Context, a *Account) (*Quota, error) {
+	if a.APIKey() {
+		return nil, nil
+	}
 	p, err := Lookup(a.Provider)
 	if err != nil {
 		return nil, err
