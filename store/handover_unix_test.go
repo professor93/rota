@@ -5,6 +5,7 @@ package store
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"testing"
 )
@@ -43,10 +44,16 @@ func TestOnlyTheHandoverKeepsAClaimAcrossExec(t *testing.T) {
 		t.Fatal("nothing is holding it")
 	}
 	defer release()
+	// This test's own claim, by its path: another test may have left one
+	// behind — a launch it made panic on purpose — and a run of this test
+	// before this one has kept that one across exec already.
 	var held *os.File
+	mine := filepath.Join(st.Home(st.Find(1)), runLock)
 	heldMu.Lock()
 	for f := range heldClaims {
-		held = f
+		if f.Name() == mine {
+			held = f
+		}
 	}
 	heldMu.Unlock()
 	if held == nil || !closeOnExec(t, held) {
