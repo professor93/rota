@@ -2708,9 +2708,11 @@ rota login 12 --token         # paste it; it is not shown as you type
 ```
 
 It goes on the account you name, into exactly the field `rota login --long`
-fills, good for a year from now. Such a token is inference-only and cannot say
-whose it is, so rota cannot check that you named the right account: name the
-one you approved as. It never creates an account, an account on an API key
+fills, good for a year counted from the moment you paste it. Such a token is
+inference-only and cannot say whose it is or when it was made, so rota cannot
+check either, and says so in one line when it stores it: a token from another
+claude.ai account would bill that account, and one made months ago ends sooner
+than rota shows. Name the account you approved as, and paste it when it is new. It never creates an account, an account on an API key
 takes none, and an API key pasted here is refused by name.
 
 ### An account on an API key
@@ -2766,10 +2768,14 @@ What it cannot do:
 - **claude.ai features** that need a login, such as claude.ai connectors.
 
 The first time Claude Code opens interactively on such an account it asks
-whether to use the key, once, and remembers the answer in its `.claude.json` —
-by default your own, which every account shares — keeping the key's last
-twenty characters there, as it does for any key in `ANTHROPIC_API_KEY`. Say
-yes. `/config` has the toggle to change it later. A headless run (`rota 7
+whether to use the key, once. Say yes. Claude Code records your answer in
+`customApiKeyResponses` in `.claude.json`, keeping the key's last twenty
+characters there, as it does for any key in `ANTHROPIC_API_KEY` — and a key
+account's `.claude.json` is your own, shared with every account, like any
+claude account's without Remote Control: rota makes nothing more of an account
+private than its tokens and its daemon. So the approval is in your shared file,
+and any account, or your own Claude Code, that is later handed the same key is
+not asked again. `/config` has the toggle to change it. A headless run (`rota 7
 "..."`) uses the key without asking. The agent the CLI starts can read its own
 environment, key included, as it can read the token of any other account.
 
