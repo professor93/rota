@@ -34,13 +34,11 @@ const (
 	claudeSetupPrefix = "sk-ant-oat"
 	// claudeAPIVersion is the API version a key is checked with.
 	claudeAPIVersion = "2023-06-01"
+	// claudeKeyCheckTime bounds the one request that checks a pasted key. A
+	// caller wanting less passes a context with an earlier deadline; the
+	// check fails open, so a short one costs only the check.
+	claudeKeyCheckTime = 5 * time.Second
 )
-
-// ClaudeKeyCheckTimeout bounds the one request that checks a pasted key. A
-// variable, like ExpiryBuffer, because how long a login may wait is the
-// application's call; the check fails open, so a short one costs only the
-// check.
-var ClaudeKeyCheckTimeout = 5 * time.Second
 
 // TakeKey takes a Console API key: its shape first, then one question to the
 // API, which only a 401 or a 403 answers with a refusal.
@@ -100,9 +98,9 @@ func claudeShape(s string, key bool) error {
 // The request follows no redirect. The key travels in a header of its own,
 // which Go's client would carry along to wherever a redirect pointed.
 func checkClaudeKey(ctx context.Context, key string) (refused, unverified error) {
-	ctx, cancel := context.WithTimeout(ctx, ClaudeKeyCheckTimeout)
+	ctx, cancel := context.WithTimeout(ctx, claudeKeyCheckTime)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, "GET", ClaudeEndpoints.Models, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", ClaudeModelsEndpoint, nil)
 	if err != nil {
 		return nil, fmt.Errorf("the key was not checked: %v", scrub(err, key))
 	}

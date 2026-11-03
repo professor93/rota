@@ -20,18 +20,20 @@ const (
 // ClaudeEndpoints are the vendor endpoints this provider calls, exported so
 // an application can point them at a gateway or a test double. The defaults
 // are the production service.
-//
-// Models is the API's model list, which a pasted API key is checked against
-// once, at login (see claudekey.go).
 var ClaudeEndpoints = struct {
-	Authorize, Token, Profile, Usage, Models string
+	Authorize, Token, Profile, Usage string
 }{
 	Authorize: "https://claude.com/cai/oauth/authorize",
 	Token:     "https://platform.claude.com/v1/oauth/token",
 	Profile:   "https://api.anthropic.com/api/oauth/profile",
 	Usage:     "https://api.anthropic.com/api/oauth/usage",
-	Models:    "https://api.anthropic.com/v1/models",
 }
+
+// ClaudeModelsEndpoint is the API's model list, which a pasted API key is
+// checked against once, at login (LoginKey). A variable of its own rather
+// than a field of ClaudeEndpoints, whose type is published API: a field added
+// there would break every program that assigns the whole struct.
+var ClaudeModelsEndpoint = "https://api.anthropic.com/v1/models"
 
 var claudeScopes = []string{
 	"org:create_api_key", "user:profile", "user:inference",

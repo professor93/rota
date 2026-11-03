@@ -11,23 +11,36 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 )
 
 // fakeServer answers by path; each handler receives the parsed form/JSON body.
 type fakeServer struct {
 	*httptest.Server
-	t     *testing.T
+	t *testing.T
+	// mu guards calls: a handler may still be running, on a goroutine of its
+	// own, when a client that gave up on it has already moved on.
+	mu    sync.Mutex
 	calls map[string]int
 	reply map[string]func(r *http.Request, body map[string]any) (int, any)
+}
+
+// count is how many requests reached path so far.
+func (f *fakeServer) count(path string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls[path]
 }
 
 func newFakeServer(t *testing.T, tls bool) *fakeServer {
 	t.Helper()
 	f := &fakeServer{t: t, calls: map[string]int{}, reply: map[string]func(*http.Request, map[string]any) (int, any){}}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
 		f.calls[r.URL.Path]++
 		h := f.reply[r.URL.Path]
+		f.mu.Unlock()
 		if h == nil {
 			t.Errorf("unexpected request %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(404)

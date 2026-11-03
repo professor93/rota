@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -35,7 +36,7 @@ func noSecret(t *testing.T, where, s string, secrets ...string) {
 // key in x-api-key and a version header, never as a bearer token.
 func TestClaudeKeyLoginAsksTheAPIOnce(t *testing.T) {
 	f := newFakeServer(t, false)
-	setURL(t, &ClaudeEndpoints.Models, f.URL+"/v1/models")
+	setURL(t, &ClaudeModelsEndpoint, f.URL+"/v1/models")
 	f.reply["/v1/models"] = func(r *http.Request, _ map[string]any) (int, any) {
 		if k := r.Header.Get("x-api-key"); r.Method != "GET" || (k != testKey && k != testOtherKey) ||
 			r.Header.Get("anthropic-version") == "" || r.Header.Get("Authorization") != "" {
@@ -50,8 +51,8 @@ func TestClaudeKeyLoginAsksTheAPIOnce(t *testing.T) {
 	if tok.Access != testKey || tok.Credential != CredentialAPIKey || tok.Refresh != "" || tok.ExpiresAt != 0 {
 		t.Fatalf("the token is the key itself, which never expires: %+v", tok)
 	}
-	if f.calls["/v1/models"] != 1 {
-		t.Fatalf("one question, got %d", f.calls["/v1/models"])
+	if f.count("/v1/models") != 1 {
+		t.Fatalf("one question, got %d", f.count("/v1/models"))
 	}
 	again, _, _ := LoginKey(context.Background(), "claude", testKey)
 	other, _, _ := LoginKey(context.Background(), "claude", testOtherKey)
@@ -70,7 +71,7 @@ func TestClaudeKeyLoginAsksTheAPIOnce(t *testing.T) {
 func TestClaudeKeyIsRefusedOnlyBy401And403(t *testing.T) {
 	for _, status := range []int{401, 403} {
 		f := newFakeServer(t, false)
-		setURL(t, &ClaudeEndpoints.Models, f.URL+"/v1/models")
+		setURL(t, &ClaudeModelsEndpoint, f.URL+"/v1/models")
 		f.reply["/v1/models"] = func(*http.Request, map[string]any) (int, any) {
 			return status, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key ` + testKey + `"}}`
 		}
@@ -84,38 +85,48 @@ func TestClaudeKeyIsRefusedOnlyBy401And403(t *testing.T) {
 		noSecret(t, "the refusal", err.Error(), testKey)
 	}
 
-	slow := 0
-	setTimeout(t, 50*time.Millisecond)
-	for name, reply := range map[string]func(*http.Request, map[string]any) (int, any){
-		"500": func(*http.Request, map[string]any) (int, any) { return 500, testKey },
-		"429": func(*http.Request, map[string]any) (int, any) { return 429, nil },
-		"slow": func(*http.Request, map[string]any) (int, any) {
-			slow++
+	// The slow handler outlives the check that gave up on it, on a goroutine
+	// of its own; it is counted atomically and waited for before the test
+	// moves on, so nothing it touches is touched by the next case too.
+	var slow atomic.Int64
+	slowDone := make(chan struct{}, 4)
+	for _, c := range []struct {
+		name  string
+		reply func(*http.Request, map[string]any) (int, any)
+	}{
+		{"500", func(*http.Request, map[string]any) (int, any) { return 500, testKey }},
+		{"429", func(*http.Request, map[string]any) (int, any) { return 429, nil }},
+		{"slow", func(*http.Request, map[string]any) (int, any) {
+			defer func() { slowDone <- struct{}{} }()
+			slow.Add(1)
 			time.Sleep(300 * time.Millisecond)
 			return 200, nil
-		},
+		}},
 	} {
 		f := newFakeServer(t, false)
-		setURL(t, &ClaudeEndpoints.Models, f.URL+"/v1/models")
-		f.reply["/v1/models"] = reply
-		tok, unverified, err := LoginKey(context.Background(), "claude", testKey)
+		setURL(t, &ClaudeModelsEndpoint, f.URL+"/v1/models")
+		f.reply["/v1/models"] = c.reply
+		// The caller's deadline bounds the check, as much as lib's own does.
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		tok, unverified, err := LoginKey(ctx, "claude", testKey)
+		cancel()
 		if err != nil || tok == nil || unverified == nil {
-			t.Fatalf("%s must take the key unchecked: %+v %v %v", name, tok, unverified, err)
+			t.Fatalf("%s must take the key unchecked: %+v %v %v", c.name, tok, unverified, err)
 		}
-		noSecret(t, name+"'s warning", unverified.Error(), testKey)
+		noSecret(t, c.name+"'s warning", unverified.Error(), testKey)
+		if c.name == "slow" {
+			<-slowDone
+			if n := slow.Load(); n != 1 {
+				t.Fatalf("the slow check was asked %d times", n)
+			}
+		}
 	}
 	// Nothing answers at all.
+	setURL(t, &ClaudeModelsEndpoint, "http://127.0.0.1:1/unreachable")
 	tok, unverified, err := LoginKey(context.Background(), "claude", testKey)
 	if err != nil || tok == nil || unverified == nil {
 		t.Fatalf("an unreachable API must take the key unchecked: %v %v", unverified, err)
 	}
-}
-
-func setTimeout(t *testing.T, d time.Duration) {
-	t.Helper()
-	old := ClaudeKeyCheckTimeout
-	ClaudeKeyCheckTimeout = d
-	t.Cleanup(func() { ClaudeKeyCheckTimeout = old })
 }
 
 // A redirect is not followed: a header carrying the key would go along to
@@ -131,7 +142,7 @@ func TestClaudeKeyCheckFollowsNoRedirect(t *testing.T) {
 		http.Redirect(w, r, away.URL+"/steal", http.StatusFound)
 	}))
 	t.Cleanup(here.Close)
-	setURL(t, &ClaudeEndpoints.Models, here.URL+"/v1/models")
+	setURL(t, &ClaudeModelsEndpoint, here.URL+"/v1/models")
 	_, unverified, err := LoginKey(context.Background(), "claude", testKey)
 	if err != nil || unverified == nil {
 		t.Fatalf("a redirect is an answer that checks nothing: %v %v", unverified, err)
@@ -224,8 +235,8 @@ func TestAKeyAccountIsUnmeteredAndNamedByItsEnd(t *testing.T) {
 	f := newFakeServer(t, false)
 	setURL(t, &ClaudeEndpoints.Usage, f.URL+"/usage")
 	q, err := Usage(context.Background(), a)
-	if q != nil || err != nil || f.calls["/usage"] != 0 {
-		t.Fatalf("the OAuth usage endpoint is never asked about a key: %+v %v %d", q, err, f.calls["/usage"])
+	if q != nil || err != nil || f.count("/usage") != 0 {
+		t.Fatalf("the OAuth usage endpoint is never asked about a key: %+v %v %d", q, err, f.count("/usage"))
 	}
 	if a.Expired() {
 		t.Fatal("a key does not expire")

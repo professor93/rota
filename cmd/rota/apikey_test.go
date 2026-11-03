@@ -24,9 +24,9 @@ func keyAPI(t *testing.T, status int) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
 	t.Cleanup(srv.Close)
-	old := rota.ClaudeEndpoints.Models
-	rota.ClaudeEndpoints.Models = srv.URL + "/v1/models"
-	t.Cleanup(func() { rota.ClaudeEndpoints.Models = old })
+	old := rota.ClaudeModelsEndpoint
+	rota.ClaudeModelsEndpoint = srv.URL + "/v1/models"
+	t.Cleanup(func() { rota.ClaudeModelsEndpoint = old })
 }
 
 // secretless fails when anything printed carries a credential, whole or the

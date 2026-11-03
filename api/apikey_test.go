@@ -25,9 +25,9 @@ const (
 func TestPastedCredentialsOverHTTP(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
 	defer api.Close()
-	old := rota.ClaudeEndpoints.Models
-	rota.ClaudeEndpoints.Models = api.URL
-	defer func() { rota.ClaudeEndpoints.Models = old }()
+	old := rota.ClaudeModelsEndpoint
+	rota.ClaudeModelsEndpoint = api.URL
+	defer func() { rota.ClaudeModelsEndpoint = old }()
 
 	h := newHarness(t, Options{})
 	seedUUID(t, h.dir, 1, "u1")

@@ -35,9 +35,9 @@ func keyCheck(t *testing.T, status int) *atomic.Int64 {
 		w.WriteHeader(status)
 	}))
 	t.Cleanup(srv.Close)
-	old := rota.ClaudeEndpoints.Models
-	rota.ClaudeEndpoints.Models = srv.URL + "/v1/models"
-	t.Cleanup(func() { rota.ClaudeEndpoints.Models = old })
+	old := rota.ClaudeModelsEndpoint
+	rota.ClaudeModelsEndpoint = srv.URL + "/v1/models"
+	t.Cleanup(func() { rota.ClaudeModelsEndpoint = old })
 	return &asked
 }
 

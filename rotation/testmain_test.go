@@ -17,7 +17,8 @@ import (
 // Claude Code directory are temporary ones.
 func TestMain(m *testing.M) {
 	const u = claudecode.Unreachable
-	rota.ClaudeEndpoints.Authorize, rota.ClaudeEndpoints.Token, rota.ClaudeEndpoints.Profile, rota.ClaudeEndpoints.Usage, rota.ClaudeEndpoints.Models = u, u, u, u, u
+	rota.ClaudeEndpoints.Authorize, rota.ClaudeEndpoints.Token, rota.ClaudeEndpoints.Profile, rota.ClaudeEndpoints.Usage = u, u, u, u
+	rota.ClaudeModelsEndpoint = u
 	rota.CodexEndpoints.Authorize, rota.CodexEndpoints.Token = u, u
 	claudecode.StandIn()
 	person, err := os.MkdirTemp("", "rota-person")

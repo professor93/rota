@@ -501,8 +501,8 @@ func TestALoginReadsThePlanAndSurvivesWithoutIt(t *testing.T) {
 	if err != nil || tok.Access != "A" || tok.Extra[claudeSubscription] != "" {
 		t.Fatalf("the login stands: %+v %v", tok, err)
 	}
-	if f.calls["/profile"] != 1 {
-		t.Fatalf("asked once: %d", f.calls["/profile"])
+	if f.count("/profile") != 1 {
+		t.Fatalf("asked once: %d", f.count("/profile"))
 	}
 	f.reply["/profile"] = func(*http.Request, map[string]any) (int, any) {
 		return 200, map[string]any{"organization": map[string]string{"organization_type": "claude_free"}}
@@ -511,11 +511,11 @@ func TestALoginReadsThePlanAndSurvivesWithoutIt(t *testing.T) {
 		t.Fatalf("a plan rota has no word for is left unsaid: %v", tok.Extra)
 	}
 	_, longState, _ := p.(LongLived).BeginLong(context.Background())
-	before := f.calls["/profile"]
+	before := f.count("/profile")
 	if _, err := p.(LongLived).CompleteLong(context.Background(), "CODE#ST", longState); err != nil {
 		t.Fatal(err)
 	}
-	if f.calls["/profile"] != before {
+	if f.count("/profile") != before {
 		t.Fatal("a long login must not ask the profile")
 	}
 }

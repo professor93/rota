@@ -2820,8 +2820,8 @@ fmt.Println(res.Result, res.SessionID, res.CostUSD)
 ```
 
 A credential somebody pasted needs no `Begin`. `LoginKey(ctx, "claude", key)`
-checks a Console API key once against `ClaudeEndpoints.Models` (within
-`ClaudeKeyCheckTimeout`) and returns a token marked `CredentialAPIKey`, named by
+checks a Console API key once against `ClaudeModelsEndpoint` (within five
+seconds, or the context's own deadline when that is sooner) and returns a token marked `CredentialAPIKey`, named by
 a fingerprint of the key; only the API's `401`/`403` is an error, and any other
 failure to ask comes back as `unverified` beside the token. `NewAccount` makes
 it an account whose `APIKey()` is true, whose `Metered()` is false, which
