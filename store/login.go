@@ -184,6 +184,11 @@ func checkLabel(label string) error {
 	return nil
 }
 
+// PastedLongCaveat is what a person is told when a pasted token is stored, in
+// one line: nothing about such a token can be checked.
+const PastedLongCaveat = "rota cannot tell which claude.ai account this token belongs to or when it was made: " +
+	"one from another account would bill that account, and its year is counted from now."
+
 // PasteLong puts a long-lived token somebody pasted — `claude setup-token`
 // printed it — on the account with this id, as `rota login --long` would, and
 // saves the store. It creates nothing: such a token cannot say whose it is,

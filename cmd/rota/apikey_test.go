@@ -150,6 +150,11 @@ func TestLoginTokenPutsASetupTokenOnTheAccountNamed(t *testing.T) {
 		t.Fatalf("%d %q %q", code, out, errOut)
 	}
 	secretless(t, "--token", out, errOut)
+	// Nothing about a pasted token can be checked, and that is said.
+	if !strings.Contains(out, "cannot tell which claude.ai account this token belongs to or when it was made") ||
+		!strings.Contains(out, "counted from now") {
+		t.Fatalf("the caveat must be said: %q", out)
+	}
 	raw, _ := os.ReadFile(filepath.Join(home, "accounts.json"))
 	if !strings.Contains(string(raw), testSetup) {
 		t.Fatal("not stored")

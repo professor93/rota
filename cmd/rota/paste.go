@@ -13,6 +13,7 @@ import (
 	"time"
 
 	rota "github.com/professor93/rota/lib"
+	"github.com/professor93/rota/store"
 )
 
 // This file is the two logins that are a paste rather than a browser: an API
@@ -150,10 +151,12 @@ func (c *cli) loginToken(provider string, long bool, rest []string) error {
 	}
 	if c.json {
 		return c.emit(map[string]any{"id": a.ID, "provider": a.Provider, "email": a.Email,
-			"uuid": a.UUID, "status": "long", "long_until": a.LongUntil().UTC().Format(time.RFC3339)})
+			"uuid": a.UUID, "status": "long", "long_until": a.LongUntil().UTC().Format(time.RFC3339),
+			"note": store.PastedLongCaveat})
 	}
 	fmt.Fprintf(c.out, "long-lived token stored for #%d %s, good until %s; a run without the account's home, or on a dead login, uses it from now on.\n",
 		a.ID, a, a.LongUntil().Format(time.DateOnly))
+	fmt.Fprintln(c.out, store.PastedLongCaveat)
 	return nil
 }
 

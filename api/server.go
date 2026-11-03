@@ -1161,7 +1161,8 @@ func (s *Server) pasteLong(w http.ResponseWriter, r *http.Request, st *store.Sto
 	s.log.Info("long-lived token stored", "account", a.ID, "provider", a.Provider,
 		"until", a.LongUntil().UTC().Format(time.RFC3339))
 	writeJSON(w, http.StatusOK, map[string]any{"id": a.ID, "provider": a.Provider, "email": a.Email,
-		"uuid": a.UUID, "status": "long", "long_until": a.LongUntil().UTC().Format(time.RFC3339)})
+		"uuid": a.UUID, "status": "long", "long_until": a.LongUntil().UTC().Format(time.RFC3339),
+		"note": store.PastedLongCaveat})
 }
 
 func (s *Server) loginFinish(w http.ResponseWriter, r *http.Request) {

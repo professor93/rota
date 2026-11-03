@@ -64,7 +64,8 @@ func TestPastedCredentialsOverHTTP(t *testing.T) {
 
 	resp, raw = h.do("POST", "/v1/login", map[string]any{"account": 1, "token": testSetup})
 	clean(raw)
-	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"status":"long"`) {
+	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"status":"long"`) ||
+		!strings.Contains(string(raw), "cannot tell which claude.ai account") {
 		t.Fatalf("%d %s", resp.StatusCode, raw)
 	}
 
