@@ -14,7 +14,7 @@ type fakeCatalog struct {
 	dm, de  string
 }
 
-func (f fakeCatalog) Models() []Model            { return f.models }
+func (f fakeCatalog) Models() []Model            { return copyModels(f.models) }
 func (f fakeCatalog) Efforts() []string          { return f.efforts }
 func (f fakeCatalog) Defaults() (string, string) { return f.dm, f.de }
 
