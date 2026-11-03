@@ -72,6 +72,9 @@ func roleFlag(fs *flag.FlagSet) *string {
 
 func checkRole(s string) error {
 	if api.Role(s) != api.RoleControl && api.Role(s) != api.RoleWatch {
+		if err := keyInArgs(s); err != nil {
+			return err
+		}
 		return usageErr("--role is %q or %q, not %q", api.RoleControl, api.RoleWatch, s)
 	}
 	return nil
@@ -219,6 +222,9 @@ func (c *cli) serveInvite(args []string) error {
 		return usageErr("%v", err)
 	}
 	if len(rest) > 0 {
+		if err := keyInArgs(rest[0]); err != nil {
+			return err
+		}
 		return usageErr("serve invite takes no arguments, got %q", rest[0])
 	}
 	cfg, err := serverConfig(*conf)

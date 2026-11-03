@@ -353,6 +353,9 @@ func (c *cli) send(args []string) error {
 		return usageError(sendShort)
 	}
 	id, text := words[0], strings.TrimSpace(strings.Join(words[1:], " "))
+	if err := keyInArgs(id); err != nil {
+		return err // a run id is eight hex characters; this is something else
+	}
 	req := sendRequest{Kind: "message", Text: text}
 	switch {
 	case *shut:

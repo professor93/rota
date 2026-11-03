@@ -183,9 +183,12 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		// This lives in the default arm rather than in front of the switch so
 		// there is no second list of command names to keep in step: whatever
 		// the switch answers to is a command, and nothing else is.
-		if looksLikePrompt(argv) {
+		switch {
+		case looksLikePrompt(argv):
 			err = c.run(argv)
-		} else {
+		case keyInArgs(cmd) != nil:
+			err = keyInArgs(cmd)
+		default:
 			err = usageErr("unknown command %q", cmd)
 		}
 	}
@@ -206,9 +209,9 @@ func (c *cli) report(err error) int {
 		status = 2
 	}
 	if c.json {
-		_ = c.emit(map[string]string{"error": err.Error()})
+		_ = c.emit(map[string]string{"error": unsecret(err.Error())})
 	} else {
-		fmt.Fprintln(c.err, "error:", err)
+		fmt.Fprintln(c.err, "error:", unsecret(err.Error()))
 		if hint := remediation(err); hint != "" {
 			fmt.Fprintln(c.err, "try:", hint)
 		}
@@ -290,6 +293,9 @@ func splitFlags(rest []string, allowed ...string) (args []string, flags map[stri
 		case slices.Contains(allowed, a):
 			flags[a] = true
 		default:
+			if err := keyInArgs(a); err != nil {
+				return nil, nil, err
+			}
 			return nil, nil, usageErr("unknown flag %q", a)
 		}
 	}
@@ -299,6 +305,9 @@ func splitFlags(rest []string, allowed ...string) (args []string, flags map[stri
 func parseID(s string) (int, error) {
 	id, err := strconv.Atoi(s)
 	if err != nil || id < 1 {
+		if kerr := keyInArgs(s); kerr != nil {
+			return 0, kerr
+		}
 		return 0, usageErr("%q is not an account id; see `rota list`", s)
 	}
 	return id, nil
@@ -367,6 +376,12 @@ func (c *cli) login(args []string) error {
 	// account id wins over a login id when both could read it — six random
 	// hex characters are all digits often enough to matter — because an
 	// account is a thing someone can see in `rota list`.
+	//
+	// None of them is ever a key: `rota login sk-ant-…` is --key forgotten,
+	// and is refused before anything could repeat what was typed.
+	if err := keyInArgs(rest[0]); err != nil {
+		return err
+	}
 	id, numeric := 0, false
 	if n, err := strconv.Atoi(rest[0]); err == nil && n >= 1 {
 		id, numeric = n, true
@@ -1171,6 +1186,12 @@ func (c *cli) answer(id int, args []string) error {
 	if text == "" {
 		text = *altPrompt
 	}
+	// A prompt that is nothing but an Anthropic credential is a key typed in
+	// the wrong place, and sending it would hand it to the model, its
+	// transcript and the conversation history. It is refused instead.
+	if !strings.ContainsAny(text, " \t\n") && strings.HasPrefix(text, "sk-ant-") {
+		return keyInArgs(text)
+	}
 	if *input && text == "" {
 		// A run that reads its messages from stdin takes the first one from
 		// there too, which is what `echo ... | rota run 1 --input` means.
@@ -1439,6 +1460,9 @@ func (c *cli) set(args []string) error {
 		return usageErr("--long takes forget and nothing else; `rota login --long` is how one is obtained")
 	}
 	if given["remote-control"] && *remoteCtl != "on" && *remoteCtl != "off" {
+		if err := keyInArgs(*remoteCtl); err != nil {
+			return err
+		}
 		return usageErr("--remote-control takes on or off, not %q", *remoteCtl)
 	}
 
@@ -1924,7 +1948,7 @@ func parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 	rest := args
 	for len(rest) > 0 {
 		if err := fs.Parse(rest); err != nil {
-			return nil, err
+			return nil, keyInFlagErr(err, rest)
 		}
 		rest = fs.Args()
 		if len(rest) == 0 {
@@ -2078,12 +2102,15 @@ func (c *cli) serve(args []string) error {
 				fs.PrintDefaults()
 				return nil
 			}
-			return usageErr("%v", err)
+			return usageErr("%v", keyInFlagErr(err, rest))
 		}
 		if rest = fs.Args(); len(rest) == 0 {
 			break
 		}
 		if addr != "" {
+			if err := keyInArgs(addr, rest[0]); err != nil {
+				return err
+			}
 			return usageErr("serve takes one address, got %q and %q", addr, rest[0])
 		}
 		addr, rest = rest[0], rest[1:]

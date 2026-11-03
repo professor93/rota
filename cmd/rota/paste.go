@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -195,6 +197,50 @@ func (c *cli) askSecret(what string) (string, error) {
 		return "", fmt.Errorf("reading the %s: %w", what, err)
 	}
 	return strings.TrimSpace(s), nil
+}
+
+// looksLikeKey reports whether an argument may be a credential typed where an
+// argument was expected — `rota login sk-ant-…` for `rota login --key`, say. A
+// message about such an argument must not repeat it: whatever it printed would
+// be in a terminal's scrollback and in any log that keeps stderr.
+func looksLikeKey(s string) bool { return strings.Contains(s, "sk-ant-") || len(s) > 40 }
+
+// keyInArgs is the refusal of an argument that looks like a key, in words that
+// do not repeat it, or nil when none of args does.
+func keyInArgs(args ...string) error {
+	for _, a := range args {
+		if looksLikeKey(a) {
+			return usageErr("that argument looks like a key, so it is not repeated here; an API key is pasted with " +
+				"`rota login --key`, which reads it hidden — one typed on a command line is in the shell's history now")
+		}
+	}
+	return nil
+}
+
+// keyInFlagErr is a flag parser's error with any argument that looks like a
+// key taken out: the flag package quotes the value it could not use.
+func keyInFlagErr(err error, args []string) error {
+	if err == nil || errors.Is(err, flag.ErrHelp) {
+		return err
+	}
+	for _, a := range args {
+		if looksLikeKey(a) && strings.Contains(err.Error(), a) {
+			return keyInArgs(a)
+		}
+	}
+	return err
+}
+
+// anthropicSecret is the shape of any Anthropic credential long enough to be
+// a real one. The prefixes alone, as messages name them, are too short to
+// match.
+var anthropicSecret = regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{16,}`)
+
+// unsecret is a message with anything shaped like an Anthropic credential
+// taken out. Every error this command prints passes through it, as the last
+// line of defence for a message somebody wrote without thinking of keys.
+func unsecret(msg string) string {
+	return anthropicSecret.ReplaceAllString(msg, "sk-ant-[not repeated]")
 }
 
 // isCharDevice reports whether f is a terminal or some other character

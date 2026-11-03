@@ -174,6 +174,50 @@ func TestLoginTokenPutsASetupTokenOnTheAccountNamed(t *testing.T) {
 	}
 }
 
+// A key typed where an argument goes — `rota login sk-ant-…` for `rota login
+// --key`, above all — is never repeated, by any command, in any output; the
+// refusal says it looks like a key and how one is pasted.
+func TestAKeyTypedAsAnArgumentIsNeverRepeated(t *testing.T) {
+	seedLong(t, time.Time{}, "")
+	long := strings.Repeat("Q", 48)
+	for _, args := range [][]string{
+		{"login", testKey},
+		{"--json", "login", testKey},
+		{"login", "claude", testKey},
+		{"login", long},
+		{testKey},
+		{"run", testKey},
+		{"run", "1", testKey},
+		{"run", "-p", testKey},
+		{"run", "1", "--model=" + testKey, "-x"},
+		{"set", testKey},
+		{"set", "1", "--threshold", testKey},
+		{"set", "1", "--remote-control", testKey},
+		{"remove", testKey},
+		{"list", "--" + testKey},
+		{"send", testKey, "hello"},
+		{"serve", "8787", testKey},
+		{"serve", "invite", testKey},
+		{"serve", "passwd", "alice", "--role", testKey},
+	} {
+		out, errOut, code := runCLIStdin(t, "", args...)
+		if code == 0 {
+			t.Fatalf("%d: must be refused", len(args))
+		}
+		for _, secret := range []string{testKey, "TESTONLY", long} {
+			if strings.Contains(out, secret) || strings.Contains(errOut, secret) {
+				t.Fatalf("a command repeated what looks like a key (args %d long): %q %q",
+					len(args), strings.ReplaceAll(out, testKey, "<key>"), strings.ReplaceAll(errOut, testKey, "<key>"))
+			}
+		}
+	}
+	// The one that matters most says what to do instead.
+	_, errOut, _ := call(t, "login", testKey)
+	if !strings.Contains(errOut, "looks like a key") || !strings.Contains(errOut, "rota login --key") {
+		t.Fatalf("the refusal must say how a key is pasted: %q", errOut)
+	}
+}
+
 // Remote Control refuses an API key, and rota says so by name rather than
 // starting a session that cannot have it.
 func TestAKeyAccountRefusesRemoteControl(t *testing.T) {
