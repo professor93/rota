@@ -107,7 +107,10 @@ func (w *watcher) look(ctx context.Context) bool {
 		case !got:
 			return false // another watcher keeps this home
 		}
-		_, _ = f.WriteString(strconv.Itoa(os.Getpid()) + "\n")
+		// Truncated first: a shorter pid must not leave the tail of a longer one.
+		if f.Truncate(0) == nil {
+			_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+		}
 		w.lock, w.home = f, home
 		w.said("%s: watching %s", a, home)
 		return true

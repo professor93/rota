@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -333,6 +334,22 @@ func TestASecondWatcherOfOneHomeGoesAtOnce(t *testing.T) {
 	if first.ended(0) || !watchHeld(t, home) {
 		t.Fatal("the first stays")
 	}
+}
+
+// The lock names the watcher holding it, and only it: a longer pid left there
+// by an earlier one leaves no tail behind.
+func TestTheWatchLockNamesItsWatcherAlone(t *testing.T) {
+	fakeAnthropic(t)
+	open, home := watchedStore(t, func(t *testing.T, s *Store, a *rota.Account) {
+		healthy(t, s, a)
+		alive(t, s.Home(a), "sessions/1.json", os.Getpid())
+		writeFile(t, filepath.Join(s.Home(a), watchLock), "123456789012345678901234567890\n")
+	})
+	startWatch(t, open)
+	want := strconv.Itoa(os.Getpid()) + "\n"
+	eventually(t, "the lock names this watcher alone", func() bool {
+		return readFile(filepath.Join(home, watchLock)) == want
+	})
 }
 
 // A store that cannot be opened is said and tried again at the next look; it
