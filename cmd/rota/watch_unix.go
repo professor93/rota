@@ -18,6 +18,11 @@ import (
 // other descriptor: every one of rota's is close-on-exec until the handover
 // clears the claim's, which is after this.
 func watchInBackground(id int) error {
+	if _, err := sessionOf(0); err != nil {
+		// A unix with no getsid: the watcher could not tell it had left this
+		// session and would stay in the child this waits for, so none starts.
+		return nil
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return err
