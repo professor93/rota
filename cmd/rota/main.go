@@ -768,6 +768,8 @@ Asks one account for one answer and prints it. The id is optional: without
 one, rota takes the first account in the rotation still under its threshold
 (see ` + "`rota set`" + `). With no prompt either, it opens
 that account's own CLI instead of asking it anything.
+A claude account opened that way on its own login leaves a watcher behind
+(` + "`rota serve watch`" + `) that rescues that login while the CLI runs.
 
 rota speaks its own vocabulary here — --model, --effort, --resume — and
 builds the right headless command for whichever CLI the account belongs to,
@@ -1021,6 +1023,7 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 		}
 	}
 	_ = s.Close() // everything is on disk; release the lock before handing over
+	c.watchLogin(s, a)
 
 	// This process is about to become the CLI, or to sit above it: either
 	// way the entry written here describes what is running. Nothing else
@@ -2014,6 +2017,8 @@ func (c *cli) serve(args []string) error {
 			return c.serveToken(args[1:])
 		case "invite":
 			return c.serveInvite(args[1:])
+		case "watch":
+			return c.serveWatch(args[1:])
 		}
 	}
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)

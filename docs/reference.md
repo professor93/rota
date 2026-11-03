@@ -298,6 +298,10 @@ takes `--ttl` (ten minutes by default, a day at most) and `--config`, and
 asks a server that is already running for the link. None of the three serves
 anything; see *The principals*.
 
+**`rota serve watch <id>`** is internal: started by `rota run`, it keeps the
+account's login alive while its CLI runs (see *Watched*). It is not meant to be
+typed.
+
 The whole `[routes]` and `[terminal]` groups — the terminal page among them —
 have no flag at all and are set in the file only.
 
@@ -2351,6 +2355,27 @@ Code blanked: see *Stranded* and *Blanked*, below.
   not be signed in. A blanked login that is not the account's current one is a
   home with nothing usable in it, as ever. An account marked dead before it got
   this chance stays dead: `rota login`, or `/login` inside one of its windows.
+- **Watched.** `rota run` with no prompt replaces itself with the CLI, so no
+  rota is left to notice a home going stranded or blanked under a window open
+  for days. Before that handover, on a claude account whose login lives in its
+  home and whose launch took the stored route, it starts one watcher, `rota
+  serve watch <id>`: in a session of its own, at `/`, with stdin, stdout and
+  stderr on `/dev/null` and no other descriptor — the run's claim is still
+  close-on-exec when it starts, so the watcher never holds it — and not the
+  CLI's child, nor its parent. The CLI's process, terminal, signals,
+  environment and arguments are what they were. Every five minutes the watcher
+  takes the store's lock and, while anything is alive in the home (a daemon, a
+  live session, a run holding the account), makes the same look `rota list`
+  starts with, for that account alone: every rule above holds, and a healthy
+  home is left to Claude Code. It goes when the home goes quiet, when the
+  account is removed, dead, given another home or moved to the environment
+  route, and on SIGTERM or SIGHUP — never in the middle of a look. One watcher
+  per home: it holds `.rota-watch.lock` there, and a second goes at once. A
+  store it cannot open is tried again next time. What it says goes to
+  `watch.log` in the store, moved aside to `watch.log.1` at one MiB. `--share`
+  starts the same watcher; a question, a hermetic run, the HTTP API and Windows
+  start none, and `rota serve` maintains accounts as it always did beside it.
+  No watcher has yet been seen rescuing a home under a live Claude Code.
 - **The refresh lock.** Through all of that rota holds Claude Code's own
   refresh lock (`.oauth_refresh.lock` in the home), for one account at a time,
   from reading the home again until the login is in it, and touches it every
@@ -2926,6 +2951,7 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `sessions/` | What the vendor CLIs are doing: the runs rota started, the editors holding one open, and the conversations `--resume` could pick up |
 | `store/mirror.go` | The Claude world each account gets: what is linked, what stays its own, and the warning for an entry that stopped being a link |
 | `store/claude.go` | A claude account's login in its home: what is alive there, reading, writing and refreshing it, the daemon, removal |
+| `store/watch.go`, `cmd/rota/watch*.go` | The watcher an interactive run leaves: its looks, its lock, starting it in a session of its own, its log |
 | `store/claudejson.go` | An account's own `.claude.json` for Remote Control: switching it, the identity in it, and the one-way fold |
 | `internal/claudecode/` | The macOS keychain item and `claude daemon stop`, behind variables every test replaces |
 | `internal/proc/` | Whether a process is still alive, for the session listing and the store alike |
