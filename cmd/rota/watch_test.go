@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/professor93/rota/internal/fakecli"
 )
 
 // No test starts a real watcher unless it means to: one started from here
@@ -33,7 +35,7 @@ func TestAnInteractiveRunOnAStoredLoginStartsAWatcher(t *testing.T) {
 	if _, errOut, code := call(t, "run", "1"); code != 0 {
 		t.Fatalf("%d %q", code, errOut)
 	}
-	if len(*argv) == 0 || (*argv)[0] != "claude" {
+	if len(*argv) == 0 || (*argv)[0] != fakecli.Exe("claude") {
 		t.Fatalf("the CLI is still handed the terminal: %q", *argv)
 	}
 	want := 1
