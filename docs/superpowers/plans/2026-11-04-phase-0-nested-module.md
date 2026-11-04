@@ -16,6 +16,7 @@
 - Program module `github.com/professor93/rota/cmd/rota`, `go 1.27`: requires `github.com/professor93/rota` at a release tag (`v1.4.0-beta.1` until the release pins `v1.4.0-beta.2`). Never a `replace` and never a pseudo-version.
 - `go.work` is committed: `go 1.27`, `use ( . ./cmd/rota )`, no `replace`.
 - Release tag regex: `^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$`. The program's tag is `cmd/rota/` followed by that tag.
+- No tag until a dispatched `ci.yml` run on `phase-0` is green on ubuntu, macos and windows.
 - Release order: tag `vX` on the version commit and push it. Then the pin commit (`cmd/rota/go.mod` requires `vX`, with its `go.sum`). Then tag `cmd/rota/vX` and push it. Only after that, fast-forward `main`. Tags are lightweight, like `v1.4.0-beta.1`. A number is never reused.
 - No behaviour change: the only Go files this phase changes are `lib/httpx.go:21` and `wire/wire.go:424`, and the only change is `Version` going to `"1.4.0-beta.2"`.
 - `lib` stays standard-library only and reads no environment.
@@ -34,6 +35,7 @@
 3. **Tags out of order or a reused number**: pinning before the root tag is on origin, pinning on a commit other than the one the tag names, or pinning a version whose `cmd/rota/` tag already exists. Test: Task 2 Step 6, which checks all three refusals.
 4. **Old versions and hand-run checks**: `go install …/cmd/rota@v1.3.0` must still give the root's 1.3.0. The module job must accept `v1.3.0` from a dispatch and `cmd/rota/v1.4.0-beta.2` from a push. Test: Task 4 Step 4.
 5. **A Windows step that runs two commands** passes even when the first one fails. Test: Task 1 Step 8, where `grep -c 'run: |' .github/workflows/ci.yml` must print `0`.
+6. **A red Windows run after a tag publishes a broken beta.** CI runs only on main and on PRs, and main moves only after both tags, so without a dispatch Windows would first test the split after release. Test: Task 6 Step 1, a dispatched `ci.yml` run on `phase-0` that must be green on ubuntu, macos and windows before any tag.
 
 ## File Structure
 
@@ -100,7 +102,7 @@
 
 - [ ] **Step 5: Show what CI would miss.** `<testenv> go test ./... 2>&1 | grep -c 'rota/cmd/rota'` prints `0`, because the root's `./...` leaves the program out.
 
-- [ ] **Step 6: CI.** In the `test` job of `ci.yml`, add a step `vet the program` (`run: go -C cmd/rota vet ./...`) after `vet`, and after `test` add `test the program` (`run: go -C cmd/rota test ./...`) followed by `module boundary` (`run: sh scripts/module.sh check`). In the `windows` job, add `build the program`, `vet the program` and `test the program` after `build`, `vet` and `test` respectively, each running `go -C cmd/rota build ./...`, `vet ./...` or `test ./...`. Put one comment above the first new step: `# The program is a module of its own, which ./... at the root leaves out.`
+- [ ] **Step 6: CI.** Add `workflow_dispatch:` to `ci.yml`'s `on:`, beside `push` and `pull_request`, with the comment `# By hand on a branch, so Windows is proven before a tag.`. In the `test` job of `ci.yml`, add a step `vet the program` (`run: go -C cmd/rota vet ./...`) after `vet`, and after `test` add `test the program` (`run: go -C cmd/rota test ./...`) followed by `module boundary` (`run: sh scripts/module.sh check`). In the `windows` job, add `build the program`, `vet the program` and `test the program` after `build`, `vet` and `test` respectively, each running `go -C cmd/rota build ./...`, `vet ./...` or `test ./...`. Put one comment above the first new step: `# The program is a module of its own, which ./... at the root leaves out.`
 
 - [ ] **Step 7: Docs.** Make these exact replacements:
   - `README.md:11`: `and the whole project has **zero third-party dependencies**.` becomes `and the SDK and the server packages have **zero third-party dependencies**.`
@@ -120,7 +122,7 @@
 - [ ] **Step 9: Commit.**
   ```bash
   git add go.work cmd/rota/go.mod scripts/module.sh .github/workflows/ci.yml README.md docs/reference.md
-  git commit -m "The rota program is a module of its own beside the root, which still requires nothing, and CI vets and tests both and checks the line between them"
+  git commit -m "The rota program is a module of its own beside the root, which still requires nothing, and CI, which also runs by hand, vets and tests both and checks the line between them"
   ```
 
 ### Task 2: Tidy and pin
@@ -302,13 +304,14 @@ Everything in this task can only be verified by real pushes. Nothing here runs u
 **Interfaces:**
 - Consumes everything above. `HEAD` of `phase-0` is the `1.4.0-beta.2` commit.
 
-- [ ] **Step 1: Suite first.** In rota-sdk-test, `git checkout main && git merge --ff-only rota-bin && git push origin main`, then `gh run watch` until the suite's CI passes. The gate checks out the suite's `main`.
-- [ ] **Step 2: The numbers are free.** `git ls-remote --tags origin refs/tags/v1.4.0-beta.2 refs/tags/cmd/rota/v1.4.0-beta.2` prints nothing. Do not probe the proxy, which would cache a miss.
-- [ ] **Step 3: Root tag.** Run `git tag v1.4.0-beta.2 && git push origin v1.4.0-beta.2`, then `gh run watch` on the newest `release.yml` run.
+- [ ] **Step 1: Windows before any tag (Review Focus 6).** Run `gh workflow run ci.yml --repo professor93/rota --ref phase-0`, then `gh run watch --repo professor93/rota --exit-status "$(gh run list --repo professor93/rota --workflow ci.yml --branch phase-0 --event workflow_dispatch -L1 --json databaseId -q '.[0].databaseId')"`. Expected: `test (ubuntu-latest)`, `test (macos-latest)` and `windows` all succeed, and the watch exits 0. No tag is made until it does. If GitHub refuses the dispatch because `main`'s `ci.yml` has no `workflow_dispatch` trigger, stop and ask the owner; do not tag.
+- [ ] **Step 2: Suite first.** In rota-sdk-test, `git checkout main && git merge --ff-only rota-bin && git push origin main`, then `gh run watch` until the suite's CI passes. The gate checks out the suite's `main`.
+- [ ] **Step 3: The numbers are free.** `git ls-remote --tags origin refs/tags/v1.4.0-beta.2 refs/tags/cmd/rota/v1.4.0-beta.2` prints nothing. Do not probe the proxy, which would cache a miss.
+- [ ] **Step 4: Root tag.** Run `git tag v1.4.0-beta.2 && git push origin v1.4.0-beta.2`, then `gh run watch` on the newest `release.yml` run.
   - Gate, publish and all three smoke jobs succeed, and module is skipped.
   - `gh release view v1.4.0-beta.2 --json isPrerelease -q .isPrerelease` prints `true`.
   - `gh api repos/professor93/rota/releases/latest -q .tag_name` prints `v1.3.0`.
-- [ ] **Step 4: Release notes.** Write this head to `$N/head.md`, where `N=$(mktemp -d)`:
+- [ ] **Step 5: Release notes.** Write this head to `$N/head.md`, where `N=$(mktemp -d)`:
 
   > A pre-release for testing before 1.4.0. `install.sh` gives the last stable version. `go install github.com/professor93/rota/cmd/rota@latest` now gives this beta, because the program became a module of its own in this version and that module has only betas so far; `@v1.3.0` gives the last stable one. To try this one:
   >
@@ -320,12 +323,12 @@ Everything in this task can only be verified by real pushes. Nothing here runs u
   > It carries everything since 1.3.0: 1.3.1 and 1.3.2 were never published on their own.
 
   Then run `for f in "$N/head.md" docs/releases/1.4.0.md docs/releases/1.3.2.md docs/releases/1.3.1.md; do cat "$f"; echo; done > "$N/notes.md" && gh release edit v1.4.0-beta.2 --notes-file "$N/notes.md"`.
-- [ ] **Step 5: Pin.** `sh scripts/module.sh pin v1.4.0-beta.2` prints `module: tagged cmd/rota/v1.4.0-beta.2`. `git show --stat --format=%s HEAD` shows `cmd/rota requires rota v1.4.0-beta.2`, `cmd/rota/go.mod` and `cmd/rota/go.sum`. `cmd/rota/go.sum` has exactly two lines, both starting `github.com/professor93/rota v1.4.0-beta.2`.
-- [ ] **Step 6: Program tag.** Run `git push origin phase-0 cmd/rota/v1.4.0-beta.2`, then watch the new `release.yml` run: only `module` runs, and it succeeds. `gh release view cmd/rota/v1.4.0-beta.2` prints `release not found`.
-- [ ] **Step 7: As the world sees it.** In `T=$(mktemp -d)`, outside any module:
+- [ ] **Step 6: Pin.** `sh scripts/module.sh pin v1.4.0-beta.2` prints `module: tagged cmd/rota/v1.4.0-beta.2`. `git show --stat --format=%s HEAD` shows `cmd/rota requires rota v1.4.0-beta.2`, `cmd/rota/go.mod` and `cmd/rota/go.sum`. `cmd/rota/go.sum` has exactly two lines, both starting `github.com/professor93/rota v1.4.0-beta.2`.
+- [ ] **Step 7: Program tag.** Run `git push origin phase-0 cmd/rota/v1.4.0-beta.2`, then watch the new `release.yml` run: only `module` runs, and it succeeds. `gh release view cmd/rota/v1.4.0-beta.2` prints `release not found`.
+- [ ] **Step 8: As the world sees it.** In `T=$(mktemp -d)`, outside any module:
   - `GOBIN=$T go install github.com/professor93/rota/cmd/rota@v1.4.0-beta.2 && $T/rota --version` prints `rota 1.4.0-beta.2`.
   - `GOBIN=$T/old go install github.com/professor93/rota/cmd/rota@v1.3.0 && $T/old/rota --version` prints `rota 1.3.0`.
   - `go list -m github.com/professor93/rota/cmd/rota@latest` prints `github.com/professor93/rota/cmd/rota v1.4.0-beta.2`.
   - `go list -m github.com/professor93/rota@latest` prints `github.com/professor93/rota v1.3.0`.
-- [ ] **Step 8: Main.** `git push origin phase-0:main` (a fast-forward). Then `gh run watch` on the `ci.yml` run for `main`: test on ubuntu and on macos, and windows, all succeed. This is the first Windows run of the split, because CI runs only on `main` and on PRs.
-- [ ] **Step 9: Rebuild.** In the main checkout, `git pull --ff-only && go build -trimpath -ldflags='-s -w' -o ~/.local/bin/rota ./cmd/rota && rota --version` prints `rota 1.4.0-beta.2`. Tell the owner the linux-amd64 size from Task 5 Step 2.
+- [ ] **Step 9: Main.** `git push origin phase-0:main` (a fast-forward). Then `gh run watch` on the `ci.yml` run for `main`: test on ubuntu and on macos, and windows, all succeed.
+- [ ] **Step 10: Rebuild.** In the main checkout, `git pull --ff-only && go build -trimpath -ldflags='-s -w' -o ~/.local/bin/rota ./cmd/rota && rota --version` prints `rota 1.4.0-beta.2`. Tell the owner the linux-amd64 size from Task 5 Step 2.
