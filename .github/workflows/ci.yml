@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  # By hand on a branch, so Windows is proven before a tag.
+  workflow_dispatch:
 
 permissions:
   contents: read
