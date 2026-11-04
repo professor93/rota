@@ -25,7 +25,8 @@ func personWorld(t *testing.T) string {
 		}
 	}
 	for _, name := range []string{"settings.json", "CLAUDE.md", "history.jsonl", "daemon.lock", "daemon.log",
-		".credentials.json", "policy-limits.json", "mcp-needs-auth-cache.json", "ide.lock"} {
+		".credentials.json", "policy-limits.json", "policy-limits.json.signature.json", "remote-settings.json",
+		"remote-settings.json.synced-at", "mcp-needs-auth-cache.json", "ide.lock"} {
 		writeFile(t, filepath.Join(src, name), name)
 	}
 	writeFile(t, filepath.Join(src, ".claude.json"), `{
@@ -42,7 +43,8 @@ func personWorld(t *testing.T) string {
 // neverShared are the entries of a Claude Code directory that belong to one
 // login or one running Claude Code, and never resolve to anybody else's.
 var neverShared = []string{"sessions", "telemetry", "daemon", "daemon.lock", "daemon.log",
-	".credentials.json", "policy-limits.json", "statsig", "mcp-needs-auth-cache.json", "bridge-spawn", "ide.lock"}
+	".credentials.json", "policy-limits.json", "policy-limits.json.signature.json", "remote-settings.json",
+	"remote-settings.json.synced-at", "statsig", "mcp-needs-auth-cache.json", "bridge-spawn", "ide.lock"}
 
 // sameThing reports whether two paths lead to the same file or directory.
 func sameThing(a, b string) bool {
@@ -319,4 +321,118 @@ func TestALinkForANameNoLongerSharedWaitsForAQuietHome(t *testing.T) {
 	}
 	absent(t, filepath.Join(dst, "telemetry"))
 	absent(t, filepath.Join(dst, "statsig"))
+}
+
+// orgPolicy is every name Claude Code keeps an organisation's policy and
+// remote settings under, as seen in its directory: the policy itself, its
+// signature and stamp, and the remote settings with what it notes beside
+// them.
+var orgPolicy = []string{
+	"policy-limits.json", "policy-limits.json.signature.json", "policy-limits.json.stamp.json",
+	"remote-settings.json", "remote-settings.json.synced-at", "remote-settings.json.signature.json",
+}
+
+// nearOrgPolicy are names that only look like those, and are shared like
+// any other entry.
+var nearOrgPolicy = []string{"policy-limits.jsonx", "policy-limits-other.json", "remote-settings-other.json", "remote-settings.jsonl"}
+
+// Which names are an organisation's policy is decided by exact prefix: the
+// name itself, or the name followed by a dot and anything.
+func TestOrganisationPolicyIsDecidedByExactPrefix(t *testing.T) {
+	for _, name := range orgPolicy {
+		if sharedWithClaude(name) {
+			t.Fatalf("%s is shared", name)
+		}
+	}
+	for _, name := range append(slices.Clone(nearOrgPolicy), "settings.json", "skills", "remote-settings", "policy-limits") {
+		if !sharedWithClaude(name) {
+			t.Fatalf("%s is not shared", name)
+		}
+	}
+}
+
+// One organisation's cached policy or remote settings never applies under
+// another account: a fresh mirror links none of them from the person's
+// directory, and everything else, names that merely look like them
+// included, is linked as before.
+func TestAFreshMirrorLinksNoOrganisationPolicy(t *testing.T) {
+	src := personWorld(t)
+	for _, name := range append(slices.Clone(orgPolicy), nearOrgPolicy...) {
+		writeFile(t, filepath.Join(src, name), name)
+	}
+	s, a := claudeStore(t)
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	dst := s.ownHome(a)
+	for _, name := range orgPolicy {
+		absent(t, filepath.Join(dst, name))
+		if readFile(filepath.Join(src, name)) != name {
+			t.Fatalf("the person's %s is untouched", name)
+		}
+	}
+	for _, name := range append(slices.Clone(nearOrgPolicy), "settings.json", "CLAUDE.md", "skills", "projects") {
+		linksTo(t, filepath.Join(dst, name), filepath.Join(src, name))
+	}
+}
+
+// A home an older rota mirrored holds links for them. They go on the first
+// refresh that finds the home quiet, as every link for a name no longer
+// shared does, while a real file of that name Claude Code wrote in the home
+// stays exactly as it is, and the person's own files are never touched.
+func TestAnExistingHomeLosesItsLinksToOrganisationPolicy(t *testing.T) {
+	src := personWorld(t)
+	for _, name := range append(slices.Clone(orgPolicy), nearOrgPolicy...) {
+		writeFile(t, filepath.Join(src, name), name)
+	}
+	s, a := claudeStore(t)
+	var said []string
+	s.Warn = func(msg string) { said = append(said, msg) }
+	dst := s.ownHome(a)
+	if err := os.MkdirAll(dst, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linked, real := orgPolicy[1:], orgPolicy[0]
+	for _, name := range linked {
+		if err := os.Symlink(filepath.Join(src, name), filepath.Join(dst, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, filepath.Join(dst, real), "the home's own")
+	writeFile(t, filepath.Join(dst, "remote-settings.json.synced-at.tmp"), "the home's own")
+
+	alive(t, dst, "daemon.lock", os.Getpid())
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range linked {
+		linksTo(t, filepath.Join(dst, name), filepath.Join(src, name))
+	}
+
+	os.Remove(filepath.Join(dst, "daemon.lock"))
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range linked {
+		absent(t, filepath.Join(dst, name))
+	}
+	for _, name := range []string{real, "remote-settings.json.synced-at.tmp"} {
+		fi, err := os.Lstat(filepath.Join(dst, name))
+		if err != nil || fi.Mode()&os.ModeSymlink != 0 || readFile(filepath.Join(dst, name)) != "the home's own" {
+			t.Fatalf("the home's own %s stays: %v %v", name, fi, err)
+		}
+	}
+	for _, name := range orgPolicy {
+		if fi, err := os.Lstat(filepath.Join(src, name)); err != nil || !fi.Mode().IsRegular() || readFile(filepath.Join(src, name)) != name {
+			t.Fatalf("the person's %s is untouched: %v %v", name, fi, err)
+		}
+	}
+	for _, name := range nearOrgPolicy {
+		linksTo(t, filepath.Join(dst, name), filepath.Join(src, name))
+	}
+	for _, msg := range said {
+		if strings.Contains(msg, "policy-limits") || strings.Contains(msg, "remote-settings") {
+			t.Fatalf("a home's own policy is not in the way of anything: %s", msg)
+		}
+	}
 }

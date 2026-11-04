@@ -338,10 +338,14 @@ func makeConversationState(dir string) error {
 //   - `sessions/` is the registry of live session processes and the keys
 //     that open them, which is how one account would reach another's daemon;
 //   - `bridge-spawn` is Remote Control's own state for this login;
-//   - `policy-limits.json`, `statsig`, `mcp-needs-auth-cache.json` and
-//     `telemetry` are caches and spools kept per login: limits the
-//     provider set for this account, its feature flags, which MCP servers
-//     still want it to sign in, what it is waiting to report;
+//   - `statsig`, `mcp-needs-auth-cache.json` and `telemetry` are caches and
+//     spools kept per login: its feature flags, which MCP servers still want
+//     it to sign in, what it is waiting to report;
+//   - `policy-limits.json` and `remote-settings.json`, and every name that
+//     is one of them followed by a dot — the signature, the stamp, when they
+//     were last synced — are the policy and the settings the login's
+//     organisation set, cached; shared, one organisation's would apply under
+//     another account;
 //   - any name ending in `.lock` is a lock Claude Code takes for this
 //     directory's own processes;
 //   - `.claude.json` is dealt with on its own, `.claude.json.own` and
@@ -353,14 +357,23 @@ func makeConversationState(dir string) error {
 // is, the account's own while the account keeps its own file.
 func sharedWithClaude(name string) bool {
 	switch {
-	case strings.HasPrefix(name, "daemon"), strings.HasSuffix(name, ".lock"):
+	case strings.HasPrefix(name, "daemon"), strings.HasSuffix(name, ".lock"),
+		orgPolicyFile(name, "policy-limits.json"), orgPolicyFile(name, "remote-settings.json"):
 		return false
 	}
 	switch name {
 	case claudeCredentials, claudeConfigFile, claudeConfigAside, configBackupsAside, ".DS_Store",
 		"sessions", "bridge-spawn",
-		"policy-limits.json", "statsig", "mcp-needs-auth-cache.json", "telemetry":
+		"statsig", "mcp-needs-auth-cache.json", "telemetry":
 		return false
 	}
 	return true
+}
+
+// orgPolicyFile reports whether name is base itself or base followed by a dot
+// and anything: the file Claude Code caches an organisation's policy or
+// remote settings in, and the files it keeps beside it.
+func orgPolicyFile(name, base string) bool {
+	rest, ok := strings.CutPrefix(name, base)
+	return ok && (rest == "" || rest[0] == '.')
 }

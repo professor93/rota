@@ -2075,7 +2075,8 @@ belongs to one login or one daemon:
 | `daemon*` | the daemon's lock, log, status and auth cooldown |
 | `sessions/` | the registry of live session processes and the keys that open them |
 | `bridge-spawn` | Remote Control's own state for this login |
-| `policy-limits.json`, `statsig`, `mcp-needs-auth-cache.json`, `telemetry` | per-login caches and spools: limits, feature flags, which MCP servers want a sign-in, what is waiting to be reported |
+| `statsig`, `mcp-needs-auth-cache.json`, `telemetry` | per-login caches and spools: feature flags, which MCP servers want a sign-in, what is waiting to be reported |
+| `policy-limits.json`, `remote-settings.json`, and any name that is one of them followed by a dot, such as `policy-limits.json.signature.json` or `remote-settings.json.synced-at` | the policy and the settings the login's organisation set, cached: shared, one organisation's would apply under another account |
 | any `*.lock` | locks Claude Code takes for this directory's own processes |
 | `.claude.json` and `backups/` — with Remote Control on | the identity Remote Control acts as, and Claude Code's backups of that file |
 
