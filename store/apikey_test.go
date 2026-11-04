@@ -205,7 +205,7 @@ func TestAKeyAccountReadsNoUsage(t *testing.T) {
 	if errs := s.Maintain(context.Background()); len(errs) != 0 {
 		t.Fatal(errs)
 	}
-	if asked.Load() != 0 || a.Quota != nil || a.QuotaAt != 0 || a.Metered() {
+	if asked.Load() != 0 || a.Quota != nil || a.QuotaAt != 0 {
 		t.Fatalf("usage asked %d times, quota %+v", asked.Load(), a.Quota)
 	}
 }
@@ -230,7 +230,7 @@ func TestPasteLongPutsASetupTokenOnAnAccount(t *testing.T) {
 	a := claudeAccount(s, "u1", "one@x")
 	k := keyAccountIn(t, s)
 
-	got, err := s.PasteLong(a.ID, " "+testSetup+"\n")
+	got, err := s.PasteLong(context.Background(), a.ID, " "+testSetup+"\n")
 	if err != nil || got != a {
 		t.Fatalf("paste: %v", err)
 	}
@@ -241,9 +241,9 @@ func TestPasteLongPutsASetupTokenOnAnAccount(t *testing.T) {
 		t.Fatal("the ordinary login is left alone")
 	}
 	for name, try := range map[string]func() error{
-		"a key account": func() error { _, err := s.PasteLong(k.ID, testSetup); return err },
-		"no account":    func() error { _, err := s.PasteLong(99, testSetup); return err },
-		"a key":         func() error { _, err := s.PasteLong(a.ID, testKey); return err },
+		"a key account": func() error { _, err := s.PasteLong(context.Background(), k.ID, testSetup); return err },
+		"no account":    func() error { _, err := s.PasteLong(context.Background(), 99, testSetup); return err },
+		"a key":         func() error { _, err := s.PasteLong(context.Background(), a.ID, testKey); return err },
 	} {
 		err := try()
 		if err == nil || strings.Contains(err.Error(), "TESTONLY") {

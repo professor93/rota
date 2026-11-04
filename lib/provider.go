@@ -67,20 +67,10 @@ type LongLived interface {
 	CompleteLong(ctx context.Context, code string, state map[string]string) (*Token, error)
 }
 
-// KeyTaker is a provider that also takes a credential a person pastes, beside
-// the login it begins in a browser: an API key that makes an account of its
-// own, and a long-lived token its CLI printed for an account already logged
-// in. Both are told apart from each other, and from anything else, by their
-// shape alone, and refused with a sentence when they are the wrong one.
-type KeyTaker interface {
-	// TakeKey turns an API key into a token, asking the provider once
-	// whether it is good. A key the provider refuses is err. Any other
-	// failure to ask — no network, a timeout, a server error — takes the key
-	// all the same, with unverified saying why it was not checked.
-	TakeKey(ctx context.Context, key string) (t *Token, unverified, err error)
-	// TakeLong turns a pasted long-lived token into the one LongLived would
-	// have obtained. It names nobody: whose it is, is the caller's to say.
-	TakeLong(token string) (*Token, error)
+// paster is a provider that also takes a credential a person pastes, beside
+// the login it begins in a browser. See Paste.
+type paster interface {
+	paste(ctx context.Context, s string) (t *Token, unverified, err error)
 }
 
 // Delegator is implemented by a provider whose CLI can sign itself in and

@@ -142,7 +142,7 @@ func (c *cli) loginToken(provider string, long bool, rest []string) error {
 		return err
 	}
 	defer s.Close()
-	a, err := s.PasteLong(id, tok)
+	a, err := s.PasteLong(context.Background(), id, tok)
 	if err != nil {
 		if errors.Is(err, rota.ErrNoAccount) {
 			return fmt.Errorf("%w; see `rota list`", err)

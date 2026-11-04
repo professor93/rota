@@ -128,42 +128,34 @@ func (l *Login) exchange(ctx context.Context, p Provider, code string) (*Token, 
 	return lp.CompleteLong(ctx, trimSpace(code), l.State)
 }
 
-// LoginKey makes a login out of an API key somebody pasted: no browser and
-// nothing to finish. The token it returns is the key itself, marked
-// CredentialAPIKey, and names the account by a fingerprint of the key, so the
-// same key pasted twice is the same account (MatchIdentity) and a different
-// one is another.
+// Paste takes a credential somebody pasted — no browser, nothing to finish —
+// and says by its shape which of two kinds it is, in Token.Credential. Claude
+// takes both; every other provider refuses.
 //
-// The provider is asked once whether the key is good. Its refusal refuses the
-// key, as an ErrInvalidRequest saying so; any other failure to ask takes the
-// key unchecked, and unverified says why, for the caller to pass on. Neither
-// error, nor anything else here, carries the key.
-func LoginKey(ctx context.Context, provider, key string) (t *Token, unverified, err error) {
+// "apikey" is an API key, and makes an account of its own (NewAccount): the
+// token is the key itself, naming the account by a fingerprint of the key, so
+// the same key pasted twice is the same account (MatchIdentity) and another is
+// another. The provider is asked once whether the key is good: its refusal is
+// err, an ErrInvalidRequest saying so; any other failure to ask takes the key
+// unchecked, and unverified says why, for the caller to pass on.
+//
+// "setup-token" is a long-lived token the vendor CLI printed — `claude
+// setup-token` — and is the token a long login (BeginLong) would have
+// obtained, for Account.ApplyLong, never an account of its own. It names
+// nobody, so the caller decides whose it is, and its year is counted from now.
+//
+// Nothing pasted that is neither is taken, and no error here carries what was
+// pasted.
+func Paste(ctx context.Context, provider, s string) (t *Token, unverified, err error) {
 	p, err := Lookup(provider)
 	if err != nil {
 		return nil, nil, err
 	}
-	kt, ok := p.(KeyTaker)
+	pp, ok := p.(paster)
 	if !ok {
-		return nil, nil, failf(ErrInvalidRequest, "%s takes no pasted API key", p.Name())
+		return nil, nil, failf(ErrInvalidRequest, "%s takes no pasted key or token", p.Name())
 	}
-	return kt.TakeKey(ctx, trimSpace(key))
-}
-
-// PasteLong turns a long-lived token somebody pasted — one the vendor CLI
-// printed, `claude setup-token` for Claude Code — into the token a long login
-// (BeginLong) would have obtained, for Account.ApplyLong. Such a token cannot
-// say whose it is, so the caller decides which account it belongs on.
-func PasteLong(provider, token string) (*Token, error) {
-	p, err := Lookup(provider)
-	if err != nil {
-		return nil, err
-	}
-	kt, ok := p.(KeyTaker)
-	if !ok {
-		return nil, failf(ErrInvalidRequest, "%s takes no pasted long-lived token", p.Name())
-	}
-	return kt.TakeLong(trimSpace(token))
+	return pp.paste(ctx, trimSpace(s))
 }
 
 // NewAccount builds an account from a finished login. The id is the

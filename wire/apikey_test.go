@@ -12,7 +12,7 @@ import (
 // key: not the key, and no usage it does not have.
 func TestDescribeSaysAnAccountRunsOnAKeyAndNeverShowsIt(t *testing.T) {
 	const key = "sk-ant-api03-TESTONLY-not-a-real-key-0000000000-WXYZ"
-	a := &rota.Account{ID: 7, Provider: "claude", UUID: "apikey-0011223344556677", Credential: rota.CredentialAPIKey,
+	a := &rota.Account{ID: 7, Provider: "claude", UUID: "apikey-0011223344556677", Credential: "apikey",
 		Token: rota.Token{Access: key}}
 	raw, err := json.Marshal(Describe(a))
 	if err != nil {

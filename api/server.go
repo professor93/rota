@@ -1153,7 +1153,7 @@ func (s *Server) loginKey(w http.ResponseWriter, r *http.Request, st *store.Stor
 
 // pasteLong puts a pasted setup token on an account as its long-lived token.
 func (s *Server) pasteLong(w http.ResponseWriter, r *http.Request, st *store.Store, id int, token string) {
-	a, err := st.PasteLong(id, token)
+	a, err := st.PasteLong(r.Context(), id, token)
 	if err != nil {
 		s.report(w, r, err)
 		return

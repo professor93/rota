@@ -2825,17 +2825,17 @@ res, _ := rota.Run(ctx, a, home, nil, rota.Spec{Prompt: "hi", Model: "sonnet"}, 
 fmt.Println(res.Result, res.SessionID, res.CostUSD)
 ```
 
-A credential somebody pasted needs no `Begin`. `LoginKey(ctx, "claude", key)`
-checks a Console API key once against `ClaudeModelsEndpoint` (within five
-seconds, or the context's own deadline when that is sooner) and returns a token marked `CredentialAPIKey`, named by
+A credential somebody pasted needs no `Begin`. `Paste(ctx, "claude", s)` tells
+the two kinds apart by shape and says which in `Token.Credential`. A Console
+API key (`"apikey"`) is checked once against `ClaudeModelsEndpoint` (within
+five seconds, or the context's own deadline when that is sooner) and named by
 a fingerprint of the key; only the API's `401`/`403` is an error, and any other
 failure to ask comes back as `unverified` beside the token. `NewAccount` makes
-it an account whose `APIKey()` is true, whose `Metered()` is false, which
-`Usage` never asks about and which `Stage` launches with `ANTHROPIC_API_KEY`
-alone. `PasteLong("claude", token)` turns a `claude setup-token` token into the
-one `BeginLong` would have obtained, for `Account.ApplyLong` on whichever
-account the caller knows it belongs to. A provider offers either by
-implementing `KeyTaker`.
+it an account whose `APIKey()` is true, which `Usage` never asks about and
+which `Stage` launches with `ANTHROPIC_API_KEY` alone. A `claude setup-token`
+token (`"setup-token"`) comes back as the one `BeginLong` would have obtained,
+good for a year from now, for `Account.ApplyLong` on whichever account the
+caller knows it belongs to. Every other provider refuses both.
 
 `Run` is one question and one answer. `Start` is the same request left open:
 set `Spec.Input` alongside `Stream` and the CLI keeps its standard input, so

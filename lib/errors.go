@@ -107,11 +107,3 @@ func WrapNoBinary(bin string, err error) error {
 // transport can report a request it rejected before rota ever saw it — a
 // malformed body, an unreadable upload — in the same vocabulary.
 func Invalid(format string, a ...any) error { return failf(ErrInvalidRequest, format, a...) }
-
-// WrapRemoteControlKey refuses Remote Control for an account that runs on an
-// API key: Claude Code's Remote Control refuses API keys, so a setting that
-// asked for it would only fail later, inside the session.
-func WrapRemoteControlKey(a *Account) error {
-	return failf(ErrInvalidRequest,
-		"%s runs on an API key, and Claude Code's Remote Control refuses API keys: it needs a claude.ai login", a)
-}

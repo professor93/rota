@@ -30,7 +30,7 @@ var ClaudeEndpoints = struct {
 }
 
 // ClaudeModelsEndpoint is the API's model list, which a pasted API key is
-// checked against once, at login (LoginKey). A variable of its own rather
+// checked against once, at login (Paste). A variable of its own rather
 // than a field of ClaudeEndpoints, whose type is published API: a field added
 // there would break every program that assigns the whole struct.
 var ClaudeModelsEndpoint = "https://api.anthropic.com/v1/models"

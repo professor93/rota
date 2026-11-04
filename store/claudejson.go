@@ -125,7 +125,7 @@ func (s *Store) RemoteControlNow(a *rota.Account) error {
 // to be, before the setting is saved, and is nil for everything else.
 func (s *Store) CheckRemoteControl(a *rota.Account) error {
 	if a.RemoteControl && a.APIKey() {
-		return rota.WrapRemoteControlKey(a)
+		return a.CheckProject() // which names the refusal
 	}
 	if !a.RemoteControl || rota.Flavor(a.Provider) != "claude" || s.owns(a) {
 		return nil

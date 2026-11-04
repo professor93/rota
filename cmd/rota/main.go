@@ -2333,7 +2333,7 @@ func headline(a *rota.Account) string {
 	if a.APIKey() {
 		return apiKeyUsage
 	}
-	if !a.Metered() {
+	if !rota.Metered(a.Provider) {
 		return "n/a"
 	}
 	if a.QuotaAt == 0 {

@@ -27,8 +27,9 @@ type Token struct {
 	// token, and nothing about it expires or refreshes here.
 	Delegated bool `json:"delegated,omitzero"`
 	// Credential says what kind of credential Access is when it is not the
-	// provider's ordinary login: CredentialAPIKey for a key a person pasted
-	// (LoginKey). Empty for every token a login or a refresh obtains.
+	// provider's ordinary login, as Paste tells it apart: "apikey" for an API
+	// key, "setup-token" for a long-lived token the vendor CLI printed. Empty
+	// for every token a login or a refresh obtains.
 	Credential string `json:"credential,omitempty"`
 	// Identity is set only when the token response itself carried it.
 	Identity *Identity `json:"identity,omitzero"`

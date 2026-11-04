@@ -44,18 +44,18 @@ func TestClaudeKeyLoginAsksTheAPIOnce(t *testing.T) {
 		}
 		return 200, map[string]any{"data": []any{}}
 	}
-	tok, unverified, err := LoginKey(context.Background(), "claude", "  "+testKey+"\n")
+	tok, unverified, err := Paste(context.Background(), "claude", "  "+testKey+"\n")
 	if err != nil || unverified != nil {
 		t.Fatalf("a good key must be taken: %v %v", err, unverified)
 	}
-	if tok.Access != testKey || tok.Credential != CredentialAPIKey || tok.Refresh != "" || tok.ExpiresAt != 0 {
+	if tok.Access != testKey || tok.Credential != credentialAPIKey || tok.Refresh != "" || tok.ExpiresAt != 0 {
 		t.Fatalf("the token is the key itself, which never expires: %+v", tok)
 	}
 	if f.count("/v1/models") != 1 {
 		t.Fatalf("one question, got %d", f.count("/v1/models"))
 	}
-	again, _, _ := LoginKey(context.Background(), "claude", testKey)
-	other, _, _ := LoginKey(context.Background(), "claude", testOtherKey)
+	again, _, _ := Paste(context.Background(), "claude", testKey)
+	other, _, _ := Paste(context.Background(), "claude", testOtherKey)
 	if tok.Identity == nil || !strings.HasPrefix(tok.Identity.UUID, "apikey-") || tok.Identity.Email != "" {
 		t.Fatalf("a key's identity is a fingerprint of it, and it has no e-mail: %+v", tok.Identity)
 	}
@@ -75,7 +75,7 @@ func TestClaudeKeyIsRefusedOnlyBy401And403(t *testing.T) {
 		f.reply["/v1/models"] = func(*http.Request, map[string]any) (int, any) {
 			return status, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key ` + testKey + `"}}`
 		}
-		tok, _, err := LoginKey(context.Background(), "claude", testKey)
+		tok, _, err := Paste(context.Background(), "claude", testKey)
 		if tok != nil || !errors.Is(err, ErrInvalidRequest) {
 			t.Fatalf("%d must refuse the key: %+v %v", status, tok, err)
 		}
@@ -108,7 +108,7 @@ func TestClaudeKeyIsRefusedOnlyBy401And403(t *testing.T) {
 		f.reply["/v1/models"] = c.reply
 		// The caller's deadline bounds the check, as much as lib's own does.
 		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-		tok, unverified, err := LoginKey(ctx, "claude", testKey)
+		tok, unverified, err := Paste(ctx, "claude", testKey)
 		cancel()
 		if err != nil || tok == nil || unverified == nil {
 			t.Fatalf("%s must take the key unchecked: %+v %v %v", c.name, tok, unverified, err)
@@ -123,7 +123,7 @@ func TestClaudeKeyIsRefusedOnlyBy401And403(t *testing.T) {
 	}
 	// Nothing answers at all.
 	setURL(t, &ClaudeModelsEndpoint, "http://127.0.0.1:1/unreachable")
-	tok, unverified, err := LoginKey(context.Background(), "claude", testKey)
+	tok, unverified, err := Paste(context.Background(), "claude", testKey)
 	if err != nil || tok == nil || unverified == nil {
 		t.Fatalf("an unreachable API must take the key unchecked: %v %v", unverified, err)
 	}
@@ -143,7 +143,7 @@ func TestClaudeKeyCheckFollowsNoRedirect(t *testing.T) {
 	}))
 	t.Cleanup(here.Close)
 	setURL(t, &ClaudeModelsEndpoint, here.URL+"/v1/models")
-	_, unverified, err := LoginKey(context.Background(), "claude", testKey)
+	_, unverified, err := Paste(context.Background(), "claude", testKey)
 	if err != nil || unverified == nil {
 		t.Fatalf("a redirect is an answer that checks nothing: %v %v", unverified, err)
 	}
@@ -152,66 +152,62 @@ func TestClaudeKeyCheckFollowsNoRedirect(t *testing.T) {
 	}
 }
 
-// The prefix says which credential was pasted, and the wrong one is refused
-// with a sentence that names both — never by echoing what was pasted.
-func TestClaudeTellsAKeyFromASetupToken(t *testing.T) {
-	cases := []struct {
-		key  bool
-		in   string
-		want string
-	}{
-		{true, testSetup, "setup-token"},
-		{true, "sk-proj-TESTONLY", "sk-ant-api"},
-		{true, "", "nothing"},
-		{true, "sk-ant-api03-TESTONLY with a space", "letters"},
-		{true, "sk-ant-api03-TESTONLY\nX=1", "letters"},
-		{false, testKey, "API key"},
-		{false, "nonsense-TESTONLY", "sk-ant-oat"},
-		{false, "", "nothing"},
-	}
-	for _, c := range cases {
-		var err error
-		if c.key {
-			_, _, err = LoginKey(context.Background(), "claude", c.in)
-		} else {
-			_, err = PasteLong("claude", c.in)
+// The prefix says which credential was pasted, and anything that is neither
+// is refused with a sentence — never by echoing what was pasted.
+func TestClaudePasteRefusesWhatIsNeither(t *testing.T) {
+	for in, want := range map[string]string{
+		"sk-proj-TESTONLY":                   "neither",
+		"nonsense-TESTONLY":                  "neither",
+		"":                                   "nothing",
+		"sk-ant-api03-TESTONLY with a space": "letters",
+		"sk-ant-api03-TESTONLY\nX=1":         "letters",
+	} {
+		_, _, err := Paste(context.Background(), "claude", in)
+		if !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%q: want a refusal naming %q, got %v", in, want, err)
 		}
-		if !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), c.want) {
-			t.Fatalf("%q (key=%v): want a refusal naming %q, got %v", c.in, c.key, c.want, err)
-		}
-		if c.in != "" {
-			noSecret(t, "the refusal", err.Error(), c.in)
+		if in != "" {
+			noSecret(t, "the refusal", err.Error(), in)
 		}
 	}
-	if _, _, err := LoginKey(context.Background(), "codex", testKey); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("a provider that takes no pasted key says so: %v", err)
-	}
-	if _, err := PasteLong("grok", testSetup); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("a provider that takes no pasted token says so: %v", err)
+	for _, s := range []string{testKey, testSetup} {
+		if _, _, err := Paste(context.Background(), "codex", s); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("a provider that takes nothing pasted says so: %v", err)
+		}
 	}
 }
 
 // A setup token is the long-lived credential `rota login --long` would have
-// obtained: a year from now, no refresh, no identity of its own.
+// obtained: a year from now, no refresh, no identity of its own, and no
+// question asked of anybody. It is never an account's own credential.
 func TestClaudePastedSetupTokenIsALongToken(t *testing.T) {
-	tok, err := PasteLong("claude", " "+testSetup+"\n")
-	if err != nil {
-		t.Fatal(err)
+	f := newFakeServer(t, false)
+	setURL(t, &ClaudeModelsEndpoint, f.URL+"/v1/models")
+	tok, unverified, err := Paste(context.Background(), "claude", " "+testSetup+"\n")
+	if err != nil || unverified != nil {
+		t.Fatal(err, unverified)
 	}
 	want := nowMS() + claudeLongSeconds*1000
-	if tok.Access != testSetup || tok.Refresh != "" || tok.Identity != nil || tok.ExpiresAt < want-60_000 || tok.ExpiresAt > want+60_000 {
+	if tok.Access != testSetup || tok.Credential != credentialSetupToken || tok.Refresh != "" || tok.Identity != nil ||
+		tok.ExpiresAt < want-60_000 || tok.ExpiresAt > want+60_000 {
 		t.Fatalf("a pasted setup token is a year-long credential and nothing else: %+v", tok)
+	}
+	if f.count("/v1/models") != 0 {
+		t.Fatal("a setup token is not checked against the API's key check")
 	}
 	a := &Account{ID: 1, Provider: "claude", Email: "a@b.c"}
 	a.ApplyLong(tok)
 	if a.LongAccess() != testSetup {
 		t.Fatal("it is stored where a long login stores its token")
 	}
+	if n := NewAccount(2, "claude", tok); n.APIKey() || n.Credential != "" {
+		t.Fatalf("a setup token makes no account of its own kind: %+v", n.Credential)
+	}
 }
 
 func keyAccount(t *testing.T) *Account {
 	t.Helper()
-	tok := &Token{Access: testKey, Credential: CredentialAPIKey, Identity: &Identity{UUID: "apikey-" + fingerprint(testKey)}}
+	tok := &Token{Access: testKey, Credential: credentialAPIKey, Identity: &Identity{UUID: "apikey-" + fingerprint(testKey)}}
 	return NewAccount(7, "claude", tok)
 }
 
@@ -219,7 +215,7 @@ func keyAccount(t *testing.T) *Account {
 // characters unless named, and never asked for usage.
 func TestAKeyAccountIsUnmeteredAndNamedByItsEnd(t *testing.T) {
 	a := keyAccount(t)
-	if !a.APIKey() || a.Credential != CredentialAPIKey {
+	if !a.APIKey() || a.Credential != credentialAPIKey {
 		t.Fatalf("the account must know it runs on a key: %+v", a)
 	}
 	if a.Label() != "api key ...WXYZ" || a.String() != "claude/api key ...WXYZ" {
@@ -229,7 +225,7 @@ func TestAKeyAccountIsUnmeteredAndNamedByItsEnd(t *testing.T) {
 	if a.Label() != "work credit" {
 		t.Fatalf("a name wins: %q", a.Label())
 	}
-	if a.Metered() || !Metered("claude") {
+	if !a.APIKey() || !Metered("claude") {
 		t.Fatal("a key account has no usage to read; the provider still does")
 	}
 	f := newFakeServer(t, false)
@@ -246,8 +242,8 @@ func TestAKeyAccountIsUnmeteredAndNamedByItsEnd(t *testing.T) {
 	}
 	// An ordinary account is untouched by all of this.
 	o := &Account{ID: 1, Provider: "claude", Email: "a@b.c"}
-	if o.APIKey() || !o.Metered() || o.Label() != "a@b.c" {
-		t.Fatalf("an ordinary account: %v %v %q", o.APIKey(), o.Metered(), o.Label())
+	if o.APIKey() || o.Label() != "a@b.c" {
+		t.Fatalf("an ordinary account: %v %q", o.APIKey(), o.Label())
 	}
 }
 

@@ -136,7 +136,7 @@ func (s *Store) attachLong(l *rota.Login, tok *rota.Token) (*rota.Account, error
 // LoginKey adds or updates the account an API key belongs to, and saves the
 // store. Nothing is parked: there is no second step. added reports whether a
 // new account was made, and unverified why the key could not be checked,
-// when it could not — it is stored all the same (rota.LoginKey).
+// when it could not — it is stored all the same (rota.Paste).
 //
 // A new key account starts out of the rotation, at order 0: every run on it
 // is paid for, so it runs only when somebody names it, until somebody puts it
@@ -147,9 +147,13 @@ func (s *Store) LoginKey(ctx context.Context, provider, key, label string) (a *r
 	if err := checkLabel(label); err != nil {
 		return nil, false, nil, err
 	}
-	tok, unverified, err := rota.LoginKey(ctx, provider, key)
+	tok, unverified, err := rota.Paste(ctx, provider, key)
 	if err != nil {
 		return nil, false, nil, err
+	}
+	if tok.Credential != pastedKey {
+		return nil, false, nil, rota.Invalid("that is a token from `claude setup-token`, not a Console API key: it is a " +
+			"claude.ai login's long-lived token, and goes on an account already here with `rota login <id> --token`")
 	}
 	if provider == "" {
 		provider = rota.DefaultProvider
@@ -195,7 +199,7 @@ const PastedLongCaveat = "rota cannot tell which claude.ai account this token be
 // so it goes where it is put and nowhere else. An account that runs on an API
 // key takes none: the token is a claude.ai login's, and the key is billed to
 // somebody else.
-func (s *Store) PasteLong(id int, token string) (*rota.Account, error) {
+func (s *Store) PasteLong(ctx context.Context, id int, token string) (*rota.Account, error) {
 	a := s.Find(id)
 	if a == nil {
 		return nil, rota.WrapNoAccount(id)
@@ -203,13 +207,23 @@ func (s *Store) PasteLong(id int, token string) (*rota.Account, error) {
 	if a.APIKey() {
 		return nil, rota.Invalid("%s runs on an API key; a token from `claude setup-token` belongs on the claude.ai account it was made for", a)
 	}
-	tok, err := rota.PasteLong(a.Provider, token)
+	tok, _, err := rota.Paste(ctx, a.Provider, token)
 	if err != nil {
 		return nil, err
+	}
+	if tok.Credential != pastedSetupToken {
+		return nil, rota.Invalid("that is a Console API key, not a token from `claude setup-token`: " +
+			"a key is an account of its own, made with `rota login --key`")
 	}
 	a.ApplyLong(tok)
 	return a, s.Save()
 }
+
+// The two kinds rota.Paste names in Token.Credential.
+const (
+	pastedKey        = "apikey"
+	pastedSetupToken = "setup-token"
+)
 
 // identityName is whoever approved, in the words a person would recognise:
 // the e-mail when the provider sent one, the uuid when it did not.

@@ -27,8 +27,8 @@ type Account struct {
 	// signs itself in there. There is no token here to expire or refresh.
 	Delegated bool `json:"delegated,omitzero"`
 	// Credential is what kind of credential Token.Access is, when it is not
-	// the provider's ordinary login: CredentialAPIKey for an API key somebody
-	// pasted. Empty for everything a login obtains.
+	// the provider's ordinary login: "apikey" for an API key somebody pasted
+	// (Paste; ask APIKey). Empty for everything a login obtains.
 	Credential string `json:"credential,omitempty"`
 	// Name is what a person called the account, shown in place of anything
 	// the provider says about it. Empty for most: an e-mail names an account
@@ -128,18 +128,18 @@ func (a *Account) SessionsDir() string {
 	return a.Sessions
 }
 
-// CredentialAPIKey is the Credential of an account that runs on an API key a
-// person pasted rather than on a login: billed by the provider per token, with
-// no usage endpoint, no refresh and no expiry. See LoginKey.
-const CredentialAPIKey = "apikey"
+// The kinds of credential Paste tells apart, as Token.Credential spells them.
+// An API key is billed by the provider per token, with no usage endpoint, no
+// refresh and no expiry; a setup token is a long-lived token for ApplyLong.
+const (
+	credentialAPIKey     = "apikey"
+	credentialSetupToken = "setup-token"
+)
 
 // APIKey reports whether the account runs on an API key rather than a login.
-func (a *Account) APIKey() bool { return a.Credential == CredentialAPIKey }
-
-// Metered reports whether usage can be read for this account at all: its
-// provider publishes a usage endpoint, and the account has a login that
-// endpoint answers. An API key has no plan and so no limits to read.
-func (a *Account) Metered() bool { return !a.APIKey() && Metered(a.Provider) }
+// Such an account has no plan, so Usage reads nothing for it whatever its
+// provider publishes.
+func (a *Account) APIKey() bool { return a.Credential == credentialAPIKey }
 
 // Label is the account's display name: the name a person gave it, else its
 // email, else — for an API key — "api key" and the key's last four
@@ -252,8 +252,9 @@ func (a *Account) ApplyLong(t *Token) {
 func (a *Account) apply(t *Token) {
 	a.Delegated = t.Delegated
 	// Only ever set, never cleared: a refresh says nothing about what kind of
-	// credential the account holds, and a key is never refreshed anyway.
-	if t.Credential != "" {
+	// credential the account holds, and a key is never refreshed anyway. A
+	// setup token is no account's credential of its own; it is ApplyLong's.
+	if t.Credential == credentialAPIKey {
 		a.Credential = t.Credential
 	}
 	a.Token.Access = t.Access
@@ -330,7 +331,8 @@ func (a *Account) CheckProject() error {
 			"remote control is Claude Code's: a %s account has no Remote Control to give its own configuration file for", a.Provider)
 	}
 	if a.RemoteControl && a.APIKey() {
-		return WrapRemoteControlKey(a)
+		return failf(ErrInvalidRequest,
+			"%s runs on an API key, and Claude Code's Remote Control refuses API keys: it needs a claude.ai login", a)
 	}
 	for _, d := range []struct{ what, path string }{
 		{"config_dir", a.ConfigDir},
