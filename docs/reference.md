@@ -24,11 +24,13 @@ One library, and the rest are examples of using it:
 | reading an answer: blocks, events, questions | `rota/message` | `rota/lib` |
 | what the vendor CLIs are doing: running now, resumable conversations | `rota/sessions` | `rota/lib`, `rota/store` |
 | an HTTP server with a playground | `rota/api` | all of the above |
-| the command | `./cmd/rota` | all of the above |
+| the command, a module of its own | `./cmd/rota` | all of the above |
 
 The table's short names are this repository's layout; the module paths are
 `github.com/professor93/rota` and, for the SDK alone,
 `github.com/professor93/rota/lib` — the one line an outside program needs.
+The command is the module `github.com/professor93/rota/cmd/rota`, which
+requires the other at a released version.
 
 `rota/lib` is a Go library and nothing else. You call it with Go values and
 get Go values back — begin a login, finish it, refresh a token, read a
@@ -39,9 +41,11 @@ they live in packages an application can take or leave. The command and the
 HTTP server are two applications that took them; a third is free to keep
 accounts in Postgres, pick by price, and never import a line of the rest.
 
-**The whole project has no third-party dependencies.** There is no `go.sum`,
-nothing to audit, and nothing to update. Go 1.27 removed the last two
-temptation: `encoding/json/v2` is standard library now, so the
+**The SDK and the server packages have no third-party dependencies.** Their
+module, `github.com/professor93/rota`, has no `go.sum`, nothing to audit, and
+nothing to update. The `rota` program is a module of its own, so whatever it
+comes to need never reaches a program that imports them. Go 1.27 removed the
+last two temptation: `encoding/json/v2` is standard library now, so the
 hand-rolled JSON layer is gone and nothing here reaches for a
 faster JSON package. It was not always so: the server
 began on a router framework, which cost 23 modules and 100 packages —
@@ -100,7 +104,7 @@ README. What follows builds from source.
 
 Go 1.27 or newer — released 2026-08-19, and the default GOTOOLCHAIN=auto
 fetches it on its own. rota uses one thing that arrived in it,
-`encoding/json/v2`, and nothing else outside the standard library.
+`encoding/json/v2`.
 
 ```sh
 go build -trimpath -ldflags='-s -w' -o rota ./cmd/rota
@@ -3077,6 +3081,8 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `internal/toml/` | The part of TOML that file uses, and a refusal by name for the rest |
 | `docs/server.toml` | The whole schema at its defaults, kept honest by a test |
 | `docs/releases/` | What each released version changed |
+| `go.work`, `cmd/rota/go.mod` | The command as a module of its own, and the workspace that builds it against the packages beside it |
+| `scripts/module.sh` | Checks the line between the two modules |
 | `cmd/rota/main.go` | The command |
 | `cmd/rota/share.go` | `rota run --share`: the CLI on a pseudo-terminal, and the link to the server |
 | `cmd/rota/serveauth.go` | `rota serve passwd`, `token` and `invite` |
