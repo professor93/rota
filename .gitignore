@@ -31,3 +31,6 @@ kimi-code.json
 
 # Release artifacts built by scripts/release.sh.
 /dist/
+
+# The workspace's checksum cache, which a checkout does not need.
+go.work.sum
