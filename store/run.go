@@ -35,12 +35,28 @@ func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env 
 	if err != nil {
 		return "", nil, nil, err
 	}
+	handed := false
+	defer unlessHanded(&handed, release)
 	path, err = exec.LookPath(cmd.Bin)
 	if err != nil {
-		release()
 		return "", nil, nil, fmt.Errorf("%s not found in PATH: %w", cmd.Bin, err)
 	}
-	return path, rota.Environ(HostEnv(), cmd), release, nil
+	env = rota.Environ(HostEnv(), cmd)
+	handed = true
+	return path, env, release, nil
+}
+
+// unlessHanded lets go of a claim unless the function that took it handed
+// it on, and is deferred straight after the claim is taken. A launch's claim
+// is handed to whatever runs the CLI; one abandoned on the way there — by an
+// error, or by a panic — is let go of here, the panic going on as it was. A
+// server recovers a handler's panic and goes on serving, and an account it
+// left claimed would look busy until it restarted, or, with a claim that is
+// exclusive, could not be run at all.
+func unlessHanded(handed *bool, release func()) {
+	if !*handed {
+		release()
+	}
 }
 
 // refreshForLaunch rotates the ordinary token, unless the launch is not going
@@ -125,11 +141,13 @@ func (s *Store) Start(ctx context.Context, a *rota.Account, spec rota.Spec, lim 
 	if err != nil {
 		return nil, err
 	}
+	handed := false
+	defer unlessHanded(&handed, release) // nothing started, so nothing is holding the home
 	sess, err := rota.Start(ctx, a, s.Home(a), cmd, spec, lim, events)
 	if err != nil {
-		release() // nothing started, so nothing is holding the home
 		return nil, err
 	}
+	handed = true
 	go func() {
 		<-sess.Done()
 		release()
@@ -154,11 +172,14 @@ func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.
 	if err != nil {
 		return nil, nil, err
 	}
+	handed := false
+	defer unlessHanded(&handed, release)
 	// Everything a run needs from the store is on disk by now. The lock goes,
 	// because the run that follows lasts as long as the agent does and
 	// nothing else may be made to wait for it.
 	_ = s.Release() // releasing a lock cannot fail in a way a caller can act on
 	cmd.BaseEnv = HostEnv()
+	handed = true
 	return cmd, release, nil
 }
 
@@ -179,10 +200,13 @@ func (s *Store) prepare(ctx context.Context, a *rota.Account, mirror bool) (*rot
 	if err != nil {
 		return nil, nil, err
 	}
+	handed := false
+	defer unlessHanded(&handed, release)
 	// Everything rota launches, whatever its CLI, is told whose Claude Code
 	// directory is the person's, so a rota started anywhere inside it — in a
 	// shell a codex session opened, say — knows without guessing.
 	cmd.Env = append(cmd.Env, claudeHomeVar+"="+s.handDown())
+	handed = true
 	return cmd, release, nil
 }
 
@@ -200,33 +224,32 @@ func (s *Store) prepareAlone(ctx context.Context, a *rota.Account, mirror bool) 
 	if !ok {
 		return nil, nil, fmt.Errorf("%w: %s keeps its own credential file, and two runs would spend the same refresh token", rota.ErrBusy, a)
 	}
-	fail := func(err error) (*rota.Command, func(), error) {
-		release()
-		return nil, nil, err
-	}
+	handed := false
+	defer unlessHanded(&handed, release)
 	// Adopt before refreshing: see rota.Adopt. Doing it the other way round
 	// is how a codex or kimi account is permanently killed.
 	if aerr := rota.Adopt(a, s.Home(a)); aerr != nil {
-		return fail(aerr)
+		return nil, nil, aerr
 	}
 	changed, err := refreshForLaunch(ctx, a)
 	if changed {
 		if serr := s.Save(); serr != nil {
-			return fail(errors.Join(err, fmt.Errorf("refusing to run: store not saved after a token change: %w", serr)))
+			return nil, nil, errors.Join(err, fmt.Errorf("refusing to run: store not saved after a token change: %w", serr))
 		}
 	}
 	if err != nil {
-		return fail(err)
+		return nil, nil, err
 	}
 	// Staging is the last thing that needs the store: it may adopt a token
 	// the CLI rotated, and that must be on disk before anything runs.
 	cmd, err := s.command(a, mirror)
 	if serr := s.Save(); serr != nil {
-		return fail(errors.Join(err, fmt.Errorf("refusing to run: store not saved after staging: %w", serr)))
+		return nil, nil, errors.Join(err, fmt.Errorf("refusing to run: store not saved after staging: %w", serr))
 	}
 	if err != nil {
-		return fail(err)
+		return nil, nil, err
 	}
+	handed = true
 	return cmd, release, nil
 }
 
@@ -242,17 +265,18 @@ func (s *Store) prepareShared(ctx context.Context, a *rota.Account, mirror bool)
 	if !ok {
 		return nil, nil, fmt.Errorf("%w: another rota process is changing %s's login right now; try again in a moment", rota.ErrBusy, a)
 	}
+	handed := false
+	defer unlessHanded(&handed, release)
 	cmd, err := h.launch(ctx, mirror)
 	// Whatever happened, the account may have changed — a rotation adopted,
 	// a refresh, a login found dead — and none of it may be lost.
 	if serr := s.Save(); serr != nil {
-		release()
 		return nil, nil, errors.Join(err, fmt.Errorf("refusing to run: store not saved: %w", serr))
 	}
 	if err != nil {
-		release()
 		return nil, nil, err
 	}
+	handed = true
 	return cmd, release, nil
 }
 
@@ -437,13 +461,31 @@ func (s *Store) holdRun(a *rota.Account) (release func(), ok bool) {
 // themselves, not the daemon. It is what a refresh, maintenance and a login
 // written into the home ask for, and it is held for as long as this process
 // runs.
-func (s *Store) holdIdle(a *rota.Account) (release func(), ok bool) {
-	release, ok = s.claimFile(a, false)
-	if ok && rota.SharedHome(a.Provider) && len(claudeLive(s.Home(a))) > 0 {
-		release()
+func (s *Store) holdIdle(a *rota.Account) (func(), bool) {
+	release, ok := s.claimFile(a, false)
+	if !ok || !rota.SharedHome(a.Provider) {
+		return release, ok
+	}
+	handed := false
+	defer unlessHanded(&handed, release)
+	if len(claudeLive(s.Home(a))) > 0 {
 		return func() {}, false
 	}
-	return release, ok
+	handed = true
+	return release, true
+}
+
+// whileIdle does do with the account's idle claim held, and lets go of the
+// claim however do ends, a panic included. It reports false, having done
+// nothing, when the account is in use.
+func (s *Store) whileIdle(a *rota.Account, do func()) bool {
+	release, idle := s.holdIdle(a)
+	if !idle {
+		return false
+	}
+	defer release()
+	do()
+	return true
 }
 
 // Hold claims an account while something outside this package writes into its

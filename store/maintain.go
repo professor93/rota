@@ -52,25 +52,22 @@ func (s *Store) Maintain(ctx context.Context) []error {
 		// provider invalidates the copy the CLI still holds, and the next
 		// thing it does with that copy is refused for good. Maintenance can
 		// wait two minutes; a killed lineage cannot be undone.
-		release, idle := s.holdIdle(a)
-		if !idle {
-			continue
-		}
+		//
 		// Adopt before refreshing. The vendor CLI may have rotated the
 		// refresh token during the last run, and presenting rota's older
 		// copy is how a codex or kimi lineage is permanently killed.
-		err := rota.Adopt(a, s.Home(a))
-		release()
+		var err error
+		if !s.whileIdle(a, func() { err = rota.Adopt(a, s.Home(a)) }) {
+			continue
+		}
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", a, err))
 			continue
 		}
-		release, idle = s.holdIdle(a)
-		if !idle {
+		var did bool
+		if !s.whileIdle(a, func() { did, err = rota.Refresh(ctx, a) }) {
 			continue
 		}
-		did, err := rota.Refresh(ctx, a)
-		release()
 		changed = changed || did
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", a, err))

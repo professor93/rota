@@ -126,6 +126,15 @@ func writeAtomicThen(path string, data []byte, beforeRename func() error) error 
 		return err
 	}
 	tmp := f.Name()
+	// Until it is renamed into place the temporary file goes, on an error
+	// and on a panic alike: what is written here is often a credential.
+	renamed := false
+	defer func() {
+		if !renamed {
+			_ = f.Close()
+			_ = os.Remove(tmp) // best effort; the real file is untouched
+		}
+	}()
 	_, werr := f.Write(data)
 	serr := f.Sync()
 	cerr := f.Close()
@@ -136,9 +145,9 @@ func writeAtomicThen(path string, data []byte, beforeRename func() error) error 
 		err = renameFile(tmp, path)
 	}
 	if err != nil {
-		_ = os.Remove(tmp) // best effort; the real file is untouched
 		return err
 	}
+	renamed = true
 	// The rename itself must reach the disk. Without this a power loss can
 	// leave the previous file in place — and its refresh tokens are the
 	// ones that have just been spent.

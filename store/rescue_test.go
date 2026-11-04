@@ -522,6 +522,9 @@ func TestAPanicInARescueLetsGoOfTheLock(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(home, claudeRefreshLock)); !os.IsNotExist(err) {
 				t.Fatalf("the lock is gone: %v", err)
 			}
+			if s.claimed(a) || stillHeld(s, a) {
+				t.Fatal("and so is the claim on the account")
+			}
 		})
 	}
 }

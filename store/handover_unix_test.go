@@ -3,6 +3,7 @@
 package store
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -89,5 +90,37 @@ func TestAChildStartedDuringARunDoesNotKeepTheAccountClaimed(t *testing.T) {
 	}
 	if err := s.Removable(a); err != nil {
 		t.Fatalf("so it can be removed: %v", err)
+	}
+}
+
+// A launch that goes through hands its claim on, and the handover keeps it
+// across the exec: only a claim abandoned on the way to the CLI is let go of.
+func TestALaunchHandedOverKeepsItsClaimAcrossExec(t *testing.T) {
+	for _, k := range launchKinds(t) {
+		t.Run(k.what, func(t *testing.T) {
+			s, _ := panickingStore(t)
+			a := k.make(s)
+			_, release, err := s.prepare(context.Background(), a, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer release()
+			KeepClaimsAcrossExec()
+			var held *os.File
+			mine := filepath.Join(s.Home(a), runLock)
+			heldMu.Lock()
+			for f := range heldClaims {
+				if f.Name() == mine {
+					held = f
+				}
+			}
+			heldMu.Unlock()
+			if held == nil || !s.claimed(a) {
+				t.Fatal("the launch still holds the account")
+			}
+			if closeOnExec(t, held) {
+				t.Fatal("and the exec keeps it")
+			}
+		})
 	}
 }

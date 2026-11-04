@@ -612,6 +612,7 @@ func takeRefreshLock(home string) (*refreshLock, bool) {
 	}
 	fi, err := os.Lstat(path)
 	if err != nil {
+		_ = os.Remove(path) // made a moment ago, and not to be left in Claude Code's way
 		return nil, false
 	}
 	l := &refreshLock{path: path, held: fi, stop: make(chan struct{}), done: make(chan struct{})}
