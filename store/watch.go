@@ -51,12 +51,22 @@ func (s *Store) Watchable(a *rota.Account) bool {
 // the account; otherwise it rescues it. A store that cannot be opened is said
 // and tried again at the next look.
 //
+// ctx ends the watching, and a watcher it ended says so before it lets go of
+// its lock; say has returned by then, so what it wrote is complete.
+//
 // ctx ends the watching between looks, and while one waits for the store's
 // lock, but never in the middle of a look: one stopped between a refresh and
 // its save would lose the login.
 func Watch(ctx context.Context, open func() (*Store, error), id int, say func(string)) {
 	w := &watcher{open: open, id: id, say: say}
 	defer w.release()
+	// Said before the lock is let go (deferred calls run last in, first out),
+	// so whoever sees the lock free can read why the watcher stopped.
+	defer func() {
+		if ctx.Err() != nil {
+			w.said("account %d: stopped by a signal", id)
+		}
+	}()
 	for w.look(ctx) {
 		select {
 		case <-ctx.Done():

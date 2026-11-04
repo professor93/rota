@@ -68,9 +68,6 @@ func (c *cli) serveWatch(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 	store.Watch(ctx, c.openStore, id, log.say)
-	if ctx.Err() != nil {
-		log.say(fmt.Sprintf("account %d: stopped by a signal", id))
-	}
 	return nil
 }
 
