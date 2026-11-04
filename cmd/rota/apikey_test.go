@@ -198,6 +198,9 @@ func TestAKeyTypedAsAnArgumentIsNeverRepeated(t *testing.T) {
 		{"set", testKey},
 		{"set", "1", "--threshold", testKey},
 		{"set", "1", "--remote-control", testKey},
+		{"set", "1", "--cwd", testKey},
+		{"set", "1", "--config", "/tmp/" + testKey},
+		{"set", "1", "--sessions", testKey},
 		{"remove", testKey},
 		{"list", "--" + testKey},
 		{"send", testKey, "hello"},
@@ -220,6 +223,22 @@ func TestAKeyTypedAsAnArgumentIsNeverRepeated(t *testing.T) {
 	_, errOut, _ := call(t, "login", testKey)
 	if !strings.Contains(errOut, "looks like a key") || !strings.Contains(errOut, "rota login --key") {
 		t.Fatalf("the refusal must say how a key is pasted: %q", errOut)
+	}
+	// Nothing of it was kept as a directory, to be shown by a listing later.
+	out, errOut, _ := call(t, "list", "--short", "--json")
+	if strings.Contains(out+errOut, "TESTONLY") {
+		t.Fatal("a key was saved as a path and listed")
+	}
+	// A key piped in as --input's first message is no more a prompt than one
+	// typed as an argument.
+	out, errOut, code := runCLIStdin(t, testKey+"\nmore\n", "run", "1", "--input")
+	if code == 0 || strings.Contains(out+errOut, "TESTONLY") || !strings.Contains(errOut, "looks like a key") {
+		t.Fatalf("--input: %d %q", code, strings.ReplaceAll(out+errOut, testKey, "<key>"))
+	}
+	// A directory with the letters inside a word of its own is a directory.
+	dir := filepath.Join(t.TempDir(), "task-ant-colony-with-a-long-enough-tail")
+	if _, errOut, code := call(t, "set", "1", "--cwd", dir); code != 0 {
+		t.Fatalf("an ordinary directory: %d %q", code, errOut)
 	}
 }
 

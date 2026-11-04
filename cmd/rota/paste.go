@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"regexp"
 	"strings"
 	"time"
 
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/store"
+	"github.com/professor93/rota/wire"
 )
 
 // This file is the two logins that are a paste rather than a browser: an API
@@ -206,19 +206,38 @@ func (c *cli) askSecret(what string) (string, error) {
 // argument was expected — `rota login sk-ant-…` for `rota login --key`, say. A
 // message about such an argument must not repeat it: whatever it printed would
 // be in a terminal's scrollback and in any log that keeps stderr.
-func looksLikeKey(s string) bool { return strings.Contains(s, "sk-ant-") || len(s) > 40 }
+//
+// An argument a message is about to quote is refused this way when it is
+// longer than any word a command expects, as well as when it has a
+// credential's shape.
+func looksLikeKey(s string) bool { return wire.HoldsSecret(s) || len(s) > 40 }
 
 // keyInArgs is the refusal of an argument that looks like a key, in words that
 // do not repeat it, or nil when none of args does.
 func keyInArgs(args ...string) error {
 	for _, a := range args {
 		if looksLikeKey(a) {
-			return usageErr("that argument looks like a key, so it is not repeated here; an API key is pasted with " +
-				"`rota login --key`, which reads it hidden — one typed on a command line is in the shell's history now")
+			return errKeyArg
 		}
 	}
 	return nil
 }
+
+// keyInValues is keyInArgs for values a command keeps rather than quotes — a
+// directory, which may well be longer than forty characters — and so only for
+// those that have a credential's shape.
+func keyInValues(values ...string) error {
+	for _, v := range values {
+		if wire.HoldsSecret(v) {
+			return errKeyArg
+		}
+	}
+	return nil
+}
+
+// errKeyArg is why an argument that looks like a key is refused.
+var errKeyArg = usageErr("that argument looks like a key, so it is not repeated here; an API key is pasted with " +
+	"`rota login --key`, which reads it hidden — one typed on a command line is in the shell's history now")
 
 // keyInFlagErr is a flag parser's error with any argument that looks like a
 // key taken out: the flag package quotes the value it could not use.
@@ -234,17 +253,10 @@ func keyInFlagErr(err error, args []string) error {
 	return err
 }
 
-// anthropicSecret is the shape of any Anthropic credential long enough to be
-// a real one. The prefixes alone, as messages name them, are too short to
-// match.
-var anthropicSecret = regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{16,}`)
-
 // unsecret is a message with anything shaped like an Anthropic credential
 // taken out. Every error this command prints passes through it, as the last
 // line of defence for a message somebody wrote without thinking of keys.
-func unsecret(msg string) string {
-	return anthropicSecret.ReplaceAllString(msg, "sk-ant-[not repeated]")
-}
+func unsecret(msg string) string { return wire.Unsecret(msg) }
 
 // isCharDevice reports whether f is a terminal or some other character
 // device rather than a file or a pipe.

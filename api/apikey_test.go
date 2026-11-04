@@ -62,6 +62,18 @@ func TestPastedCredentialsOverHTTP(t *testing.T) {
 		t.Fatalf("remote control refuses a key: %d %s", resp.StatusCode, raw)
 	}
 
+	// A key sent as a directory is refused, not stored and listed.
+	for _, field := range []string{"cwd", "config_dir", "sessions"} {
+		resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{field: "/srv/" + testKey})
+		clean(raw)
+		if resp.StatusCode != 400 || !strings.Contains(string(raw), "looks like a key") {
+			t.Fatalf("%s: %d %s", field, resp.StatusCode, raw)
+		}
+	}
+	if _, raw := h.do("GET", "/v1/accounts", nil); strings.Contains(string(raw), "TESTONLY") {
+		t.Fatal("a key was kept as a directory")
+	}
+
 	resp, raw = h.do("POST", "/v1/login", map[string]any{"account": 1, "token": testSetup})
 	clean(raw)
 	if resp.StatusCode != 200 || !strings.Contains(string(raw), `"status":"long"`) ||

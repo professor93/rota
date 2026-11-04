@@ -936,6 +936,15 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "threshold must be a percentage from 1 to 100")
 		return
 	}
+	// A directory is kept and shown again by every listing, so a key sent as
+	// one is refused before it is stored, and without being repeated.
+	for _, v := range []*string{body.Cwd, body.ConfigDir, body.Sessions} {
+		if v != nil && wire.HoldsSecret(*v) {
+			fail(w, http.StatusBadRequest, "that value looks like a key, so it is not taken as a directory or repeated "+
+				"here; a key is pasted to POST /v1/login as {\"key\":\"...\"}")
+			return
+		}
+	}
 	st, ok := s.open(w)
 	if !ok {
 		return

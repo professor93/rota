@@ -1186,12 +1186,6 @@ func (c *cli) answer(id int, args []string) error {
 	if text == "" {
 		text = *altPrompt
 	}
-	// A prompt that is nothing but an Anthropic credential is a key typed in
-	// the wrong place, and sending it would hand it to the model, its
-	// transcript and the conversation history. It is refused instead.
-	if !strings.ContainsAny(text, " \t\n") && strings.HasPrefix(text, "sk-ant-") {
-		return keyInArgs(text)
-	}
 	if *input && text == "" {
 		// A run that reads its messages from stdin takes the first one from
 		// there too, which is what `echo ... | rota run 1 --input` means.
@@ -1200,6 +1194,12 @@ func (c *cli) answer(id int, args []string) error {
 			return err
 		}
 		text = first
+	}
+	// A prompt that is nothing but an Anthropic credential is a key typed or
+	// piped in the wrong place, and sending it would hand it to the model, its
+	// transcript and the conversation history. It is refused instead.
+	if t := strings.TrimSpace(text); !strings.ContainsAny(t, " \t\n") && wire.HoldsSecret(t) {
+		return errKeyArg
 	}
 
 	// A fragment is a piece of a stream, so asking for fragments is asking
@@ -1464,6 +1464,11 @@ func (c *cli) set(args []string) error {
 			return err
 		}
 		return usageErr("--remote-control takes on or off, not %q", *remoteCtl)
+	}
+	// A directory is kept and shown again, so a key typed as one would be
+	// saved as a path and printed back by every listing.
+	if err := keyInValues(*cwd, *config, *sessions); err != nil {
+		return err
 	}
 
 	s, err := c.openStore()
