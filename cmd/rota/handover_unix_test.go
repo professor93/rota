@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os/exec"
 	"testing"
 
@@ -37,5 +38,32 @@ func TestTheHandoverPassesTheClaimToTheCLI(t *testing.T) {
 	defer s.Close()
 	if !s.InUse(s.Find(1)) {
 		t.Fatal("the CLI the handover became holds the account's claim")
+	}
+}
+
+// A handover that panics on its way to the CLI lets go of the claim it took,
+// and the panic goes on as it was: only a claim handed to the CLI outlives
+// the handover.
+func TestAHandoverThatPanicsLetsGoOfTheClaim(t *testing.T) {
+	seedLiving(t, "")
+	orig := execProcess
+	t.Cleanup(func() { execProcess = orig })
+	boom := errors.New("a handover panicking on purpose")
+	execProcess = func(string, []string, []string) error { panic(boom) }
+	func() {
+		defer func() {
+			if v := recover(); v != boom {
+				t.Fatalf("the panic reaches the caller, as it was: %v", v)
+			}
+		}()
+		call(t, "run", "1")
+	}()
+	s, err := store.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if s.InUse(s.Find(1)) {
+		t.Fatal("the account is let go of on the way out")
 	}
 }

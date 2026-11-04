@@ -1048,13 +1048,16 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 	if err != nil {
 		return err
 	}
+	// Let go of on every way out — an error, a panic, an exec that failed —
+	// except the one that never returns: the exec that worked, which passes
+	// the claim to the CLI.
+	defer release()
 	bin := filepath.Base(path)
 	reg := sessions.RegistryFor(s)
 	cwd, _ := os.Getwd() // where the CLI will start, which is where rota is
 	sock := ""
 	if ask.on {
 		if sock, err = shareSock(s); err != nil {
-			release()
 			return err
 		}
 	}
@@ -1102,7 +1105,8 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 	// on the account goes with it: the CLI is the run now.
 	store.KeepClaimsAcrossExec()
 	err = execProcess(path, append([]string{bin}, args...), env)
-	release() // only reached when the handover did not happen
+	// Only reached when the handover did not happen, and the deferred
+	// release lets go of the claim.
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		return exitCode(ee.ExitCode())
