@@ -325,39 +325,55 @@ func (s *Server) beginInput(p *prepared, hold *held) (*liveRun, error) {
 		return nil, err
 	}
 	lr.sess = sess
-	s.addRun(lr)
 	handover := hold.take()
-	s.log.Info("run started", "account", a.ID, "provider", a.Provider, "run", lr.id, "input", true)
-
-	// Drained to the end before the run is reported over, so every message's
-	// fate is in the stream before the event that closes it.
-	told := make(chan struct{})
-	go func() {
-		defer close(told)
-		lr.notices()
-	}()
-	go func() {
-		defer cancel()
-		res, err := sess.Wait()
-		<-told
-		// What the readings are read from, beyond the result: the stream's
-		// tally, the account, and a fresh quota reading when one was asked for.
-		src := message.Sources{Tally: tally, Account: a, Threshold: rotation.Cutoff(a)}
-		if with.Quota {
-			for _, e := range st.Refresh(s.ctx, true, a) {
-				s.log.Warn("quota reading failed", "account", a.ID, "err", e)
+	// The run is in flight from here, holding the account, and wait starts
+	// what lets go of it and of everything the request took: the waiter,
+	// which ends the run once the CLI has gone. Should anything before it
+	// panic, the panic goes on as it was, the run is cancelled and the waiter
+	// started all the same, so the run ends as any other does rather than
+	// holding the account, with nobody to reach it by, until InputTimeout.
+	waiting := false
+	wait := func() {
+		waiting = true
+		// Drained to the end before the run is reported over, so every
+		// message's fate is in the stream before the event that closes it.
+		told := make(chan struct{})
+		go func() {
+			defer close(told)
+			lr.notices()
+		}()
+		go func() {
+			defer cancel()
+			res, err := sess.Wait()
+			<-told
+			// What the readings are read from, beyond the result: the stream's
+			// tally, the account, and a fresh quota reading when one was asked for.
+			src := message.Sources{Tally: tally, Account: a, Threshold: rotation.Cutoff(a)}
+			if with.Quota {
+				for _, e := range st.Refresh(s.ctx, true, a) {
+					s.log.Warn("quota reading failed", "account", a.ID, "err", e)
+				}
+				src.Quota = a.Quota
 			}
-			src.Quota = a.Quota
+			lr.finish(wire.Ended(res, err, with, src))
+			s.log.Info("run finished", "account", a.ID, "provider", a.Provider,
+				"run", lr.id, "stream", true, "err", err, "exit", exitOf(res))
+			handover()
+			// Kept for a while after it ended, so a reader that reattaches late
+			// is given the tail and the terminal event rather than a 404 it
+			// could not tell from a wrong id.
+			time.AfterFunc(keepEnded, func() { s.dropRun(lr.id) })
+		}()
+	}
+	defer func() {
+		if !waiting {
+			cancel()
+			wait()
 		}
-		lr.finish(wire.Ended(res, err, with, src))
-		s.log.Info("run finished", "account", a.ID, "provider", a.Provider,
-			"run", lr.id, "stream", true, "err", err, "exit", exitOf(res))
-		handover()
-		// Kept for a while after it ended, so a reader that reattaches late is
-		// given the tail and the terminal event rather than a 404 it could not
-		// tell from a wrong id.
-		time.AfterFunc(keepEnded, func() { s.dropRun(lr.id) })
 	}()
+	s.addRun(lr)
+	s.log.Info("run started", "account", a.ID, "provider", a.Provider, "run", lr.id, "input", true)
+	wait()
 	return lr, nil
 }
 

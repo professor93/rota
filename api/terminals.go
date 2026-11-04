@@ -142,20 +142,46 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 	if err != nil {
 		return nil, err
 	}
+	// The claim on the account is this function's until a running terminal
+	// takes it over. Whatever stops that from happening — an error, or a
+	// panic, which goes on as it was and which the server recovers from and
+	// goes on serving — ends what was started and lets go of the account,
+	// which would otherwise look busy until the server restarted.
+	var (
+		cmd     *exec.Cmd
+		master  *os.File
+		ts      *termSession
+		running bool
+	)
+	defer func() {
+		switch {
+		case running:
+		case ts != nil:
+			// Listed, and perhaps recorded: its own ending ends all of it,
+			// the claim included, once the CLI it started has gone.
+			ts.back.end()
+			go ts.run()
+		default:
+			if master != nil {
+				_ = cmd.Process.Kill()
+				_ = cmd.Wait()
+				_ = master.Close()
+			}
+			plan.release()
+		}
+	}()
 	cols, rows := boundSize(req.Cols, req.Rows)
-	cmd := exec.Command(plan.path, plan.args...)
+	cmd = exec.Command(plan.path, plan.args...)
 	// argv[0] is the CLI's own name rather than the path it was found at,
 	// which is what the handover does and what a CLI prints in its own help.
 	cmd.Args = append([]string{filepath.Base(plan.path)}, plan.args...)
 	cmd.Env = plan.env
 	cmd.Dir = cwd
-	master, err := pty.Start(cmd, cols, rows)
+	master, err = pty.Start(cmd, cols, rows)
 	if err != nil {
-		// Nothing started, so nothing is holding the account.
-		plan.release()
-		return nil, err
+		return nil, err // nothing started, so nothing is holding the account
 	}
-	ts := &termSession{
+	ts = &termSession{
 		s: s, id: runID(), log: s.log.Info,
 		kind: kind, account: plan.account, label: plan.label, provider: plan.provider,
 		name: strings.TrimSpace(req.Label), cwd: cwd, started: s.now(),
@@ -168,6 +194,7 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 	s.recordTerminal(ts)
 	s.addTerminal(ts)
 	ts.audit("terminal created", "kind", kind, "account", plan.account, "by", who(r).Name)
+	running = true
 	go ts.run()
 	return ts, nil
 }
@@ -231,13 +258,22 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest) (*
 	if err != nil {
 		return nil, err
 	}
+	// The claim goes with the plan, or — should building it panic — goes.
+	handed := false
+	defer func() {
+		if !handed {
+			release()
+		}
+	}()
 	// Everything the store had to say is on disk; let go of its lock before
 	// a process that may run for hours starts, exactly as the handover does.
 	_ = st.Close()
-	return &termPlan{
+	plan := &termPlan{
 		path: path, args: append([]string{}, req.Args...), env: termEnv(env), release: release,
 		account: a.ID, label: a.Label(), provider: a.Provider, tokenUntil: loginUntil(a, env),
-	}, nil
+	}
+	handed = true
+	return plan, nil
 }
 
 // planShell is the opt-in: the person's own login shell, with the server's
