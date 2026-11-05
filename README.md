@@ -32,6 +32,8 @@ From source instead (Go 1.27+):
 go install github.com/professor93/rota/cmd/rota@latest
 ```
 
+While 1.4.0 is in beta, `@latest` gives the newest beta: the program became a module of its own in 1.4.0-beta.2, and that module has only betas so far. The installer above stays on the last stable release; `@v1.3.0` builds that one from source.
+
 ## Use
 
 ```sh
