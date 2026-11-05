@@ -2,7 +2,8 @@ name: release
 
 on:
   push:
-    tags: ['v*']
+    # vX.Y.Z is the root and the binaries; cmd/rota/vX.Y.Z, pushed after it, is the program's module.
+    tags: ['v*', 'cmd/rota/v*']
   # By hand, against a tag that already exists: runs only the checks of
   # what was shipped, never a publish.
   workflow_dispatch:
@@ -18,7 +19,7 @@ jobs:
   # The consumer suite runs against this exact commit before anything is
   # published: a release the SDK's own users' tests refuse never ships.
   gate:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && !startsWith(github.ref_name, 'cmd/rota/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -37,16 +38,24 @@ jobs:
           node-version: 26
       - name: rota's own tests
         working-directory: rota
-        run: go vet ./... && go test ./...
+        run: |
+          go vet ./...
+          go -C cmd/rota vet ./...
+          go test ./...
+          go -C cmd/rota test ./...
+          sh scripts/module.sh check
+      - name: the program the suite runs
+        working-directory: rota
+        run: go build -o "$RUNNER_TEMP/rota" ./cmd/rota
       - name: consumer suite against this commit
         working-directory: rota-sdk-test
         run: |
           go work init . ../rota
           go vet ./...
-          go test ./...
+          ROTA_BIN="$RUNNER_TEMP/rota" go test ./...
 
   publish:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && !startsWith(github.ref_name, 'cmd/rota/')
     needs: gate
     runs-on: ubuntu-latest
     steps:
@@ -137,10 +146,9 @@ jobs:
           Stop-Process -Id $p.Id -Force
           if ($root -notmatch ('"version":"' + $env:TAG.TrimStart('v') + '"')) { throw "root: $root" }
 
-  # The module as the world fetches it: through the public proxy, by tag.
+  # The program's module as the world fetches it, by its own tag; by hand, the root's tag, and versions before the split resolve to the root.
   module:
-    needs: publish
-    if: always() && (needs.publish.result == 'success' || github.event_name == 'workflow_dispatch')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref_name, 'cmd/rota/')
     runs-on: ubuntu-latest
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
@@ -149,11 +157,14 @@ jobs:
         with:
           go-version: 'stable'
       - name: tag is a release tag
-        run: echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+        run: |
+          v="${TAG#cmd/rota/}"
+          echo "$v" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
       - name: go install through the proxy
         env:
           GOPROXY: https://proxy.golang.org,direct
           GOFLAGS: -mod=mod
         run: |
-          go install "github.com/professor93/rota/cmd/rota@$TAG"
-          "$(go env GOPATH)/bin/rota" --version | grep -qx "rota ${TAG#v}"
+          v="${TAG#cmd/rota/}"
+          go install "github.com/professor93/rota/cmd/rota@$v"
+          "$(go env GOPATH)/bin/rota" --version | grep -qx "rota ${v#v}"
