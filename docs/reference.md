@@ -3082,7 +3082,7 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `docs/server.toml` | The whole schema at its defaults, kept honest by a test |
 | `docs/releases/` | What each released version changed |
 | `go.work`, `cmd/rota/go.mod` | The command as a module of its own, and the workspace that builds it against the packages beside it |
-| `scripts/module.sh` | Checks the line between the two modules |
+| `scripts/module.sh` | Checks the line between the two modules, tidies the command's against this checkout, and pins it to a root tag at a release |
 | `cmd/rota/main.go` | The command |
 | `cmd/rota/share.go` | `rota run --share`: the CLI on a pseudo-terminal, and the link to the server |
 | `cmd/rota/serveauth.go` | `rota serve passwd`, `token` and `invite` |
