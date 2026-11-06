@@ -2,6 +2,8 @@ package hold
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"image/color"
@@ -29,10 +31,12 @@ func TestMain(m *testing.M) {
 
 // The captures TestCaptureVT recorded, each with xterm's view of it beside it
 // as <name>.xterm.json, made by scripts/vt/golden.mjs.
-var captures = []string{"vim", "vim-quit", "less", "fake"}
+var captures = []string{"vim", "vim-quit", "less", "fake", "emoji"}
 
-// vtDoc is golden.mjs's document: what a terminal shows, cell by cell.
+// vtDoc is golden.mjs's document: what a terminal shows, cell by cell, and
+// the sha256 of what it was shown.
 type vtDoc struct {
+	Sha256 string   `json:"sha256"`
 	Rows   []string `json:"rows"`
 	Cells  []vtCell `json:"cells"`
 	Cursor vtCursor `json:"cursor"`
@@ -66,7 +70,10 @@ type vtModes struct {
 	Focus          bool `json:"focus"`
 }
 
-func golden(t *testing.T, name string) vtDoc {
+// golden is xterm's view of the bytes from, which <name>.xterm.json must
+// have been made from: a golden left over from another capture or another
+// repaint would compare against a screen nobody drew.
+func golden(t *testing.T, name string, from []byte) vtDoc {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("testdata", "vt", name+".xterm.json"))
 	if err != nil {
@@ -75,6 +82,10 @@ func golden(t *testing.T, name string) vtDoc {
 	var d vtDoc
 	if err := json.Unmarshal(raw, &d); err != nil {
 		t.Fatalf("%s.xterm.json: %v", name, err)
+	}
+	if sum := sha256.Sum256(from); d.Sha256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf("%s.xterm.json was made from other bytes than %s.bin (sha256 %s, not %x); make it again, as scripts/vt/README says",
+			name, name, d.Sha256, sum)
 	}
 	return d
 }
@@ -216,10 +227,16 @@ func cellText(c vtCell, ok bool) string {
 // has seen every byte.
 func feed(t *testing.T, s *Screen, raw []byte) *vtscan.Scanner {
 	t.Helper()
+	return feedBy(t, s, raw, 13)
+}
+
+// feedBy is feed in reads of size bytes.
+func feedBy(t *testing.T, s *Screen, raw []byte, size int) *vtscan.Scanner {
+	t.Helper()
 	sc := vtscan.NewScanner()
 	var held []byte
 	for len(raw) > 0 {
-		chunk := raw[:min(len(raw), 13)]
+		chunk := raw[:min(len(raw), size)]
 		raw = raw[len(chunk):]
 		r := sc.Feed(chunk)
 		held = append(held, chunk...)
@@ -239,18 +256,23 @@ func feed(t *testing.T, s *Screen, raw []byte) *vtscan.Scanner {
 }
 
 // TestXVTMatchesXterm is the spike's bar: x/vt, fed what vim, less and the
-// fake CLI wrote, ends on the screen xterm ends on, cell for cell.
+// fake CLI wrote, ends on the screen xterm ends on, cell for cell. It does so
+// in reads of 13 bytes, and in reads of one, which cut apart every grapheme
+// cluster that can be cut.
 func TestXVTMatchesXterm(t *testing.T) {
 	for _, name := range captures {
-		t.Run(name, func(t *testing.T) {
-			want := golden(t, name)
-			s := NewScreen(80, 24)
-			defer s.Close()
-			feed(t, s, recording(t, name))
-			if d := screenDiff("xterm", "x/vt", want, doc(t, s)); d != "" {
-				t.Errorf("x/vt and xterm disagree on %s:\n%s", name, d)
-			}
-		})
+		for _, size := range []int{13, 1} {
+			t.Run(fmt.Sprintf("%s by %d", name, size), func(t *testing.T) {
+				rec := recording(t, name)
+				want := golden(t, name, rec)
+				s := NewScreen(80, 24)
+				defer s.Close()
+				feedBy(t, s, rec, size)
+				if d := screenDiff("xterm", "x/vt", want, doc(t, s)); d != "" {
+					t.Errorf("x/vt and xterm disagree on %s:\n%s", name, d)
+				}
+			})
+		}
 	}
 }
 
@@ -259,10 +281,11 @@ func TestXVTMatchesXterm(t *testing.T) {
 func TestModesMatchXterm(t *testing.T) {
 	for _, name := range captures {
 		t.Run(name, func(t *testing.T) {
-			want := golden(t, name)
+			rec := recording(t, name)
+			want := golden(t, name, rec)
 			s := NewScreen(80, 24)
 			defer s.Close()
-			m := feed(t, s, recording(t, name)).Modes()
+			m := feed(t, s, rec).Modes()
 			got := vtModes{
 				Alt: m.AltScreen, CursorKeys: m.CursorKeys, BracketedPaste: m.BracketedPaste,
 				Mouse: m.Mouse, Focus: m.Focus,
@@ -290,9 +313,10 @@ func TestModesMatchXterm(t *testing.T) {
 func TestRepaintReproducesTheScreen(t *testing.T) {
 	for _, name := range captures {
 		t.Run(name, func(t *testing.T) {
+			rec := recording(t, name)
 			s := NewScreen(80, 24)
 			defer s.Close()
-			m := feed(t, s, recording(t, name)).Modes()
+			m := feed(t, s, rec).Modes()
 			repaint, ok := s.Repaint(m)
 			if !ok {
 				t.Fatal("Repaint refused")
@@ -321,7 +345,7 @@ func TestRepaintReproducesTheScreen(t *testing.T) {
 				t.Errorf("x/vt draws the repaint of %s as another screen:\n%s", name, d)
 			}
 
-			before, after := golden(t, name), golden(t, name+".repaint")
+			before, after := golden(t, name, rec), golden(t, name+".repaint", committed)
 			if d := screenDiff("xterm", "repaint", before, after); d != "" {
 				t.Errorf("xterm draws the repaint of %s as another screen:\n%s", name, d)
 			}

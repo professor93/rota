@@ -1,4 +1,5 @@
 {
+ "sha256": "afa3ff6369548236917516b43c9dd47600b37db2497ba38338dd1ddf45e26bdb",
  "rows": [
   "  1 // Package sample is what vim shows in the emulator spike: enough Go for",
   "  2 // syntax colours, a search and line numbers, and more lines than the screen",
