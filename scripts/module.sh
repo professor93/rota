@@ -7,8 +7,10 @@
 #   sh scripts/module.sh tidy        tidies cmd/rota/go.mod against this
 #                                    checkout, keeping the pinned version
 #   sh scripts/module.sh pin vX.Y.Z  at a release: pins the program to the
-#                                    pushed root tag, commits, and tags
-#                                    cmd/rota/vX.Y.Z locally; pushes nothing
+#                                    pushed root tag, once the release run
+#                                    has published its GitHub release (gh),
+#                                    commits, and tags cmd/rota/vX.Y.Z
+#                                    locally; pushes nothing
 #
 # Works from any directory. A broken rule is one line on stderr and exit 1.
 set -eu
@@ -30,6 +32,14 @@ usage() {
 fail() {
 	echo "module: $*" >&2
 	exit 1
+}
+
+# is_release succeeds when $1 is one line that is a release tag; grep alone
+# would pass a value with a release on any of its lines.
+is_release() {
+	case $1 in *'
+'*) return 1 ;; esac
+	printf '%s\n' "$1" | grep -Eq "$release"
 }
 
 # pinned prints the version of the root that cmd/rota/go.mod requires.
@@ -72,7 +82,7 @@ check() {
 	*'"Replace"'*) fail "cmd/rota/go.mod replaces a module; it requires the root at a release" ;;
 	esac
 	v=$(pinned)
-	printf '%s\n' "$v" | grep -Eq "$release" ||
+	is_release "$v" ||
 		fail "cmd/rota/go.mod requires $root_module at '$v', which is not a release tag"
 
 	# 3. The workspace only lists the modules; it replaces nothing.
@@ -84,12 +94,13 @@ check() {
 	# 4. A program importing every public package of the root needs no
 	# other module, so nothing is fetched and its go.sum stays empty.
 	mkdir "$tmp/consumer"
-	pkgs=$(GOWORK=off go list -e ./... 2>"$tmp/list.err" | grep -v '/internal/') || true
-	if [ -z "$pkgs" ]; then
-		echo "module: a program importing the root's packages needs other modules" >&2
+	if ! GOWORK=off go list -e ./... >"$tmp/list.out" 2>"$tmp/list.err"; then
+		echo "module: go list cannot list the root's packages" >&2
 		cat "$tmp/list.err" >&2
 		exit 1
 	fi
+	pkgs=$(grep -v '/internal/' "$tmp/list.out") ||
+		fail "go list finds no package of the root outside internal/"
 	{
 		echo "package main"
 		echo
@@ -123,8 +134,9 @@ check() {
 		cat "$tmp/build.out" >&2
 		exit 1
 	fi
-	[ "$("$tmp/rota" --version)" = "rota $(version)" ] ||
-		fail "the workspace does not build the program offline"
+	got=$("$tmp/rota" --version 2>&1) || true
+	[ "$got" = "rota $(version)" ] ||
+		fail "the program the workspace builds says '$got', not 'rota $(version)' as wire/wire.go reads"
 
 	echo "module: ok"
 }
@@ -167,31 +179,57 @@ tidy() {
 	if [ -s "$tmp/go.sum.new" ]; then
 		cmp -s "$tmp/go.sum.new" cmd/rota/go.sum 2>/dev/null ||
 			cp "$tmp/go.sum.new" cmd/rota/go.sum
-	fi
-}
-
-# on_origin succeeds when origin has the ref, fails when it does not, and
-# stops the script when origin cannot be asked.
-on_origin() {
-	if git ls-remote --exit-code --tags origin "$1" >/dev/null 2>"$tmp/ls-remote.err"; then
-		return 0
 	else
-		rc=$?
+		rm -f cmd/rota/go.sum
 	fi
-	[ "$rc" -eq 2 ] && return 1
-	echo "module: origin cannot be asked for $1" >&2
-	cat "$tmp/ls-remote.err" >&2
-	exit 1
 }
 
-# restore puts back the program's go.mod and go.sum saved by pin.
+# on_origin prints the commit origin's tag $1 points at, peeled, or nothing
+# when origin has no such tag; it stops the script when origin cannot be
+# asked. Call it as an assignment, so that stop reaches the script.
+on_origin() {
+	if ! git ls-remote --tags origin "refs/tags/$1" "refs/tags/$1^{}" \
+		>"$tmp/ls-remote.out" 2>"$tmp/ls-remote.err"; then
+		echo "module: origin cannot be asked for refs/tags/$1" >&2
+		cat "$tmp/ls-remote.err" >&2
+		exit 1
+	fi
+	awk -v r="refs/tags/$1" '
+		$2 == r { c = $1 }
+		$2 == r "^{}" { p = $1 }
+		END { print (p != "" ? p : c) }
+	' "$tmp/ls-remote.out"
+}
+
+# released succeeds when the GitHub release of the root tag $1 is published,
+# which the release run does once its gate is green, and stops the script,
+# saying why, when it is not or GitHub cannot be asked.
+released() {
+	command -v gh >/dev/null 2>&1 ||
+		fail "gh is not installed; pin needs it to see that $1 has a published GitHub release"
+	if ! draft=$(gh release view "$1" -R "$(git remote get-url origin)" \
+		--json isDraft -q .isDraft 2>"$tmp/gh.err"); then
+		grep -q 'release not found' "$tmp/gh.err" &&
+			fail "$1 has no GitHub release; pin after the release run publishes it"
+		echo "module: GitHub cannot be asked for the release of $1" >&2
+		cat "$tmp/gh.err" >&2
+		exit 1
+	fi
+	[ "$draft" = false ] ||
+		fail "the GitHub release of $1 is a draft; pin after it is published"
+}
+
+# restore puts back the program's go.mod and go.sum, and the index, as pin
+# found them; once the pin's commit is made it leaves them alone.
 restore() {
+	[ "$(git rev-parse HEAD)" = "$head" ] || return 0
 	cp "$tmp/go.mod.bak" cmd/rota/go.mod
 	if [ -e "$tmp/go.sum.bak" ]; then
 		cp "$tmp/go.sum.bak" cmd/rota/go.sum
 	else
 		rm -f cmd/rota/go.sum
 	fi
+	git reset -q -- cmd/rota/go.mod cmd/rota/go.sum
 }
 
 # pin requires the root at the pushed tag $1, checks the program builds
@@ -199,27 +237,34 @@ restore() {
 # cmd/rota/$1. It pushes nothing.
 pin() {
 	tag=${1-}
-	printf '%s\n' "$tag" | grep -Eq "$release" || usage
+	is_release "$tag" || usage
 	app_tag=cmd/rota/$tag
 
 	tmp=$(mktemp -d)
 	trap 'rm -rf "$tmp"' EXIT
 	trap 'exit 1' HUP INT TERM
 
-	if git rev-parse -q --verify "refs/tags/$app_tag" >/dev/null ||
-		on_origin "refs/tags/$app_tag"; then
+	if git rev-parse -q --verify "refs/tags/$app_tag" >/dev/null; then
 		fail "$app_tag exists already; a version is never reused"
 	fi
-	on_origin "refs/tags/$tag" ||
-		fail "$tag is not a tag on origin; push the root's tag first"
-	[ "$(git rev-parse HEAD)" = "$(git rev-parse -q --verify "$tag^{commit}" 2>/dev/null)" ] ||
+	at=$(on_origin "$app_tag")
+	[ -z "$at" ] || fail "$app_tag exists already; a version is never reused"
+	at=$(on_origin "$tag")
+	[ -n "$at" ] || fail "$tag is not a tag on origin; push the root's tag first"
+	head=$(git rev-parse HEAD)
+	[ "$head" = "$(git rev-parse -q --verify "$tag^{commit}" 2>/dev/null)" ] ||
 		fail "HEAD is not the commit tagged $tag"
+	[ "$head" = "$at" ] ||
+		fail "origin's $tag is the commit $at, not HEAD; the local tag is not the pushed one"
 	[ -z "$(git status --porcelain)" ] || fail "the tree has changes"
+	released "$tag"
 	says=$(GOWORK="$root/go.work" go run ./cmd/rota --version 2>&1) || true
 	[ "$says" = "rota ${tag#v}" ] || fail "the program says $says, the tag says $tag"
 
 	cp cmd/rota/go.mod "$tmp/go.mod.bak"
 	if [ -e cmd/rota/go.sum ]; then cp cmd/rota/go.sum "$tmp/go.sum.bak"; fi
+	# Any way out before the commit, an interrupt included, puts them back.
+	trap 'restore; rm -rf "$tmp"' EXIT
 	if ! (
 		go mod edit -require="$root_module@$tag" cmd/rota/go.mod &&
 			cd cmd/rota &&
@@ -227,22 +272,21 @@ pin() {
 			GOWORK=off GOFLAGS=-mod=readonly go build -o /dev/null . &&
 			GOWORK=off go vet ./...
 	) >"$tmp/pin.out" 2>&1; then
-		restore
 		echo "module: the program does not build against $tag" >&2
 		cat "$tmp/pin.out" >&2
 		exit 1
 	fi
 
-	if ! sh "$root/scripts/module.sh" check; then
-		restore
-		exit 1
-	fi
+	sh "$root/scripts/module.sh" check || exit 1
 	git add cmd/rota/go.mod
 	if [ -e cmd/rota/go.sum ]; then git add cmd/rota/go.sum; fi
 	git commit -q -m "cmd/rota requires rota $tag"
 	git tag "$app_tag"
-	branch=$(git symbolic-ref --short -q HEAD) || branch=HEAD
-	echo "module: tagged $app_tag; push it with: git push origin $branch $app_tag"
+	if branch=$(git symbolic-ref --short -q HEAD); then
+		echo "module: tagged $app_tag; push it with: git push origin $branch $app_tag"
+	else
+		echo "module: tagged $app_tag on a detached HEAD, on no branch; push it with: git push origin $app_tag"
+	fi
 }
 
 case ${1-} in
