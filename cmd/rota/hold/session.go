@@ -13,6 +13,7 @@ import (
 
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/ring"
+	"github.com/professor93/rota/internal/share"
 	"github.com/professor93/rota/internal/vtscan"
 )
 
@@ -412,10 +413,15 @@ func (s *Session) catchUp() {
 	}
 }
 
+// putScreen makes a Screen payload. It is a variable so a test can make one
+// the daemon could not take.
+var putScreen = holdwire.PutScreen
+
 // repaint is a Screen payload: the screen once it has caught up, the offset
 // it stands for and the modes on there. OK is false with no emulator, or a
-// repaint too big for a frame.
-func (s *Session) repaint(seq uint64) ([]byte, error) {
+// repaint too big for a frame, and then it carries no repaint: the daemon
+// replays the ring instead. Every ScreenAsk gets an answer it can take.
+func (s *Session) repaint(seq uint64) []byte {
 	s.em.mu.Lock()
 	defer s.em.mu.Unlock()
 	s.catchUp()
@@ -424,7 +430,19 @@ func (s *Session) repaint(seq uint64) ([]byte, error) {
 	if !s.em.retired {
 		out, h.OK = s.screen.Repaint(s.em.modes)
 	}
-	return holdwire.PutScreen(h, out)
+	p, err := putScreen(h, out)
+	if err == nil && len(p)+1 <= share.MaxFrame {
+		return p
+	}
+	if h.OK {
+		s.log("a repaint cannot be sent; the daemon replays the ring instead", "bytes", len(p), "err", err)
+		h.OK = false
+		if p, err = putScreen(h, nil); err == nil && len(p)+1 <= share.MaxFrame {
+			return p
+		}
+	}
+	s.log("a Screen could not be made", "err", err)
+	return nil
 }
 
 // resize takes the CLI and the screen to a bounded size. Once the CLI is
