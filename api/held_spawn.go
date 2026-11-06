@@ -57,7 +57,7 @@ func (s *Server) claimDaemon() error {
 // chooseTerminal as for any terminal, and everything after that — Prepare,
 // the pseudo-terminal, the CLI — is the holder's. list is the place
 // startTerminal took for it.
-func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd string, list func(*termSession)) (*termSession, error) {
+func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd string, list func(*termSession) bool) (*termSession, error) {
 	hreq := holdwire.Request{ID: runID(), Kind: kind, Args: req.Args, Cwd: cwd,
 		Name: strings.TrimSpace(req.Label), Scrollback: s.opts.Terminal.Scrollback}
 	hreq.Cols, hreq.Rows = boundSize(req.Cols, req.Rows)
@@ -108,7 +108,17 @@ func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd s
 	ts.idleAt = ts.started
 	h.ts = ts
 	s.recordTerminal(ts)
-	list(ts)
+	if !list(ts) {
+		// Stop has begun and let go of every held session it found. This
+		// one is let go of too, still running, as Stop would have: the next
+		// daemon takes it up.
+		h.detach()
+		if ts.rec != nil {
+			ts.rec.close(ts.view())
+		}
+		return nil, refuse(http.StatusServiceUnavailable,
+			"this server is stopping; session "+ts.id+" was started and goes on running, for the next rota daemon to take up")
+	}
 	ts.audit("terminal created", "kind", kind, "account", hreq.Account, "by", who(r).Name, "pid", h.pid)
 	go ts.run()
 	return ts, nil

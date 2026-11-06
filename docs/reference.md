@@ -628,10 +628,10 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/ws` | control | a WebSocket that starts a run on whichever account the rotation picks and carries it both ways |
 | `GET` | `/v1/accounts/{id}/ws` | control | the same, on that account |
 | `GET` | `/v1/runs/{id}/ws` | watch | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
-| `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended`, `interrupted` or `broken`), `attachable`, `reachable`, `pid` (its holder), `name`, `title`, `conversation`, `conversation_cwd`, `resumable`, `ended_at` once it has stopped, `made_by` for a holder this rota cannot attach to, and `status` (`running`, `needs_you`, `quiet` or `stopped`). The daemon also lists the held sessions its store's records describe: the stopped ones, for `keep_stopped`, and the running ones it is not linked to |
+| `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended`, `interrupted` or `broken`), `attachable`, `reachable`, `pid` (its holder), `name`, `title`, `conversation`, `conversation_cwd`, `resumable`, `ended_at` once it has stopped, `made_by` for a holder this rota cannot attach to (`unknown` when its record does not say), and `status` (`running`, `needs_you`, `quiet` or `stopped`). The daemon also lists the held sessions its store's records describe: the stopped ones, for `keep_stopped`, and the running ones it is not linked to |
 | `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard, and the same held fields, for a stopped held session too |
-| `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one |
-| `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended; a running held session the daemon is not linked to is hung up by signal, and only while its pid is still the holder its record names, `409` when it is not |
+| `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up |
+| `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended; a running held session the daemon is not linked to is hung up by signal, once however often it is asked, and only while its pid is still the holder its record names: `409` when it is not, or when its record names no process this rota can check |
 | `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame. A held session the daemon is not linked to answers `409`, saying why |
 | `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
@@ -1554,15 +1554,19 @@ a restart looks like a brief reconnect. Each session's directory is judged
 on its own, so one broken record hides nothing. A holder whose link fails is
 listed `live` with `"reachable": false` and tried again at every sweep — its
 lock, not a silent socket, says whether it is still there. A holder made by
-a rota this one cannot attach to is listed `live` with `"attachable": false`
-and `made_by`, the version that made it, and is never stopped but by a
+a rota this one cannot attach to — or one whose record this rota cannot
+read, while its lock says it is running — is listed `live` with
+`"attachable": false` and `made_by`, the version that made it as far as its
+record says, counts under `max_sessions`, and is never stopped but by a
 `DELETE`. A held session that has stopped is still listed once the five
 minutes an ended terminal stays are over: from its record, for
 `[terminal] keep_stopped` after it stopped — `ended` with its exit,
 `interrupted` (exit `-1`) for a holder that went without recording one, a
 reboot or a kill, or `broken` for a record that cannot be read. Nothing
-restarts by itself. An interrupted session's age is measured from the last
-time its holder touched its record. Once `keep_stopped` has passed, the
+restarts by itself. An interrupted session's age, and its `ended_at`, are
+measured from the moment the daemon saw its holder go, which is written into
+its record, or with no daemon there from the last time its holder touched
+it; `ended_at` reads the same before and after the daemon stops keeping it. Once `keep_stopped` has passed, the
 session's directory under `<store>/terminals/` is deleted, and nothing else:
 never a worktree, and never a directory whose lock is held. `max_sessions`
 counts every running holder on the store, these ones included.
@@ -1742,7 +1746,12 @@ a local terminal, `terminal shared` (id, account, label, pid, mode) and
 
 With `record = true`, what each terminal **printed** is appended to
 `<store>/terminals/<id>.out`, up to `record_max_bytes`, with the description
-above written beside it as `<id>.json` when it ends. Input is never recorded
+above written beside it as `<id>.json` when it ends. A held session's
+recording is carried on by the next daemon from where in the output it had
+got to, so nothing is recorded twice; where output never reached it — a gap,
+or more printed with no daemon there than its holder kept — `<id>.gaps`
+gets a line `<bytes in the file> <offset in the output>` before the file
+goes on. Input is never recorded
 — what reaches the file is the same bytes every attached client was sent, and
 nothing else. The files are mode `0600` and the directory `0700`: a recording
 is a transcript of somebody's working session.

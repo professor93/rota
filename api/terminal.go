@@ -2,10 +2,14 @@ package api
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -1171,52 +1175,114 @@ func (ts *termSession) describe() map[string]any {
 // typed is never written down. A recording is a transcript of somebody's
 // working session, so the file is theirs alone to read and it stops at a
 // size rather than filling the disk.
+//
+// A held session's output says where in the whole of it each piece
+// belongs, and the next daemon takes its recording up and adds to it, so
+// the recording keeps where in the output it has got to: end. Where what
+// it is given does not follow on from there — a gap the link could not
+// fill, or a holder that kept less than a daemon missed — it says so in
+// <id>.gaps before it writes on, one line "<bytes in the file> <offset in
+// the output>" for each place the file skips to. With no such file the
+// recording started at the start and never skipped. Nothing is recorded
+// twice, and nothing is skipped without saying so.
 type recorder struct {
 	out  *os.File
 	meta string
+	gaps string
 	max  int64
 	n    int64
 	full bool
-	// from is the offset a recording taken up again had reached: a held
-	// session's output from before is in the file already, and the holder
-	// sends it again to a daemon that takes the session up.
-	from int64
+	end  int64
 }
 
 // newRecorder starts a recording, or with resume takes up the one already
 // there for this id — a held session a daemon before this one recorded —
-// and adds to it.
+// and adds to it, from where in the output it had got to.
 func newRecorder(dir, id string, max int64, resume bool) (*recorder, error) {
-	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
-	if resume {
-		flags = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	r := &recorder{meta: filepath.Join(dir, id+".json"), gaps: filepath.Join(dir, id+".gaps"), max: max}
+	flags := os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	if !resume {
+		// A recording started afresh owes nothing to where one before it
+		// skipped.
+		flags = os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+		if err := os.Remove(r.gaps); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, err
+		}
 	}
 	f, err := os.OpenFile(filepath.Join(dir, id+".out"), flags, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	r := &recorder{out: f, meta: filepath.Join(dir, id+".json"), max: max}
+	r.out = f
 	if resume {
 		fi, err := f.Stat()
 		if err != nil {
 			f.Close()
 			return nil, err
 		}
-		r.n, r.from, r.full = fi.Size(), fi.Size(), fi.Size() >= max
+		r.n, r.full, r.end = fi.Size(), fi.Size() >= max, fi.Size()
+		if at, from, ok := lastGap(r.gaps); ok && at <= r.n {
+			r.end = from + r.n - at
+		}
 	}
 	return r, nil
 }
 
-// writeAt is write for output that says where in the stream it belongs,
-// leaving out what a recording taken up again already has.
+// lastGap is the last place a recording's <id>.gaps says its file skips
+// to. A line that is not whole — the one being written when a daemon went —
+// is passed over: nothing was written after it.
+func lastGap(path string) (at, from int64, ok bool) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, 0, false
+	}
+	for line := range strings.Lines(string(raw)) {
+		f := strings.Fields(line)
+		if !strings.HasSuffix(line, "\n") || len(f) != 2 {
+			continue
+		}
+		a, aerr := strconv.ParseInt(f[0], 10, 64)
+		b, berr := strconv.ParseInt(f[1], 10, 64)
+		if aerr == nil && berr == nil && a >= 0 && b >= 0 {
+			at, from, ok = a, b, true
+		}
+	}
+	return at, from, ok
+}
+
+// writeAt is write for output that says where in the whole of it it
+// belongs: what the recording has already is left out, and a place it
+// skips to is written down before what follows it is.
 func (r *recorder) writeAt(off int64, p []byte) {
-	if skip := r.from - off; skip > 0 {
+	if r.full || r.out == nil {
+		return
+	}
+	if skip := r.end - off; skip > 0 {
 		if skip >= int64(len(p)) {
 			return
 		}
-		p = p[skip:]
+		p, off = p[skip:], r.end
 	}
+	if off > r.end && !r.skipTo(off) {
+		// A recording that could not say where it skipped to would be
+		// wrong about everything after: it stops here instead.
+		r.full = true
+		return
+	}
+	n := r.n
 	r.write(p)
+	r.end = off + r.n - n
+}
+
+// skipTo writes down that the file goes on, from the byte it has reached,
+// with the output at off.
+func (r *recorder) skipTo(off int64) bool {
+	f, err := os.OpenFile(r.gaps, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return false
+	}
+	_, err = fmt.Fprintf(f, "%d %d\n", r.n, off)
+	return errors.Join(err, f.Close()) == nil
 }
 
 // write appends output up to the cap and then stops. Called with the

@@ -44,7 +44,10 @@ import (
 //	                              a frame that is not one, and keep it
 //	FAKE_HOLDER_DEAF=1            ignore Stop, SIGHUP and SIGTERM
 //	FAKE_HOLDER_SIGNALS=<path>    write down each SIGHUP and SIGTERM there
-//	FAKE_HOLDER_UNLINKED=<text>   print that 200 ms after a link drops, once
+//	FAKE_HOLDER_UNLINKED=<text>   print that 200 ms after a link drops, once,
+//	                              and say so in holder.log
+//	FAKE_HOLDER_KEEP=<n>          keep only the last n bytes printed
+//	FAKE_HOLDER_RECORD_LATE=<d>   record the ending that long after saying it
 //	FAKE_HOLDER_REFUSE_LINKS=<n>  refuse the first n links from the daemon
 //	FAKE_HOLDER_MAJOR=<n>         speak protocol n alone, and record it
 //	FAKE_HOLDER_VERSION=<v>       the rota version meta.json names
@@ -75,8 +78,12 @@ func fakeHolder() {
 		os.Exit(1)
 	}
 	terminals := filepath.Join(os.Getenv("ROTA_HOME"), "terminals")
+	keep, err := strconv.Atoi(os.Getenv("FAKE_HOLDER_KEEP"))
+	if err != nil {
+		keep = 1 << 20
+	}
 	f := &fake{terminals: terminals, dir: holdwire.Dir(terminals, req.ID),
-		ring: ring.New(1 << 20), cols: req.Cols, rows: req.Rows}
+		ring: ring.New(keep), cols: req.Cols, rows: req.Rows}
 	if err := f.open(&req); err != nil {
 		fakeReady(holdwire.Ready{Error: err.Error(), Kind: holdwire.KindOther})
 		os.Exit(1)
@@ -268,7 +275,10 @@ func (f *fake) unlink(conn *share.Conn) {
 	}
 	f.mu.Unlock()
 	if gone {
-		time.AfterFunc(200*time.Millisecond, func() { f.print([]byte(text)) })
+		time.AfterFunc(200*time.Millisecond, func() {
+			f.print([]byte(text))
+			f.logf("printed with nobody linked")
+		})
 	}
 }
 
@@ -425,6 +435,9 @@ func (f *fake) exit(code int) {
 	f.mu.Lock()
 	if f.link != nil {
 		_ = f.link.SendJSON(holdwire.Exit, holdwire.ExitMsg{Code: code})
+	}
+	if d, err := time.ParseDuration(os.Getenv("FAKE_HOLDER_RECORD_LATE")); err == nil {
+		time.Sleep(d)
 	}
 	f.meta.Ended, f.meta.Exit = time.Now(), &code
 	_ = holdwire.WriteMeta(f.dir, f.meta)

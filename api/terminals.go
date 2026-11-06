@@ -47,8 +47,9 @@ type termRequest struct {
 // The refusals this file answers with, as constants because they are part of
 // what this server says and a test reads them.
 const (
-	shellOff  = "this server runs accounts' CLIs only; a plain shell needs terminal.shell = true in the server file"
-	noTermFor = "a terminal needs a pseudo-terminal, and this machine has none"
+	shellOff     = "this server runs accounts' CLIs only; a plain shell needs terminal.shell = true in the server file"
+	noTermFor    = "a terminal needs a pseudo-terminal, and this machine has none"
+	termStopping = "this server is stopping; start the terminal again once it is back"
 )
 
 /* --------------------------------------------------------- the endpoints --- */
@@ -57,12 +58,12 @@ const (
 // session its store's records describe besides: the stopped ones, and the
 // running ones it is not linked to.
 func (s *Server) listTerminals(w http.ResponseWriter, _ *http.Request) {
-	terms := s.everyTerminal()
-	out := make([]map[string]any, 0, len(terms))
+	terms, records := s.everySession()
+	out := make([]map[string]any, 0, len(terms)+len(records))
 	for _, ts := range terms {
 		out = append(out, ts.view())
 	}
-	if records := s.stored(); len(records) > 0 {
+	if len(records) > 0 {
 		labels := s.accountLabels()
 		for i := range records {
 			out = append(out, describeRecord(&records[i], labels))
@@ -76,14 +77,11 @@ func (s *Server) listTerminals(w http.ResponseWriter, _ *http.Request) {
 // nil is an id nobody knows, and has been answered.
 func (s *Server) terminalOf(w http.ResponseWriter, r *http.Request) (*termSession, *holdwire.Record) {
 	id := r.PathValue("id")
-	if ts := s.findTerminal(id); ts != nil {
-		return ts, nil
+	ts, rec := s.lookup(id)
+	if ts == nil && rec == nil {
+		fail(w, http.StatusNotFound, "no terminal "+id)
 	}
-	if rec := s.storedRecord(id); rec != nil {
-		return nil, rec
-	}
-	fail(w, http.StatusNotFound, "no terminal "+id)
-	return nil, nil
+	return ts, rec
 }
 
 func (s *Server) describeTerminal(w http.ResponseWriter, r *http.Request) {
@@ -218,7 +216,9 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 	}
 	ts.idleAt = ts.started
 	s.recordTerminal(ts)
-	list(ts)
+	if !list(ts) {
+		return nil, refuse(http.StatusServiceUnavailable, termStopping)
+	}
 	ts.audit("terminal created", "kind", kind, "account", plan.account, "by", who(r).Name)
 	running = true
 	go ts.run()
@@ -231,9 +231,12 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 // in that time would otherwise count the same terminals and find room.
 //
 // list lists the terminal and hands its place over in one step, under the
-// registry's own lock, so nothing ever counts it twice or not at all.
-// list(nil) gives the place back. Only its first call does anything.
-func (s *Server) reserveTerminal() (list func(*termSession), err error) {
+// registry's own lock, so nothing ever counts it twice or not at all. It
+// refuses once Stop has begun, which has ended or let go of every terminal
+// it found and would never find this one: false leaves the terminal to the
+// caller to end, or for a held one to let go of. list(nil) gives the place
+// back. Only its first call does anything.
+func (s *Server) reserveTerminal() (list func(*termSession) bool, err error) {
 	s.startMu.Lock()
 	defer s.startMu.Unlock()
 	if n := s.liveTerminals(); n >= s.opts.Terminal.MaxSessions {
@@ -244,15 +247,18 @@ func (s *Server) reserveTerminal() (list func(*termSession), err error) {
 	s.starting++
 	s.termsMu.Unlock()
 	var once sync.Once
-	return func(ts *termSession) {
+	return func(ts *termSession) bool {
+		listed := false
 		once.Do(func() {
 			s.termsMu.Lock()
 			defer s.termsMu.Unlock()
-			if ts != nil {
-				s.terms[ts.id] = ts
-			}
 			s.starting--
+			if ts != nil && !s.stopping {
+				s.terms[ts.id] = ts
+				listed = true
+			}
 		})
+		return listed
 	}, nil
 }
 
