@@ -158,8 +158,10 @@ func (h *holder) start(in io.Reader, open func() (*store.Store, error)) error {
 		return err
 	}
 	started := time.Now()
-	h.childStart, _ = proc.StartTime(h.child.Pid())
 	h.log("the CLI started", "pid", h.child.Pid(), "path", p.path, "cols", cols, "rows", rows)
+	if h.childStart, err = proc.StartTime(h.child.Pid()); err != nil {
+		h.log("the CLI's start time could not be read: its registry will not be believed, and the daemon cannot tell it from another process with its pid", "err", err)
+	}
 
 	if err := h.listen(); err != nil {
 		return err
@@ -169,8 +171,12 @@ func (h *holder) start(in io.Reader, open func() (*store.Store, error)) error {
 		HolderPID: os.Getpid(), ChildPID: h.child.Pid(), ChildStart: h.childStart,
 		Protocol: holdwire.Major, Version: wire.Version, Cwd: cwd, Started: started,
 	}
-	m.HolderStart, _ = proc.StartTime(m.HolderPID)
-	m.BootID, _ = proc.BootID()
+	if m.HolderStart, err = proc.StartTime(m.HolderPID); err != nil {
+		h.log("the holder's own start time could not be read: the daemon cannot tell it from another process with its pid", "err", err)
+	}
+	if m.BootID, err = proc.BootID(); err != nil {
+		h.log("the boot id could not be read: the daemon cannot tell this session's processes from another boot's", "err", err)
+	}
 	if a := p.account; a != nil {
 		m.Account, m.Provider = a.ID, a.Provider
 		m.Args = holdwire.StoredArgs(a.Provider, h.req.Args)
