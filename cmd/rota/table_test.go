@@ -96,12 +96,13 @@ func framed(t *testing.T, out string, width int) {
 	// Every border of every row sits in the same column as the frame's.
 	joints := func(s string, marks string) []int {
 		var at []int
-		col := 0
-		for _, r := range s {
-			if strings.ContainsRune(marks, r) {
+		r := []rune(s)
+		for i, col := 0, 0; i < len(r); {
+			if strings.ContainsRune(marks, r[i]) {
 				at = append(at, col)
 			}
-			col += runeWidth(r)
+			end, w := char(r, i)
+			i, col = end, col+w
 		}
 		return at
 	}
