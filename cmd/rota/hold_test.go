@@ -274,6 +274,9 @@ func TestTheClaimLivesWithTheCLI(t *testing.T) {
 		t.Fatal("an account held by a session is busy")
 	}
 	child := h.meta().ChildPID
+	// The fake takes no notice of a hang-up only once it runs: by the time
+	// it says it is ready it does, and not necessarily before.
+	h.link().wait("ready")
 
 	if err := h.cmd.Process.Signal(syscall.SIGKILL); err != nil {
 		t.Fatal(err)
