@@ -96,6 +96,29 @@ func TestCaptureVT(t *testing.T) {
 		}
 		save(t, "fake", c.bytes())
 	})
+
+	// Emoji and CJK are two columns wide and a combining mark none, which
+	// is where emulators part ways first. Its goldens come from xterm with
+	// Unicode 11 widths, as real terminals draw them; see scripts/vt/README.
+	t.Run("emoji", func(t *testing.T) {
+		fake := fakecli.Install(t, t.TempDir(), "claude", fakecli.Spec{Tty: true})
+		c := record(t, env, fake)
+		noEcho(t, c.master)
+		c.wait(t, "ready 80x24")
+		esc := "\x1b"
+		for _, p := range []string{
+			esc + "[H" + esc + "[2J",
+			esc + "[2;3Ha✅b🤖c",
+			esc + "[3;3H" + esc + "[32m✅ done" + esc + "[0m " + esc + "[44m🤖 on blue" + esc + "[0m",
+			esc + "[4;3H日本語のテキスト: CJK",
+			esc + "[5;3Hcafe\u0301 man\u0303ana, a\u0301\u0302 two marks",
+			esc + "[6;3H✅日🤖e\u0301|",
+			esc + "[8;1H🤖✅",
+		} {
+			c.typed(t, "print "+hex.EncodeToString([]byte(p))+"\n")
+		}
+		save(t, "emoji", c.bytes())
+	})
 }
 
 // capture is one program on a terminal, and everything it has written.

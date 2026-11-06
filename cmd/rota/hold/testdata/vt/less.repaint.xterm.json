@@ -1,4 +1,5 @@
 {
+ "sha256": "9eeb229137d65dc33abcf85a5bda3a2734540d276b283918513bce4e28d9243b",
  "rows": [
   "less -R sample: colours, styles and wide runes for the emulator spike",
   "basic 0: foreground background bright bright bg",
