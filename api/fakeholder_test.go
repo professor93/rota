@@ -52,12 +52,19 @@ import (
 //	FAKE_HOLDER_MAJOR=<n>         speak protocol n alone, and record it
 //	FAKE_HOLDER_VERSION=<v>       the rota version meta.json names
 //	FAKE_HOLDER_CONVERSATION_CWD  the folder the conversation is in
+//	FAKE_HOLDER_RECORD=<path>     write down each input, resize and send there
+//	FAKE_HOLDER_SEND=waiting      answer a send that the session waits on its
+//	                              person, unless it is forced
+//	FAKE_HOLDER_SEND=exit         take a send, answer nothing, and exit 0
+//	                              200 ms later
 //
 // The conversation and its folder are written into meta.json as well, as a
 // real holder keeps them there for a session that has stopped.
 //
 // Typed lines are its commands: "exit N" ends it with code N, "count N"
-// prints N numbered lines, and anything else is answered "got:<line>".
+// prints N numbered lines, "flood N" prints N lines of a kilobyte as fast as
+// it can and then "flood done", and anything else is answered "got:<line>". A send is
+// typed as its text and Enter.
 func fakeHolder() {
 	// However a test fails, no fake outlives it by much.
 	time.AfterFunc(2*time.Minute, func() { os.Exit(3) })
@@ -244,7 +251,7 @@ func (f *fake) serve(c net.Conn) {
 		return
 	}
 	f.mu.Lock()
-	w := holdwire.WelcomeMsg{Major: major, Features: []string{holdwire.FeatScreen, holdwire.FeatState, holdwire.FeatStop},
+	w := holdwire.WelcomeMsg{Major: major, Features: []string{holdwire.FeatScreen, holdwire.FeatState, holdwire.FeatSend, holdwire.FeatStop},
 		Version: "fake", Oldest: f.ring.Oldest(), End: f.ring.End(), Cols: f.cols, Rows: f.rows}
 	f.mu.Unlock()
 	if conn.SendJSON(holdwire.Welcome, w) != nil || conn.SendJSON(holdwire.State, f.state()) != nil {
@@ -310,6 +317,7 @@ func (f *fake) frame(conn *share.Conn, c net.Conn, kind byte, payload []byte) {
 		if err != nil {
 			return
 		}
+		f.record("input %q", p)
 		if no := os.Getenv("FAKE_HOLDER_REFUSE"); no != "" && bytes.Contains(p, []byte(no)) {
 			_ = conn.SendJSON(holdwire.InputRefused, holdwire.InputRefusedMsg{Seq: seq,
 				Message: "the session is not taking keystrokes this fast; that input was not typed"})
@@ -319,6 +327,7 @@ func (f *fake) frame(conn *share.Conn, c net.Conn, kind byte, payload []byte) {
 	case holdwire.Resize:
 		var msg holdwire.SizeMsg
 		_ = share.Unmarshal(payload, &msg)
+		f.record("resize %dx%d", msg.Cols, msg.Rows)
 		f.mu.Lock()
 		f.cols, f.rows = msg.Cols, msg.Rows
 		f.mu.Unlock()
@@ -327,12 +336,47 @@ func (f *fake) frame(conn *share.Conn, c net.Conn, kind byte, payload []byte) {
 		var msg holdwire.ScreenAskMsg
 		_ = share.Unmarshal(payload, &msg)
 		f.screen(conn, msg.Seq)
+	case holdwire.Send:
+		var msg holdwire.SendMsg
+		_ = share.Unmarshal(payload, &msg)
+		f.sent(conn, &msg)
 	case holdwire.Stop:
 		if os.Getenv("FAKE_HOLDER_DEAF") == "" {
 			go f.exit(129)
 		}
 	case holdwire.Ping:
 		_ = conn.Send(holdwire.Pong, nil)
+	}
+}
+
+// sent answers a Send the way the environment says. Typed, it is its text
+// and Enter, as the real holder types it.
+func (f *fake) sent(conn *share.Conn, msg *holdwire.SendMsg) {
+	f.record("send %q force=%t wait=%d", msg.Text, msg.Force, msg.WaitMS)
+	switch os.Getenv("FAKE_HOLDER_SEND") {
+	case "exit":
+		time.AfterFunc(200*time.Millisecond, func() { f.exit(0) })
+		return
+	case "waiting":
+		if !msg.Force {
+			_ = conn.SendJSON(holdwire.Sent, holdwire.SentMsg{Seq: msg.Seq, Code: holdwire.SentWaiting,
+				Message: "the session is waiting for the person (permission)"})
+			return
+		}
+	}
+	f.typed([]byte(msg.Text + "\r"))
+	_ = conn.SendJSON(holdwire.Sent, holdwire.SentMsg{Seq: msg.Seq})
+}
+
+// record writes one line about what the daemon sent, for a test to read.
+func (f *fake) record(format string, args ...any) {
+	path := os.Getenv("FAKE_HOLDER_RECORD")
+	if path == "" {
+		return
+	}
+	if w, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		fmt.Fprintf(w, format+"\n", args...)
+		w.Close()
 	}
 }
 
@@ -366,6 +410,11 @@ func (f *fake) screen(conn *share.Conn, seq uint64) {
 	}
 }
 
+// floodLine fills out a flood's line to a kilobyte, so that a flood of tens
+// of thousands is more than any kernel buffers for a reader that stopped
+// reading.
+var floodLine = strings.Repeat(".", 1000)
+
 // typed takes keystrokes a line at a time.
 func (f *fake) typed(p []byte) {
 	f.mu.Lock()
@@ -394,6 +443,13 @@ func (f *fake) command(line string) {
 		go f.exit(n)
 	case "count":
 		go f.count(n)
+	case "flood":
+		go func() {
+			for i := 1; i <= n; i++ {
+				f.print(fmt.Appendf(nil, "flood-%06d %s\r\n", i, floodLine))
+			}
+			f.print([]byte("flood done\r\n"))
+		}()
 	default:
 		f.print([]byte("got:" + line + "\r\n"))
 	}

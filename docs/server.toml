@@ -31,6 +31,8 @@ token = ""                # the bearer token, if you keep it here
 token_file = ""           # or a file holding it, under the same permission rule
 token_env = "ROTA_TOKEN"  # or the name of the variable that holds it
 session_ttl = "12h"       # how long a sign-in on the page lasts
+local_user = ""           # the [[users]] entry this machine's own terminal types as,
+                          # when more than one may control
 
 # Whole groups of routes, on or off. A group that is off is not registered,
 # so its paths answer 404 like any path this server never had.

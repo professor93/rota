@@ -77,7 +77,7 @@ const (
 var errHeldAway = errors.New("this session's holder is not linked right now; that was not passed on")
 
 // heldFeatures are the holder features this server uses.
-var heldFeatures = []string{holdwire.FeatScreen, holdwire.FeatState, holdwire.FeatStop}
+var heldFeatures = []string{holdwire.FeatScreen, holdwire.FeatState, holdwire.FeatSend, holdwire.FeatStop}
 
 /* ---------------------------------------------------------------- the link --- */
 
@@ -171,6 +171,9 @@ type heldTerm struct {
 	typed   [heldTyped]typist
 	askSeq  uint64
 	asks    map[uint64]chan *heldScreen
+	// sends are the sends waiting for the holder's answer, by sequence.
+	sendSeq uint64
+	sends   map[uint64]*sending
 }
 
 func (h *heldTerm) link() *share.Conn {
@@ -331,7 +334,17 @@ func (h *heldTerm) run(termSink) int {
 		if conn != nil {
 			conn.Close()
 		}
-		if code, back := h.relink(); !back {
+		code, back := h.relink()
+		// A send that went down the link that broke is answered now, once
+		// it is known whether the holder is still there: a holder drops a
+		// send whose link closes before it types it. One whose CLI ended
+		// was answered as ended when the state was set.
+		if conn != nil {
+			h.mu.Lock()
+			h.answerSends(conn, sentUnlinked)
+			h.mu.Unlock()
+		}
+		if !back {
 			return code
 		}
 	}
@@ -392,6 +405,11 @@ func (h *heldTerm) read(conn *share.Conn) (code int, ended bool) {
 			var msg holdwire.InputRefusedMsg
 			if share.Unmarshal(payload, &msg) == nil {
 				h.refused(&msg)
+			}
+		case holdwire.Sent:
+			var msg holdwire.SentMsg
+			if share.Unmarshal(payload, &msg) == nil {
+				h.sent(&msg)
 			}
 		case holdwire.Ping:
 			_ = conn.Send(holdwire.Pong, nil)
@@ -482,6 +500,9 @@ func (h *heldTerm) setState(state string) {
 		h.stopped = h.s.now()
 	}
 	h.state = state
+	if state != heldLive {
+		h.answerSends(nil, holdwire.SentEnded)
+	}
 }
 
 // noteState keeps what the holder last said about the session. A registry
