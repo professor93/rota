@@ -632,7 +632,7 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended` or `interrupted`), `attachable`, `pid` (its holder), `name`, `title`, `conversation` and `status` (`running`, `needs_you`, `quiet` or `stopped`) |
 | `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard, and the same held fields |
 | `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one |
-| `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later |
+| `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended |
 | `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame |
 | `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
@@ -1507,7 +1507,7 @@ nothing at all.
 | `GET /v1/terminals/{id}` | one of them (watch) |
 | `GET /v1/terminals/{id}/ws?since=N&mode=…` | attach (watch) |
 | `POST /v1/terminals` | start one (control) |
-| `DELETE /v1/terminals/{id}` | end one: a hangup, then a kill three seconds later (control) |
+| `DELETE /v1/terminals/{id}` | end one: a hangup, then a kill three seconds later, or five for a held session (control) |
 
 ```bash
 curl -X POST localhost:8787/v1/terminals -H "Authorization: Bearer $ROTA_TOKEN" \
@@ -1568,7 +1568,7 @@ Out:
 | `claim_request{by,id}` | somebody is asking the holder for it |
 | `resized{cols,rows}` | the terminal is a different size now |
 | `viewers{list}` | who is attached: name, role and since — never an address |
-| `gap{from,to}` | `since` was older than the scrollback; these bytes are gone |
+| `gap{from,to,bytes}` | bytes you will never be sent: `since` was older than the scrollback (`from` to `to`, before any output), or, mid-stream, `bytes` of output that never reached this server — a shared terminal's queue that overflowed, or a held session's holder that printed past what its link carried; the offsets go on from `to` |
 | `exit{code}` | the CLI ended |
 | `error{message}` | a frame that was read and will not be acted on |
 | `pong` | the answer to `ping` |
@@ -1591,7 +1591,9 @@ be sent; add the length of every binary frame to it and you have the number
 to reconnect with. `?since=N` gives you everything from there; saying nothing
 gives you the whole scrollback, which is what a page opening a terminal for
 the first time wants. If `N` is older than `scrollback_bytes`, a `gap` frame
-comes first and says exactly which bytes were lost.
+comes first and says exactly which bytes were lost. A `gap` can also come in
+the middle of the output, for bytes this server itself never received; the
+next binary frame then starts at its `to`.
 
 **Falling behind.** Each connection has a bounded queue and the terminal
 never waits for one: a reader that stops reading is closed with `1013` and
