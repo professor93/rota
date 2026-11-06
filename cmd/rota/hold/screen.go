@@ -50,6 +50,7 @@ type Screen struct {
 	// held is the end of what the program has printed so far, kept from
 	// the emulator until what follows shows whether it is finished.
 	held []byte
+	reps reps
 }
 
 // NewScreen starts an emulator of the given size.
@@ -130,6 +131,8 @@ func (s *Screen) Resize(cols, rows int) {
 	defer s.catch()
 	s.settle()
 	s.em.Resize(cols, rows)
+	// What a run of repeats drew is not a full screen at the new size.
+	s.reps.run = 0
 }
 
 // Cursor is where the cursor is, 1-based, as a CPR reports it. Without an

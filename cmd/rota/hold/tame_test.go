@@ -253,3 +253,165 @@ func TestALongRunIsNotHeldForever(t *testing.T) {
 		t.Fatalf("%d bytes are held", len(s.held))
 	}
 }
+
+// TestAWriteOfRepeatsTakesNoTime: a REP capped at two screens still takes
+// milliseconds, and a write packed with them took seconds under the screen's
+// lock, 4 KiB of ESC[99999999b at 200×60. A run of REPs one straight
+// after another is one REP of their total, which the screen draws two
+// screens of and then only the remainder of each. Past two screens of
+// repeats beyond a row's worth each, a write drops a REP that would draw
+// more; a REP of a row or less is never dropped.
+func TestAWriteOfRepeatsTakesNoTime(t *testing.T) {
+	const w, h, size = 200, 60, 32 << 10
+	const rep = "\x1b[99999999b"
+	quick := func(t *testing.T, in string) *Screen {
+		t.Helper()
+		start := time.Now()
+		s := guarded(t, w, h, in)
+		if took := time.Since(start); took > slow*200*time.Millisecond {
+			t.Errorf("%d bytes took %v", len(in), took)
+		}
+		if !s.OK() {
+			t.Fatal("the screen retired")
+		}
+		return s
+	}
+	t.Run("one run", func(t *testing.T) {
+		k := size / len(rep)
+		s := quick(t, "x"+strings.Repeat(rep, k))
+		// k REPs of 99999999 draw what two screens and the rest of
+		// k·99999999 over the width draw.
+		m := 2*w*h + int(int64(k)*99999999%w)
+		want := unguarded(t, w, h, fmt.Sprintf("x\x1b[%db", m))
+		if d := screenDiff("x/vt", "screen", doc(t, want), doc(t, s)); d != "" {
+			t.Errorf("%d REPs in a row:\n%s", k, d)
+		}
+	})
+	t.Run("between characters", func(t *testing.T) {
+		k := size / (len(rep) + 1)
+		s := quick(t, strings.Repeat("x"+rep, k))
+		// The first REP draws its two screens and the rest of 99999999
+		// over the width; every later one is past the budget, and only its
+		// x is drawn.
+		want := unguarded(t, w, h, fmt.Sprintf("x\x1b[%db%s", 2*w*h+99999999%w, strings.Repeat("x", k-1)))
+		if d := screenDiff("budget", "screen", doc(t, want), doc(t, s)); d != "" {
+			t.Errorf("%d REPs between characters:\n%s", k, d)
+		}
+	})
+	t.Run("rows of a TUI", func(t *testing.T) {
+		// What ncurses sends for a row of one character, a frame after a
+		// frame, more than two screens of repeats in all.
+		const w, h = 80, 24
+		var b strings.Builder
+		for f := 0; b.Len() < size; f++ {
+			for y := 1; y <= h; y++ {
+				fmt.Fprintf(&b, "\x1b[%d;1H%c\x1b[%db", y, 'a'+(f+y)%26, w-1)
+			}
+		}
+		in := b.String()
+		s := guarded(t, w, h, in)
+		if d := screenDiff("x/vt", "screen", doc(t, unguarded(t, w, h, in)), doc(t, s)); d != "" {
+			t.Errorf("%d bytes of rows drawn by REP:\n%s", len(in), d)
+		}
+	})
+}
+
+// TestARunOfRepeatsDrawsWhatItsFullCountDraws runs REPs one straight after
+// another, around and past two screens, in one write and cut across two,
+// followed by what ends a run, against x/vt running every full count.
+func TestARunOfRepeatsDrawsWhatItsFullCountDraws(t *testing.T) {
+	setups := []struct {
+		name, in string
+		small    bool // fits a 1×1 screen
+	}{
+		{"home", "x", true},
+		{"no autowrap", "\x1b[?7lx", true},
+		{"coloured", "\x1b[41;33mx", true},
+		{"mid-screen", "\x1b[2;4Hx", false},
+		{"in a region", "\x1b[2;3r\x1b[2;1Hx", false},
+		{"left and right margins", "\x1b[?69h\x1b[3;6s\x1b[2;4Hx", false},
+	}
+	for _, size := range [][2]int{{10, 4}, {1, 1}} {
+		w, h := size[0], size[1]
+		floor := 2 * w * h
+		// What follows a run: nothing; a sequence and a character; a
+		// control and a new run longer than a row; a REP x/vt takes as the
+		// run's next and the screen does not; one cut across two writes; an
+		// ESC sequence and a character held back.
+		followers := [][2]string{
+			{"", ""}, {"\x1b[1my", ""}, {fmt.Sprintf("\r\x1b[%db", w+3), ""}, {"\x1b[3;5b", ""},
+			{"\x1b[", "4by"}, {"\x1b7é", ""},
+		}
+		var runs [][]int
+		counts := []int{1, w + 1, floor - 1, floor + w + 3, 5*floor + 7}
+		for _, a := range counts {
+			for _, b := range counts {
+				runs = append(runs, []int{a, b})
+			}
+		}
+		runs = append(runs, []int{5*floor + 7, 5*floor + 7, 5*floor + 7}, []int{floor - 1, 1, 5*floor + 7},
+			[]int{floor + w + 3, 0, w + 1}, []int{0, 0, floor + w + 3})
+		for _, setup := range setups {
+			if !setup.small && h < 3 {
+				continue
+			}
+			t.Run(fmt.Sprintf("%dx%d %s", w, h, setup.name), func(t *testing.T) {
+				for _, counts := range runs {
+					var run []string
+					for _, n := range counts {
+						run = append(run, fmt.Sprintf("\x1b[%db", n))
+					}
+					for _, f := range followers {
+						whole := setup.in + strings.Join(run, "") + f[0] + f[1]
+						want := doc(t, unguarded(t, w, h, whole))
+						for _, cut := range []struct {
+							name string
+							in   []string
+						}{
+							{"one write", []string{whole}},
+							{"two writes", []string{setup.in + run[0], strings.Join(run[1:], "") + f[0], f[1]}},
+						} {
+							s := guarded(t, w, h, cut.in...)
+							if d := screenDiff("x/vt", cut.name, want, doc(t, s)); d != "" {
+								t.Fatalf("%q in %s:\n%s", cut.in, cut.name, d)
+							}
+							s.Close()
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// TestARunOfRepeatsEndsAtAResize: a run that filled its region before a
+// resize has filled nothing the size after, so a REP after a resize is a
+// run's first.
+func TestARunOfRepeatsEndsAtAResize(t *testing.T) {
+	for _, c := range []struct {
+		before, after string
+		w, h          int
+	}{
+		{"x\x1b[99b", "\x1b[10b", 7, 3},
+		{"x\x1b[99b", "\x1b[99b", 20, 8},
+		{"\x1b[2;3r\x1b[2;1Hx\x1b[99b", "\x1b[10b", 7, 3},
+		{"\x1b[2;3r\x1b[2;1Hx\x1b[99b", "\x1b[3b", 7, 3},
+		{"\x1b[?69h\x1b[3;6s\x1b[2;4Hx\x1b[99b", "\x1b[9b", 9, 4},
+	} {
+		s := guarded(t, 10, 4, c.before)
+		s.Resize(c.w, c.h)
+		s.Write([]byte(c.after))
+		want := unguarded(t, 10, 4, c.before)
+		func() {
+			want.mu.Lock()
+			defer want.mu.Unlock()
+			want.em.Resize(c.w, c.h)
+			if _, err := want.em.Write([]byte(c.after)); err != nil {
+				t.Fatal(err)
+			}
+		}()
+		if d := screenDiff("x/vt", "screen", doc(t, want), doc(t, s)); d != "" {
+			t.Errorf("%q, a resize to %dx%d, then %q:\n%s", c.before, c.w, c.h, c.after, d)
+		}
+	}
+}
