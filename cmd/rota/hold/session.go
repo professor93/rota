@@ -542,13 +542,17 @@ func (s *Session) life() {
 	}
 	_ = s.child.Close()
 	s.w.stop()
-	// Nothing feeds the screen once Done is closed. A repaint asked for
-	// after this still catches up by itself.
+	// Nothing feeds the screen from here, and it is closed before Done, so
+	// neither its emulator nor the goroutine reading the emulator's answers
+	// outlives the session. A repaint asked for after this answers OK=false,
+	// and the daemon has the Exit by now anyway.
 	close(s.finished)
 	select {
 	case <-s.emDone:
+		s.screen.Close()
 	case <-time.After(exitFlush):
 		s.log("the screen did not stop in time")
+		go s.screen.Close()
 	}
 	if s.cfg.OnExit != nil {
 		s.safely("OnExit", func() { s.cfg.OnExit(code) })
