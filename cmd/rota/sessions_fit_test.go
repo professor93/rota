@@ -478,6 +478,32 @@ func TestPlainDrawsAControlCharacterAsASpace(t *testing.T) {
 	}
 }
 
+// A newline in a directory or a name is a space too, so its row stays one
+// line, lined up with the rest, on a terminal of any width and off one.
+func TestPlainDrawsANewlineAsASpace(t *testing.T) {
+	broken, spaced := longReport(), longReport()
+	broken.Instances[0].Dir = "/Users/someone/a\nb/services/api"
+	spaced.Instances[0].Dir = "/Users/someone/a b/services/api"
+	broken.Sessions[1].Dir = "/Users/someone/work\n\nterraform"
+	spaced.Sessions[1].Dir = "/Users/someone/work  terraform"
+	broken.Sessions[0].Name = "two\nlines"
+	spaced.Sessions[0].Name = "two lines"
+	for _, width := range []int{0, 200, 80, 60, 40, 24} {
+		got, want := sessionsOf(broken, width), sessionsOf(spaced, width)
+		if got != want {
+			t.Fatalf("at %d:\n%s\nwant:\n%s", width, got, want)
+		}
+	}
+	g := grid{plain: true}
+	g.add("●", "claude", "/a\nb", "pid 1")
+	g.add("●", "GoLand", "/c", "pid 2")
+	var out bytes.Buffer
+	g.render(&out)
+	if want := "  ●  claude  /a b  pid 1\n  ●  GoLand  /c    pid 2\n"; out.String() != want {
+		t.Fatalf("got %q, want %q", out.String(), want)
+	}
+}
+
 // emojiReport is longReport with emoji in its titles and directories: a
 // flag, a skin tone, a joined pair, and a symbol asked to be a picture.
 func emojiReport() sessions.Report {
