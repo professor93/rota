@@ -13,6 +13,7 @@ import (
 
 	rota "github.com/professor93/rota/lib"
 
+	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/pty"
 	"github.com/professor93/rota/internal/ring"
 )
@@ -1333,29 +1334,11 @@ func nameOrNil(name string) any {
 	return name
 }
 
-// boundSize keeps a terminal to a size a terminal can be. Zero is the
-// default rather than an error — a client that says nothing means the
-// ordinary eighty by twenty-four — and the ceiling is there because the
-// numbers arrive from whoever is connected.
-func boundSize(cols, rows uint16) (uint16, uint16) {
-	if cols == 0 {
-		cols = 80
-	}
-	if rows == 0 {
-		rows = 24
-	}
-	if cols > maxTermCols {
-		cols = maxTermCols
-	}
-	if rows > maxTermRows {
-		rows = maxTermRows
-	}
-	return cols, rows
-}
+// boundSize keeps a terminal to a size a terminal can be, the same bound a
+// holder keeps its pty to.
+func boundSize(cols, rows uint16) (uint16, uint16) { return holdwire.BoundSize(cols, rows) }
 
 const (
-	maxTermCols = 1000
-	maxTermRows = 1000
 	// defaultScrollback is two megabytes: enough that a person scrolling
 	// back finds what they were looking at, small enough that eight
 	// terminals are sixteen megabytes.
