@@ -7,9 +7,14 @@ capture in cmd/rota/hold/testdata/vt, x/vt's final screen must be xterm's,
 cell for cell, and so must the screen x/vt's repaint draws in xterm.
 
 xterm's side is golden.mjs, run on @xterm/headless 5.5.0, the same release as
-the xterm.js the web page serves (api/assets/xterm). Its output is committed
-as <name>.xterm.json beside each capture. The package itself never is: it is
-fetched, checked, into a directory of its own, and used from there.
+the xterm.js the web page serves (api/assets/xterm), with
+@xterm/addon-unicode11 0.8.0, the addon released beside it, active. xterm's
+own widths are Unicode 6's, where an emoji such as ✅ takes one column; real
+terminals and x/vt give it two, as Unicode 11 does. On the other captures
+the two draw the same screen, byte for byte. golden.mjs
+writes its output as <name>.xterm.json beside each capture. The packages
+themselves are never committed: they are fetched, checked, into a directory
+of their own, and used from there.
 
 What is in a capture directory
 ------------------------------
@@ -20,51 +25,71 @@ What is in a capture directory
   <name>.repaint.xterm.json xterm's screen after <name>.repaint.bin
   sample.go, sample.ansi    what vim and less were shown
 
-The captures are vim (stopped before it quits), vim-quit, less and the fake
-CLI. TestCaptureVT records them; it runs vim and less with HOME in a temporary
+The captures are vim (stopped before it quits), vim-quit, less, the fake CLI
+(fake) and the fake CLI printing emoji, CJK and combining marks (emoji).
+TestCaptureVT records them; it runs vim and less with HOME in a temporary
 directory and -u NONE, so nobody's own settings reach a capture.
+
+Each .xterm.json starts with the sha256 of the .bin it was made from, and the
+tests check it, so a golden left over from an older capture or repaint fails
+instead of passing on a screen nobody drew.
+
+Not covered: x/vt measures a whole grapheme cluster, so ✔️ with its
+variation selector, a ZWJ sequence such as 👩‍💻 and a flag are each one cell
+two columns wide, as in terminals that do the same. xterm 5.5 measures each
+code point, even with Unicode 11: ✔️ takes one column, 👩‍💻 two cells of two,
+and a flag two cells of one.
 
 xterm 5.5 cannot report the mouse encoding or the kitty keyboard flags, so the
 tests check those two for fake.bin against the values its script set.
 
-To fetch @xterm/headless 5.5.0
-------------------------------
+To fetch @xterm/headless 5.5.0 and @xterm/addon-unicode11 0.8.0
+---------------------------------------------------------------
 
-1. Read the registry metadata and take that version's dist.integrity:
-     curl -s https://registry.npmjs.org/@xterm/headless | python3 -I -c \
-       "import json,sys; print(json.load(sys.stdin)['versions']['5.5.0']['dist'])"
-   For 5.5.0 it is
+1. Read the registry metadata and take each version's dist.integrity:
+     for p in headless:5.5.0 addon-unicode11:0.8.0; do
+       curl -s https://registry.npmjs.org/@xterm/${p%%:*} | python3 -I -c \
+         "import json,sys; print(json.load(sys.stdin)['versions'][sys.argv[1]]['dist']['integrity'])" ${p#*:}
+     done
+   They are
      sha512-5xXB7kdQlFBP82ViMJTwwEc3gKCLGKR/eoxQm4zge7GPBl86tCdI0IdPJjoKd8mUSFXz5V7i/25sfsEkP4j46g==
-2. Fetch the tarball into a fresh directory and check it against that sha512
-   before opening it:
+     sha512-LxinXu8SC4OmVa6FhgwsVCBZbr8WoSGzBl2+vqe8WcQ6hb1r6Gj9P99qTNdPiFPh4Ceiu2pC8xukZ6+2nnh49Q==
+2. Fetch the tarballs into a fresh directory and check each against its
+   sha512 before opening it:
      dir=$(mktemp -d) && cd "$dir" &&
        curl -sO https://registry.npmjs.org/@xterm/headless/-/headless-5.5.0.tgz &&
-       python3 -I -c "import base64,hashlib,sys;\
-         print('sha512-'+base64.b64encode(hashlib.sha512(open(sys.argv[1],'rb').read()).digest()).decode())" \
-         headless-5.5.0.tgz
-3. Only when the two match, unpack it there:
-     mkdir -p node_modules/@xterm/headless &&
-       tar -xzf headless-5.5.0.tgz -C node_modules/@xterm/headless --strip-components=1
-   The package has no dependencies, so there is nothing else to install.
+       curl -sO https://registry.npmjs.org/@xterm/addon-unicode11/-/addon-unicode11-0.8.0.tgz &&
+       for f in headless-5.5.0.tgz addon-unicode11-0.8.0.tgz; do
+         python3 -I -c "import base64,hashlib,sys;\
+           print('sha512-'+base64.b64encode(hashlib.sha512(open(sys.argv[1],'rb').read()).digest()).decode())" $f
+       done
+3. Only when they match, unpack them there:
+     for p in headless:headless-5.5.0 addon-unicode11:addon-unicode11-0.8.0; do
+       mkdir -p node_modules/@xterm/${p%%:*} &&
+         tar -xzf ${p#*:}.tgz -C node_modules/@xterm/${p%%:*} --strip-components=1
+     done
+   Neither package has dependencies, so there is nothing else to install.
 
 To make the goldens
 -------------------
 
 From the repository root, with dir from step 2:
 
-  ROTA_VT_CAPTURE=1 go test -count=1 -run TestCaptureVT ./cmd/rota/hold/
+  ROTA_VT_CAPTURE=1 go -C cmd/rota test -count=1 -run TestCaptureVT ./hold/
   export XTERM_HEADLESS="$dir/node_modules/@xterm/headless"
-  cd cmd/rota/hold/testdata/vt
-  for n in vim vim-quit less fake; do
-    node ../../../../../scripts/vt/golden.mjs $n.bin 80 24 >$n.xterm.json
+  export XTERM_UNICODE11="$dir/node_modules/@xterm/addon-unicode11"
+  for n in vim vim-quit less fake emoji; do
+    node scripts/vt/golden.mjs cmd/rota/hold/testdata/vt/$n.bin 80 24 \
+      >cmd/rota/hold/testdata/vt/$n.xterm.json
   done
 
 The repaints come from the holder's own code, so they are made by the test
-that checks them:
+that checks them, and their goldens after them:
 
-  ROTA_VT_GOLDEN=1 go test -count=1 -run TestRepaintReproducesTheScreen ./cmd/rota/hold/
-  for n in vim vim-quit less fake; do
-    node ../../../../../scripts/vt/golden.mjs $n.repaint.bin 80 24 >$n.repaint.xterm.json
+  ROTA_VT_GOLDEN=1 go -C cmd/rota test -count=1 -run TestRepaintReproducesTheScreen ./hold/
+  for n in vim vim-quit less fake emoji; do
+    node scripts/vt/golden.mjs cmd/rota/hold/testdata/vt/$n.repaint.bin 80 24 \
+      >cmd/rota/hold/testdata/vt/$n.repaint.xterm.json
   done
 
 and the test is run again without ROTA_VT_GOLDEN to check them. A capture

@@ -2,14 +2,20 @@
 // screen afterwards, as the JSON the holder's screen tests compare x/vt with.
 //
 //   XTERM_HEADLESS=<dir>/node_modules/@xterm/headless \
+//   XTERM_UNICODE11=<dir>/node_modules/@xterm/addon-unicode11 \
 //     node scripts/vt/golden.mjs <bin> <cols> <rows> > <name>.xterm.json
 //
-// xterm is the reference because it is what the web page draws with. The
-// package is never committed and never installed here: scripts/vt/README says
-// how to fetch it, checked, into a directory of its own.
+// xterm is the reference because it is what the web page draws with. It
+// measures characters by Unicode 11 through @xterm/addon-unicode11 0.8.0, so
+// an emoji such as ✅ is two columns wide, as in real terminals and in x/vt;
+// xterm's own default, Unicode 6, makes it one. Neither package is ever
+// committed or installed here: scripts/vt/README says how to fetch them,
+// checked, into a directory of their own.
 //
-// The document has four parts:
+// The document has five parts:
 //
+//   sha256  the sha256 of the bytes it was made from, so a test can tell a
+//           golden made from another capture or another repaint
 //   rows    each row's text, trailing blanks trimmed
 //   cells   each cell that shows something: a character that is not blank, or
 //           a background, inverse or underline that a blank still shows
@@ -19,6 +25,7 @@
 // A colour is "default", "p<n>" for the palette or "#rrggbb". The second half
 // of a wide character is not a cell of its own. A cursor waiting to wrap past
 // the last column is reported in that column, where both emulators keep it.
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 
@@ -28,14 +35,25 @@ if (!file || !(cols > 0) || !(rows > 0)) {
   process.exit(2);
 }
 const pkg = process.env.XTERM_HEADLESS;
-if (!pkg) {
-  console.error('golden.mjs: set XTERM_HEADLESS to the @xterm/headless 5.5.0 directory; see scripts/vt/README');
+const u11 = process.env.XTERM_UNICODE11;
+if (!pkg || !u11) {
+  console.error('golden.mjs: set XTERM_HEADLESS to the @xterm/headless 5.5.0 directory and ' +
+    'XTERM_UNICODE11 to the @xterm/addon-unicode11 0.8.0 one; see scripts/vt/README');
   process.exit(2);
 }
-const { Terminal } = createRequire(import.meta.url)(pkg);
+const load = createRequire(import.meta.url);
+const { Terminal } = load(pkg);
+const { Unicode11Addon } = load(u11);
 
 const term = new Terminal({ cols: +cols, rows: +rows, allowProposedApi: true, scrollback: 0 });
-await new Promise((done) => term.write(readFileSync(file), done));
+term.loadAddon(new Unicode11Addon());
+term.unicode.activeVersion = '11';
+if (term.unicode.activeVersion !== '11') {
+  console.error('golden.mjs: xterm did not take Unicode 11 widths');
+  process.exit(1);
+}
+const bin = readFileSync(file);
+await new Promise((done) => term.write(bin, done));
 
 function colour(mode, palette, rgb, value) {
   if (mode) return 'default';
@@ -45,7 +63,7 @@ function colour(mode, palette, rgb, value) {
 }
 
 const buf = term.buffer.active;
-const doc = { rows: [], cells: [], cursor: null, modes: null };
+const doc = { sha256: createHash('sha256').update(bin).digest('hex'), rows: [], cells: [], cursor: null, modes: null };
 for (let y = 0; y < term.rows; y++) {
   const line = buf.getLine(buf.baseY + y);
   // translateToString(true) trims only cells nothing was written to; a space
@@ -84,7 +102,7 @@ doc.modes = {
 };
 
 // One row and one cell to a line, so a changed golden reads as a diff.
-const out = ['{', ' "rows": ['];
+const out = ['{', ' "sha256": ' + JSON.stringify(doc.sha256) + ',', ' "rows": ['];
 doc.rows.forEach((r, i) => out.push('  ' + JSON.stringify(r) + (i < doc.rows.length - 1 ? ',' : '')));
 out.push(' ],', ' "cells": [');
 doc.cells.forEach((c, i) => out.push('  ' + JSON.stringify(c) + (i < doc.cells.length - 1 ? ',' : '')));
