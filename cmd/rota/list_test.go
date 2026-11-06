@@ -1,7 +1,11 @@
 package main
 
 import (
+	"encoding/json/jsontext"
 	"fmt"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -167,4 +171,62 @@ func TestListSaysSoWhenNoReasonWasKept(t *testing.T) {
 	if !strings.Contains(out, "re-auth needed (") || !strings.Contains(out, "kept no reason") {
 		t.Fatalf("the status cell has something to say:\n%s", out)
 	}
+}
+
+// `list --json` is a map at the top, and a map is written with its keys
+// sorted: the same store lists as the same bytes every time, so a script can
+// diff two listings. Unsorted, "default" led the document in some runs and
+// not in others.
+func TestListJSONKeepsItsKeysInOneOrder(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	claude := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claude)
+	writeStore(t, home, `{"ordered":true,"nextId":3,"accounts":[
+		{"id":1,"provider":"claude","email":"a@x","order":1,"token":{"accessToken":"t"}},
+		{"id":2,"provider":"claude","email":"b@x","order":2,"token":{"accessToken":"t"}}]}`)
+	p := filepath.Join(claude, "projects", "-x", "abcdef12-3456-7890-abcd-ef1234567890.jsonl")
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(`{"type":"user","cwd":"/x"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"accounts", "default", "instances", "sessions", "shared"}
+	// "notes" says what this machine would not let the scan read (lsof can
+	// fail under load), so it comes and goes; when it is there, it is in
+	// its sorted place.
+	withNotes := slices.Insert(slices.Clone(want), 3, "notes")
+	// Several tries, because an unsorted map is only sometimes out of order.
+	for i := range 8 {
+		out, errOut, code := call(t, "--json", "list", "--short", "--sessions")
+		if code != 0 {
+			t.Fatalf("%d %q", code, errOut)
+		}
+		if got := topKeys(t, out); !slices.Equal(got, want) && !slices.Equal(got, withNotes) {
+			t.Fatalf("try %d: top-level keys %q, want %q\n%s", i, got, want, out)
+		}
+	}
+}
+
+// topKeys is the names of a JSON object's members, in the order written.
+func topKeys(t *testing.T, doc string) []string {
+	t.Helper()
+	dec := jsontext.NewDecoder(strings.NewReader(doc))
+	if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '{' {
+		t.Fatalf("not an object (%v):\n%s", err, doc)
+	}
+	var names []string
+	for dec.PeekKind() != '}' {
+		tok, err := dec.ReadToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		names = append(names, tok.String())
+		if err := dec.SkipValue(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return names
 }
