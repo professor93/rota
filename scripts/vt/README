@@ -1,0 +1,72 @@
+The emulator spike's goldens
+============================
+
+A held session keeps its screen in x/vt, and a viewer draws what it is sent
+with xterm. The tests in cmd/rota/hold check that the two agree: for each
+capture in cmd/rota/hold/testdata/vt, x/vt's final screen must be xterm's,
+cell for cell, and so must the screen x/vt's repaint draws in xterm.
+
+xterm's side is golden.mjs, run on @xterm/headless 5.5.0, the same release as
+the xterm.js the web page serves (api/assets/xterm). Its output is committed
+as <name>.xterm.json beside each capture. The package itself never is: it is
+fetched, checked, into a directory of its own, and used from there.
+
+What is in a capture directory
+------------------------------
+
+  <name>.bin                what a program wrote to an 80x24 terminal
+  <name>.xterm.json         xterm's screen after <name>.bin
+  <name>.repaint.bin        the holder's repaint of x/vt's screen
+  <name>.repaint.xterm.json xterm's screen after <name>.repaint.bin
+  sample.go, sample.ansi    what vim and less were shown
+
+The captures are vim (stopped before it quits), vim-quit, less and the fake
+CLI. TestCaptureVT records them; it runs vim and less with HOME in a temporary
+directory and -u NONE, so nobody's own settings reach a capture.
+
+xterm 5.5 cannot report the mouse encoding or the kitty keyboard flags, so the
+tests check those two for fake.bin against the values its script set.
+
+To fetch @xterm/headless 5.5.0
+------------------------------
+
+1. Read the registry metadata and take that version's dist.integrity:
+     curl -s https://registry.npmjs.org/@xterm/headless | python3 -I -c \
+       "import json,sys; print(json.load(sys.stdin)['versions']['5.5.0']['dist'])"
+   For 5.5.0 it is
+     sha512-5xXB7kdQlFBP82ViMJTwwEc3gKCLGKR/eoxQm4zge7GPBl86tCdI0IdPJjoKd8mUSFXz5V7i/25sfsEkP4j46g==
+2. Fetch the tarball into a fresh directory and check it against that sha512
+   before opening it:
+     dir=$(mktemp -d) && cd "$dir" &&
+       curl -sO https://registry.npmjs.org/@xterm/headless/-/headless-5.5.0.tgz &&
+       python3 -I -c "import base64,hashlib,sys;\
+         print('sha512-'+base64.b64encode(hashlib.sha512(open(sys.argv[1],'rb').read()).digest()).decode())" \
+         headless-5.5.0.tgz
+3. Only when the two match, unpack it there:
+     mkdir -p node_modules/@xterm/headless &&
+       tar -xzf headless-5.5.0.tgz -C node_modules/@xterm/headless --strip-components=1
+   The package has no dependencies, so there is nothing else to install.
+
+To make the goldens
+-------------------
+
+From the repository root, with dir from step 2:
+
+  ROTA_VT_CAPTURE=1 go test -count=1 -run TestCaptureVT ./cmd/rota/hold/
+  export XTERM_HEADLESS="$dir/node_modules/@xterm/headless"
+  cd cmd/rota/hold/testdata/vt
+  for n in vim vim-quit less fake; do
+    node ../../../../../scripts/vt/golden.mjs $n.bin 80 24 >$n.xterm.json
+  done
+
+The repaints come from the holder's own code, so they are made by the test
+that checks them:
+
+  ROTA_VT_GOLDEN=1 go test -count=1 -run TestRepaintReproducesTheScreen ./cmd/rota/hold/
+  for n in vim vim-quit less fake; do
+    node ../../../../../scripts/vt/golden.mjs $n.repaint.bin 80 24 >$n.repaint.xterm.json
+  done
+
+and the test is run again without ROTA_VT_GOLDEN to check them. A capture
+that changes is a reason to read the new goldens' diff before committing it:
+the tests compare against whatever is committed.

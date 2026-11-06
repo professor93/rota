@@ -1,0 +1,24 @@
+[?1049h[>4;2m[?1h=[?2004h[?1004h[1;24r[?12h[?12l[22;2t[22;1t[27m[23m[29m[m[H[2J[?25l[24;1H"testdata/vt/sample.go" 51L, 1041B[2;1H▽[6n[2;1H  [3;1HPzz\[0%m[6n[3;1H           [1;1H[>c[1;1H[34m// Package sample is what vim shows in the emulator spike: enough Go for
+// syntax colours, a search and line numbers, and more lines than the screen.[m[2;78H[K[3;1H[38;5;130mpackage[m sample[3;15H[K[5;1H[38;5;130mimport[m ([6;9H[31m"fmt"[7;9H"strings"[m
+)
+
+[34m// Greeting is who is greeted, and how loudly.[m
+[38;5;130mtype[m Greeting [38;5;130mstruct[m {[12;9HName  [32mstring[m[13;9HTimes [32mint[m[14;9HShout [32mbool[m
+}
+
+[34m// String says hello as often as asked.[m
+[38;5;130mfunc[m (g Greeting) String() [32mstring[m {[19;9H[38;5;130mvar[m b strings.Builder[20;9H[38;5;130mfor[m i := [31m0[m; i < g.Times; i++ {[21;17Hfmt.Fprintf(&b, [31m"hello, [m[35m%s\n[m[31m"[m, g.Name)[22;9H}[23;9H[38;5;130mif[m g.Shout {[1;1H[?25h[?4m[?25l[24;1H[K[24;1H/func[18;1H[?25h[?25l[24;1H[K[24;1H:set number[1;1H[38;5;130m  1 [m[34m// Package sample is what vim shows in the emulator spike: enough Go for[m
+[38;5;130m  2 [m[34m// syntax colours, a search and line numbers, and more lines than the screenn[m[3;1H[38;5;130m    [m[34m.[m[3;6H[K[4;1H[38;5;130m  3 package[m sample
+[38;5;130m  4 [m[5;5H[K[6;1H[38;5;130m  5 import[m ([6;13H[K[7;1H[38;5;130m  6 [m        [31m"fmt[m
+[38;5;130m  7 [m[8C[31m"strings"[m
+[38;5;130m  8 [m)
+[38;5;130m  9 [m[10;5H[K[11;1H[38;5;130m 10 [m[34m// Greeting is who is greeted, and how loudly.[m
+[38;5;130m 11 type[m Greeting [38;5;130mstruct[m {
+[38;5;130m 12 [m        Name  [32mstring[m
+[38;5;130m 13 [m        Times [32mint[m
+[38;5;130m 14 [m[8CShout [32mbool[m
+[38;5;130m 15 [m}
+[38;5;130m 16 [m[17;5H[K[18;1H[38;5;130m 17 [m[34m// String says hello as often as asked.[m
+[38;5;130m 18 func[m (g Greeting) String() [32mstring[m {
+[38;5;130m 19 [m        [38;5;130mvar[m b strings.Builder[20;34H[K[21;1H[38;5;130m 20 [8Cfor[m i := [31m0[m; i < g.Times; i++ {[21;43H[K[22;1H[38;5;130m 21 [m     [11Cfmt.Fprintf(&b, [31m"hello, [m[35m%s\n[m[31m"[m, g.Name)
+[38;5;130m 22 [m        }[23;14H[K[19;5H[?25h[?25l[24;1H[K[24;1H:q![?2004l[>4;m[23;2t[23;1t[24;1H[K[24;1H[?1004l[?2004l[?1l>[?1049l[?25h[>4;m

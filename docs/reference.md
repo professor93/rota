@@ -44,10 +44,11 @@ accounts in Postgres, pick by price, and never import a line of the rest.
 **The SDK and the server packages have no third-party dependencies.** Their
 module, `github.com/professor93/rota`, has no `go.sum`, nothing to audit, and
 nothing to update. The `rota` program is a module of its own, so whatever it
-comes to need never reaches a program that imports them. Go 1.27 removed the
-last two temptation: `encoding/json/v2` is standard library now, so the
-hand-rolled JSON layer is gone and nothing here reaches for a
-faster JSON package. It was not always so: the server
+comes to need never reaches a program that imports them. It uses
+github.com/charmbracelet/x/vt to keep the screen of each held session.
+Go 1.27 removed the last two temptation: `encoding/json/v2` is standard
+library now, so the hand-rolled JSON layer is gone and nothing here reaches
+for a faster JSON package. It was not always so: the server
 began on a router framework, which cost 23 modules and 100 packages —
 including an HTTP/3 stack, a MongoDB driver, protobuf, a YAML parser and a
 2018 commit of an abandoned library — to provide path matching the standard
