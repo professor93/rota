@@ -522,6 +522,7 @@ func TestAPanickingScreenIsRetiredOutLoud(t *testing.T) {
 		return orig(em, p)
 	}
 	r := newRig(t, 0, newFakeChild())
+	r.panics = "x/vt fell over"
 	claim(t, r.terminals)
 	r.c.reads()
 	p := r.link(t)

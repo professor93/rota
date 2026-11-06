@@ -228,10 +228,10 @@ func newRigOf(t *testing.T, scrollback int, c *fakeChild, child Child) *rig {
 		case <-time.After(10 * time.Second):
 			t.Errorf("the session never finished")
 		}
-		// The session's own goroutines log a panic as "a panic in";
-		// the emulator's is the Screen's to take, and logged apart.
+		// Any panic logged fails the test, but for one it makes on
+		// purpose and names in r.panics.
 		for _, l := range r.logLines() {
-			if strings.Contains(l, "a panic in") && (r.panics == "" || !strings.Contains(l, r.panics)) {
+			if strings.Contains(l, "panic") && (r.panics == "" || !strings.Contains(l, r.panics)) {
 				t.Errorf("logged: %s", l)
 			}
 		}
