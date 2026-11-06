@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"text/tabwriter"
 	"unicode"
 	"unicode/utf8"
 
@@ -40,6 +41,30 @@ type grid struct {
 	// — a place, an id, a percentage — which are cut only once every column
 	// but give is down to its "…", in the order they give way.
 	keep []int
+	// cutBy is how a column is cut where cutCell's way would lose what it
+	// is there for: a path keeps its end, the part no other path on the
+	// screen shares (cutStart), and "#1 a@x" is cut where the width falls
+	// (cut), since going back to its space leaves "#1…" and no account.
+	cutBy map[int]func(c string, n int) string
+	// steps, when set, is the order the columns are cut in, in place of the
+	// one give and keep make (see fit), for a table with no column to wrap
+	// whose columns each give way only so far before the next is touched:
+	// a column can be in more than one step, each with a floor of its own.
+	steps []stage
+
+	// plain draws the rows with no frame and no header, lined up the way
+	// text/tabwriter lines them up: two spaces in, and each column but the
+	// last two spaces wider than its widest cell. It is the sessions
+	// listing's look, kept on a terminal wide enough for it, so fitting a
+	// narrow one changes nothing anywhere else.
+	plain bool
+}
+
+// stage is a step in fitting a table to its terminal: its columns are cut,
+// the widest of them first, until each is down to floor.
+type stage struct {
+	cols  []int
+	floor int
 }
 
 // termWidth is how many columns wide out is, when it is a terminal, and 0
@@ -97,7 +122,11 @@ func (g *grid) add(cells ...string) { g.rows = append(g.rows, cells) }
 // widths is the widest line in each column, header included, in the
 // columns it takes on screen (see screenWidth).
 func widths(header []string, rows [][]string) []int {
-	w := make([]int, len(header))
+	n := len(header)
+	for _, r := range rows {
+		n = max(n, len(r))
+	}
+	w := make([]int, n)
 	measure := func(cells []string) {
 		for i, c := range cells {
 			for line := range strings.SplitSeq(c, "\n") {
@@ -112,9 +141,29 @@ func widths(header []string, rows [][]string) []int {
 	return w
 }
 
+// head is column i's header, "" in a table without one.
+func (g *grid) head(i int) string {
+	if i < len(g.header) {
+		return g.header[i]
+	}
+	return ""
+}
+
 // frame is how wide a table with these column widths is drawn: each column
 // is a border, a space, its content and a space, and one border closes it.
-func frame(w []int) int {
+// A plain one is two spaces in, and each column but the last its content
+// and the two spaces between it and the next.
+func (g *grid) frame(w []int) int {
+	if g.plain {
+		n := 2
+		for i, c := range w {
+			n += c
+			if i < len(w)-1 {
+				n += 2
+			}
+		}
+		return n
+	}
 	n := 1
 	for _, c := range w {
 		n += c + 3
@@ -129,11 +178,12 @@ func frame(w []int) int {
 // nothing of what they say is lost. The rest of the stages are below.
 func (g *grid) fit() (header []string, rows [][]string) {
 	w := widths(g.header, g.rows)
-	if g.width <= 0 || frame(w) <= g.width {
+	// A table with no columns, a plain one with no rows, has nothing to cut.
+	if g.width <= 0 || len(w) == 0 || g.frame(w) <= g.width {
 		return g.header, g.rows
 	}
 	natural := slices.Clone(w)
-	over := frame(w) - g.width
+	over := g.frame(w) - g.width
 	for _, i := range g.give {
 		take := min(over, max(w[i]-min(natural[i], minWrap), 0))
 		w[i] -= take
@@ -157,24 +207,26 @@ func (g *grid) fit() (header []string, rows [][]string) {
 	//   - the columns in neither list cut to cutHard, then keep;
 	//   - and only then the wrapping columns cut, to cutHard as well.
 	//
-	// A cut line keeps its start, as many whole words of it as fit (see
-	// cutCell), and ends in the "…" that says more was there. What is still
-	// too wide after all of it is drawn as narrow as it goes.
-	for _, stage := range []struct {
-		cols  []int
-		floor int
-	}{
-		{g.give, wrapFloor},
-		{rest, cutSoft},
-		{g.give, hardWrap},
-		{rest, cutHard},
-		{g.keep, cutHard},
-		{g.give, cutHard},
-	} {
+	// A table with steps of its own is cut in those instead. A cut line
+	// keeps its start, as many whole words of it as fit (see cutCell), and
+	// ends in the "…" that says more was there. What is still too wide after
+	// all of it is drawn as narrow as it goes.
+	steps := g.steps
+	if steps == nil {
+		steps = []stage{
+			{g.give, wrapFloor},
+			{rest, cutSoft},
+			{g.give, hardWrap},
+			{rest, cutHard},
+			{g.keep, cutHard},
+			{g.give, cutHard},
+		}
+	}
+	for _, step := range steps {
 		for ; over > 0; over-- {
 			at := -1
-			for _, j := range stage.cols {
-				if w[j] > stage.floor && (at < 0 || w[j] > w[at]) {
+			for _, j := range step.cols {
+				if w[j] > step.floor && (at < 0 || w[j] > w[at]) {
 					at = j
 				}
 			}
@@ -196,6 +248,8 @@ func (g *grid) fit() (header []string, rows [][]string) {
 			return c
 		case wraps[i] && !head:
 			return wrapCell(c, n)
+		case g.cutBy[i] != nil:
+			return g.cutBy[i](c, n)
 		default:
 			return cutCell(c, n)
 		}
@@ -209,7 +263,7 @@ func (g *grid) fit() (header []string, rows [][]string) {
 				m = max(m, screenWidth(line))
 			}
 		}
-		measure(g.header[i], true)
+		measure(g.head(i), true)
 		for _, r := range g.rows {
 			if i < len(r) {
 				measure(r[i], false)
@@ -229,13 +283,20 @@ func (g *grid) fit() (header []string, rows [][]string) {
 	cuts := false
 	for i := range w {
 		got[i] = drawn(i, w[i])
-		cuts = cuts || w[i] < natural[i] && (!wraps[i] || screenWidth(g.header[i]) > w[i])
+		cuts = cuts || w[i] < natural[i] && (!wraps[i] || screenWidth(g.head(i)) > w[i])
 	}
-	if slack := g.width - frame(got); cuts && slack > 0 {
+	if slack := g.width - g.frame(got); cuts && slack > 0 {
+		cutOrder := [][]int{rest, g.keep, g.give}
+		if g.steps != nil {
+			cutOrder = nil
+			for _, s := range g.steps {
+				cutOrder = append(cutOrder, s.cols)
+			}
+		}
 		var order []int
-		for _, cols := range [][]int{rest, g.keep, g.give} {
+		for _, cols := range cutOrder {
 			for _, i := range cols {
-				if !wraps[i] {
+				if !wraps[i] && !slices.Contains(order, i) {
 					order = append(order, i)
 				}
 			}
@@ -402,6 +463,33 @@ func cut(s string, n int) string {
 	return s
 }
 
+// cutStart cuts each line of a cell to n at its start rather than its end:
+// the "…" comes first, and the end is kept, for a cell whose end says the
+// most. Like cutCell it does not begin in part of a word when there is a
+// space to go forward to, so "1h ago, session af7fda4d" at 20 is
+// "…session af7fda4d"; a path has none, and is cut where n falls.
+func cutStart(c string, n int) string {
+	lines := strings.Split(c, "\n")
+	for i, line := range lines {
+		r := []rune(line)
+		k := max(n-1, 0) // how many runes of the end are kept
+		if len(r) <= n {
+			continue
+		}
+		end := string(r[len(r)-k:])
+		lines[i] = "…" + strings.TrimLeft(end, " ")
+		if k < 1 || r[len(r)-k] == ' ' || r[len(r)-k-1] == ' ' {
+			continue // nothing kept, or cut between two words
+		}
+		if at := strings.Index(end, " "); at >= 0 {
+			if kept := strings.TrimLeft(end[at:], " "); utf8.RuneCountInString(kept) >= 2 {
+				lines[i] = "…" + kept
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
 // cutCell cuts each line of a cell to n, as cut does, except where that
 // would end the line in part of a word: then it is cut at the space before
 // the word, so "5h 100% (4h 12m)" at 6 is "5h…" and never "5h 10…", which
@@ -430,6 +518,10 @@ func cutCell(c string, n int) string {
 // render draws the table. Every line is exactly as wide as the frame, and
 // none ends in padding: the border is the last thing on it.
 func (g *grid) render(out io.Writer) {
+	if g.plain {
+		g.renderPlain(out)
+		return
+	}
 	header, rows := g.fit()
 	w := widths(header, rows)
 	rule := func(left, mid, right string) string {
@@ -484,4 +576,31 @@ func (g *grid) render(out io.Writer) {
 		}
 	}
 	fmt.Fprintln(out, rule("└", "┴", "┘"))
+}
+
+// renderPlain draws a plain table (see grid.plain) through text/tabwriter
+// itself, one line per row, so a table that needs no fitting comes out byte
+// for byte as tabwriter has always drawn it. A cell that spans lines leaves
+// the other cells of its later lines empty.
+func (g *grid) renderPlain(out io.Writer) {
+	_, rows := g.fit()
+	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	for _, r := range rows {
+		split := make([][]string, len(r))
+		height := 1
+		for i, c := range r {
+			split[i] = strings.Split(c, "\n")
+			height = max(height, len(split[i]))
+		}
+		for k := range height {
+			cells := make([]string, len(r))
+			for i := range r {
+				if k < len(split[i]) {
+					cells[i] = split[i][k]
+				}
+			}
+			fmt.Fprintf(tw, "  %s\n", strings.Join(cells, "\t"))
+		}
+	}
+	_ = tw.Flush()
 }

@@ -20,7 +20,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"text/tabwriter"
 	"time"
 
 	"github.com/professor93/rota/api"
@@ -653,7 +652,7 @@ func (c *cli) list(args []string) error {
 		g.render(c.out)
 		c.sayLongNotes(shown, width)
 		if withSessions {
-			c.showSessions(sessions.Scan(s, recent))
+			c.showSessions(sessions.Scan(s, recent), width)
 		}
 		for _, e := range errs {
 			fmt.Fprintf(c.err, "warning: %v\n", e)
@@ -691,7 +690,7 @@ func (c *cli) list(args []string) error {
 	}
 	c.sayLongNotes(shown, width)
 	if withSessions {
-		c.showSessions(sessions.Scan(s, recent))
+		c.showSessions(sessions.Scan(s, recent), width)
 	}
 	for _, e := range errs {
 		fmt.Fprintf(c.err, "warning: %v\n", e)
@@ -723,26 +722,47 @@ func (c *cli) sayLongNotes(shown []*rota.Account, width int) {
 // showSessions prints what the CLIs are doing: what is running now, and what
 // could be resumed. Both sections say when nothing was found, because an
 // empty section and an absent one mean different things.
-func (c *cli) showSessions(rep sessions.Report) {
+//
+// width is the terminal's, or 0. On a terminal narrower than a section, its
+// rows stay one line each and the free text is cut to fit, the wider of the
+// name and the directory first: the name keeps its start, the way a title is
+// read, and the directory its end, the part that tells one path from the
+// next. Each keeps cutSoft columns until the account is cut as far. The
+// account, cut at its end, goes second to last and the session id last of
+// all — they are what a row is for, and an id cut short resumes nothing. The
+// lines under the sections wrap at their spaces, two spaces in. Anywhere
+// else nothing changes.
+func (c *cli) showSessions(rep sessions.Report, width int) {
 	fmt.Fprintln(c.out, "\nRunning instances:")
 	if len(rep.Instances) == 0 {
 		fmt.Fprintln(c.out, "  none")
 	}
-	w := tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
+	// The note keeps its end, as the directory does: the session id is last
+	// in it, and is cut no sooner than the account. Before the account is
+	// touched the note goes to "…session af7fda4d", and before the account
+	// is down to its "…" to "…af7fda4d".
+	const sessionNote, idNote = 17, 9 // "…session af7fda4d", "…af7fda4d"
+	g := grid{plain: true, width: width,
+		cutBy: map[int]func(string, int) string{2: cut, 3: cutStart, 4: cutStart},
+		steps: []stage{{[]int{3}, cutSoft}, {[]int{4}, sessionNote}, {[]int{2}, cutSoft},
+			{[]int{3}, cutHard}, {[]int{4}, idNote}, {[]int{2}, cutHard}, {[]int{1}, cutHard}, {[]int{4}, cutHard}}}
 	for _, in := range rep.Instances {
 		who := "-"
 		if in.Account != 0 {
 			who = fmt.Sprintf("#%d %s", in.Account, in.Label)
 		}
-		fmt.Fprintf(w, "  ●\t%s\t%s\t%s\t%s\n", what(in), who, orDash(in.Dir), instanceNote(in))
+		g.add("●", what(in), who, orDash(in.Dir), instanceNote(in))
 	}
-	_ = w.Flush()
+	g.render(c.out)
 
 	fmt.Fprintln(c.out, "\nSessions:")
 	if len(rep.Sessions) == 0 && rep.Shared == nil {
 		fmt.Fprintln(c.out, "  none")
 	}
-	w = tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
+	g = grid{plain: true, width: width,
+		cutBy: map[int]func(string, int) string{0: cut, 4: cutStart},
+		steps: []stage{{[]int{3, 4}, cutSoft}, {[]int{0}, cutSoft},
+			{[]int{3, 4}, cutHard}, {[]int{0}, cutHard}, {[]int{1}, cutHard}, {[]int{2}, cutHard}}}
 	for _, x := range rep.Sessions {
 		who := "shared"
 		if x.Account != 0 {
@@ -751,15 +771,27 @@ func (c *cli) showSessions(rep sessions.Report) {
 		// The name is what a person recognises a conversation by; the id is
 		// what they resume it with. Both, and neither allowed to push the
 		// row onto a second line.
-		fmt.Fprintf(w, "  %s\t%s\t%s\t%s\t%s\n", who, x.Provider, short(x.ID), clip(x.Name, 44), orDash(x.Dir))
+		g.add(who, x.Provider, short(x.ID), clip(x.Name, 44), orDash(x.Dir))
 	}
-	_ = w.Flush()
+	g.render(c.out)
 	if sh := rep.Shared; sh != nil {
-		fmt.Fprintf(c.out, "  %s holds %d conversations across %d projects, shared by every account with no --config of its own.\n",
-			sh.Dir, sh.Sessions, sh.Projects)
+		sayIn(c.out, width, fmt.Sprintf("%s holds %d conversations across %d projects, shared by every account with no --config of its own.",
+			sh.Dir, sh.Sessions, sh.Projects))
 	}
 	for _, n := range rep.Notes {
-		fmt.Fprintf(c.out, "  note: %s\n", n)
+		sayIn(c.out, width, "note: "+n)
+	}
+}
+
+// sayIn prints a line two spaces in, and on a terminal wraps it at its
+// spaces with every line it wraps onto two spaces in as well.
+func sayIn(out io.Writer, width int, line string) {
+	if width <= 2 {
+		fmt.Fprintf(out, "  %s\n", line)
+		return
+	}
+	for _, l := range wrapLine(line, width-2) {
+		fmt.Fprintf(out, "  %s\n", l)
 	}
 }
 
