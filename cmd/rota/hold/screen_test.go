@@ -88,8 +88,8 @@ func recording(t *testing.T, name string) []byte {
 	return raw
 }
 
-// doc reads a Screen the way golden.mjs reads xterm. Modes are not the
-// screen's to say and stay zero.
+// doc reads a Screen the way golden.mjs reads xterm, after everything it was
+// given. Modes are not the screen's to say and stay zero.
 func doc(t *testing.T, s *Screen) vtDoc {
 	t.Helper()
 	s.mu.Lock()
@@ -97,6 +97,7 @@ func doc(t *testing.T, s *Screen) vtDoc {
 	if !s.ok {
 		t.Fatal("the screen has no emulator")
 	}
+	s.settle()
 	em := s.em
 	var d vtDoc
 	for y := range em.Height() {
