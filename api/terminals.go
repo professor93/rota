@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
@@ -131,16 +132,19 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 	if kind == termKindShell && req.Account != 0 {
 		return nil, refuse(http.StatusBadRequest, "a shell runs no account: name one or the other, not both")
 	}
-	if n := s.liveTerminals(); n >= s.opts.Terminal.MaxSessions {
-		return nil, refuse(http.StatusConflict, fmt.Sprintf(
-			"this server is holding %d terminals, which is terminal.max_sessions; end one before starting another", n))
+	list, err := s.reserveTerminal()
+	if err != nil {
+		return nil, err
 	}
+	// A terminal that never gets as far as being listed gives its place
+	// back; one that was listed has made this a no-op.
+	defer list(nil)
 	cwd, err := s.terminalCwd(req.Cwd)
 	if err != nil {
 		return nil, err
 	}
 	if s.opts.HoldCommand != nil {
-		return s.startHeld(r, kind, req, cwd)
+		return s.startHeld(r, kind, req, cwd, list)
 	}
 	plan, err := s.planTerminal(r, kind, req, cwd)
 	if err != nil {
@@ -196,11 +200,42 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 	}
 	ts.idleAt = ts.started
 	s.recordTerminal(ts)
-	s.addTerminal(ts)
+	list(ts)
 	ts.audit("terminal created", "kind", kind, "account", plan.account, "by", who(r).Name)
 	running = true
 	go ts.run()
 	return ts, nil
+}
+
+// reserveTerminal takes one of terminal.max_sessions' places for a terminal
+// that is starting, so the cap counts it from the request and not from the
+// moment it is listed: a holder has holdReady to answer, and every request
+// in that time would otherwise count the same terminals and find room.
+//
+// list lists the terminal and hands its place over in one step, under the
+// registry's own lock, so nothing ever counts it twice or not at all.
+// list(nil) gives the place back. Only its first call does anything.
+func (s *Server) reserveTerminal() (list func(*termSession), err error) {
+	s.startMu.Lock()
+	defer s.startMu.Unlock()
+	if n := s.liveTerminals(); n >= s.opts.Terminal.MaxSessions {
+		return nil, refuse(http.StatusConflict, fmt.Sprintf(
+			"this server is holding %d terminals, which is terminal.max_sessions; end one before starting another", n))
+	}
+	s.termsMu.Lock()
+	s.starting++
+	s.termsMu.Unlock()
+	var once sync.Once
+	return func(ts *termSession) {
+		once.Do(func() {
+			s.termsMu.Lock()
+			defer s.termsMu.Unlock()
+			if ts != nil {
+				s.terms[ts.id] = ts
+			}
+			s.starting--
+		})
+	}, nil
 }
 
 // recordTerminal opens the recording, where the file asked for one. A
@@ -240,25 +275,14 @@ type termPlan struct {
 // cwd, the directory the terminal starts in, because there is exactly one
 // right order for those steps and one copy of it.
 func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest, cwd string) (*termPlan, error) {
-	if kind == termKindShell {
+	st, a, err := s.chooseTerminal(r, kind, req.Account)
+	if err != nil {
+		return nil, err
+	}
+	if a == nil {
 		return s.planShell(req)
 	}
-	st, err := s.openStore()
-	if err != nil {
-		s.log.Error("opening the store", "err", err)
-		return nil, refuse(http.StatusInternalServerError, "the account store could not be opened")
-	}
 	defer st.Close()
-	rotation.Backfill(st)
-	a, err := rotation.Choose(r.Context(), st, req.Account)
-	if err != nil {
-		return nil, err
-	}
-	// A dead lineage is refused before anything starts, by the store's own
-	// rule, for the reasons run.go gives.
-	if err := st.Launchable(r.Context(), a); err != nil {
-		return nil, err
-	}
 	// Prepared for the directory the terminal starts in, whose project
 	// settings its Claude Code reads, rather than for the server's own.
 	path, env, release, err := st.PrepareIn(r.Context(), a, cwd)
@@ -283,14 +307,44 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest, cw
 	return plan, nil
 }
 
-// planShell is the opt-in: the person's own login shell, with the server's
-// environment minus the secrets no child may inherit. It is refused unless
-// the file asked for it, because a terminal that runs an account's CLI is
-// what this feature is and a general remote shell is a different offer.
-func (s *Server) planShell(req *termRequest) (*termPlan, error) {
-	if !s.opts.Terminal.Shell {
-		return nil, refuse(http.StatusForbidden, shellOff)
+// chooseTerminal is what a terminal may run, decided in this one place for a
+// terminal this server runs and for one a holder runs. A shell is refused
+// unless the file asked for it, because a terminal that runs an account's
+// CLI is what this feature is and a general remote shell is a different
+// offer. An account is the rotation's choice, and a dead lineage is refused
+// before anything starts, by the store's own rule, for the reasons run.go
+// gives.
+//
+// For an account the store comes back open, for whatever the caller does
+// with it next, and is the caller's to close. A shell has neither.
+func (s *Server) chooseTerminal(r *http.Request, kind string, id int) (*store.Store, *rota.Account, error) {
+	if kind == termKindShell {
+		if !s.opts.Terminal.Shell {
+			return nil, nil, refuse(http.StatusForbidden, shellOff)
+		}
+		return nil, nil, nil
 	}
+	st, err := s.openStore()
+	if err != nil {
+		s.log.Error("opening the store", "err", err)
+		return nil, nil, refuse(http.StatusInternalServerError, "the account store could not be opened")
+	}
+	rotation.Backfill(st)
+	a, err := rotation.Choose(r.Context(), st, id)
+	if err == nil {
+		err = st.Launchable(r.Context(), a)
+	}
+	if err != nil {
+		st.Close()
+		return nil, nil, err
+	}
+	return st, a, nil
+}
+
+// planShell is the opt-in, once chooseTerminal has allowed it: the person's
+// own login shell, with the server's environment minus the secrets no child
+// may inherit.
+func (s *Server) planShell(req *termRequest) (*termPlan, error) {
 	sh := os.Getenv("SHELL")
 	if sh == "" {
 		sh = "/bin/sh"
