@@ -296,8 +296,11 @@ func atty(spec Spec, stdin io.Reader, stdout io.Writer) int {
 		cols, rows := termSize()
 		say("%s %dx%d", what, cols, rows)
 	}
-	size("ready")
+	// The window is watched before ready is said, because ready is what a
+	// test waits for before it resizes: a SIGWINCH that arrives before
+	// anybody is listening for it is dropped, and the size is never said.
 	watchResize(func() { size("size") })
+	size("ready")
 
 	sc := bufio.NewScanner(stdin)
 	sc.Buffer(make([]byte, 0, 4096), 1<<20)
