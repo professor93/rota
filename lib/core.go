@@ -158,6 +158,22 @@ func Paste(ctx context.Context, provider, s string) (t *Token, unverified, err e
 	return pp.paste(ctx, trimSpace(s))
 }
 
+// PasteLong is Paste for the long-lived token alone: what comes back is a
+// "setup-token", for Account.ApplyLong. Anything else is refused by its shape,
+// an API key by name, and nothing is sent anywhere — a key is asked about
+// only when it was pasted as a key.
+func PasteLong(provider, s string) (*Token, error) {
+	p, err := Lookup(provider)
+	if err != nil {
+		return nil, err
+	}
+	pp, ok := p.(paster)
+	if !ok {
+		return nil, failf(ErrInvalidRequest, "%s takes no pasted key or token", p.Name())
+	}
+	return pp.pasteLong(trimSpace(s))
+}
+
 // NewAccount builds an account from a finished login. The id is the
 // caller's to assign — rota never invents one here.
 func NewAccount(id int, provider string, t *Token) *Account {

@@ -45,18 +45,12 @@ const (
 // token `claude setup-token` printed is good for a year from when it was
 // made, which is about now: the person ran it to paste it.
 func (claudeProvider) paste(ctx context.Context, s string) (*Token, error, error) {
-	switch {
-	case s == "":
-		return nil, nil, failf(ErrInvalidRequest, "nothing was pasted; a Claude Console API key starts with %s, "+
-			"and a token from `claude setup-token` with %s", claudeKeyPrefix, claudeSetupPrefix)
-	case strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != "":
-		return nil, nil, failf(ErrInvalidRequest,
-			"a key or a token is letters, digits, - and _ only, and what was pasted has something else in it")
-	case strings.HasPrefix(s, claudeSetupPrefix):
-		return &Token{Access: s, Credential: credentialSetupToken, ExpiresAt: nowMS() + claudeLongSeconds*1000}, nil, nil
-	case !strings.HasPrefix(s, claudeKeyPrefix):
-		return nil, nil, failf(ErrInvalidRequest, "a Claude Console API key starts with %s, and a token from "+
-			"`claude setup-token` with %s; what was pasted is neither", claudeKeyPrefix, claudeSetupPrefix)
+	key, err := claudeKeyShaped(s)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !key {
+		return claudeSetupToken(s), nil, nil
 	}
 	refused, unverified := checkClaudeKey(ctx, s)
 	if refused != nil {
@@ -67,6 +61,47 @@ func (claudeProvider) paste(ctx context.Context, s string) (*Token, error, error
 		Credential: credentialAPIKey,
 		Identity:   &Identity{UUID: "apikey-" + fingerprint(s)},
 	}, unverified, nil
+}
+
+// pasteLong takes a token from `claude setup-token` alone. A Console API key
+// pasted where one belongs is refused by its prefix, before it goes anywhere:
+// a key is asked about only when somebody meant it as a key.
+func (claudeProvider) pasteLong(s string) (*Token, error) {
+	key, err := claudeKeyShaped(s)
+	if err != nil {
+		return nil, err
+	}
+	if key {
+		return nil, failf(ErrInvalidRequest, "that is a Console API key, not a token from `claude setup-token`: "+
+			"a key is an account of its own, made with `rota login --key`")
+	}
+	return claudeSetupToken(s), nil
+}
+
+// claudeKeyShaped reads the prefix alone: true for a Console API key, false
+// for a token from `claude setup-token`, and a refusal in a sentence for
+// anything that is neither.
+func claudeKeyShaped(s string) (bool, error) {
+	switch {
+	case s == "":
+		return false, failf(ErrInvalidRequest, "nothing was pasted; a Claude Console API key starts with %s, "+
+			"and a token from `claude setup-token` with %s", claudeKeyPrefix, claudeSetupPrefix)
+	case strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") != "":
+		return false, failf(ErrInvalidRequest,
+			"a key or a token is letters, digits, - and _ only, and what was pasted has something else in it")
+	case strings.HasPrefix(s, claudeSetupPrefix):
+		return false, nil
+	case !strings.HasPrefix(s, claudeKeyPrefix):
+		return false, failf(ErrInvalidRequest, "a Claude Console API key starts with %s, and a token from "+
+			"`claude setup-token` with %s; what was pasted is neither", claudeKeyPrefix, claudeSetupPrefix)
+	}
+	return true, nil
+}
+
+// claudeSetupToken is a pasted `claude setup-token` token as the long-lived
+// token BeginLong would have obtained, its year counted from now.
+func claudeSetupToken(s string) *Token {
+	return &Token{Access: s, Credential: credentialSetupToken, ExpiresAt: nowMS() + claudeLongSeconds*1000}
 }
 
 // checkClaudeKey asks the API's model list whether a key is good. refused is

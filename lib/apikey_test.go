@@ -205,6 +205,37 @@ func TestClaudePastedSetupTokenIsALongToken(t *testing.T) {
 	}
 }
 
+// PasteLong takes a setup token alone. A Console API key pasted where one
+// belongs is refused by its prefix, by name, and never asked about: it was
+// not pasted as a key, so it goes nowhere.
+func TestClaudePasteLongRefusesAKeyBeforeItGoesAnywhere(t *testing.T) {
+	f := newFakeServer(t, false)
+	setURL(t, &ClaudeModelsEndpoint, f.URL+"/v1/models")
+	for _, s := range []string{testKey, " " + testOtherKey + "\n"} {
+		tok, err := PasteLong("claude", s)
+		if tok != nil || !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), "Console API key") ||
+			!strings.Contains(err.Error(), "rota login --key") {
+			t.Fatalf("a key must be refused by name: %v", err)
+		}
+		noSecret(t, "the refusal", err.Error(), testKey, testOtherKey)
+	}
+	for in, want := range map[string]string{"": "nothing", "sk-proj-TESTONLY": "neither", "sk-ant-oat01 TESTONLY": "letters"} {
+		if _, err := PasteLong("claude", in); !errors.Is(err, ErrInvalidRequest) || !strings.Contains(err.Error(), want) {
+			t.Fatalf("%q: want a refusal naming %q, got %v", in, want, err)
+		}
+	}
+	if _, err := PasteLong("codex", testSetup); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("a provider that takes nothing pasted says so: %v", err)
+	}
+	tok, err := PasteLong("claude", " "+testSetup+"\n")
+	if err != nil || tok.Access != testSetup || tok.Credential != credentialSetupToken || tok.ExpiresAt < nowMS()+claudeLongSeconds*1000-60_000 {
+		t.Fatalf("a setup token is taken as Paste takes it: %v %+v", err, tok)
+	}
+	if n := f.count("/v1/models"); n != 0 {
+		t.Fatalf("nothing pasted here is sent anywhere: %d requests", n)
+	}
+}
+
 func keyAccount(t *testing.T) *Account {
 	t.Helper()
 	tok := &Token{Access: testKey, Credential: credentialAPIKey, Identity: &Identity{UUID: "apikey-" + fingerprint(testKey)}}

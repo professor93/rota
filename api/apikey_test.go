@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	rota "github.com/professor93/rota/lib"
@@ -95,5 +96,34 @@ func TestPastedCredentialsOverHTTP(t *testing.T) {
 		if resp.StatusCode != 400 {
 			t.Fatalf("%v: %d %s", body, resp.StatusCode, raw)
 		}
+	}
+}
+
+// A Console API key sent as a setup token is refused here, for what it is,
+// and never sent to the API to be refused there as a bad key.
+func TestAKeySentAsATokenNeverLeaves(t *testing.T) {
+	var asked atomic.Int64
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked.Add(1)
+		w.WriteHeader(401)
+	}))
+	defer api.Close()
+	old := rota.ClaudeModelsEndpoint
+	rota.ClaudeModelsEndpoint = api.URL
+	defer func() { rota.ClaudeModelsEndpoint = old }()
+
+	h := newHarness(t, Options{})
+	seedUUID(t, h.dir, 1, "u1")
+	resp, raw := h.do("POST", "/v1/login", map[string]any{"account": 1, "token": testKey})
+	var got struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil || resp.StatusCode != 400 ||
+		!strings.Contains(got.Error, "Console API key") || !strings.Contains(got.Error, "rota login --key") ||
+		strings.Contains(got.Error, "refused this key") || strings.Contains(string(raw), "TESTONLY") {
+		t.Fatalf("%d %s", resp.StatusCode, strings.ReplaceAll(string(raw), testKey, "<key>"))
+	}
+	if n := asked.Load(); n != 0 {
+		t.Fatalf("a key sent as a setup token must go nowhere: %d requests reached the API", n)
 	}
 }
