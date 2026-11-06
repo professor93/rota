@@ -199,7 +199,7 @@ func TestListJSONKeepsItsKeysInOneOrder(t *testing.T) {
 	// its sorted place.
 	withNotes := slices.Insert(slices.Clone(want), 3, "notes")
 	// Several tries, because an unsorted map is only sometimes out of order.
-	for i := range 8 {
+	for i := range 16 {
 		out, errOut, code := call(t, "--json", "list", "--short", "--sessions")
 		if code != 0 {
 			t.Fatalf("%d %q", code, errOut)

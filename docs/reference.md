@@ -145,8 +145,9 @@ handles the six differences that matter here:
 
 The first four change what rota writes, so every affected field now says
 `omitzero`, which means under both packages exactly what `omitempty` used to
-mean here, nil slices are still written as null, and a map's keys are still
-written sorted, so the same value is always the same bytes. A struct's fields
+mean here, nil slices are still written as null, and rota asks the package
+for a map's keys in sorted order (`jsonv2.Deterministic`), so the same value
+is always the same bytes. A struct's fields
 keep the order they are declared in. `lib/jsonwire_test.go` pins the
 resulting bytes, because they are the on-disk account store, the HTTP replies
 and what `rota --json` prints.
