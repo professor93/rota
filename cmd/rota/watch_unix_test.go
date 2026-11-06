@@ -70,16 +70,23 @@ func TestTheWatcherHoldsNoClaimAndEndsOnSIGTERM(t *testing.T) {
 	t.Cleanup(func() { _ = cli.Process.Kill(); _ = cli.Wait() })
 
 	lock := filepath.Join(home, ".rota-watch.lock")
-	within(t, "the watcher holds its lock", 10*time.Second, func() bool { return lockHeld(t, lock) })
-	raw, err := os.ReadFile(lock)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-	if err != nil || pid <= 0 {
-		t.Fatalf("the lock names its watcher: %q", raw)
-	}
+	// The watcher writes its pid into the lock once it holds it, so the pid
+	// is what is waited for: reading the file takes no lock, where probing
+	// the lock is one more process trying to take it — and a watcher that
+	// finds it taken goes at once, as a second watcher should.
+	var pid int
+	within(t, "the lock names its watcher", 10*time.Second, func() bool {
+		raw, err := os.ReadFile(lock)
+		if err != nil || !strings.HasSuffix(string(raw), "\n") {
+			return false
+		}
+		pid, err = strconv.Atoi(strings.TrimSpace(string(raw)))
+		return err == nil && pid > 0
+	})
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	if !lockHeld(t, lock) {
+		t.Fatal("the watcher holds its lock")
+	}
 	if sid, err := sessionOf(pid); err != nil || sid != pid {
 		t.Fatalf("the watcher leads a session of its own: sid %d, %v", sid, err)
 	}
@@ -89,15 +96,17 @@ func TestTheWatcherHoldsNoClaimAndEndsOnSIGTERM(t *testing.T) {
 
 	_ = cli.Process.Kill()
 	_ = cli.Wait()
-	s, err := store.Open("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	inUse := s.InUse(s.Find(1))
-	s.Close()
-	if inUse {
-		t.Fatal("with the CLI gone nothing holds the account's claim, the watcher included")
-	}
+	// A killed process's lock can be let go of a moment after it has been
+	// waited for (macOS, under load), so the claim is looked at until it is
+	// free; one the watcher held would never be.
+	within(t, "with the CLI gone nothing holds the account's claim, the watcher included", 10*time.Second, func() bool {
+		s, err := store.Open("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		return !s.InUse(s.Find(1))
+	})
 	if !lockHeld(t, lock) {
 		t.Fatal("while the watcher is still there")
 	}
