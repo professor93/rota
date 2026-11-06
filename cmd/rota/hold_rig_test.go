@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -96,33 +97,13 @@ func holdRequest(t *testing.T) holdwire.Request {
 // one line of answer.
 func startHolder(t *testing.T, terminals, bin string, req holdwire.Request) *holderProc {
 	t.Helper()
-	cmd := exec.Command(os.Args[0], "serve", "hold")
-	cmd.Env = append(os.Environ(), "ROTA_AS_RUN=1", "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	raw, err := json.Marshal(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cmd.Stdin = bytes.NewReader(append(raw, '\n'))
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd.Stdout = w
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
+	h := launchHolder(t, terminals, bin, req.ID, bytes.NewReader(requestLine(t, req)), w)
 	w.Close()
-	h := &holderProc{t: t, cmd: cmd, dir: holdwire.Dir(terminals, req.ID), exited: make(chan struct{})}
-	go func() { _ = cmd.Wait(); close(h.exited) }()
-	t.Cleanup(func() {
-		r.Close()
-		_ = cmd.Process.Kill()
-		<-h.exited
-		if m, err := holdwire.ReadMeta(h.dir); err == nil && proc.Alive(m.ChildPID) {
-			_ = syscall.Kill(m.ChildPID, syscall.SIGKILL)
-		}
-	})
+	t.Cleanup(func() { r.Close() })
 	got := make(chan error, 1)
 	go func() { got <- json.NewDecoder(r).Decode(&h.ready) }()
 	select {
@@ -134,6 +115,40 @@ func startHolder(t *testing.T, terminals, bin string, req holdwire.Request) *hol
 		t.Fatal("the holder never answered")
 	}
 	return h
+}
+
+// launchHolder starts `rota serve hold` for session id the way the daemon
+// does — in a session of its own, with bin first on PATH — reading in and
+// answering on out, and leaves reading the answer to the caller.
+func launchHolder(t *testing.T, terminals, bin, id string, in io.Reader, out *os.File) *holderProc {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "serve", "hold")
+	cmd.Env = append(os.Environ(), "ROTA_AS_RUN=1", "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdin, cmd.Stdout = in, out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	h := &holderProc{t: t, cmd: cmd, dir: holdwire.Dir(terminals, id), exited: make(chan struct{})}
+	go func() { _ = cmd.Wait(); close(h.exited) }()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-h.exited
+		if m, err := holdwire.ReadMeta(h.dir); err == nil && proc.Alive(m.ChildPID) {
+			_ = syscall.Kill(m.ChildPID, syscall.SIGKILL)
+		}
+	})
+	return h
+}
+
+// requestLine is req as the daemon writes it.
+func requestLine(t *testing.T, req holdwire.Request) []byte {
+	t.Helper()
+	raw, err := json.Marshal(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return append(raw, '\n')
 }
 
 // code waits for the holder to exit and says how.
@@ -265,6 +280,26 @@ func modeOf(t *testing.T, path string) os.FileMode {
 		t.Fatal(err)
 	}
 	return fi.Mode().Perm()
+}
+
+// ignores says whether pid ignores sig, as Linux's /proc says.
+func ignores(t *testing.T, pid int, sig syscall.Signal) bool {
+	t.Helper()
+	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if v, ok := strings.CutPrefix(line, "SigIgn:"); ok {
+			mask, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return mask&(1<<(uint(sig)-1)) != 0
+		}
+	}
+	t.Fatalf("/proc/%d/status says nothing of ignored signals", pid)
+	return false
 }
 
 // gone says pid has exited: it is not there at all, or it is a zombie

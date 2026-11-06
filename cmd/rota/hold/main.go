@@ -52,6 +52,7 @@ const maxScrollback = 64 << 20
 // could not start — said on out as a Ready line first — and 0 once the CLI
 // has ended and its ending is recorded.
 func Main(in io.Reader, out io.Writer, open func() (*store.Store, error)) int {
+	keepOnBrokenPipe()
 	if atTerminal(in) || !leadsSession() {
 		fmt.Fprintln(out, ByHand)
 		return 2
@@ -62,6 +63,20 @@ func Main(in io.Reader, out io.Writer, open func() (*store.Store, error)) int {
 		return 1
 	}
 	return h.hold()
+}
+
+// keepOnBrokenPipe makes a write to a reader that went away an error rather
+// than this process's end. Go ends a program whose standard output or error
+// breaks, and the daemon that reads the Ready line may be gone before the
+// holder writes it — stopped, or crashed, while the session started.
+//
+// The signal is taken rather than ignored: an ignored signal stays ignored
+// across exec, so the CLI, and the shell and every command it starts, would
+// begin with SIGPIPE ignored, and a pipeline such as `yes | head` would
+// complain of a broken pipe instead of ending quietly. A taken one goes back
+// to its default in a child. Nothing reads the channel, and nothing needs to.
+func keepOnBrokenPipe() {
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
 }
 
 // holder is one session being started and then held. Each field is set by
@@ -323,15 +338,25 @@ func (h *holder) fail(err error) {
 	if h.unlock != nil {
 		h.unlock()
 	}
+	if err := h.say(holdwire.Ready{Error: msg, Kind: holdwire.Classify(err)}); err != nil && h.log != nil {
+		h.log("nobody read the answer", "err", err)
+	}
 	if h.logs != nil {
 		h.logs.close()
 	}
-	h.say(holdwire.Ready{Error: msg, Kind: holdwire.Classify(err)})
 }
 
 // hold says the session is ready and keeps it until the CLI has ended.
+//
+// An answer nobody reads is no reason to stop: the daemon that asked went
+// away while the session started. By then the CLI runs, meta.json is whole
+// and the socket listens, so the session is exactly what a daemon gone a
+// moment later would have left — held, for the next daemon to find — and
+// tearing it down would end a CLI that may already be at work.
 func (h *holder) hold() int {
-	h.say(holdwire.Ready{OK: true, PID: os.Getpid(), TokenUntil: h.tokenUntil})
+	if err := h.say(holdwire.Ready{OK: true, PID: os.Getpid(), TokenUntil: h.tokenUntil}); err != nil {
+		h.log("nobody read the answer: the session is held for the next daemon to find", "err", err)
+	}
 	// Whoever read the answer may go away; nothing written after it may
 	// cost this process a broken pipe.
 	if err := quiet(); err != nil {
@@ -370,15 +395,14 @@ func (h *holder) ended(code int) {
 	}
 }
 
-// say writes the one line of answer.
-func (h *holder) say(r holdwire.Ready) {
+// say writes the one line of answer, and says whether it could.
+func (h *holder) say(r holdwire.Ready) error {
 	raw, err := json.Marshal(r)
 	if err != nil {
 		raw = []byte(`{"ok":false,"error":"internal error","kind":"other"}`)
 	}
-	if _, err := h.out.Write(append(raw, '\n')); err != nil && h.log != nil {
-		h.log("the answer could not be written", "err", err)
-	}
+	_, err = h.out.Write(append(raw, '\n'))
+	return err
 }
 
 // noControl drops anything that names the daemon's control socket: a CLI
