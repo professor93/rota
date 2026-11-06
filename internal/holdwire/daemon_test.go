@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/professor93/rota/internal/proc"
+	rota "github.com/professor93/rota/lib"
 )
 
 // One store has one daemon: the second claim is told whose it is, and a
@@ -54,6 +55,75 @@ func TestTwoDaemonsCannotClaimOneStore(t *testing.T) {
 		t.Fatalf("a free store could not be claimed: %v", err)
 	}
 	again()
+}
+
+// A daemon.pid left by a daemon that crashed names nobody. With the lock
+// free nothing runs and the store is claimed over it; with the lock held, by
+// a daemon that has yet to write who it is, the old record is still not that
+// daemon, so nobody is named rather than a pid that may be anybody's.
+func TestAStaleDaemonPIDNamesNobody(t *testing.T) {
+	pid := os.Getpid()
+	start, err := proc.StartTime(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boot, err := proc.BootID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := func(t *testing.T, terminals string, d Daemon) {
+		t.Helper()
+		raw, err := rota.Encode(&d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(DaemonPIDFile(terminals), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// This very pid, so only the start time and the boot can tell the record
+	// from this process.
+	for name, d := range map[string]Daemon{
+		"another start": {PID: pid, Version: "1.3.0", ProcStart: start.Add(-time.Hour), BootID: boot},
+		"another boot":  {PID: pid, Version: "1.3.0", ProcStart: start, BootID: boot + "-before"},
+		"nothing known": {PID: pid, Version: "1.3.0"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			terminals := t.TempDir()
+			stale(t, terminals, d)
+			if err := os.WriteFile(DaemonLock(terminals), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got, ok := RunningDaemon(terminals); ok {
+				t.Fatalf("a crashed daemon runs: %+v", got)
+			}
+
+			held, err := tryLock(DaemonLock(terminals))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := RunningDaemon(terminals)
+			if !ok || got == nil || got.PID != 0 {
+				t.Errorf("a daemon not yet written down is %+v (%v)", got, ok)
+			}
+			_, err = ClaimDaemon(terminals, "1.4.0-test")
+			var running DaemonRunning
+			if !errors.As(err, &running) || running.PID != 0 {
+				t.Errorf("a claim refused by a daemon not yet written down: %v", err)
+			}
+			unlock(held)
+
+			release, err := ClaimDaemon(terminals, "1.4.0-test")
+			if err != nil {
+				t.Fatalf("a store whose daemon crashed could not be claimed: %v", err)
+			}
+			defer release()
+			got, ok = RunningDaemon(terminals)
+			if !ok || got.PID != pid || got.Version != "1.4.0-test" || !got.ProcStart.Equal(start) || got.BootID != boot {
+				t.Fatalf("the claim left daemon.pid as %+v (%v)", got, ok)
+			}
+		})
+	}
 }
 
 // A pid is the process that was recorded only while its start time and the
