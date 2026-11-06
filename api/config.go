@@ -90,6 +90,11 @@ type AuthSection struct {
 	// a per-user lifetime would be one more thing to get wrong in a file
 	// somebody edits by hand.
 	SessionTTL time.Duration `toml:"session_ttl"`
+	// LocalUser is the person the control socket's principal, local, is
+	// for the keyboard of a held session: the [[users]] entry it names,
+	// which may control. Empty is the only control user when there is
+	// exactly one, and local as a person of its own otherwise.
+	LocalUser string `toml:"local_user"`
 }
 
 // UserEntry is one person who may sign in on the page: a name, a role, and
@@ -282,6 +287,9 @@ func (c *Config) Check() error {
 	if c.Auth.SessionTTL <= 0 {
 		return errors.New("auth.session_ttl must be longer than nothing")
 	}
+	if err := c.checkLocalUser(); err != nil {
+		return err
+	}
 	for _, d := range []struct {
 		key string
 		val time.Duration
@@ -412,6 +420,22 @@ func (c *Config) checkPrincipals() error {
 		}
 	}
 	return nil
+}
+
+// checkLocalUser refuses an auth.local_user that is not somebody who may
+// sign in and control: the local principal typing as a watcher, or as a
+// name nobody signs in with, would be a person the file never meant.
+func (c *Config) checkLocalUser() error {
+	name := c.Auth.LocalUser
+	if name == "" {
+		return nil
+	}
+	for _, u := range c.Users {
+		if u.Name == name && Role(u.Role) == RoleControl {
+			return nil
+		}
+	}
+	return fmt.Errorf("auth.local_user names %q, who is not a [[users]] entry that may control", name)
 }
 
 // entryName is how one entry of an array of tables is pointed at in a
@@ -546,6 +570,7 @@ func (c *Config) Serve() (Options, Listener, error) {
 		Users:          users,
 		Tokens:         tokens,
 		SessionTTL:     c.Auth.SessionTTL,
+		LocalUser:      c.Auth.LocalUser,
 		Roots:          roots,
 		AllowDangerous: c.Runs.AllowDangerous,
 		AllowRawFlags:  c.Runs.AllowRawFlags,
@@ -633,6 +658,7 @@ func (c *Config) Print(w io.Writer, token string) error {
 	str("auth.token_file", c.Auth.TokenFile)
 	str("auth.token_env", c.Auth.TokenEnv)
 	span("auth.session_ttl", c.Auth.SessionTTL)
+	str("auth.local_user", c.Auth.LocalUser)
 
 	body.WriteString("\n[routes]\n")
 	yes("routes.api", c.Routes.API)

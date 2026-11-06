@@ -115,6 +115,8 @@ var roleFor = map[string]Role{
 	"GET /v1/terminals/{id}":    RoleWatch,
 	"POST /v1/terminals":        RoleControl,
 	"DELETE /v1/terminals/{id}": RoleControl,
+	// Typing a message into a held session is typing.
+	"POST /v1/terminals/{id}/send": RoleControl,
 	// The sockets. Attaching is reading a run; starting one is running it.
 	"GET /v1/runs/{id}/ws":     RoleWatch,
 	"GET /v1/accounts/{id}/ws": RoleControl,
@@ -158,6 +160,39 @@ func needs(pattern string) Role {
 		return r
 	}
 	return RoleControl
+}
+
+// personOf is who a principal is as a person, for the keyboard of a held
+// session: the same person on several devices types on whichever of them
+// without asking. A user signed in on the page is its name. The local
+// principal — the control socket, this machine's own terminal — is the one
+// user who may control when there is exactly one, the one auth.local_user
+// names when there are more, and local itself when nobody says. A bearer
+// token or an invite is "", which is never a person: a token is carried by
+// a program, and an invite by whoever was handed the link.
+func (s *Server) personOf(p *Principal) string {
+	if p == nil {
+		return ""
+	}
+	switch p.Via {
+	case "user":
+		return p.Name
+	case "local":
+		only, n := "", 0
+		for _, u := range s.users {
+			if u.role == RoleControl {
+				only, n = u.name, n+1
+			}
+		}
+		switch {
+		case n == 1:
+			return only
+		case s.opts.LocalUser != "":
+			return s.opts.LocalUser
+		}
+		return "local"
+	}
+	return ""
 }
 
 // The two sentences a principal is refused with. They are constants because

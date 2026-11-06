@@ -1,7 +1,9 @@
 package api
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -20,7 +22,7 @@ import (
 	"github.com/professor93/rota/store"
 )
 
-// The doors into a terminal: five routes and one socket protocol.
+// The doors into a terminal: six routes and one socket protocol.
 //
 // Everything that reads is watch and everything that changes is control, as
 // everywhere else here — with the one twist that attaching is reading. A
@@ -126,6 +128,109 @@ func (s *Server) killTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	ts.kill(who(r).Name)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// heldSendMax bounds the body of a send: a message, not a file.
+const heldSendMax = 256 << 10
+
+// sendTerminal types a message into a held session the way a person would:
+// its holder waits until the CLI is ready for one, types it, and presses
+// Enter. It is typing, so it goes under the keyboard's rule: the keyboard
+// free, or held by the sender's own person. A session waiting on its person
+// for a permission or a question refuses it unless it is forced, because
+// Enter there may approve something.
+//
+// The answer is 200 once the text is in, or the refusal with a reason a
+// program can act on: 409 waiting, keyboard (naming the holder), ended or
+// not_held, and 504 timeout for a session that never became ready.
+func (s *Server) sendTerminal(w http.ResponseWriter, r *http.Request) {
+	ts, rec := s.terminalOf(w, r)
+	if ts == nil && rec == nil {
+		return
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, heldSendMax+1))
+	if err != nil || len(raw) > heldSendMax {
+		fail(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("a send is at most %d KiB", heldSendMax>>10))
+		return
+	}
+	var req struct {
+		Text  string `json:"text"`
+		Force bool   `json:"force"`
+	}
+	if err := strictJSON(bytes.NewReader(raw), &req); err != nil {
+		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if req.Text == "" {
+		fail(w, http.StatusBadRequest, "text is empty; a send types a message and then Enter")
+		return
+	}
+	if rec != nil {
+		reason := "ended"
+		if rec.State == holdwire.StateLive || rec.State == holdwire.StateUnreadable {
+			reason = "not_held"
+		}
+		sendRefused(w, http.StatusConflict, reason, recordRefusal(rec), "")
+		return
+	}
+	h, held := ts.back.(*heldTerm)
+	switch {
+	case !held:
+		sendRefused(w, http.StatusConflict, "not_held",
+			"terminal "+ts.id+" is not a held session; a send types only into one", "")
+		return
+	case ts.over():
+		sendRefused(w, http.StatusConflict, "ended", "terminal "+ts.id+" has ended", "")
+		return
+	}
+	p := who(r)
+	if holder, ok := ts.mayType(s.personOf(p)); !ok {
+		sendRefused(w, http.StatusConflict, "keyboard", holder+" holds the keyboard of this session", holder)
+		return
+	}
+	answer := h.sendText(r.Context(), req.Text, req.Force)
+	word := answer.Code
+	if word == holdwire.SentOK {
+		word = "typed"
+	}
+	ts.audit("terminal sent", "by", p.Name, "force", req.Force, "answer", word)
+	say := func(fallback string) string {
+		if answer.Message != "" {
+			return answer.Message
+		}
+		return fallback
+	}
+	switch answer.Code {
+	case holdwire.SentOK:
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	case holdwire.SentWaiting:
+		sendRefused(w, http.StatusConflict, "waiting",
+			say("the session is waiting for its person, and Enter there may approve something; force sends anyway"), "")
+	case holdwire.SentTimeout:
+		sendRefused(w, http.StatusGatewayTimeout, "timeout",
+			say("the session did not become ready for the text in time; nothing was typed"), "")
+	case holdwire.SentEnded:
+		sendRefused(w, http.StatusConflict, "ended", "terminal "+ts.id+" has ended", "")
+	case sentUnlinked:
+		sendRefused(w, http.StatusConflict, "not_held",
+			say("the link to this session's holder went before it answered; the text may not have been typed"), "")
+	case sentNoSend:
+		sendRefused(w, http.StatusConflict, "not_held", "this session's holder takes no sends", "")
+	case sentGone:
+		// Nobody is left to read an answer.
+	default:
+		sendRefused(w, http.StatusBadGateway, answer.Code, say("the holder answered "+answer.Code), "")
+	}
+}
+
+// sendRefused is a send's refusal: the sentence, the reason a program reads,
+// and for the keyboard, who holds it.
+func sendRefused(w http.ResponseWriter, code int, reason, msg, holder string) {
+	doc := map[string]any{"error": msg, "reason": reason}
+	if holder != "" {
+		doc["holder"] = holder
+	}
+	writeJSON(w, code, doc)
 }
 
 /* ------------------------------------------------------------ starting it --- */
@@ -476,6 +581,9 @@ func termSince(w http.ResponseWriter, r *http.Request) (since int64, all bool, o
 // stops.
 func (s *Server) serveTerminal(c *wsConn, ts *termSession, p *Principal, watch bool, since int64, all bool) {
 	tc := newTermConn(c, p, watch, s.now())
+	if ts.held() {
+		tc.repainting(s.personOf(p), ts.catchUp)
+	}
 	go tc.write()
 	ts.attach(tc, since, all)
 	reads := make(chan inFrame, 8)
@@ -536,6 +644,7 @@ type termFrameIn struct {
 	Type  string `json:"type"`
 	Cols  uint16 `json:"cols"`
 	Rows  uint16 `json:"rows"`
+	Fit   bool   `json:"fit"`
 	Force bool   `json:"force"`
 	To    string `json:"to"`
 }
@@ -543,13 +652,24 @@ type termFrameIn struct {
 // onTerm acts on one frame. Returning an error ends the socket: that is for
 // a frame this server cannot read at all. Everything it can read and will
 // not do is an error frame with a reason, because the connection is fine.
+//
+// On a held session what a connection types first has its own terminal's
+// answers taken out — the holder answered those queries already, when the
+// CLI asked — and a frame that held nothing else is nothing at all: no
+// refusal, no keystroke, no keyboard moved.
 func (s *Server) onTerm(ts *termSession, tc *termConn, f inFrame) error {
 	if f.op == opBinary {
+		data := f.data
+		if tc.replies != nil {
+			if data = tc.replies.Strip(data); len(data) == 0 {
+				return nil
+			}
+		}
 		if !tc.role.allows(termNeeds("input")) {
 			tc.fail(watchOnly)
 			return nil
 		}
-		if err := ts.typeInto(tc, f.data); err != nil {
+		if err := ts.typeInto(tc, data); err != nil {
 			tc.fail(err.Error())
 		}
 		return nil
@@ -567,6 +687,15 @@ func (s *Server) onTerm(ts *termSession, tc *termConn, f inFrame) error {
 	}
 	switch in.Type {
 	case "resize":
+		if ts.held() && !in.Fit {
+			// A window resizing itself is not somebody asking: said once,
+			// and otherwise ignored.
+			if !tc.noFit {
+				tc.noFit = true
+				tc.fail(heldNoFit)
+			}
+			return nil
+		}
 		if err := ts.resizeTo(tc, in.Cols, in.Rows); err != nil {
 			tc.fail(err.Error())
 		}

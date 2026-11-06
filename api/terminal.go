@@ -20,6 +20,7 @@ import (
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/pty"
 	"github.com/professor93/rota/internal/ring"
+	"github.com/professor93/rota/internal/vtscan"
 )
 
 // A terminal is an account's CLI on a pseudo-terminal that lives in this
@@ -71,6 +72,18 @@ const (
 	// closed, the terminal is fine, and reattaching with since picks up
 	// everything that was missed.
 	wsTooSlow = 1013
+
+	// termDocRoom is how many documents a held session's viewer may have
+	// queued beyond its output. Its output may fall behind and be repainted,
+	// but a keyboard change or the exit is not output, and has to arrive.
+	termDocRoom = 64
+	// termLate bounds the documents a viewer that fell behind keeps for
+	// after its repaint.
+	termLate = 1024
+	// termReset is the repaint of a held session whose holder has no screen
+	// to give: a reset, and then everything the ring still holds, which is
+	// what attaching without a screen is shown.
+	termReset = "\x1bc"
 )
 
 var (
@@ -113,6 +126,12 @@ const (
 	// sharedSize is the other thing a shared terminal does not take: its
 	// size belongs to the window somebody is actually sitting at.
 	sharedSize = "this terminal's size follows the window it was started in"
+	// heldNoFit is said once to a viewer of a held session that asks for a
+	// size without asking to fit: a window that resized itself, a page
+	// fitting itself on attach. A held session is looked at from devices of
+	// every size, and only an explicit fit by the keyboard's holder changes
+	// it, so a stray tap on a phone does not reflow the desk.
+	heldNoFit = "this session's size changes only when a viewer asks to fit it"
 )
 
 var (
@@ -162,6 +181,10 @@ type termFrame struct {
 	// joined to what is queued around it: a held session's repaint, which a
 	// viewer must be able to tell from the bytes that follow it.
 	alone bool
+	// late is a document queued for a held session's viewer while it was
+	// behind: it is sent after the repaint, not before, so the exit frame
+	// is never followed by the screen it ended on.
+	late bool
 }
 
 // termConn is one attached socket: who is behind it, whether it may ever
@@ -193,6 +216,28 @@ type termConn struct {
 	// to be sent: those are on its screen already. Zero is nothing to skip.
 	// It belongs to the session's mu.
 	skip int64
+
+	// The rest is a held session's viewer's alone (repainting), and stays
+	// empty for every other terminal, whose rules do not change.
+	//
+	// person is who this connection is for the keyboard (personOf): the
+	// keyboard follows a person across their connections. "" is nobody.
+	person string
+	// replies takes out of what this connection types the answers its own
+	// terminal gives to the queries it sees replayed, which the holder
+	// answered already. noFit is heldNoFit having been said. Both belong to
+	// the goroutine reading the connection.
+	replies *vtscan.ReplyFilter
+	noFit   bool
+	// catchUp is what a viewer that fell behind is sent instead of being
+	// closed with 1013. depth is how many frames of output it may fall
+	// behind by, and queued how many of them are in its queue. behind is it
+	// having fallen behind: its output is thrown away until it is
+	// repainted, which shows all of it.
+	catchUp func(*termConn) []termFrame
+	depth   int32
+	queued  atomic.Int32
+	behind  atomic.Bool
 }
 
 func newTermConn(c *wsConn, p *Principal, watch bool, at time.Time) *termConn {
@@ -207,17 +252,70 @@ func newTermConn(c *wsConn, p *Principal, watch bool, at time.Time) *termConn {
 	}
 }
 
+// repainting makes a connection a held session's viewer, before it is
+// attached: it types as person, its terminal's answers are taken out of
+// what it types, and falling behind repaints it rather than closing it.
+// Its queue gets room for documents beyond the output it may fall behind
+// by.
+func (tc *termConn) repainting(person string, catchUp func(*termConn) []termFrame) {
+	tc.person, tc.replies, tc.catchUp = person, &vtscan.ReplyFilter{}, catchUp
+	tc.depth = int32(cap(tc.out))
+	tc.out = make(chan termFrame, cap(tc.out)+termDocRoom)
+}
+
 // push queues one frame, and closes the connection rather than waiting when
 // the queue is full. That is the whole rule that keeps one slow watcher from
 // stalling the terminal: the terminal never blocks on a reader.
 func (tc *termConn) push(op byte, data []byte) { tc.queue(termFrame{op: op, data: data}) }
 
 func (tc *termConn) queue(f termFrame) {
+	if tc.catchUp != nil {
+		tc.queueHeld(f)
+		return
+	}
 	select {
 	case tc.out <- f:
 	default:
 		tc.slow.Store(true)
 		tc.stop()
+	}
+}
+
+// queueHeld is queue for a held session's viewer, which is never closed for
+// being slow. Output past its depth marks it behind, and from then on its
+// output is thrown away: the repaint it is sent once its queue has drained
+// shows all of it. A document still goes in, in the room kept for them,
+// marked late when it came while the viewer was behind.
+func (tc *termConn) queueHeld(f termFrame) {
+	behind := tc.behind.Load()
+	if f.op == opBinary {
+		if behind {
+			return
+		}
+		if tc.queued.Load() >= tc.depth {
+			tc.behind.Store(true)
+			return
+		}
+		tc.queued.Add(1)
+	} else {
+		f.late = behind
+	}
+	select {
+	case tc.out <- f:
+	default:
+		// Not even the room kept for documents is left. What this was is
+		// lost; the repaint says the size and the screen again.
+		if f.op == opBinary {
+			tc.queued.Add(-1)
+		}
+		tc.behind.Store(true)
+	}
+}
+
+// took is one frame taken off the queue by the writing goroutine.
+func (tc *termConn) took(f termFrame) {
+	if f.op == opBinary && tc.catchUp != nil {
+		tc.queued.Add(-1)
 	}
 }
 
@@ -235,32 +333,63 @@ func (tc *termConn) fail(msg string) {
 
 func (tc *termConn) stop() { tc.once.Do(func() { close(tc.gone) }) }
 
+// done reports whether this connection has been finished with.
+func (tc *termConn) done() bool {
+	select {
+	case <-tc.gone:
+		return true
+	default:
+		return false
+	}
+}
+
 // write is this connection's one writing goroutine: everything the terminal
 // says to it, in order, on the socket. When the connection is finished it
 // drains what is already queued first, so the exit frame that was pushed
 // just before the close still arrives.
+//
+// A held session's viewer that fell behind has the output in its queue
+// thrown away and the documents queued before it fell behind sent, and once
+// the queue is empty it is repainted, and then sent the documents that came
+// while it was behind.
 func (tc *termConn) write() {
 	defer close(tc.drained)
+	var late []termFrame
 	for {
 		var f termFrame
 		switch {
 		case tc.pending != nil:
 			f, tc.pending = *tc.pending, nil
+		case tc.behind.Load() && len(tc.out) == 0 && !tc.done():
+			if !tc.repaint(late) {
+				tc.stop()
+				return
+			}
+			late = nil
+			continue
 		default:
 			select {
 			case f = <-tc.out:
+				tc.took(f)
 			case <-tc.gone:
-				for {
-					select {
-					case f := <-tc.out:
-						if err := tc.c.send(f.op, f.data); err != nil {
-							return
-						}
-					default:
-						return
-					}
+				tc.goodbye(late)
+				return
+			}
+		}
+		if tc.behind.Load() {
+			switch {
+			case f.op == opBinary:
+			case f.late:
+				if len(late) < termLate {
+					late = append(late, f)
+				}
+			default:
+				if err := tc.c.send(f.op, f.data); err != nil {
+					tc.stop()
+					return
 				}
 			}
+			continue
 		}
 		if f.op == opBinary && !f.alone {
 			f.data = tc.join(f.data)
@@ -270,6 +399,48 @@ func (tc *termConn) write() {
 			return
 		}
 	}
+}
+
+// goodbye sends what is still queued once the connection is finished, so
+// the exit frame that was pushed just before the close still arrives. A
+// viewer that is behind is sent its documents and no output: there is no
+// repaint on the way out.
+func (tc *termConn) goodbye(late []termFrame) {
+	for {
+		select {
+		case f := <-tc.out:
+			tc.took(f)
+			behind := tc.behind.Load()
+			switch {
+			case behind && f.op == opBinary:
+				continue
+			case behind && f.late:
+				late = append(late, f)
+				continue
+			}
+			if err := tc.c.send(f.op, f.data); err != nil {
+				return
+			}
+		default:
+			for _, f := range late {
+				if err := tc.c.send(f.op, f.data); err != nil {
+					return
+				}
+			}
+			return
+		}
+	}
+}
+
+// repaint brings a viewer that fell behind back to now: what its session's
+// catchUp gives, and then the documents that waited for it.
+func (tc *termConn) repaint(late []termFrame) bool {
+	for _, f := range append(tc.catchUp(tc), late...) {
+		if err := tc.c.send(f.op, f.data); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // settle ends this connection and waits for what is already queued to have
@@ -299,6 +470,7 @@ func (tc *termConn) join(first []byte) []byte {
 	for len(out) < termJoin {
 		select {
 		case f := <-tc.out:
+			tc.took(f)
 			if f.op != opBinary || f.alone {
 				tc.pending = &f
 				return out
@@ -467,12 +639,15 @@ type termSession struct {
 	conns      []*termConn
 	holder     *termConn
 	// holderName and freeAt are the keyboard's grace: whose it still is
-	// after their socket dropped, and until when.
-	holderName string
-	freeAt     time.Time
-	claims     []*termClaim
-	ended      bool
-	exit       int
+	// after their socket dropped, and until when. holderPerson is the
+	// person holding it (personOf), on a held session, kept through the
+	// grace; "" on any other.
+	holderName   string
+	holderPerson string
+	freeAt       time.Time
+	claims       []*termClaim
+	ended        bool
+	exit         int
 	// idleAt is when the last connection left, and zero while somebody is
 	// attached. The idle timeout is measured from it.
 	idleAt  time.Time
@@ -512,8 +687,11 @@ func (ts *termSession) typeInto(tc *termConn, p []byte) error {
 		return errSharedWatch
 	}
 	if !ts.holds(tc) {
-		ts.mu.Unlock()
-		return errNotHolding
+		if !ts.follows(tc) {
+			ts.mu.Unlock()
+			return errNotHolding
+		}
+		ts.move(tc)
 	}
 	back := ts.back
 	ts.mu.Unlock()
@@ -599,30 +777,71 @@ func (ts *termSession) free() bool {
 	if ts.s.now().Before(ts.freeAt) {
 		return false
 	}
-	ts.holderName, ts.freeAt = "", time.Time{}
+	ts.holderName, ts.holderPerson, ts.freeAt = "", "", time.Time{}
 	ts.tellKeyboard()
 	return true
 }
 
 // mine reports whether the keyboard is in its grace and belongs to the
-// principal behind this connection, which is what a reconnect is. Called
-// with mu held.
+// principal behind this connection, which is what a reconnect is — or, on a
+// held session, to its person, which is the same person on another device.
+// Called with mu held.
 func (ts *termSession) mine(tc *termConn) bool {
-	return ts.holder == nil && ts.holderName != "" && ts.holderName == tc.name &&
-		ts.s.now().Before(ts.freeAt)
+	if ts.holder != nil || ts.holderName == "" || !ts.s.now().Before(ts.freeAt) {
+		return false
+	}
+	return ts.holderName == tc.name || (tc.person != "" && tc.person == ts.holderPerson)
+}
+
+// follows reports whether the keyboard is this connection's person's, held
+// on another of their connections or in its grace, so that typing here
+// moves it here without asking anybody. Only a held session's connections
+// have a person, and a connection attached to watch or by a watcher never
+// types. Called with mu held.
+func (ts *termSession) follows(tc *termConn) bool {
+	if tc.person == "" || tc.person != ts.holderPerson || ts.holder == tc ||
+		tc.watch || ts.lookOnly || !tc.role.allows(RoleControl) {
+		return false
+	}
+	return ts.holder != nil || ts.s.now().Before(ts.freeAt)
+}
+
+// move is the keyboard following its person to the connection they typed
+// on. Whoever was asking for it is asked for again where it is now. Called
+// with mu held.
+func (ts *termSession) move(tc *termConn) {
+	from := ts.heldBy()
+	ts.take(tc)
+	for _, cl := range ts.claims {
+		ts.askHolder(cl.conn)
+	}
+	ts.audit("keyboard moved", "from", from, "to", tc.name)
+}
+
+// mayType reports whether a send from this person may type now: the
+// keyboard is free, or held by the same person on a connection or in its
+// grace. holder is who holds it otherwise. A person of "" is nobody's, and
+// types only while the keyboard is free.
+func (ts *termSession) mayType(person string) (holder string, ok bool) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	if ts.free() || (person != "" && person == ts.holderPerson) {
+		return "", true
+	}
+	return ts.heldBy(), false
 }
 
 // take gives the keyboard to one connection and tells everyone. Called with
 // mu held.
 func (ts *termSession) take(tc *termConn) {
-	ts.holder, ts.holderName, ts.freeAt = tc, tc.name, time.Time{}
+	ts.holder, ts.holderName, ts.holderPerson, ts.freeAt = tc, tc.name, tc.person, time.Time{}
 	ts.forget(tc)
 	ts.tellKeyboard()
 }
 
 // letGo frees the keyboard outright. Called with mu held.
 func (ts *termSession) letGo() {
-	ts.holder, ts.holderName, ts.freeAt = nil, "", time.Time{}
+	ts.holder, ts.holderName, ts.holderPerson, ts.freeAt = nil, "", "", time.Time{}
 	ts.tellKeyboard()
 }
 
@@ -663,6 +882,8 @@ func (ts *termSession) claim(tc *termConn, force bool) {
 	case ts.free() || ts.mine(tc):
 		ts.take(tc)
 		ts.audit("keyboard taken", "to", tc.name)
+	case ts.follows(tc):
+		ts.move(tc)
 	case force:
 		ts.forceTo(tc)
 	default:
@@ -847,6 +1068,7 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 	if scr != nil {
 		hello["repaint"] = true
 	}
+	ts.holderConn(hello)
 	tc.say(hello)
 	if gap {
 		tc.say(map[string]any{"type": "gap", "from": from, "to": at})
@@ -913,7 +1135,23 @@ func (ts *termSession) tell(doc map[string]any) {
 }
 
 func (ts *termSession) tellKeyboard() {
-	ts.tell(map[string]any{"type": "keyboard", "holder": nameOrNil(ts.heldBy())})
+	doc := map[string]any{"type": "keyboard", "holder": nameOrNil(ts.heldBy())}
+	ts.holderConn(doc)
+	ts.tell(doc)
+}
+
+// holderConn adds, on a held session, which connection holds the keyboard:
+// one person may be attached from several devices, and only this tells
+// them which of them it is. null is none — nobody, or the grace. Called with
+// mu held.
+func (ts *termSession) holderConn(doc map[string]any) {
+	if !ts.held() {
+		return
+	}
+	doc["holder_conn"] = nil
+	if ts.holder != nil && !ts.ended {
+		doc["holder_conn"] = ts.holder.id
+	}
 }
 
 func (ts *termSession) tellViewers() {
@@ -995,6 +1233,41 @@ func (ts *termSession) outputAt(off int64, p []byte) {
 		}
 		tc.skip = 0
 	}
+}
+
+// catchUp is what a held session's viewer that fell behind is sent instead
+// of being closed: a repaint frame saying where its offsets go on from and
+// at what size, the holder's screen as it is now, and the output after the
+// offset that screen stands for. It is called on the viewer's writing
+// goroutine with its queue drained, and asks for the screen before taking
+// the lock, as attach does; the output that arrives meanwhile is on the
+// screen or after it.
+//
+// A holder with no screen to give is replayed from the oldest byte kept,
+// after a reset, as a viewer attaching without a screen is.
+func (ts *termSession) catchUp(tc *termConn) []termFrame {
+	var scr *heldScreen
+	if h, ok := ts.back.(*heldTerm); ok {
+		scr = h.screen()
+	}
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	paint, from := []byte(termReset), ts.ring.Oldest()
+	if scr != nil && scr.head.Offset >= ts.ring.Oldest() {
+		paint, from = scr.repaint, scr.head.Offset
+	}
+	tail, _ := ts.ring.Read(from)
+	tc.skip = 0
+	if from > ts.ring.End() {
+		tc.skip = from // a screen ahead of what this server has been sent
+	}
+	tc.behind.Store(false)
+	doc, _ := rota.Encode(map[string]any{"type": "repaint", "offset": from, "cols": ts.cols, "rows": ts.rows})
+	out := []termFrame{{op: opText, data: doc}, {op: opBinary, data: paint}}
+	if len(tail) > 0 {
+		out = append(out, termFrame{op: opBinary, data: tail})
+	}
+	return out
 }
 
 // end is the offset this terminal's output has got to.
