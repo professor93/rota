@@ -202,6 +202,43 @@ func TestClaudeFlow(t *testing.T) {
 	}
 }
 
+// A claude account rota holds no access token for asks the usage endpoint
+// nothing: the request could only be refused, and it would tell whoever
+// watches the wire that rota runs here. It is told why instead, as an account
+// only a login helps. One that holds a token is asked as ever, with it.
+func TestUsageAsksNothingWithoutAToken(t *testing.T) {
+	f := newFakeServer(t, false)
+	setURL(t, &ClaudeEndpoints.Usage, f.URL+"/usage")
+	f.reply["/usage"] = func(r *http.Request, _ map[string]any) (int, any) {
+		if r.Header.Get("Authorization") != "Bearer A1" {
+			t.Errorf("usage asked with %q", r.Header.Get("Authorization"))
+			return 401, nil
+		}
+		return 200, map[string]any{"five_hour": map[string]any{"utilization": 7}}
+	}
+	for _, a := range []*Account{
+		{ID: 1, Provider: "claude", Email: "a@x"},
+		{ID: 2, Provider: "claude", Email: "b@x", Token: Token{Refresh: "R1"}},
+		{ID: 3, Provider: "claude", Email: "c@x", Long: &LongToken{Access: "L1"}},
+	} {
+		q, err := Usage(context.Background(), a)
+		if q != nil || !errors.Is(err, ErrReauth) || !strings.Contains(err.Error(), "no credential") {
+			t.Fatalf("%s: %+v %v", a, q, err)
+		}
+	}
+	p, _ := Lookup("claude")
+	if q, err := p.(Meter).Quota(context.Background(), ""); q != nil || !errors.Is(err, ErrReauth) {
+		t.Fatalf("the provider asked directly refuses the same way: %+v %v", q, err)
+	}
+	if n := f.count("/usage"); n != 0 {
+		t.Fatalf("an account without an access token asked the usage endpoint %d times", n)
+	}
+	q, err := Usage(context.Background(), &Account{ID: 4, Provider: "claude", Token: Token{Access: "A1"}})
+	if err != nil || q == nil || len(q.Windows) != 1 || q.Windows[0].Percent != 7 || f.count("/usage") != 1 {
+		t.Fatalf("a token is read with as ever: %+v %v %d", q, err, f.count("/usage"))
+	}
+}
+
 func TestCodexFlowAndStaging(t *testing.T) {
 	f := newFakeServer(t, false)
 	setURL(t, &CodexEndpoints.Token, f.URL+"/token")

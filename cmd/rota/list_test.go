@@ -3,13 +3,18 @@ package main
 import (
 	"encoding/json/jsontext"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	rota "github.com/professor93/rota/lib"
 )
 
 // cells is a bordered line without its frame: the words in it, in order.
@@ -229,4 +234,70 @@ func topKeys(t *testing.T, doc string) []string {
 		}
 	}
 	return names
+}
+
+// An account rota holds no token for costs a listing no request: usage asked
+// without a credential can only be refused, the refusal used to reach the
+// person as a network error, and the request itself tells whoever watches the
+// wire that rota runs here. The listing says why there is no reading instead,
+// and an account that holds a token is read as ever.
+func TestListAsksNothingForAnAccountWithoutAToken(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		asked []string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.Header.Get("Authorization"))
+		mu.Unlock()
+		fmt.Fprint(w, `{"five_hour":{"utilization":7}}`)
+	}))
+	t.Cleanup(srv.Close)
+	old := rota.ClaudeEndpoints.Usage
+	rota.ClaudeEndpoints.Usage = srv.URL
+	t.Cleanup(func() { rota.ClaudeEndpoints.Usage = old })
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	writeStore(t, home, `{"ordered":true,"nextId":3,"accounts":[
+		{"id":1,"provider":"claude","email":"a@x","order":1,"token":{}},
+		{"id":2,"provider":"claude","email":"b@x","order":2,"token":{"accessToken":"t2"}}]}`)
+
+	out, errOut, code := call(t, "list")
+	if code != 0 {
+		t.Fatalf("%d %q %q", code, out, errOut)
+	}
+	mu.Lock()
+	got := slices.Clone(asked)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != "Bearer t2" {
+		t.Fatalf("only the account with a token is asked, with its token: %q", got)
+	}
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(line, "│") {
+			continue
+		}
+		if strings.Contains(line, "b@x") && !strings.Contains(line, "5h 7%") {
+			t.Fatalf("the account with a token has its reading: %q", line)
+		}
+		if strings.Contains(line, "a@x") && (!strings.Contains(line, "│ -") || !strings.Contains(line, "never")) {
+			t.Fatalf("the account without one has none, as before: %q", line)
+		}
+	}
+	if !strings.Contains(errOut, "claude/a@x") || !strings.Contains(errOut, "no credential") || strings.Contains(errOut, "http") {
+		t.Fatalf("the warning says there is no credential, not what a network did: %q", errOut)
+	}
+
+	out, _, code = call(t, "--json", "list", "--refresh")
+	if code != 0 {
+		t.Fatalf("%d %q", code, out)
+	}
+	mu.Lock()
+	got = slices.Clone(asked)
+	mu.Unlock()
+	if len(got) != 2 || got[1] != "Bearer t2" {
+		t.Fatalf("a forced reading asks for the token's account alone: %q", got)
+	}
+	if !strings.Contains(out, `"warnings"`) || !strings.Contains(out, "no credential") {
+		t.Fatalf("json warns the same way:\n%s", out)
+	}
 }
