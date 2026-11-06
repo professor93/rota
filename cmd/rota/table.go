@@ -279,8 +279,11 @@ func wrapCell(c string, n int) string {
 
 // wrapLine breaks a line longer than n at its spaces into lines no longer
 // than n. Something in backticks — `rota login` — is one word, so a command
-// is never split across lines. A word longer than n on its own is broken
-// where it reads best (see breakAt). A line that fits is returned as it is.
+// is never split across lines unless it is longer than n. A word longer
+// than n on its own is broken where it reads best (see breakAt), and its
+// start goes on the line before it when it breaks within the room that line
+// has left, so a short word is not left on a line by itself. A line that
+// fits is returned as it is.
 func wrapLine(s string, n int) []string {
 	if n <= 0 || utf8.RuneCountInString(s) <= n {
 		return []string{s}
@@ -289,12 +292,20 @@ func wrapLine(s string, n int) []string {
 	cur := ""
 	for _, word := range words(s) {
 		for utf8.RuneCountInString(word) > n {
+			r := []rune(word)
 			if cur != "" {
+				if k := breakAt(r, n-utf8.RuneCountInString(cur)-1); k > 0 {
+					out = append(out, cur+" "+strings.TrimRight(string(r[:k]), " "))
+					cur, word = "", strings.TrimLeft(string(r[k:]), " ")
+					continue
+				}
 				out = append(out, cur)
 				cur = ""
 			}
-			r := []rune(word)
 			k := breakAt(r, n)
+			if k == 0 {
+				k = n
+			}
 			out = append(out, strings.TrimRight(string(r[:k]), " "))
 			word = strings.TrimLeft(string(r[k:]), " ")
 		}
@@ -344,8 +355,9 @@ func words(s string) []string {
 // breakAt is how many of a word's runes go on the first of the lines it is
 // broken across, when it is longer than n: after the last space that fits,
 // which only a quoted command has; before an "@", so an address breaks into
-// its name and its domain; after the last ".", "/" or "-" that fits; and
-// only failing all of those, where n falls.
+// its name and its domain; or after the last ".", "/" or "-" that fits. It
+// is 0 when the word has none of those within n, and is broken where n
+// falls only if it must be.
 func breakAt(r []rune, n int) int {
 	// last is the index of the last of marks at or before limit, and never
 	// the first rune, which would leave a line with nothing on it.
@@ -366,7 +378,7 @@ func breakAt(r []rune, n int) int {
 	if k := last("./-", n-1); k > 0 {
 		return k + 1
 	}
-	return n
+	return 0
 }
 
 // cut shortens s to n runes when it is longer, the last of them an "…" that

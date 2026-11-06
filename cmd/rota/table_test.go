@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -396,8 +397,12 @@ func TestWrapLine(t *testing.T) {
 		{"exactly", 7, []string{"exactly"}},
 		// An address breaks before its "@", a name after its last ".", "/"
 		// or "-" that fits, and only what has none of them where n falls.
-		{"a manager.ican@gmail.com b", 10, []string{"a", "manager.", "ican", "@gmail.com", "b"}},
+		// A word too long for a line starts on the line before it when it
+		// breaks within the room left there; when it does not, that line
+		// ends where it is rather than take a piece cut where n falls.
+		{"a manager.ican@gmail.com b", 10, []string{"a manager.", "ican", "@gmail.com", "b"}},
 		{"a manager.ican@gmail.com b", 8, []string{"a", "manager.", "ican", "@gmail.", "com b"}},
+		{"x account@example.com", 12, []string{"x account", "@example.com"}},
 		{"/usr/local/share/rota/accounts.json", 12, []string{"/usr/local/", "share/rota/", "accounts.", "json"}},
 		{"re-auth", 4, []string{"re-", "auth"}},
 		{"abcdefghijkl", 5, []string{"abcde", "fghij", "kl"}},
@@ -405,8 +410,11 @@ func TestWrapLine(t *testing.T) {
 		// only when it is longer than the line.
 		{"say `rota login --long` now", 20, []string{"say", "`rota login --long`", "now"}},
 		{"`rota login --long`", 12, []string{"`rota login", "--long`"}},
+		// A quote left open makes the rest of the line one word, which no
+		// longer leaves the word before it on a line by itself.
+		{"an `unbalanced quote runs on to the end", 20, []string{"an `unbalanced", "quote runs on to", "the end"}},
 	} {
-		if got := wrapLine(c.in, c.n); fmt.Sprint(got) != fmt.Sprint(c.want) {
+		if got := wrapLine(c.in, c.n); !slices.Equal(got, c.want) {
 			t.Errorf("wrapLine(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
 		}
 	}
