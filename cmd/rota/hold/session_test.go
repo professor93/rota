@@ -412,6 +412,9 @@ func TestTheExitReachesTheLinkLast(t *testing.T) {
 	if code := <-r.exits; code != 3 || r.s.Code() != 3 {
 		t.Fatalf("OnExit %d, Code %d", code, r.s.Code())
 	}
+	if r.s.screen.OK() || r.s.screen.Lost() != "" {
+		t.Fatalf("the screen outlived its session: OK %v, lost %q", r.s.screen.OK(), r.s.screen.Lost())
+	}
 	p.eof()
 }
 
