@@ -1064,6 +1064,9 @@ func (ts *termSession) finish(code int) {
 	ts.ended, ts.exit = true, code
 	ts.tell(map[string]any{"type": "exit", "code": code})
 	conns := append([]*termConn(nil), ts.conns...)
+	// Read before anybody can see this terminal has ended, so whoever
+	// waited for that and then changed keepEnded changed it after.
+	keep := keepEnded
 	ts.mu.Unlock()
 
 	ts.audit("terminal ended", "exit", code)
@@ -1085,7 +1088,7 @@ func (ts *termSession) finish(code int) {
 	for _, tc := range conns {
 		tc.settle()
 	}
-	time.AfterFunc(keepEnded, func() { ts.s.dropTerminal(ts.id) })
+	time.AfterFunc(keep, func() { ts.s.dropTerminal(ts.id) })
 }
 
 // kill asks the terminal to end and makes sure it does: a hangup first,
