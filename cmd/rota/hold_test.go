@@ -191,6 +191,15 @@ func TestTheChildsEnvironmentIsScrubbed(t *testing.T) {
 			t.Errorf("%s: the CLI says %q, want %q", ask, got, want)
 		}
 	}
+	// The log says which variable was kept from the CLI, and never what it
+	// held.
+	raw, err := os.ReadFile(holdwire.LogPath(h.dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte("name=ROTA_CONTROL")) || bytes.Contains(raw, []byte(holdwire.CtlSock(terminals))) {
+		t.Fatalf("holder.log names the dropped variable and not its value:\n%s", raw)
+	}
 }
 
 func TestTheConversationComesFromTheRegistry(t *testing.T) {
