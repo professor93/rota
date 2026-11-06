@@ -69,10 +69,13 @@ func ClaimDaemon(terminals, version string) (release func(), err error) {
 
 // claimant is the pid of the daemon holding the lock. A daemon writes its
 // pid file just after taking the lock, so a claim that lost that race waits
-// a moment for it rather than reporting nobody.
+// a moment for it rather than reporting nobody. Until then the file may be
+// one a crashed daemon left, so only a record of a process still running is
+// believed; after the wait, nobody is named rather than a pid that may now
+// be anybody's.
 func claimant(terminals string) int {
 	for try := 0; try < 20; try++ {
-		if d, err := readDaemon(terminals); err == nil && d.PID > 0 {
+		if d := currentDaemon(terminals); d != nil {
 			return d.PID
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -82,16 +85,29 @@ func claimant(terminals string) int {
 
 // RunningDaemon is the daemon serving a store, if one is: true only while
 // somebody holds daemon.lock. The Daemon it returns is never nil when true,
-// but is empty while the daemon has yet to write who it is.
+// but is empty until daemon.pid names the process that is running, which
+// it does not while the daemon has yet to write who it is, nor ever for a
+// daemon that could not read its own start time or boot.
 func RunningDaemon(terminals string) (*Daemon, bool) {
 	if !Locked(DaemonLock(terminals)) {
 		return nil, false
 	}
-	d, err := readDaemon(terminals)
-	if err != nil {
-		return &Daemon{}, true
+	if d := currentDaemon(terminals); d != nil {
+		return d, true
 	}
-	return d, true
+	return &Daemon{}, true
+}
+
+// currentDaemon is what daemon.pid says when it is about a process running
+// now, or nil. A daemon that crashed leaves its file behind, and the next
+// one overwrites it only after it has taken the lock: in between, the file
+// names a process that has gone, or a pid since given to another.
+func currentDaemon(terminals string) *Daemon {
+	d, err := readDaemon(terminals)
+	if err != nil || !SameProcess(d.PID, d.ProcStart, d.BootID) {
+		return nil
+	}
+	return d
 }
 
 func readDaemon(terminals string) (*Daemon, error) {
