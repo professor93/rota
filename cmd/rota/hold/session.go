@@ -493,6 +493,7 @@ func (s *Session) resize(ask holdwire.SizeMsg) (holdwire.SizeMsg, bool) {
 // output read, a waiting send told, the Exit offered behind the output,
 // OnExit, Done.
 func (s *Session) life() {
+	defer s.end()
 	defer s.recovered("the session's end")
 	code := s.child.Wait()
 	s.mu.Lock()
@@ -558,10 +559,25 @@ func (s *Session) life() {
 		s.safely("OnExit", func() { s.cfg.OnExit(code) })
 	}
 	s.log("the CLI ended", "code", code)
+}
+
+// end is the last of life, also when life panicked: Done closes, no link is
+// taken, and the one there is closes. A holder whose end went wrong still
+// ends, and then nothing feeds the screen or writes to the CLI.
+func (s *Session) end() {
+	select {
+	case <-s.finished:
+	default:
+		// life panicked before it got this far.
+		_ = s.child.Close()
+		s.w.stop()
+		close(s.finished)
+		go s.screen.Close()
+	}
 	close(s.done)
 	s.mu.Lock()
 	s.over = true
-	l = s.link
+	l := s.link
 	s.mu.Unlock()
 	if l != nil {
 		l.close()

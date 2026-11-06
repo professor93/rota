@@ -183,11 +183,19 @@ type rig struct {
 	exits     chan int
 	logMu     sync.Mutex
 	logs      []string
+	// panics is a panic the test makes on purpose, which the log may name.
+	panics string
 }
 
 // newRig starts a session on a fake CLI, serving a socket in a directory
 // short enough for one.
 func newRig(t *testing.T, scrollback int, c *fakeChild) *rig {
+	t.Helper()
+	return newRigOf(t, scrollback, c, c)
+}
+
+// newRigOf is newRig with the session holding child, which is c or wraps it.
+func newRigOf(t *testing.T, scrollback int, c *fakeChild, child Child) *rig {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "rh")
 	if err != nil {
@@ -211,7 +219,7 @@ func newRig(t *testing.T, scrollback int, c *fakeChild) *rig {
 			r.logMu.Unlock()
 		},
 		OnExit: func(code int) { r.exits <- code },
-	}, c)
+	}, child)
 	go r.s.Serve(ln)
 	t.Cleanup(func() {
 		c.exit(0)
@@ -223,7 +231,7 @@ func newRig(t *testing.T, scrollback int, c *fakeChild) *rig {
 		// The session's own goroutines log a panic as "a panic in";
 		// the emulator's is the Screen's to take, and logged apart.
 		for _, l := range r.logLines() {
-			if strings.Contains(l, "a panic in") {
+			if strings.Contains(l, "a panic in") && (r.panics == "" || !strings.Contains(l, r.panics)) {
 				t.Errorf("logged: %s", l)
 			}
 		}

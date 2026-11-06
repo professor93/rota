@@ -542,3 +542,40 @@ func TestAPanickingScreenIsRetiredOutLoud(t *testing.T) {
 		t.Fatalf("the log says %q about the emulator", lines)
 	}
 }
+
+// waitPanics is a CLI whose Wait panics when told to, as a broken Child
+// might.
+type waitPanics struct {
+	*fakeChild
+	now chan struct{}
+}
+
+func (w waitPanics) Wait() int {
+	<-w.now
+	panic("Wait fell over")
+}
+
+// A session whose end panics still ends: the panic is logged, Done closes,
+// and the link closes.
+func TestDoneClosesWhenTheEndPanics(t *testing.T) {
+	c := newFakeChild()
+	w := waitPanics{c, make(chan struct{})}
+	r := newRigOf(t, 0, c, w)
+	r.panics = "Wait fell over"
+	claim(t, r.terminals)
+	p := r.link(t)
+	close(w.now)
+	select {
+	case <-r.s.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done never closed after the session's end panicked")
+	}
+	p.eof()
+	logged := false
+	for _, l := range r.logLines() {
+		logged = logged || strings.Contains(l, "a panic in the session's end") && strings.Contains(l, "Wait fell over")
+	}
+	if !logged {
+		t.Fatalf("the log says %q", r.logLines())
+	}
+}
