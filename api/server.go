@@ -219,6 +219,11 @@ type Server struct {
 	// knows where they are. Ended ones stay a few minutes, as runs do.
 	terms   map[string]*termSession
 	termsMu sync.Mutex
+	// starting is how many terminals have a place under max_sessions and
+	// are not listed yet, under termsMu. startMu makes counting the places
+	// and taking one a single step.
+	starting int
+	startMu  sync.Mutex
 	// share is the socket a terminal somebody is sitting at is offered
 	// over, or nil where the file said not to hold one.
 	share *shareSocket

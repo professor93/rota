@@ -296,13 +296,21 @@ func (h *heldTerm) run(termSink) int {
 	defer close(stop)
 	go h.ping(stop)
 	for {
-		if code, ended := h.read(h.link()); ended {
+		conn := h.link()
+		if code, ended := h.read(conn); ended {
 			h.setState(heldEnded)
 			return code
 		}
 		h.mu.Lock()
 		h.conn = nil
 		h.mu.Unlock()
+		// Closed here and not left to the collector: a link that broke at
+		// this end — a silence, a frame that was not one — is still open at
+		// the holder's, which would go on writing into it until the next
+		// link replaced it.
+		if conn != nil {
+			conn.Close()
+		}
 		if code, back := h.relink(); !back {
 			return code
 		}
@@ -442,8 +450,10 @@ func (h *heldTerm) refused(msg *holdwire.InputRefusedMsg) {
 }
 
 // screen asks the holder for its screen and waits a moment for it. Nil is
-// no screen to be had: a holder without one, a link that is down, or one
-// that did not answer in time.
+// no screen to be had: a holder without one, a link that is down, one that
+// did not answer in time, or an answer with nothing to paint — a real
+// repaint is never empty, and a viewer told one is coming would take the
+// first bytes after it for the screen.
 func (h *heldTerm) screen() *heldScreen {
 	h.mu.Lock()
 	conn := h.conn
@@ -466,7 +476,7 @@ func (h *heldTerm) screen() *heldScreen {
 	}
 	select {
 	case sc := <-ch:
-		if sc.head.OK {
+		if sc.head.OK && len(sc.repaint) > 0 {
 			return sc
 		}
 	case <-time.After(holdScreenWait):
