@@ -1064,19 +1064,30 @@ func TestTheAuditSaysWhatHappenedAndNotWhatWasTyped(t *testing.T) {
 	})
 	alice.c.conn.Close()
 	p.do("DELETE", "/v1/terminals/"+id, nil)
-	for range 300 {
-		if p.api.findTerminal(id).over() {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 
-	log := out.String()
-	for _, want := range []string{
+	// What is waited for is the log, not the terminal: two of these lines are
+	// written after anything this test can watch for — "terminal detached"
+	// once the server's reader notices the closed socket, and "terminal
+	// ended" just after the terminal reports itself over.
+	wants := []string{
 		"terminal created", "terminal attached", "keyboard taken",
 		"keyboard released", "terminal detached", "terminal killed", "terminal ended",
 		"terminal=" + id, "kind=account", "by=token", "name=alice", "role=control",
-	} {
+	}
+	saysAll := func(log string) bool {
+		for _, want := range wants {
+			if !strings.Contains(log, want) {
+				return false
+			}
+		}
+		return true
+	}
+	log := out.String()
+	for i := 0; i < 300 && !saysAll(log); i++ {
+		time.Sleep(10 * time.Millisecond)
+		log = out.String()
+	}
+	for _, want := range wants {
 		if !strings.Contains(log, want) {
 			t.Errorf("the log never says %q:\n%s", want, log)
 		}
