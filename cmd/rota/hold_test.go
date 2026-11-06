@@ -347,6 +347,78 @@ func TestAHolderFailingAfterItsCLIStartedLeavesNothingRunning(t *testing.T) {
 	}
 }
 
+// The daemon may go away while a session starts, and so never read its
+// answer. By then the CLI runs and its record is whole: the holder keeps the
+// session for the next daemon to find, as it would had the daemon gone a
+// moment later, rather than dying of the broken pipe.
+func TestAHolderWhoseAnswerNobodyReadsKeepsHolding(t *testing.T) {
+	_, terminals := holdStore(t)
+	bin := holdFake(t, "claude", fakecli.Spec{})
+	req := holdRequest(t)
+	in, give, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := launchHolder(t, terminals, bin, req.ID, in, w)
+	in.Close()
+	w.Close()
+	// Nobody is left to read the answer before the holder has its request.
+	r.Close()
+	if _, err := give.Write(requestLine(t, req)); err != nil {
+		t.Fatal(err)
+	}
+	give.Close()
+
+	said := func(what string) bool {
+		raw, _ := os.ReadFile(holdwire.LogPath(h.dir))
+		return bytes.Contains(raw, []byte(what))
+	}
+	within(t, "the holder is ready", 30*time.Second, func() bool {
+		select {
+		case <-h.exited:
+			return true
+		default:
+			return said(`msg=ready `)
+		}
+	})
+	select {
+	case <-h.exited:
+		t.Fatalf("a holder whose answer nobody read ended: %v", h.cmd.ProcessState)
+	default:
+	}
+	if !said(`msg="nobody read the answer`) {
+		raw, _ := os.ReadFile(holdwire.LogPath(h.dir))
+		t.Fatalf("the holder does not say that nobody read its answer:\n%s", raw)
+	}
+	// The broken pipe is taken, not ignored: an ignored signal stays ignored
+	// across exec, and the CLI and every command it runs would start so.
+	if runtime.GOOS == "linux" && ignores(t, h.cmd.Process.Pid, syscall.SIGPIPE) {
+		t.Fatal("the holder ignores SIGPIPE, and so would its CLI")
+	}
+	if recs := holdwire.Scan(terminals); len(recs) != 1 || recs[0].State != holdwire.StateLive || !proc.Alive(recs[0].Meta.ChildPID) {
+		t.Fatalf("the session is held for the next daemon to find: %+v", recs)
+	}
+
+	// And it is held as any other: the next daemon links, and the ending is
+	// recorded.
+	l := h.link()
+	l.wait("ready 120x40")
+	l.typed("bye\r")
+	if code := l.exit(); code != 0 {
+		t.Fatalf("the link is told exit %d", code)
+	}
+	if code := h.code(); code != 0 {
+		t.Fatalf("the holder exits %d (%v)", code, h.cmd.ProcessState)
+	}
+	if m := h.meta(); m.Exit == nil || *m.Exit != 0 || m.Ended.IsZero() {
+		t.Fatalf("meta.json records the ending: %+v", m)
+	}
+}
+
 func TestTheExitIsRecorded(t *testing.T) {
 	_, terminals := holdStore(t)
 	bin := holdFake(t, "claude", fakecli.Spec{})
