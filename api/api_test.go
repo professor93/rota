@@ -28,6 +28,10 @@ import (
 // TestMain doubles as the fake vendor CLIs: the test binary is symlinked as
 // `claude` and `codex` into a private PATH, and behaves by its argv[0].
 func TestMain(m *testing.M) {
+	// A held terminal's holder is this binary too (fakeholder_test.go).
+	if os.Getenv("ROTA_FAKE_HOLDER") == "1" {
+		fakeHolder()
+	}
 	// A fake installed with a spec plays that; the harness's own claude and
 	// codex links carry none and are played below.
 	fakecli.Maybe()

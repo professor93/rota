@@ -283,6 +283,8 @@ func (sh *sharedTerm) end() { _ = sh.conn.Close() }
 
 func (sh *sharedTerm) close() { _ = sh.conn.Close() }
 
+func (sh *sharedTerm) detach() {}
+
 // describe says what only a shared terminal has: the rota answering for it,
 // whether it may be typed into, and whether that rota is still there.
 func (sh *sharedTerm) describe(doc map[string]any) {

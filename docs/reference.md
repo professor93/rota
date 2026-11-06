@@ -613,8 +613,8 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/ws` | control | a WebSocket that starts a run on whichever account the rotation picks and carries it both ways |
 | `GET` | `/v1/accounts/{id}/ws` | control | the same, on that account |
 | `GET` | `/v1/runs/{id}/ws` | watch | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
-| `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended |
-| `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard |
+| `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended` or `interrupted`), `attachable`, `pid` (its holder), `name`, `title`, `conversation` and `status` (`running`, `needs_you`, `quiet` or `stopped`) |
+| `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard, and the same held fields |
 | `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one |
 | `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later |
 | `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame |
@@ -1509,6 +1509,17 @@ somebody looking at a terminal that has been open all day can see it coming.
 `offset` is how many bytes it has printed altogether, which is what `since`
 is measured in.
 
+A held session — one the rota daemon runs in a holder process of its own,
+which outlives the daemon — adds `"held": true`; `state`, which is `live`,
+`ended`, or `interrupted` for a holder that went without recording an exit;
+`attachable`; `pid`, the holder's; `title`, the one the CLI set;
+`conversation`, the CLI's own session id when it reports one; `status`,
+which is `running`, `needs_you` while the CLI waits on a permission or a
+question, `quiet` after 30 seconds with no output, or `stopped`; and `name`,
+the first there is of the label, the title without its spinner, the CLI's
+own name for the conversation, and the folder. A held session is never
+ended for being idle.
+
 #### The socket
 
 One connection carries both directions, and the framing is what tells the two
@@ -1523,7 +1534,7 @@ Out:
 | | |
 |---|---|
 | *binary* | output: write it to the terminal emulator as it arrives |
-| `hello{id,kind,cols,rows,offset,holder,you:{name,role,conn},viewers}` | the first frame, always |
+| `hello{id,kind,cols,rows,offset,holder,you:{name,role,conn},viewers}` | the first frame, always; `repaint:true` on a held session attached without `since`, whose first binary frame is then its current screen, standing for `offset` |
 | `keyboard{holder}` | who holds it now, `null` for nobody |
 | `claim_request{by,id}` | somebody is asking the holder for it |
 | `resized{cols,rows}` | the terminal is a different size now |
