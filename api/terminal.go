@@ -153,6 +153,10 @@ func (s *Server) now() time.Time { return s.clock.now() }
 type termFrame struct {
 	op   byte
 	data []byte
+	// alone is output that goes out as a frame of its own rather than being
+	// joined to what is queued around it: a held session's repaint, which a
+	// viewer must be able to tell from the bytes that follow it.
+	alone bool
 }
 
 // termConn is one attached socket: who is behind it, whether it may ever
@@ -179,6 +183,11 @@ type termConn struct {
 	// slow says this connection was closed for falling behind, so the close
 	// frame can say which of the two it was.
 	slow atomic.Bool
+	// skip is the offset this connection's output resumes at, when it was
+	// shown a held session's screen standing for bytes this server had yet
+	// to be sent: those are on its screen already. Zero is nothing to skip.
+	// It belongs to the session's mu.
+	skip int64
 }
 
 func newTermConn(c *wsConn, p *Principal, watch bool, at time.Time) *termConn {
@@ -196,9 +205,11 @@ func newTermConn(c *wsConn, p *Principal, watch bool, at time.Time) *termConn {
 // push queues one frame, and closes the connection rather than waiting when
 // the queue is full. That is the whole rule that keeps one slow watcher from
 // stalling the terminal: the terminal never blocks on a reader.
-func (tc *termConn) push(op byte, data []byte) {
+func (tc *termConn) push(op byte, data []byte) { tc.queue(termFrame{op: op, data: data}) }
+
+func (tc *termConn) queue(f termFrame) {
 	select {
-	case tc.out <- termFrame{op: op, data: data}:
+	case tc.out <- f:
 	default:
 		tc.slow.Store(true)
 		tc.stop()
@@ -246,7 +257,7 @@ func (tc *termConn) write() {
 				}
 			}
 		}
-		if f.op == opBinary {
+		if f.op == opBinary && !f.alone {
 			f.data = tc.join(f.data)
 		}
 		if err := tc.c.send(f.op, f.data); err != nil {
@@ -283,7 +294,7 @@ func (tc *termConn) join(first []byte) []byte {
 	for len(out) < termJoin {
 		select {
 		case f := <-tc.out:
-			if f.op != opBinary {
+			if f.op != opBinary || f.alone {
 				tc.pending = &f
 				return out
 			}
@@ -328,6 +339,10 @@ type termBackend interface {
 	run(sink termSink) int
 	// close lets go of what it holds, once the session is finished with it.
 	close()
+	// detach lets go of a far end that goes on without this server, and
+	// makes run return without an ending. Only a held terminal is one; for
+	// the others it does nothing.
+	detach()
 	// describe adds what only this kind of far end knows to a terminal's
 	// description.
 	describe(doc map[string]any)
@@ -367,6 +382,8 @@ func (l *localTerm) end() {
 }
 
 func (l *localTerm) close() { l.master.Close() }
+
+func (l *localTerm) detach() {}
 
 func (l *localTerm) describe(map[string]any) {}
 
@@ -455,6 +472,9 @@ type termSession struct {
 	// attached. The idle timeout is measured from it.
 	idleAt  time.Time
 	killing bool
+	// left is a held terminal this server has let go of, still running: it
+	// is the next daemon's, and nothing here ends it any more.
+	left bool
 }
 
 /* ------------------------------------------------------------ the keyboard --- */
@@ -492,6 +512,10 @@ func (ts *termSession) typeInto(tc *termConn, p []byte) error {
 	}
 	back := ts.back
 	ts.mu.Unlock()
+	if h, ok := back.(*heldTerm); ok {
+		// By connection, so a refusal that comes back later finds who typed.
+		return h.typeFrom(tc, p)
+	}
 	return back.typeInto(p)
 }
 
@@ -764,7 +788,16 @@ func (ts *termSession) lapse() {
 
 // attach adds one connection, replays what it asked for, and hands it the
 // keyboard when it may have it and nobody else does.
+//
+// A held terminal's viewer that said nothing is shown the holder's screen
+// instead of the scrollback, then the bytes after the offset that screen
+// stands for. The screen is asked for before the lock is taken: the answer
+// can take holdScreenWait, and the output pump needs the lock meanwhile.
 func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
+	var scr *heldScreen
+	if h, ok := ts.back.(*heldTerm); ok && replayAll {
+		scr = h.screen()
+	}
 	ts.mu.Lock()
 	ts.conns = append(ts.conns, tc)
 	ts.idleAt = time.Time{}
@@ -776,8 +809,23 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 	if replayAll {
 		from = ts.ring.Oldest()
 	}
+	if scr != nil && scr.head.Offset < ts.ring.Oldest() {
+		scr = nil // the ring has moved past it: what lay between is gone
+	}
+	if scr != nil {
+		from = scr.head.Offset
+	}
 	data, at := ts.ring.Read(from)
 	gap := at > from
+	if scr != nil {
+		// A screen can stand for bytes this server has yet to be sent.
+		// Until they come, the offset is the screen's and not the ring's,
+		// and this viewer skips them when they do.
+		at, gap = scr.head.Offset, false
+		if at > ts.ring.End() {
+			tc.skip = at
+		}
+	}
 	hello := map[string]any{
 		"type": "hello", "id": ts.id, "kind": ts.kind,
 		"cols": ts.cols, "rows": ts.rows, "offset": at,
@@ -791,9 +839,15 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 		// size is not its to set and may not be its to type into.
 		hello["mode"] = ts.shareMode()
 	}
+	if scr != nil {
+		hello["repaint"] = true
+	}
 	tc.say(hello)
 	if gap {
 		tc.say(map[string]any{"type": "gap", "from": from, "to": at})
+	}
+	if scr != nil && len(scr.repaint) > 0 {
+		tc.queue(termFrame{op: opBinary, data: scr.repaint, alone: true})
 	}
 	if len(data) > 0 {
 		tc.push(opBinary, data)
@@ -899,6 +953,51 @@ func (ts *termSession) output(p []byte) {
 	}
 }
 
+// outputAt is output from a holder, which says where in the stream it
+// belongs. Bytes this end already has are dropped. Bytes that never reached
+// it are said as a gap, and the ring starts again at the holder's numbering,
+// so the next link asks for exactly what it lacks. A viewer whose screen
+// already shows some of these skips them.
+func (ts *termSession) outputAt(off int64, p []byte) {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	end := ts.ring.End()
+	if off < end {
+		if int64(len(p)) <= end-off {
+			return
+		}
+		p, off = p[end-off:], end
+	}
+	if off > end {
+		ts.tell(map[string]any{"type": "gap", "from": end, "to": off, "bytes": off - end})
+		ts.ring = ring.NewAt(ts.s.opts.Terminal.Scrollback, off)
+	}
+	chunk := make([]byte, len(p))
+	copy(chunk, p)
+	ts.ring.Write(chunk)
+	if ts.rec != nil {
+		ts.rec.write(chunk)
+	}
+	for _, tc := range ts.conns {
+		switch skip := tc.skip - off; {
+		case skip <= 0:
+			tc.push(opBinary, chunk)
+		case skip < int64(len(chunk)):
+			tc.push(opBinary, chunk[skip:])
+		default:
+			continue
+		}
+		tc.skip = 0
+	}
+}
+
+// end is the offset this terminal's output has got to.
+func (ts *termSession) end() int64 {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	return ts.ring.End()
+}
+
 /* ------------------------------------------------------------- the ending --- */
 
 // over reports whether this terminal has ended, which is the one thing every
@@ -913,7 +1012,37 @@ func (ts *termSession) over() bool {
 // ends: the far end prints until there is nothing more and then says how it
 // ended, and everything that follows from the ending — the exit frame, the
 // recording, the account, the sockets — happens after both, once, here.
-func (ts *termSession) run() { ts.finish(ts.back.run(ts)) }
+//
+// A held terminal this server let go of returns from its far end without an
+// ending: it has not ended, it has stopped being this server's.
+func (ts *termSession) run() {
+	code := ts.back.run(ts)
+	ts.mu.Lock()
+	left := ts.left
+	ts.mu.Unlock()
+	if left {
+		if ts.rec != nil {
+			ts.rec.close(ts.view())
+		}
+		return
+	}
+	ts.finish(code)
+}
+
+// held reports whether this terminal's CLI is in a holder of its own.
+func (ts *termSession) held() bool {
+	_, ok := ts.back.(*heldTerm)
+	return ok
+}
+
+// leave lets go of a held terminal, which goes on running for the next
+// daemon on the store to take up.
+func (ts *termSession) leave() {
+	ts.mu.Lock()
+	ts.left = true
+	ts.mu.Unlock()
+	ts.back.detach()
+}
 
 // finish is the process having gone: everyone is told how, the account is
 // let go of, and the terminal stays listed for a while so a client that
@@ -967,7 +1096,7 @@ func (ts *termSession) finish(code int) {
 // is all it can do to a machine it does not own.
 func (ts *termSession) kill(by string) {
 	ts.mu.Lock()
-	if ts.ended || ts.killing {
+	if ts.ended || ts.killing || ts.left {
 		ts.mu.Unlock()
 		return
 	}
@@ -978,7 +1107,13 @@ func (ts *termSession) kill(by string) {
 		ts.audit("terminal killed", "by", by)
 	}
 	back.hangUp()
-	time.AfterFunc(termKillAfter, func() {
+	wait := termKillAfter
+	if ts.held() {
+		// A holder kills its own CLI at termKillAfter, and records it: it
+		// is given the time to, so the session reads ended, not interrupted.
+		wait += holdKillLater
+	}
+	time.AfterFunc(wait, func() {
 		if !ts.over() {
 			back.end()
 		}
@@ -1132,8 +1267,10 @@ func (s *Server) sweepTerminals() {
 	}
 	now := s.now()
 	for _, ts := range s.everyTerminal() {
+		// A held session is exempt: a long task left alone is what it is
+		// for, and it keeps running whether or not anybody watches.
 		ts.mu.Lock()
-		idle := !ts.ended && len(ts.conns) == 0 && !ts.idleAt.IsZero() &&
+		idle := !ts.held() && !ts.ended && len(ts.conns) == 0 && !ts.idleAt.IsZero() &&
 			now.Sub(ts.idleAt) >= limit
 		ts.mu.Unlock()
 		if idle {
@@ -1163,8 +1300,16 @@ func (s *Server) keepTerminals() {
 // for them: a CLI on a pseudo-terminal is in a process group of its own
 // precisely so a signal to rota does not reach it, so without this, exiting
 // would leave agents running.
+//
+// A held terminal is let go of instead, and is no longer listed here: its
+// holder outlives this server by design, and the next daemon takes it up.
 func (s *Server) endTerminals() {
 	for _, ts := range s.everyTerminal() {
+		if ts.held() {
+			ts.leave()
+			s.dropTerminal(ts.id)
+			continue
+		}
 		ts.kill("shutdown")
 	}
 }
