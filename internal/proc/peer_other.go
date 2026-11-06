@@ -5,4 +5,4 @@ package proc
 import "net"
 
 // PeerPID is not known here.
-func PeerPID(c *net.UnixConn) (int, error) { return 0, errNoHeld }
+func PeerPID(c *net.UnixConn) (int, error) { return 0, ErrPlatform }
