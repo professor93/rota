@@ -311,7 +311,7 @@ func (claudeProvider) Quota(ctx context.Context, access string) (*Quota, error) 
 	// Without a token the endpoint can only refuse, and asking at all tells
 	// whoever watches the wire that rota runs here.
 	if access == "" {
-		return nil, failf(ErrReauth, "rota holds no credential for this account; log it in to read its usage")
+		return nil, failf(ErrReauth, "rota holds no access token for this account, so its usage is not asked")
 	}
 	var u claudeUsage
 	if err := getJSON(ctx, ClaudeEndpoints.Usage, access, &u, map[string]string{"anthropic-beta": claudeBeta}); err != nil {

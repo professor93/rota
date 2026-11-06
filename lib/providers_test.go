@@ -222,7 +222,7 @@ func TestUsageAsksNothingWithoutAToken(t *testing.T) {
 		{ID: 3, Provider: "claude", Email: "c@x", Long: &LongToken{Access: "L1"}},
 	} {
 		q, err := Usage(context.Background(), a)
-		if q != nil || !errors.Is(err, ErrReauth) || !strings.Contains(err.Error(), "no credential") {
+		if q != nil || !errors.Is(err, ErrReauth) || !strings.Contains(err.Error(), "no access token") {
 			t.Fatalf("%s: %+v %v", a, q, err)
 		}
 	}
