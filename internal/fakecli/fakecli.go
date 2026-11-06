@@ -59,8 +59,9 @@ type Spec struct {
 	// with a transformed copy — so a test can tell the terminal's own echo
 	// from the program's output — says the new size whenever the window
 	// changes, prints as much as it is asked to on "noise N", writes the
-	// bytes "print <hex>" spells out and exits on "bye". Stdout is ignored
-	// in this mode.
+	// bytes "print <hex>" spells out, answers "env", "envhas" and
+	// "registry" (see ask) and exits on "bye". Stdout is ignored in this
+	// mode.
 	Tty bool `json:"tty,omitempty"`
 	// EchoHold holds the first turn, in echo mode, until this many further
 	// lines have arrived on stdin. A test about messages that arrive
@@ -86,6 +87,11 @@ type Spec struct {
 	// Ready names a file the fake writes its pid to once Term, Spawn and
 	// Detach are in force, so a test can signal it without racing its start.
 	Ready string `json:"ready,omitempty"`
+	// Linger keeps a tty fake this long after its terminal hangs up or its
+	// input ends, taking no notice of the hang-up, as a CLI finishing its
+	// work does: a test can then see what outlives the process holding the
+	// other end of its terminal.
+	Linger string `json:"linger,omitempty"`
 }
 
 // Result is a Spec that answers as the claude CLI does in print mode: one
@@ -251,13 +257,20 @@ func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) in
 			return 70
 		}
 	}
+	if spec.Linger != "" {
+		signal.Ignore(syscall.SIGHUP)
+	}
 	if spec.Ready != "" {
 		// Written whole and then named, so WaitReady never reads half a pid.
 		_ = os.WriteFile(spec.Ready+".tmp", []byte(strconv.Itoa(os.Getpid())), 0o600)
 		_ = os.Rename(spec.Ready+".tmp", spec.Ready)
 	}
 	if spec.Tty {
-		return atty(spec, stdin, stdout)
+		code := atty(spec, stdin, stdout)
+		if d, err := time.ParseDuration(spec.Linger); err == nil {
+			time.Sleep(d)
+		}
+		return code
 	}
 	if spec.Echo {
 		return echo(spec, stdin, stdout)
@@ -387,6 +400,10 @@ func atty(spec Spec, stdin io.Reader, stdout io.Writer) int {
 				_, _ = stdout.Write(raw)
 			}
 			mu.Unlock()
+			continue
+		}
+		if reply, ok := ask(line); ok {
+			say("%s", reply)
 			continue
 		}
 		switch line {

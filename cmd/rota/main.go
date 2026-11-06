@@ -2174,10 +2174,11 @@ var serveGrace = 10 * time.Second
 // serve runs the HTTP API and its playground. The token is mandatory: an
 // account runner anyone can reach is not something to start by accident.
 func (c *cli) serve(args []string) (err error) {
-	// Three of serve's words are not a server at all: two print a block to
-	// paste into its file, and one asks a server already running for a link.
-	// They live under serve because that is what they are about, and they
-	// are matched before the flags because none of them is an address.
+	// Some of serve's words are not a server at all: two print a block to
+	// paste into its file, one asks a server already running for a link, and
+	// two are processes rota starts for itself. They live under serve because
+	// that is what they are about, and they are matched before the flags
+	// because none of them is an address.
 	if len(args) > 0 {
 		switch args[0] {
 		case "passwd":
@@ -2188,6 +2189,8 @@ func (c *cli) serve(args []string) (err error) {
 			return c.serveInvite(args[1:])
 		case "watch":
 			return c.serveWatch(args[1:])
+		case "hold":
+			return c.serveHold(args[1:])
 		}
 	}
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
