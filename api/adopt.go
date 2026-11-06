@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
+	"slices"
 	"sync"
 	"time"
 
@@ -96,9 +97,11 @@ func (s *Server) sweepRecords() {
 		return
 	}
 	now := s.now()
+	records := holdwire.Scan(s.terminals)
+	s.readLabels(records)
 	var live []holdwire.Record
 	running := map[string]bool{}
-	for _, r := range holdwire.Scan(s.terminals) {
+	for _, r := range records {
 		switch r.State {
 		case holdwire.StateLive:
 			running[r.ID] = true
@@ -268,53 +271,94 @@ func (s *Server) isStopping() bool {
 	return s.stopping
 }
 
-// accountLabels is each account's own name by id, for the sessions whose
-// records name only the id. A store that cannot be read is no names rather
-// than a failure: the records say everything else.
-func (s *Server) accountLabels() map[int]string {
+// readLabels reads each account's own name from the store, for the
+// sessions whose records name only the account's id, and keeps them for
+// describing those. Only a sweep opens the store for them, and only when a
+// record names an account — never a request, which would otherwise wait on
+// the store's lock to say what is on disk. A store that cannot be read
+// keeps the names already known: the records say everything else.
+func (s *Server) readLabels(records []holdwire.Record) {
+	if !slices.ContainsFunc(records, func(r holdwire.Record) bool { return r.Meta != nil && r.Meta.Account != 0 }) {
+		return
+	}
 	st, err := s.openStore()
 	if err != nil {
-		return nil
+		return
 	}
-	defer st.Close()
-	out := make(map[int]string, len(st.Accounts))
+	labels := make(map[int]string, len(st.Accounts))
 	for _, a := range st.Accounts {
-		out[a.ID] = a.Label()
+		labels[a.ID] = a.Label()
 	}
-	return out
+	st.Close()
+	s.termsMu.Lock()
+	s.labels = labels
+	s.termsMu.Unlock()
+}
+
+// accountLabels is each account's own name by id as the last sweep read
+// it. The map is replaced whole and never written to, so it is read after
+// the lock is let go of.
+func (s *Server) accountLabels() map[int]string {
+	s.termsMu.Lock()
+	defer s.termsMu.Unlock()
+	return s.labels
 }
 
 /* ------------------------------------------------- what a record says --- */
 
-// stored is every session a daemon describes from its record rather than
-// from a session it holds: the stopped ones, and the running ones it is not
-// linked to. A directory with no record yet, or a locked one whose record
-// cannot be read, is a holder on its way and is not one of them.
-func (s *Server) stored() []holdwire.Record {
-	if s.terminals == "" {
-		return nil
+// everySession is every terminal this server holds, and in a daemon every
+// session it describes from its record instead: the stopped ones, and the
+// running ones it is not linked to. The records are read first and the
+// terminals after, in one look with what rules a record out, so a session
+// moving from its record to this server in between is in exactly one of
+// the two.
+func (s *Server) everySession() ([]*termSession, []holdwire.Record) {
+	var scanned []holdwire.Record
+	if s.terminals != "" {
+		scanned = holdwire.Scan(s.terminals)
 	}
-	var out []holdwire.Record
-	for _, r := range holdwire.Scan(s.terminals) {
-		if s.known(r.ID) || noRecord(&r) {
-			continue
-		}
-		if r.State == holdwire.StateBroken && r.Locked {
-			continue
-		}
-		out = append(out, r)
+	s.termsMu.Lock()
+	defer s.termsMu.Unlock()
+	terms := make([]*termSession, 0, len(s.terms))
+	for _, ts := range s.terms {
+		terms = append(terms, ts)
 	}
-	return out
+	var records []holdwire.Record
+	for _, r := range scanned {
+		if s.describedFrom(&r) {
+			records = append(records, r)
+		}
+	}
+	return terms, records
 }
 
-// storedRecord is the one session of stored with this id, or nil.
-func (s *Server) storedRecord(id string) *holdwire.Record {
-	for _, r := range s.stored() {
-		if r.ID == id {
-			return &r
-		}
+// lookup is the session with this id: a terminal this server holds, or in
+// a daemon a session it describes from its record, which is that one
+// directory judged alone. Both nil is an id nobody knows.
+func (s *Server) lookup(id string) (*termSession, *holdwire.Record) {
+	if ts := s.findTerminal(id); ts != nil || s.terminals == "" {
+		return ts, nil
 	}
-	return nil
+	r := holdwire.Judge(s.terminals, id)
+	s.termsMu.Lock()
+	defer s.termsMu.Unlock()
+	if ts := s.terms[id]; ts != nil {
+		return ts, nil // taken up while its record was being read
+	}
+	if !s.describedFrom(&r) {
+		return nil, nil
+	}
+	return nil, &r
+}
+
+// describedFrom reports whether a session is described from its record:
+// it is one — a directory with no record in it is a holder on its way, or
+// one that never got there — and it is neither held here nor a holder this
+// server is starting. One a sweep is linking to again is still described
+// from its record until it is held, so a holder slow to answer the link
+// stays listed and can be stopped meanwhile. Called with termsMu held.
+func (s *Server) describedFrom(r *holdwire.Record) bool {
+	return !noRecord(r) && s.terms[r.ID] == nil && !s.pending[r.ID]
 }
 
 // describeRecord is a session's description from its record alone, in the
@@ -365,12 +409,23 @@ func describeRecord(r *holdwire.Record, labels map[int]string) map[string]any {
 	return doc
 }
 
-// madeBy is the rota a holder this one cannot speak to says made it.
+// madeBy is the rota a holder this one cannot speak to says made it, as far
+// as its record can be read.
 func madeBy(m *holdwire.Meta) string {
-	if m.Version == "" {
+	switch {
+	case m.Version != "":
+		return m.Version
+	case m.Protocol != 0:
 		return fmt.Sprintf("unknown (protocol %d)", m.Protocol)
 	}
-	return m.Version
+	return "unknown"
+}
+
+// checkable reports whether a record names its holder well enough to be
+// signalled: the pid, with the start time and boot id it is checked
+// against. One whose record could not be read may not.
+func checkable(m *holdwire.Meta) bool {
+	return m != nil && m.HolderPID > 0 && !m.HolderStart.IsZero() && m.BootID != ""
 }
 
 /* ---------------------------------------------- answering for a record --- */
@@ -380,7 +435,10 @@ func madeBy(m *holdwire.Meta) string {
 func recordRefusal(r *holdwire.Record) string {
 	switch r.State {
 	case holdwire.StateUnreadable:
-		return fmt.Sprintf("session %s was made by rota %s, which this rota cannot attach to; stop it, or attach with that version", r.ID, madeBy(r.Meta))
+		if by := madeBy(r.Meta); by != "unknown" {
+			return fmt.Sprintf("session %s was made by rota %s, which this rota cannot attach to; stop it, or attach with that version", r.ID, by)
+		}
+		return "session " + r.ID + " has a record this rota cannot read, so it cannot be attached to; attach with the rota that made it"
 	case holdwire.StateLive:
 		return "session " + r.ID + " is running, but its holder is not answering; it is tried again within " + short(termSweep)
 	}
@@ -391,23 +449,59 @@ func recordRefusal(r *holdwire.Record) string {
 // signal: a hangup, and a kill a little after the time the holder has to
 // stop its own CLI if its lock is still held then. Each goes only while the
 // pid is still the holder the record names. A stopped one has ended
-// already.
+// already, and one a DELETE is stopping already is sent nothing more.
 func (s *Server) stopRecord(w http.ResponseWriter, r *http.Request, rec *holdwire.Record) {
 	if rec.State != holdwire.StateLive && rec.State != holdwire.StateUnreadable {
 		fail(w, http.StatusConflict, "terminal "+rec.ID+" has ended")
 		return
 	}
+	if !checkable(rec.Meta) {
+		fail(w, http.StatusConflict, "session "+rec.ID+"'s record names no process this rota can check; nothing was signalled")
+		return
+	}
+	if !s.signal(rec.ID) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		return
+	}
 	kill, err := holdwire.StopHolder(rec, termKillAfter+holdKillLater)
 	switch {
 	case errors.Is(err, holdwire.ErrNotSameProcess):
+		s.unsignal(rec.ID)
 		fail(w, http.StatusConflict, "session "+rec.ID+" is no longer the process that started it; nothing was signalled")
 		return
 	case err != nil:
+		s.unsignal(rec.ID)
 		s.log.Error("a held session could not be signalled", "terminal", rec.ID, "err", err)
 		fail(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	s.log.Info("terminal killed", "terminal", rec.ID, "by", who(r).Name, "pid", rec.Meta.HolderPID)
-	go kill()
+	go func() {
+		defer s.unsignal(rec.ID)
+		kill()
+	}()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// signal marks a session as being stopped by signal, and reports whether
+// it was not already: one hangup and one kill to come per session, however
+// many times it is asked. unsignal is the stop over — the holder gone, or
+// killed — after which a session somehow still running may be asked again.
+func (s *Server) signal(id string) bool {
+	s.termsMu.Lock()
+	defer s.termsMu.Unlock()
+	if s.signalled[id] {
+		return false
+	}
+	if s.signalled == nil {
+		s.signalled = map[string]bool{}
+	}
+	s.signalled[id] = true
+	return true
+}
+
+func (s *Server) unsignal(id string) {
+	s.termsMu.Lock()
+	defer s.termsMu.Unlock()
+	delete(s.signalled, id)
 }

@@ -233,11 +233,17 @@ type Server struct {
 	// which has its place in starting already, false for one being linked
 	// to again. unlinked are the running holders a sweep could not link
 	// to, said once in the log. stopping is Stop having begun: a session
-	// taken up after that is let go of rather than added. All three are
-	// termsMu's.
-	pending  map[string]bool
-	unlinked map[string]bool
-	stopping bool
+	// taken up after that is let go of rather than added. signalled are
+	// the running sessions a DELETE is stopping by signal, so another
+	// DELETE meanwhile signals nothing more. labels are the accounts' own
+	// names by id as the last sweep read them, for the sessions a record
+	// names by id alone, so describing one never waits on the store. All
+	// of these are termsMu's.
+	pending   map[string]bool
+	unlinked  map[string]bool
+	signalled map[string]bool
+	labels    map[int]string
+	stopping  bool
 	// share is the socket a terminal somebody is sitting at is offered
 	// over, or nil where the file said not to hold one.
 	share *shareSocket
