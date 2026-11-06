@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"text/tabwriter"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/professor93/rota/sessions"
@@ -40,11 +43,24 @@ func longReport() sessions.Report {
 
 // sessionsAt is the listing of longReport on a terminal width columns wide,
 // 0 being no terminal at all.
-func sessionsAt(width int) string {
+func sessionsAt(width int) string { return sessionsOf(longReport(), width) }
+
+// sessionsOf is the listing of rep on a terminal width columns wide.
+func sessionsOf(rep sessions.Report, width int) string {
 	var out bytes.Buffer
 	c := &cli{out: &out, err: &out, cols: width}
-	c.showSessions(longReport(), width)
+	c.showSessions(rep, width)
 	return out.String()
+}
+
+// wideReport is longReport with a title in Japanese and directories in
+// Chinese, which take two columns a character.
+func wideReport() sessions.Report {
+	rep := longReport()
+	rep.Instances[0].Dir = "/Users/someone/项目/客户端/服务/接口"
+	rep.Sessions[2].Name = "アカウントの切り替えでリフレッシュトークンが再利用されたときの確認"
+	rep.Sessions[2].Dir = "/Users/someone/项目/客户端/服务/接口/测试"
+	return rep
 }
 
 // Off a terminal the sessions are lined up exactly as they were before a
@@ -85,10 +101,11 @@ var cell = regexp.MustCompile(`\S+( \S+)*`)
 // starts on it.
 func rowCells(row string) []string { return cell.FindAllString(row, -1) }
 
+// starts is the screen column each cell of a row starts in.
 func starts(row string) []int {
 	var at []int
 	for _, m := range cell.FindAllStringIndex(row, -1) {
-		at = append(at, utf8.RuneCountInString(row[:m[0]]))
+		at = append(at, screenWidth(row[:m[0]]))
 	}
 	return at
 }
@@ -102,7 +119,7 @@ func TestSessionsFitANarrowTerminal(t *testing.T) {
 		t.Run(fmt.Sprint(width), func(t *testing.T) {
 			out := sessionsAt(width)
 			for _, line := range strings.Split(out, "\n") {
-				if n := utf8.RuneCountInString(line); n > width {
+				if n := screenWidth(line); n > width {
 					t.Fatalf("a line %d wide at %d columns: %q\n%s", n, width, line, out)
 				}
 			}
@@ -148,17 +165,17 @@ func TestSessionsFitANarrowTerminal(t *testing.T) {
 			// given way as far, and the note "…session af7fda4d"; the id
 			// goes no sooner than the account.
 			who, note := rowCells(inst[0])[2], rowCells(inst[0])[4]
-			if utf8.RuneCountInString(who) > cutSoft && !strings.HasSuffix(note, "session af7fda4d") {
+			if screenWidth(who) > cutSoft && !strings.HasSuffix(note, "session af7fda4d") {
 				t.Fatalf("the note cut to %q while the account is %q:\n%s", note, who, out)
 			}
-			if dir := rowCells(inst[0])[3]; utf8.RuneCountInString(who) > cutSoft && utf8.RuneCountInString(dir) < cutSoft {
+			if dir := rowCells(inst[0])[3]; screenWidth(who) > cutSoft && screenWidth(dir) < cutSoft {
 				t.Fatalf("the directory cut to %q while the account is %q:\n%s", dir, who, out)
 			}
-			if who := rowCells(sess[1])[0]; utf8.RuneCountInString(who) > cutSoft {
-				if name, least := row[3], cutCell(full.Sessions[2].Name, cutSoft); utf8.RuneCountInString(name) < utf8.RuneCountInString(least) {
+			if who := rowCells(sess[1])[0]; screenWidth(who) > cutSoft {
+				if name, least := row[3], cutCell(full.Sessions[2].Name, cutSoft); screenWidth(name) < screenWidth(least) {
 					t.Fatalf("the title cut to %q while the account is %q:\n%s", name, who, out)
 				}
-				if dir := row[4]; utf8.RuneCountInString(dir) < cutSoft {
+				if dir := row[4]; screenWidth(dir) < cutSoft {
 					t.Fatalf("the path cut to %q while the account is %q:\n%s", dir, who, out)
 				}
 			}
@@ -239,7 +256,7 @@ func TestListSessionsFitTheTerminalItIsOn(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, line := range strings.Split(out.String(), "\n") {
-		if n := utf8.RuneCountInString(line); n > 60 {
+		if n := screenWidth(line); n > 60 {
 			t.Fatalf("a line %d wide at 60 columns: %q\n%s", n, line, out.String())
 		}
 	}
@@ -262,9 +279,264 @@ func TestCutStart(t *testing.T) {
 		{"1h ago, session af7fda4d", 17, "…session af7fda4d"},
 		{"1h ago, session af7fda4d", 9, "…af7fda4d"},
 		{"1h ago, session af7fda4d", 5, "…da4d"},
+		// Counted in screen columns: a wide character the cut would halve
+		// goes, and so does a mark whose letter went.
+		{"/项目/客户端/服务", 7, "…/服务"},
+		{"/项目/客户端/服务", 6, "…/服务"},
+		{"/项目/客户端/服务", 5, "…服务"},
+		{"/项目/客户端/服务", 4, "…务"},
+		{"ae\u0301x", 2, "…x"},
+		// An emoji of several runes, and a symbol asked to be a picture, is
+		// two columns kept whole or not at all, as screenWidth counts it.
+		{"/x/☀\ufe0f☀\ufe0f☀\ufe0f", 4, "…☀\ufe0f"},
+		{"/x/☀\ufe0f☀\ufe0f☀\ufe0f", 5, "…☀\ufe0f☀\ufe0f"},
+		{"/x/🇯🇵🇺🇸", 4, "…🇺🇸"},
+		{"/x/🇯🇵🇺🇸", 3, "…🇺🇸"},
+		{"/x/🇯🇵🇺🇸", 2, "…"},
+		{"/x/👍🏽👍🏽", 4, "…👍🏽"},
+		{"/x/👨\u200d👩\u200d👧👨\u200d👩\u200d👧", 4, "…👨\u200d👩\u200d👧"},
+		{"/x/👨\u200d👩\u200d👧👨\u200d👩\u200d👧", 5, "…👨\u200d👩\u200d👧👨\u200d👩\u200d👧"},
+		// Going forward to a space needs two characters after it, counted
+		// as characters: a letter with its mark, or an emoji, is one.
+		{"abcdef x", 5, "…ef x"},
+		{"abcdef e\u0301", 5, "…ef e\u0301"},
+		{"abcdef 👍🏽", 6, "…ef 👍🏽"},
+		{"abcdef 仕事", 7, "…仕事"},
 	} {
 		if got := cutStart(c.in, c.n); got != c.want {
 			t.Errorf("cutStart(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
 		}
+	}
+}
+
+// At every width a cut from the start is no wider than it was asked to be,
+// and keeps whole characters of the end: what follows its "…" ends the line
+// and starts where a character of it starts.
+func TestCutStartKeepsWholeCharactersAtEveryWidth(t *testing.T) {
+	for _, in := range []string{
+		"/Users/someone/src/api",
+		"1h ago, session af7fda4d",
+		"/Users/someone/项目/客户端/服务/接口/测试",
+		"/x/☀\ufe0f☀\ufe0f☀\ufe0f",
+		"/a/🇯🇵🇺🇸/👍🏽👍🏽/👨\u200d👩\u200d👧/1\ufe0f\u20e3",
+		"ae\u0301e\u0301 👩\u200d💻 x 仕事 y",
+		"アカウントの切り替え 🚀 launch 🇯🇵 team",
+	} {
+		r := []rune(in)
+		at := map[int]bool{} // the byte where each character starts
+		for i := 0; i < len(r); {
+			at[len(string(r[:i]))] = true
+			i, _ = char(r, i)
+		}
+		for n := 1; n <= screenWidth(in)+1; n++ {
+			got := cutStart(in, n)
+			if screenWidth(got) > n {
+				t.Errorf("cutStart(%q, %d) = %q, %d columns", in, n, got, screenWidth(got))
+			}
+			if screenWidth(in) <= n {
+				if got != in {
+					t.Errorf("cutStart(%q, %d) = %q, and it fit", in, n, got)
+				}
+				continue
+			}
+			kept, ok := strings.CutPrefix(got, "…")
+			if !ok || !strings.HasSuffix(in, kept) || !at[len(in)-len(kept)] && kept != "" {
+				t.Errorf("cutStart(%q, %d) = %q, not whole characters of its end", in, n, got)
+			}
+		}
+	}
+}
+
+// A title or a directory in Chinese or Japanese is measured by the columns
+// it takes on screen: off a terminal its column is padded by them so what
+// follows lines up, and on a narrow one every line fits, every row's cells
+// start where the first row's do, and no character is halved.
+func TestSessionsLineUpWideCharacters(t *testing.T) {
+	for _, width := range []int{0, 200, 120, 80, 60, 40} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			out := sessionsOf(wideReport(), width)
+			cellsWhole(t, out)
+			for _, line := range strings.Split(out, "\n") {
+				if n := screenWidth(line); width > 0 && n > width {
+					t.Fatalf("a line %d wide at %d columns: %q\n%s", n, width, line, out)
+				}
+			}
+			inst, sess := sections(out)
+			if len(inst) != 2 || len(sess) != 4 {
+				t.Fatalf("one line a row: %d instances, %d sessions\n%s", len(inst), len(sess), out)
+			}
+			for _, rows := range [][]string{inst, sess} {
+				want := fmt.Sprint(starts(rows[0]))
+				for _, r := range rows {
+					if got := fmt.Sprint(starts(r)); got != want {
+						t.Fatalf("columns at %s, the first row's at %s:\n%s", got, want, out)
+					}
+				}
+			}
+			for _, id := range []string{"497f1383", "01a048be", "abcdef12", "0badcafe"} {
+				if !strings.Contains(out, "  "+id+"  ") {
+					t.Fatalf("the id %s, whole:\n%s", id, out)
+				}
+			}
+		})
+	}
+}
+
+// A plain table of one-column characters with no control character in it
+// is what text/tabwriter made of it, byte for byte, empty cells and an
+// empty last cell included: the table above, and a few hundred of printable
+// ASCII drawn at random, each row as many cells as the next.
+func TestPlainIsTabwriterForNarrowCharacters(t *testing.T) {
+	tables := [][][]string{{
+		{"●", "claude", "#1 a@x", "/a/b", "1h ago, session af7fda4d"},
+		{"●", "GoLand", "-", "", ""},
+		{"", "", "", "", "pid 1"},
+		{"x", "a longer cell than the rest", "", "/dir with spaces", ""},
+	}}
+	rnd := rand.New(rand.NewPCG(1, 2))
+	for range 300 {
+		cols, n := 1+rnd.IntN(6), 1+rnd.IntN(8)
+		var rows [][]string
+		for range n {
+			r := make([]string, cols)
+			for i := range r {
+				b := make([]byte, rnd.IntN(13))
+				for k := range b {
+					b[k] = byte(' ' + rnd.IntN('~'-' '+1))
+				}
+				r[i] = string(b)
+			}
+			rows = append(rows, r)
+		}
+		tables = append(tables, rows)
+	}
+	for _, rows := range tables {
+		var want bytes.Buffer
+		tw := tabwriter.NewWriter(&want, 0, 0, 2, ' ', 0)
+		g := grid{plain: true}
+		for _, r := range rows {
+			fmt.Fprintf(tw, "  %s\n", strings.Join(r, "\t"))
+			g.add(r...)
+		}
+		_ = tw.Flush()
+		var got bytes.Buffer
+		g.render(&got)
+		if got.String() != want.String() {
+			t.Fatalf("%q\ngot:\n%q\nwant:\n%q", rows, got.String(), want.String())
+		}
+	}
+}
+
+// A control character in a cell — a tab, a carriage return, an escape, a
+// DEL, a byte that is not UTF-8 — is drawn as a space, so a directory with
+// a tab in it lines up like any other; the newline still parts a cell's
+// lines, and U+FFFD that was written as such is kept.
+func TestPlainDrawsAControlCharacterAsASpace(t *testing.T) {
+	if got, want := printable("a\tb\r\x1b\x7f\xff\u0085\v\fc\nd\ufffd"), "a b       c\nd\ufffd"; got != want {
+		t.Fatalf("printable = %q, want %q", got, want)
+	}
+	if s := "/Users/someone/项目 🚀\nx"; printable(s) != s {
+		t.Fatalf("printable changed %q", s)
+	}
+	dirty := [][]string{
+		{"●", "claude", "#1 a@x", "/a\tb/c\x1b[31md", "1h ago, session af7fda4d"},
+		{"●", "GoLand", "-", "/x\ry\x7fz\xffw", "pid 1"},
+		{"●", "codex", "#2 b@x", "/plain/dir", "pid 2"},
+	}
+	for _, width := range []int{0, 60, 40, 30} {
+		var g, clean grid
+		g = grid{plain: true, width: width, cutBy: map[int]func(string, int) string{3: cutStart}}
+		clean = g
+		for _, r := range dirty {
+			g.add(r...)
+			c := make([]string, len(r))
+			for i := range r {
+				c[i] = strings.Map(func(r rune) rune {
+					if r == utf8.RuneError || unicode.IsControl(r) {
+						return ' '
+					}
+					return r
+				}, r[i])
+			}
+			clean.add(c...)
+		}
+		var got, want bytes.Buffer
+		g.render(&got)
+		clean.render(&want)
+		if got.String() != want.String() {
+			t.Fatalf("at %d:\n%s\nwant:\n%s", width, got.String(), want.String())
+		}
+		if strings.ContainsFunc(got.String(), func(r rune) bool { return r != '\n' && unicode.IsControl(r) }) || !utf8.ValidString(got.String()) {
+			t.Fatalf("a control character drawn at %d: %q", width, got.String())
+		}
+		lines := rows(got.String())
+		for _, l := range lines {
+			if fmt.Sprint(starts(l)) != fmt.Sprint(starts(lines[0])) {
+				t.Fatalf("out of line at %d:\n%s", width, got.String())
+			}
+		}
+	}
+}
+
+// emojiReport is longReport with emoji in its titles and directories: a
+// flag, a skin tone, a joined pair, and a symbol asked to be a picture.
+func emojiReport() sessions.Report {
+	rep := longReport()
+	rep.Instances[0].Dir = "/Users/someone/プロジェクト/🚀/☀\ufe0f☀\ufe0f/🇯🇵/api"
+	rep.Sessions[0].Name = "🇯🇵 launch 👍🏽 review 👩\u200d💻 ☀\ufe0f weather"
+	rep.Sessions[1].Label = "仕事用アカウント@example.com"
+	rep.Sessions[2].Dir = "/Users/someone/项目/👩\u200d💻/🇯🇵🇯🇵/☀\ufe0f☀\ufe0f☀\ufe0f/测试"
+	return rep
+}
+
+// From no terminal to 220 columns, with names in Chinese and Japanese, with
+// emoji, and with nothing to list, nothing panics, every row is one line,
+// no character is halved, and from the narrowest width the tables and their
+// headings can be drawn at, no line is wider than the terminal and the
+// cells line up. (The lines under the tables wrap as sayIn does, which is
+// tested on its own; here they would only blur where a table ends.)
+func TestSessionsAtEveryWidth(t *testing.T) {
+	wide, emoji := wideReport(), emojiReport()
+	wide.Shared, wide.Notes, emoji.Shared, emoji.Notes = nil, nil, nil, nil
+	for name, rep := range map[string]sessions.Report{"wide": wide, "emoji": emoji, "empty": {}} {
+		t.Run(name, func(t *testing.T) {
+			// floor is the widest row of the tables at their narrowest, or
+			// the widest heading.
+			floor := screenWidth("Running instances:")
+			inst, sess := sections(sessionsOf(rep, 1))
+			for _, l := range append(inst, sess...) {
+				floor = max(floor, screenWidth(l))
+			}
+			if floor > 24 {
+				t.Fatalf("the tables are %d columns at their narrowest:\n%s", floor, sessionsOf(rep, 1))
+			}
+			for width := 0; width <= 220; width++ {
+				out := sessionsOf(rep, width)
+				cellsWhole(t, out)
+				if strings.Count(out, "🏽") != strings.Count(out, "👍🏽") || strings.Count(out, "\ufe0f") != strings.Count(out, "☀\ufe0f") {
+					t.Fatalf("an emoji was split at %d:\n%s", width, out)
+				}
+				inst, sess := sections(out)
+				if len(inst) != max(len(rep.Instances), 1) || len(sess) != max(len(rep.Sessions), 1) {
+					t.Fatalf("one line a row at %d:\n%s", width, out)
+				}
+				if width < floor {
+					continue
+				}
+				for _, line := range strings.Split(out, "\n") {
+					if n := screenWidth(line); width > 0 && n > width {
+						t.Fatalf("a line %d wide at %d columns: %q\n%s", n, width, line, out)
+					}
+				}
+				for _, rows := range [][]string{inst, sess} {
+					want := fmt.Sprint(starts(rows[0]))
+					for _, r := range rows {
+						if got := fmt.Sprint(starts(r)); got != want {
+							t.Fatalf("columns at %s, the first row's at %s, at %d:\n%s", got, want, width, out)
+						}
+					}
+				}
+			}
+		})
 	}
 }

@@ -7,9 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"text/tabwriter"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/professor93/rota/internal/pty"
 )
@@ -463,26 +461,28 @@ func cut(s string, n int) string {
 	return s
 }
 
-// cutStart cuts each line of a cell to n at its start rather than its end:
-// the "…" comes first, and the end is kept, for a cell whose end says the
-// most. Like cutCell it does not begin in part of a word when there is a
-// space to go forward to, so "1h ago, session af7fda4d" at 20 is
-// "…session af7fda4d"; a path has none, and is cut where n falls.
+// cutStart cuts each line of a cell to n columns at its start rather than
+// its end: the "…" comes first, and the end is kept, for a cell whose end
+// says the most. Like cutCell it does not begin in part of a word when there
+// is a space to go forward to, so "1h ago, session af7fda4d" at 20 is
+// "…session af7fda4d"; a path has none, and is cut where n falls, a wide
+// character or an emoji the cut would halve going with the rest (see
+// suffix).
 func cutStart(c string, n int) string {
 	lines := strings.Split(c, "\n")
 	for i, line := range lines {
-		r := []rune(line)
-		k := max(n-1, 0) // how many runes of the end are kept
-		if len(r) <= n {
+		if screenWidth(line) <= n {
 			continue
 		}
+		r := []rune(line)
+		k := suffix(r, n-1) // how many runes of the end are kept
 		end := string(r[len(r)-k:])
 		lines[i] = "…" + strings.TrimLeft(end, " ")
 		if k < 1 || r[len(r)-k] == ' ' || r[len(r)-k-1] == ' ' {
 			continue // nothing kept, or cut between two words
 		}
 		if at := strings.Index(end, " "); at >= 0 {
-			if kept := strings.TrimLeft(end[at:], " "); utf8.RuneCountInString(kept) >= 2 {
+			if kept := strings.TrimLeft(end[at:], " "); chars(kept) >= 2 {
 				lines[i] = "…" + kept
 			}
 		}
@@ -508,7 +508,7 @@ func cutCell(c string, n int) string {
 		if at := strings.LastIndex(head, " "); at > 0 {
 			kept = strings.TrimRight(head[:at], " ")
 		}
-		if utf8.RuneCountInString(kept) >= 2 {
+		if chars(kept) >= 2 {
 			lines[i] = kept + "…"
 		}
 	}
@@ -578,13 +578,25 @@ func (g *grid) render(out io.Writer) {
 	fmt.Fprintln(out, rule("└", "┴", "┘"))
 }
 
-// renderPlain draws a plain table (see grid.plain) through text/tabwriter
-// itself, one line per row, so a table that needs no fitting comes out byte
-// for byte as tabwriter has always drawn it. A cell that spans lines leaves
-// the other cells of its later lines empty.
+// renderPlain draws a plain table (see grid.plain) one line per row, lined
+// up the way text/tabwriter lines them up: a cell is padded by the columns
+// it takes on screen (see screenWidth) where tabwriter counts its runes, so
+// a name in Chinese lines up too, and a control character in a cell, which
+// would move the cursor where no count can follow, is a space (see
+// printable). A table of one-column characters with no control character in
+// it that needs no fitting comes out byte for byte as tabwriter drew it. A
+// cell that spans lines leaves the other cells of its later lines empty.
 func (g *grid) renderPlain(out io.Writer) {
-	_, rows := g.fit()
-	tw := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
+	clean := *g
+	clean.rows = make([][]string, len(g.rows))
+	for i, r := range g.rows {
+		clean.rows[i] = make([]string, len(r))
+		for j, c := range r {
+			clean.rows[i][j] = printable(c)
+		}
+	}
+	_, rows := clean.fit()
+	var lines [][]string
 	for _, r := range rows {
 		split := make([][]string, len(r))
 		height := 1
@@ -599,8 +611,19 @@ func (g *grid) renderPlain(out io.Writer) {
 					cells[i] = split[i][k]
 				}
 			}
-			fmt.Fprintf(tw, "  %s\n", strings.Join(cells, "\t"))
+			lines = append(lines, cells)
 		}
 	}
-	_ = tw.Flush()
+	w := widths(nil, lines)
+	for _, cells := range lines {
+		var b strings.Builder
+		b.WriteString("  ")
+		for i, c := range cells {
+			b.WriteString(c)
+			if i < len(cells)-1 {
+				b.WriteString(strings.Repeat(" ", w[i]-screenWidth(c)+2))
+			}
+		}
+		fmt.Fprintln(out, b.String())
+	}
 }
