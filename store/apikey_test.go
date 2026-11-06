@@ -229,6 +229,7 @@ func TestPasteLongPutsASetupTokenOnAnAccount(t *testing.T) {
 	s := openTemp(t)
 	a := claudeAccount(s, "u1", "one@x")
 	k := keyAccountIn(t, s)
+	asked := keyCheck(t, 401) // from here on, the API would refuse any key
 
 	got, err := s.PasteLong(context.Background(), a.ID, " "+testSetup+"\n")
 	if err != nil || got != a {
@@ -252,5 +253,14 @@ func TestPasteLongPutsASetupTokenOnAnAccount(t *testing.T) {
 	}
 	if k.Long != nil || len(s.Accounts) != 2 {
 		t.Fatal("nothing else changed")
+	}
+	// A key where a setup token belongs is refused by name, and is never sent
+	// to the API to be refused there in words about something else.
+	if _, err := s.PasteLong(context.Background(), a.ID, testKey); err == nil ||
+		!strings.Contains(err.Error(), "Console API key") || strings.Contains(err.Error(), "refused this key") {
+		t.Fatalf("a key is refused for what it is: %v", err)
+	}
+	if asked.Load() != 0 {
+		t.Fatalf("nothing pasted as a setup token is sent anywhere: %d requests", asked.Load())
 	}
 }

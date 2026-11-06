@@ -623,7 +623,7 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame |
 | `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
-| `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"long_until":"...","status":"long"}`. Neither comes back or is logged |
+| `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"long_until":"...","status":"long"}`, and an API key sent as `token` is refused with `400` by its prefix, without being sent anywhere. Neither comes back or is logged |
 | `POST` | `/v1/login/{id}` | control | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"long_until":"...","status":"long"}` |
 | `POST` | `/v1/auth` | control | what `POST /v1/login` was called before the API and the command agreed on one word; kept working for anything already calling it |
 | `POST` | `/v1/auth/{id}` | control | likewise for `POST /v1/login/{id}` |
@@ -2800,7 +2800,8 @@ inference-only and cannot say whose it is or when it was made, so rota cannot
 check either, and says so in one line when it stores it: a token from another
 claude.ai account would bill that account, and one made months ago ends sooner
 than rota shows. Name the account you approved as, and paste it when it is new. It never creates an account, an account on an API key
-takes none, and an API key pasted here is refused by name.
+takes none, and an API key pasted here is refused by name, from its prefix on
+this machine, without being sent anywhere.
 
 ### An account on an API key
 
@@ -2925,7 +2926,9 @@ it an account whose `APIKey()` is true, which `Usage` never asks about and
 which `Stage` launches with `ANTHROPIC_API_KEY` alone. A `claude setup-token`
 token (`"setup-token"`) comes back as the one `BeginLong` would have obtained,
 good for a year from now, for `Account.ApplyLong` on whichever account the
-caller knows it belongs to. Every other provider refuses both.
+caller knows it belongs to. `PasteLong(provider, s)` takes that token alone and
+refuses an API key by its prefix, asking nobody. Every other provider refuses
+both.
 
 `Run` is one question and one answer. `Start` is the same request left open:
 set `Spec.Input` alongside `Stream` and the CLI keeps its standard input, so

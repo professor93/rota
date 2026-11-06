@@ -68,9 +68,10 @@ type LongLived interface {
 }
 
 // paster is a provider that also takes a credential a person pastes, beside
-// the login it begins in a browser. See Paste.
+// the login it begins in a browser. See Paste and PasteLong.
 type paster interface {
 	paste(ctx context.Context, s string) (t *Token, unverified, err error)
+	pasteLong(s string) (*Token, error)
 }
 
 // Delegator is implemented by a provider whose CLI can sign itself in and

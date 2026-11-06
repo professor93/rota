@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,14 +20,20 @@ const (
 	testSetup = "sk-ant-oat01-TESTONLY-not-a-real-setup-token-2222"
 )
 
-// keyAPI stands in for the API's model list, answering status.
-func keyAPI(t *testing.T, status int) {
+// keyAPI stands in for the API's model list, answering status and counting
+// the questions it is asked.
+func keyAPI(t *testing.T, status int) *atomic.Int64 {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(status) }))
+	var asked atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		asked.Add(1)
+		w.WriteHeader(status)
+	}))
 	t.Cleanup(srv.Close)
 	old := rota.ClaudeModelsEndpoint
 	rota.ClaudeModelsEndpoint = srv.URL + "/v1/models"
 	t.Cleanup(func() { rota.ClaudeModelsEndpoint = old })
+	return &asked
 }
 
 // secretless fails when anything printed carries a credential, whole or the
@@ -176,6 +183,36 @@ func TestLoginTokenPutsASetupTokenOnTheAccountNamed(t *testing.T) {
 			t.Fatalf("%v: %d %q %q", c.args[:2], code, out, errOut)
 		}
 		secretless(t, "a refused --token", out, errOut)
+	}
+}
+
+// A Console API key given where a setup token belongs is refused on this
+// machine, for what it is — whether it was piped in or written on the
+// command line — and never sent to the API to be refused there as a bad key.
+func TestLoginTokenRefusesAKeyBeforeItLeavesTheMachine(t *testing.T) {
+	asked := keyAPI(t, 401)
+	home := seedLong(t, time.Time{}, "")
+	out, errOut, code := runCLIStdin(t, testKey+"\n", "login", "1", "--token")
+	if code != 1 || !strings.Contains(errOut, "Console API key") || !strings.Contains(errOut, "rota login --key") ||
+		strings.Contains(errOut, "refused this key") {
+		t.Fatalf("standard input: %d %q %q", code, out, errOut)
+	}
+	secretless(t, "a key as --token", out, errOut)
+	for _, args := range [][]string{
+		{"login", "1", "--token=" + testKey},
+		{"login", "1", "--token", testKey},
+	} {
+		out, errOut, code := runCLIStdin(t, "", args...)
+		if code != 2 {
+			t.Fatalf("on the command line: %d %q %q", code, out, errOut)
+		}
+		secretless(t, "a key as --token on the command line", out, errOut)
+	}
+	if n := asked.Load(); n != 0 {
+		t.Fatalf("a key given as a setup token must go nowhere: %d requests reached the API", n)
+	}
+	if raw, _ := os.ReadFile(filepath.Join(home, "accounts.json")); strings.Contains(string(raw), "TESTONLY") {
+		t.Fatal("nothing is stored")
 	}
 }
 
