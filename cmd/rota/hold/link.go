@@ -216,7 +216,7 @@ func (s *Session) handle(l *link, kind byte, payload []byte) {
 		if share.Unmarshal(payload, &m) != nil {
 			return
 		}
-		if out, err := s.repaint(m.Seq); err == nil {
+		if out := s.repaint(m.Seq); out != nil {
 			_ = l.send(holdwire.Screen, out)
 		}
 	case holdwire.Stop:
