@@ -146,6 +146,11 @@ type TerminalSection struct {
 	// long, so a CLI left running over a weekend is not still holding an
 	// account on Monday.
 	IdleTimeout time.Duration `toml:"idle_timeout"`
+	// KeepStopped is how long a held session that has stopped — ended, or
+	// interrupted by its holder going — stays listed with what is known
+	// about it, so it can be resumed or read about, before its record is
+	// forgotten.
+	KeepStopped time.Duration `toml:"keep_stopped"`
 	// Record keeps what each terminal printed — and never what was typed
 	// into it — under the store, up to RecordMaxBytes each.
 	Record         bool  `toml:"record"`
@@ -193,7 +198,8 @@ func DefaultConfig() *Config {
 		},
 		Terminal: TerminalSection{
 			MaxSessions: 8, ScrollbackBytes: defaultScrollback,
-			IdleTimeout: 12 * time.Hour, RecordMaxBytes: 50 << 20, Share: true,
+			IdleTimeout: 12 * time.Hour, KeepStopped: defaultKeepStopped,
+			RecordMaxBytes: 50 << 20, Share: true,
 		},
 		From: map[string]string{},
 	}
@@ -300,6 +306,9 @@ func (c *Config) Check() error {
 	}
 	if c.Terminal.IdleTimeout <= 0 {
 		return errors.New("terminal.idle_timeout must be longer than nothing")
+	}
+	if c.Terminal.KeepStopped <= 0 {
+		return errors.New("terminal.keep_stopped must be longer than nothing")
 	}
 	if _, err := ListenAddr(c.Server.Listen); err != nil {
 		return fmt.Errorf("server.listen: %w", err)
@@ -550,7 +559,8 @@ func (c *Config) Serve() (Options, Listener, error) {
 		Terminal: Terminal{
 			Shell: c.Terminal.Shell, MaxSessions: c.Terminal.MaxSessions,
 			Scrollback: c.Terminal.ScrollbackBytes, IdleTimeout: c.Terminal.IdleTimeout,
-			Record: c.Terminal.Record, RecordMax: c.Terminal.RecordMaxBytes,
+			KeepStopped: c.Terminal.KeepStopped,
+			Record:      c.Terminal.Record, RecordMax: c.Terminal.RecordMaxBytes,
 			Share: &share,
 		},
 	}, Listener{Addr: addr, Cert: c.TLS.Cert, Key: c.TLS.Key}, nil
@@ -651,6 +661,7 @@ func (c *Config) Print(w io.Writer, token string) error {
 	num("terminal.max_sessions", c.Terminal.MaxSessions)
 	num("terminal.scrollback_bytes", c.Terminal.ScrollbackBytes)
 	span("terminal.idle_timeout", c.Terminal.IdleTimeout)
+	span("terminal.keep_stopped", c.Terminal.KeepStopped)
 	yes("terminal.record", c.Terminal.Record)
 	key("terminal.record_max_bytes", strconv.FormatInt(c.Terminal.RecordMaxBytes, 10))
 	yes("terminal.share", c.Terminal.Share)

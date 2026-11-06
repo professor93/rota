@@ -27,7 +27,5 @@ func (h *heldTerm) signal(sig syscall.Signal) {
 		_ = h.proc.Signal(sig)
 		return
 	}
-	if holdwire.SameProcess(h.pid, h.start, h.boot) {
-		_ = syscall.Kill(h.pid, sig)
-	}
+	_ = holdwire.Signal(h.pid, h.start, h.boot, sig)
 }

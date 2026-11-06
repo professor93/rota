@@ -112,6 +112,10 @@ type Terminal struct {
 	// IdleTimeout ends a terminal nobody has been attached to for this long
 	// (default 12h). Zero is the default; negative never ends one.
 	IdleTimeout time.Duration
+	// KeepStopped is how long a daemon keeps listing a held session that
+	// has stopped, measured from when it stopped, before its directory is
+	// deleted (default 168h). Zero is the default; negative keeps every one.
+	KeepStopped time.Duration
 	// Record keeps each terminal's output — never its input — under the
 	// store, up to RecordMax bytes each (default 50 MiB).
 	Record    bool
@@ -224,6 +228,16 @@ type Server struct {
 	// and taking one a single step.
 	starting int
 	startMu  sync.Mutex
+	// pending are the held sessions on their way to terms, so nothing else
+	// takes the same one up meanwhile: true for a holder being started,
+	// which has its place in starting already, false for one being linked
+	// to again. unlinked are the running holders a sweep could not link
+	// to, said once in the log. stopping is Stop having begun: a session
+	// taken up after that is let go of rather than added. All three are
+	// termsMu's.
+	pending  map[string]bool
+	unlinked map[string]bool
+	stopping bool
 	// share is the socket a terminal somebody is sitting at is offered
 	// over, or nil where the file said not to hold one.
 	share *shareSocket
@@ -304,6 +318,9 @@ func New(opts Options) (*Server, error) {
 		// caller says a terminal should outlive everything.
 		opts.Terminal.IdleTimeout = 12 * time.Hour
 	}
+	if opts.Terminal.KeepStopped == 0 {
+		opts.Terminal.KeepStopped = defaultKeepStopped
+	}
 	if opts.Terminal.RecordMax <= 0 {
 		opts.Terminal.RecordMax = 50 << 20
 	}
@@ -321,6 +338,7 @@ func New(opts Options) (*Server, error) {
 		log: log, ctx: ctx, cancel: cancel, forced: map[int]time.Time{},
 		runs:     map[string]*liveRun{},
 		terms:    map[string]*termSession{},
+		pending:  map[string]bool{},
 		users:    users,
 		tokens:   tokens,
 		decoy:    decoyFor(users),
@@ -334,6 +352,10 @@ func New(opts Options) (*Server, error) {
 			cancel()
 			return nil, err
 		}
+		// Every holder still running on the store is this daemon's from
+		// here, and every stopped session is listed, before the first
+		// request can ask.
+		s.sweepRecords()
 	}
 	if opts.RefreshEvery > 0 {
 		s.keeperDone = make(chan struct{})
@@ -465,6 +487,9 @@ func (s *Server) maintain() {
 // next daemon on the store to take up — and the daemon's claim on the store
 // goes last, once nothing of this one is left to compete with that daemon.
 func (s *Server) Stop() {
+	s.termsMu.Lock()
+	s.stopping = true
+	s.termsMu.Unlock()
 	// The socket first, so nothing new is offered to a server that is
 	// stopping, and the file it left behind goes with it.
 	if s.share != nil {
