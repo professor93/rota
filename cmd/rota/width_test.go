@@ -40,6 +40,12 @@ func TestRuneWidth(t *testing.T) {
 		{'🀄', 2}, {'🃏', 2}, {'🟰', 2}, {'〈', 2}, {'〉', 2}, {'䷀', 2}, {'䷿', 2},
 		{'\U00017000', 2}, {'\U00018b00', 2}, {'\U0001b000', 2}, {'\U0001b170', 2}, {'\U00016fe0', 2},
 		{'🏽', 2},
+		// The pictographs that are text until asked to be pictures are one
+		// column, the ones on either side of them two.
+		{'🛠', 1}, {'👁', 1}, {'🖥', 1}, {'🗂', 1}, {'🗑', 1}, {'🌡', 1}, {'🕊', 1}, {'🏳', 1},
+		{'\U0001f900', 1}, {'\U0001f90b', 1}, {'\U0001f93b', 1}, {'\U0001f946', 1},
+		{'🌠', 2}, {'🌭', 2}, {'🏴', 2}, {'👀', 2}, {'👂', 2}, {'🕺', 2}, {'🖤', 2}, {'🗻', 2},
+		{'🛌', 2}, {'🛕', 2}, {'🛫', 2}, {'🛴', 2}, {'🤌', 2}, {'🥇', 2},
 	} {
 		if got := runeWidth(c.r); got != c.want {
 			t.Errorf("runeWidth(%q U+%04X) = %d, want %d", c.r, c.r, got, c.want)
@@ -105,6 +111,17 @@ func TestRuneWidth(t *testing.T) {
 		"*\ufe0f\u20e3": 2,
 		"0\ufe0f\u20e3": 2,
 		"\ufe0f0":       1,
+		// A pictograph that is text by default is one column, and two once
+		// U+FE0F, a skin tone or a joiner makes it a picture.
+		"🛠":                    1,
+		"🛠\ufe0f":              2,
+		"👁":                    1,
+		"👁\ufe0f":              2,
+		"🛠 fix":                5,
+		"🛠\ufe0f fix":          6,
+		"🕵🏽":                   2,
+		"👁\ufe0f\u200d🗨\ufe0f": 2,
+		"🏳\u200d🌈":             2,
 		// A Hangul syllable spelled out letter by letter is two wide.
 		"\u1100\u1161\u11a8": 2,
 	} {
