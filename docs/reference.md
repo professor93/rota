@@ -527,6 +527,7 @@ token       = ""            # the bearer token, if you keep it here
 token_file  = ""            # or a file holding it, same permission rule
 token_env   = "ROTA_TOKEN"  # or the name of the variable that holds it
 session_ttl = "12h"         # how long a sign-in on the page lasts
+local_user  = ""            # the [[users]] entry this machine's own terminal types as
 
 [routes]
 api        = true           # everything under /v1 except the sockets and health
@@ -641,6 +642,7 @@ see *Who is asking, and what they may do*.
 | `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up |
 | `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended; a running held session the daemon is not linked to is hung up by signal, once however often it is asked, and only while its pid is still the holder its record names: `409` when it is not, or when its record names no process this rota can check |
 | `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame. A held session the daemon is not linked to answers `409`, saying why |
+| `POST` | `/v1/terminals/{id}/send` | control | `{"text":"…","force":false}` — type a message into a held session the way a person would, once it is ready for one: the text, then Enter. It is typing, so the keyboard must be free or held by the sender's own person. `200 {"ok":true}` once typed; `409` with `reason` `waiting` (the CLI waits on its person, where Enter may approve something; `"force":true` types anyway), `keyboard` (with `holder`), `ended`, or `not_held` (a terminal that is not a held session, or one the daemon is not linked to); `504` with `reason` `timeout` when it never became ready in 30 seconds |
 | `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
 | `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"long_until":"...","status":"long"}`, and an API key sent as `token` is refused with `400` by its prefix, without being sent anywhere. Neither comes back or is logged |
@@ -1506,6 +1508,32 @@ Anything a non-holder sends inward — bytes, or a resize — is answered with
 `{"message":"you are not holding the keyboard","type":"error"}` and changes
 nothing at all.
 
+A **held session** keeps those rules and adds four, which a terminal the
+server runs itself does not have:
+
+- **The keyboard follows the person.** One person attached from several
+  devices types on whichever of them without asking: typing (or `claim`) on
+  a connection whose person holds the keyboard elsewhere moves it there, and
+  everyone is told. A person is a user signed in on the page, by name; the
+  control socket's principal, `local`, is the one `[[users]]` entry that may
+  control when there is exactly one, the entry `[auth] local_user` names
+  when there are more, and a person of its own when neither says. A bearer
+  token or an invite is never a person, so its connections keep the claim
+  flow. A connection that lost the keyboard to somebody else does not get it
+  back by attaching again.
+- **Only a fit resizes.** Attaching never resizes, and neither does typing.
+  A `resize` without `"fit":true` is ignored, and said once per connection
+  as `this session's size changes only when a viewer asks to fit it`; one
+  with it is the holder's, as ever, at most 1000×1000, with a 0 meaning 80
+  columns or 24 rows.
+- **A viewer's terminal never answers twice.** What a connection sends first
+  has its own terminal's answers taken out — to the colour, cursor and
+  device queries it sees replayed, which the holder answered when the CLI
+  asked — so a watcher's terminal answering is not a watcher typing, and a
+  frame that held nothing else does nothing at all.
+- **Falling behind repaints.** A viewer that cannot keep up is never closed
+  with `1013`; see *Falling behind* below.
+
 #### The routes
 
 | | |
@@ -1515,6 +1543,7 @@ nothing at all.
 | `GET /v1/terminals/{id}/ws?since=N&mode=…` | attach (watch) |
 | `POST /v1/terminals` | start one (control) |
 | `DELETE /v1/terminals/{id}` | end one: a hangup, then a kill three seconds later, or five for a held session (control) |
+| `POST /v1/terminals/{id}/send` | type a message into a held session once it is ready, then Enter (control) |
 
 ```bash
 curl -X POST localhost:8787/v1/terminals -H "Authorization: Bearer $ROTA_TOKEN" \
@@ -1596,8 +1625,9 @@ Out:
 | | |
 |---|---|
 | *binary* | output: write it to the terminal emulator as it arrives |
-| `hello{id,kind,cols,rows,offset,holder,you:{name,role,conn},viewers}` | the first frame, always; `repaint:true` on a held session attached without `since`, whose first binary frame is then its current screen, standing for `offset` |
-| `keyboard{holder}` | who holds it now, `null` for nobody |
+| `hello{id,kind,cols,rows,offset,holder,you:{name,role,conn},viewers}` | the first frame, always; `repaint:true` on a held session attached without `since`, whose first binary frame is then its current screen, standing for `offset`; a held session's also has `holder_conn` |
+| `keyboard{holder}` | who holds it now, `null` for nobody; a held session's also has `holder_conn`, the `conn` of the connection holding it, since one person may be attached from several devices |
+| `repaint{offset,cols,rows}` | a held session's viewer that fell behind: the next binary frame is the screen at that size, standing for `offset`, and output goes on from there |
 | `claim_request{by,id}` | somebody is asking the holder for it |
 | `resized{cols,rows}` | the terminal is a different size now |
 | `viewers{list}` | who is attached: name, role and since — never an address |
@@ -1611,7 +1641,7 @@ In:
 | | |
 |---|---|
 | *binary* | input: the bytes of somebody typing, control characters and all |
-| `resize{cols,rows}` | holder only |
+| `resize{cols,rows,fit?}` | holder only; on a held session only with `"fit":true` |
 | `claim{force?}` / `release` | ask for the keyboard, or let it go |
 | `grant{to}` / `deny{to}` | the holder answering a `claim_request`, by its `id` |
 | `ping` | the one thing a watcher may send |
@@ -1631,7 +1661,13 @@ next binary frame then starts at its `to`.
 **Falling behind.** Each connection has a bounded queue and the terminal
 never waits for one: a reader that stops reading is closed with `1013` and
 reattaches with `since`. One slow watcher cannot stall the CLI or anybody
-else watching it.
+else watching it. A held session's viewer is not closed: the output it fell
+behind on is thrown away, and once it has caught up with what was queued it
+is sent `repaint{offset,cols,rows}`, the screen as it is now as the next
+binary frame, and the output after `offset`. Documents still arrive, and
+the ones that came while it was behind arrive after the repaint. A holder
+with no screen to give is replayed from the oldest byte kept, after a reset,
+as an attach without a screen is.
 
 ```js
 const ws = new WebSocket(`wss://host/v1/terminals/${id}/ws`);
@@ -1686,7 +1722,9 @@ refused: it goes nowhere, and the keyboard control flashes once.
 The terminal is fitted to its container for whoever holds the keyboard,
 which sends `resize` when the fitted size changes; for everybody else it is
 set to the session's own `cols`×`rows` and scrolls inside the container
-rather than lying about how wide the terminal on the server is.
+rather than lying about how wide the terminal on the server is. On a held
+session that `resize` is not a fit, so the server leaves the size alone and
+says so once.
 
 **Reconnecting** is the socket's own rules, followed exactly. The page adds
 every binary frame's length to `hello.offset`, so it always knows the offset
@@ -1750,8 +1788,10 @@ output: `terminal created` (id, kind, account, by), `terminal attached` and
 `terminal detached` (id, name, role), `keyboard taken`, `keyboard released`,
 `keyboard granted` and `keyboard forced` (id, from, to), `terminal killed`
 (id, by) and `terminal ended` (id, exit); for a held session, `terminal
-adopted` (id, kind, account, pid) when a daemon takes it up and `terminal
-relinked` (id, pid) when its link comes back — and, for one that was offered from
+adopted` (id, kind, account, pid) when a daemon takes it up, `terminal
+relinked` (id, pid) when its link comes back, `keyboard moved` (id, from,
+to) when it follows its person to another connection, and `terminal sent`
+(id, by, force, answer) for a send, without its text — and, for one that was offered from
 a local terminal, `terminal shared` (id, account, label, pid, mode) and
 `terminal unshared` (id, exit) beside the last of those.
 
