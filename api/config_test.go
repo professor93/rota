@@ -81,6 +81,7 @@ shell = true
 max_sessions = 2
 scrollback_bytes = 4096
 idle_timeout = "90m"
+keep_stopped = "36h"
 record = true
 record_max_bytes = 1024
 share = false
@@ -124,7 +125,8 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 		},
 		Terminal: TerminalSection{
 			Shell: true, MaxSessions: 2, ScrollbackBytes: 4096,
-			IdleTimeout: 90 * time.Minute, Record: true, RecordMaxBytes: 1024, Share: false,
+			IdleTimeout: 90 * time.Minute, KeepStopped: 36 * time.Hour,
+			Record: true, RecordMaxBytes: 1024, Share: false,
 		},
 		Store: StoreSection{Dir: "/srv/rota"},
 		Users: []UserEntry{{Name: "inoyat", Role: "control",
@@ -522,5 +524,37 @@ func TestPrintIsStillAFileWhenNothingIsSecret(t *testing.T) {
 	}
 	if err := back.Check(); err != nil {
 		t.Fatalf("what it printed is not a file it would serve with: %v", err)
+	}
+}
+
+// TestKeepStoppedIsADuration: how long a stopped held session stays listed
+// is a length of time like every other one here, written the way the parser
+// reads it back, refused when it is nothing, and handed to the server as
+// it was written.
+func TestKeepStoppedIsADuration(t *testing.T) {
+	var b bytes.Buffer
+	if err := DefaultConfig().Print(&b, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "\nkeep_stopped    = \"168h\"") {
+		t.Fatalf("the default is not printed as 168h:\n%s", b.String())
+	}
+	if _, err := LoadConfig(write(t, "[terminal]\nkeep_stopped = \"0s\"\n")); err == nil ||
+		!strings.Contains(err.Error(), "terminal.keep_stopped must be longer than nothing") {
+		t.Fatalf("0s answers %v", err)
+	}
+	c, err := LoadConfig(write(t, "[terminal]\nkeep_stopped = \"72h\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts, _, err := c.Serve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Terminal.KeepStopped != 72*time.Hour {
+		t.Fatalf("72h came through as %v", opts.Terminal.KeepStopped)
+	}
+	if c.From["terminal.keep_stopped"] != "file" {
+		t.Fatalf("the file's own key is %q", c.From["terminal.keep_stopped"])
 	}
 }

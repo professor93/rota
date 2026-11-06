@@ -978,7 +978,7 @@ func (ts *termSession) outputAt(off int64, p []byte) {
 	copy(chunk, p)
 	ts.ring.Write(chunk)
 	if ts.rec != nil {
-		ts.rec.write(chunk)
+		ts.rec.writeAt(off, chunk)
 	}
 	for _, tc := range ts.conns {
 		switch skip := tc.skip - off; {
@@ -1174,14 +1174,46 @@ type recorder struct {
 	max  int64
 	n    int64
 	full bool
+	// from is the offset a recording taken up again had reached: a held
+	// session's output from before is in the file already, and the holder
+	// sends it again to a daemon that takes the session up.
+	from int64
 }
 
-func newRecorder(dir, id string, max int64) (*recorder, error) {
-	f, err := os.OpenFile(filepath.Join(dir, id+".out"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+// newRecorder starts a recording, or with resume takes up the one already
+// there for this id — a held session a daemon before this one recorded —
+// and adds to it.
+func newRecorder(dir, id string, max int64, resume bool) (*recorder, error) {
+	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
+	if resume {
+		flags = os.O_CREATE | os.O_WRONLY | os.O_APPEND
+	}
+	f, err := os.OpenFile(filepath.Join(dir, id+".out"), flags, 0o600)
 	if err != nil {
 		return nil, err
 	}
-	return &recorder{out: f, meta: filepath.Join(dir, id+".json"), max: max}, nil
+	r := &recorder{out: f, meta: filepath.Join(dir, id+".json"), max: max}
+	if resume {
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return nil, err
+		}
+		r.n, r.from, r.full = fi.Size(), fi.Size(), fi.Size() >= max
+	}
+	return r, nil
+}
+
+// writeAt is write for output that says where in the stream it belongs,
+// leaving out what a recording taken up again already has.
+func (r *recorder) writeAt(off int64, p []byte) {
+	if skip := r.from - off; skip > 0 {
+		if skip >= int64(len(p)) {
+			return
+		}
+		p = p[skip:]
+	}
+	r.write(p)
 }
 
 // write appends output up to the cap and then stops. Called with the
@@ -1247,14 +1279,28 @@ func (s *Server) everyTerminal() []*termSession {
 
 // live counts the terminals still running, which is what max_sessions caps:
 // one that has ended is listed for a few minutes but is not holding
-// anything. One still starting holds its place already. Both are read in
-// one look, since a terminal moves from one to the other in one step.
+// anything. One still starting holds its place already. A daemon also
+// counts every holder running on its store that it is not linked to: each
+// is a CLI holding an account. The records are read first and the rest in
+// one look after, so a terminal moving from one to another in between is
+// counted once — a held one still starting is counted by its place, not by
+// its record.
 func (s *Server) liveTerminals() int {
+	var records []holdwire.Record
+	if s.terminals != "" {
+		records = holdwire.Scan(s.terminals)
+	}
 	s.termsMu.Lock()
 	n := s.starting
 	all := make([]*termSession, 0, len(s.terms))
 	for _, ts := range s.terms {
 		all = append(all, ts)
+	}
+	for _, r := range records {
+		if (r.State == holdwire.StateLive || r.State == holdwire.StateUnreadable) &&
+			s.terms[r.ID] == nil && !s.pending[r.ID] {
+			n++
+		}
 	}
 	s.termsMu.Unlock()
 	for _, ts := range all {
@@ -1291,7 +1337,8 @@ func (s *Server) sweepTerminals() {
 
 // keepTerminals is the sweeper. It runs until the server stops, and it is
 // the only thing measuring the idle timeout — a timer per terminal would be
-// one more thing to cancel in every path that ends one.
+// one more thing to cancel in every path that ends one. A daemon's sweep
+// also goes through its store's records (sweepRecords).
 func (s *Server) keepTerminals() {
 	t := time.NewTicker(termSweep)
 	defer t.Stop()
@@ -1301,6 +1348,7 @@ func (s *Server) keepTerminals() {
 			return
 		case <-t.C:
 			s.sweepTerminals()
+			s.sweepRecords()
 		}
 	}
 }

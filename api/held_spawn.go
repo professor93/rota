@@ -71,6 +71,10 @@ func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd s
 		st.Close()
 		hreq.Account, label, provider = a.ID, a.Label(), a.Provider
 	}
+	// On its way from here: a sweep finding its record before this has
+	// linked to it must not link to it as well.
+	s.pend(hreq.ID, true)
+	defer s.unpend(hreq.ID)
 	cmd, ready, err := s.spawnHolder(&hreq)
 	if err != nil {
 		return nil, err
