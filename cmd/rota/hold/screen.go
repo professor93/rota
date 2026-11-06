@@ -69,6 +69,7 @@ func NewScreen(cols, rows int) *Screen {
 		defer s.catch()
 		s.em = vt.NewEmulator(cols, rows)
 		s.ok = true
+		s.refill()
 	}()
 	if s.ok {
 		go drain(s.em)
@@ -137,8 +138,10 @@ func (s *Screen) Resize(cols, rows int) {
 	defer s.catch()
 	s.settle()
 	s.em.Resize(cols, rows)
-	// What a run of repeats drew is not a full screen at the new size.
+	// What a run of repeats drew is not a full screen at the new size, and
+	// two screens are another count.
 	s.reps.run = 0
+	s.refill()
 }
 
 // Cursor is where the cursor is, 1-based, as a CPR reports it. Without an
