@@ -31,11 +31,17 @@ const (
 // Record is one session's directory as Scan found it. Stopped is when it
 // stopped: the ending meta.json records, or for an interrupted session the
 // last time its holder touched meta.json. Err says why a record is broken.
+//
+// Locked is what the lock said when the record was judged, whatever the
+// state. A broken record can be locked: a holder starting holds its lock
+// before it writes meta.json. Nothing is deleted from a locked directory,
+// and the answer is here so that a sweep need not ask the lock again.
 type Record struct {
 	ID, Dir string
 	Meta    *Meta
 	State   RecordState
 	Stopped time.Time
+	Locked  bool
 	Err     error
 }
 
@@ -118,6 +124,7 @@ func judge(terminals, id string) (r Record) {
 		}
 	}()
 	locked := Locked(LockPath(r.Dir))
+	r.Locked = locked
 	mtime := func() time.Time {
 		if fi, err := os.Stat(MetaPath(r.Dir)); err == nil {
 			return fi.ModTime()
