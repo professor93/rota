@@ -115,6 +115,16 @@ A link rather than a copy, so rebuilding is one command and the next `rota`
 you type is the one you just built. `go install ./cmd/rota` works too and puts
 it in `$(go env GOPATH)/bin`, but then every rebuild needs installing again.
 
+To test a checkout, name the workspace rather than the root:
+
+```sh
+go vet work && go test work
+```
+
+The program is a module of its own, and `./...` at the root stops at a
+module's edge, so `go test ./...` tests the SDK and the server and leaves the
+program out. `work` is every package of both modules `go.work` lists.
+
 ### On encoding/json/v2
 
 rota reads and writes JSON with `encoding/json/v2`. In Go 1.27 the original
@@ -684,14 +694,15 @@ users (mode 0644); it is its owner's alone, so fix it with: chmod 600
 
 When a write would take the file past 20 MiB it is moved to `rota.log.1`,
 the older ones move up by one, the fifth goes, and a new file is started:
-four old files are kept, the newest as `.1`, so a server left running for
-months fills a hundred mebibytes at most. The log is moved first and the
+four old files are kept, the newest as `.1`, so a server whose rotations
+succeed fills a hundred mebibytes at most. The log is moved first and the
 older files only after it: if it cannot be moved, nothing older is touched,
-writing goes on into the same file, and the next try waits for another
-20 MiB. A `rota.log.0` that a crash left in the middle of a rotation is put
-into the chain as `.1` when the log is opened, and before the next rotation,
-rather than written over; one that cannot be moved, such as another user's
-in a shared directory, is left where it is and costs no older file. If the new file cannot be opened after a
+writing goes on into the same file, which keeps growing, and the next try
+waits for another 20 MiB. A `rota.log.0` or `rota.log.folding` that a crash
+left in the middle of a rotation joins the chain as the newest old files
+when the log is opened, and before the next rotation, rather than written over; one that
+cannot be moved, such as another user's in a shared directory, is left where
+it is and costs no older file. If the new file cannot be opened after a
 rotation, the log goes to stderr until it can: the file is tried again
 after a minute, or once another 20 MiB has gone to stderr, whichever is
 first, and each switch, either way, is said once on stderr. A server that
