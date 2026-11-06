@@ -8,7 +8,8 @@ Register each account once, give it a place in the queue, and ask. rota
 launches each vendor's own CLI with a credential you own, takes the first
 account still under its usage threshold, and moves on to the next when one
 is spent. It is not a proxy: nothing is intercepted, nothing impersonated,
-and the SDK and the server packages have **zero third-party dependencies**.
+and the SDK and the server packages have **zero third-party dependencies**;
+the `rota` program uses x/vt.
 
 **The name.** A rota is a roster: the list that says whose turn it is.
 This one is a rota of accounts — each takes its turn until it is spent,
