@@ -306,8 +306,11 @@ func TestServeThatStopsBadlySaysSoOnStderr(t *testing.T) {
 		conn.Write([]byte("GET /v1/health HTTP/1.1\r\n"))
 		// One whole request on another connection: the server accepts in
 		// order, so once this is answered the half-sent one is accepted
-		// and tracked, and the shutdown below has to wait for it.
-		resp, err := client.Get(base + "/v1/health")
+		// and tracked, and the shutdown below has to wait for it. A
+		// transport of its own, without keep-alives, so this can never
+		// ride a connection the start-up's polling left open.
+		fresh := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}}
+		resp, err := fresh.Get(base + "/v1/health")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -460,6 +463,75 @@ func TestLogFileNeverFollowsALink(t *testing.T) {
 	}
 	if readFile(t, path+".1") != "before\n" {
 		t.Fatal("the rotated log lost what it had")
+	}
+}
+
+// TestLogFileFoldThatCannotMoveKeepsEverything: a <name>.0 that cannot be
+// moved — another user's, in a shared directory with the sticky bit — must
+// not cost an old file on every try. Here the fold's own name is taken by a
+// directory, so the move fails the same way.
+func TestLogFileFoldThatCannotMoveKeepsEverything(t *testing.T) {
+	smallLogs(t, 100, 4)
+	path := filepath.Join(t.TempDir(), "rota.log")
+	want := map[string]string{".0": "crashed\n"}
+	for i := 1; i <= 4; i++ {
+		want[fmt.Sprintf(".%d", i)] = fmt.Sprintf("old %d\n", i)
+	}
+	for name, body := range want {
+		if err := os.WriteFile(path+name, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(path+".folding", "in the way"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	kept := func(when string) {
+		t.Helper()
+		for name, body := range want {
+			if got := readFile(t, path+name); got != body {
+				t.Fatalf("%s: %s holds %q, want %q", when, name, got, body)
+			}
+		}
+	}
+	lf, err := openLogFile(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lf.Close()
+	kept("on opening")
+	for i := range 3 { // the third would rotate, and the fold cannot clear .0
+		line(lf, i)
+	}
+	kept("at a rotation")
+	if got := lines(t, path); len(got) != 3 {
+		t.Fatalf("the log must hold all three lines: %q", got)
+	}
+}
+
+// TestLogFileFoldsAnInterruptedFold: a <name>.folding left by a fold that
+// was cut short is this user's, and goes into the chain behind a newer .0.
+func TestLogFileFoldsAnInterruptedFold(t *testing.T) {
+	smallLogs(t, 100, 4)
+	path := filepath.Join(t.TempDir(), "rota.log")
+	for name, body := range map[string]string{".folding": "interrupted\n", ".0": "crashed\n", ".1": "old 1\n"} {
+		if err := os.WriteFile(path+name, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	lf, err := openLogFile(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lf.Close()
+	for name, body := range map[string]string{".1": "crashed\n", ".2": "interrupted\n", ".3": "old 1\n"} {
+		if got := readFile(t, path+name); got != body {
+			t.Fatalf("%s holds %q, want %q", name, got, body)
+		}
+	}
+	for _, gone := range []string{".folding", ".0"} {
+		if _, err := os.Stat(path + gone); err == nil {
+			t.Fatalf("%s is still there", gone)
+		}
 	}
 }
 

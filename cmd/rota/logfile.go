@@ -186,16 +186,39 @@ func (l *logFile) old(i int) string { return fmt.Sprintf("%s.%d", l.path, i) }
 // move up by one, and <name>.0 becomes <name>.1. It reports whether the name
 // is free afterwards. Something at <name>.0 that is not a plain file is not
 // a log rota left, and is left alone; a rename onto it is what fails then.
+//
+// <name>.0 is first moved to <name>.folding, a name of the fold's own, and
+// only once that has worked is anything older shifted or dropped. A .0 that
+// cannot be moved — in a shared directory with the sticky bit, one another
+// user put there — so costs nothing: every old file stays. A .folding that
+// an interrupted fold left is folded first, as the older of the two, but
+// only when it is provably this user's: only a file's owner may change its
+// mode, so a chmod that works says the rename after the shift will too. One
+// that is somebody else's is never shifted around; renaming .0 onto it is
+// refused, and then nothing is.
 func (l *logFile) foldAside() bool {
-	fi, err := os.Lstat(l.old(0))
-	if err != nil || !fi.Mode().IsRegular() {
-		return true
+	plain := func(name string) bool {
+		fi, err := os.Lstat(name)
+		return err == nil && fi.Mode().IsRegular()
 	}
-	_ = os.Remove(l.old(logFileKeep))
-	for i := logFileKeep - 1; i >= 1; i-- {
-		_ = os.Rename(l.old(i), l.old(i+1))
+	folding := l.path + ".folding"
+	for {
+		if !plain(folding) || os.Chmod(folding, 0o600) != nil {
+			if !plain(l.old(0)) {
+				return true
+			}
+			if os.Rename(l.old(0), folding) != nil {
+				return false
+			}
+		}
+		_ = os.Remove(l.old(logFileKeep))
+		for i := logFileKeep - 1; i >= 1; i-- {
+			_ = os.Rename(l.old(i), l.old(i+1))
+		}
+		if os.Rename(folding, l.old(1)) != nil {
+			return false
+		}
 	}
-	return os.Rename(l.old(0), l.old(1)) == nil
 }
 
 // Close closes the file for good: something still logging after the server

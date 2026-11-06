@@ -690,7 +690,8 @@ older files only after it: if it cannot be moved, nothing older is touched,
 writing goes on into the same file, and the next try waits for another
 20 MiB. A `rota.log.0` that a crash left in the middle of a rotation is put
 into the chain as `.1` when the log is opened, and before the next rotation,
-rather than written over. If the new file cannot be opened after a
+rather than written over; one that cannot be moved, such as another user's
+in a shared directory, is left where it is and costs no older file. If the new file cannot be opened after a
 rotation, the log goes to stderr until it can: the file is tried again
 after a minute, or once another 20 MiB has gone to stderr, whichever is
 first, and each switch, either way, is said once on stderr. A server that
