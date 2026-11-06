@@ -116,7 +116,10 @@ func (t *tokenizer) step(b byte) (tok uint8, again bool) {
 			t.push(b)
 			t.st = stStrEsc
 			return tokNone, false
-		case b == 0x18 || b == 0x1a:
+		case b == 0x18 || b == 0x1a, t.keys && (b < 0x20 || b == 0x7f):
+			// CAN and SUB cancel a string. In typing so does any other
+			// control character or DEL: no terminal's reply holds one, so
+			// it is a key, and so was the string.
 			t.st = stGround
 			return tokCut, true
 		}
