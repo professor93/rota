@@ -1,10 +1,12 @@
 package main
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/printer"
 	"go/token"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -58,6 +60,12 @@ func TestReferenceDocumentsEveryFlag(t *testing.T) {
 func reference(t *testing.T) string {
 	t.Helper()
 	raw, err := os.ReadFile(filepath.Join("..", "..", "docs", "reference.md"))
+	if errors.Is(err, fs.ErrNotExist) {
+		// The program's module can be tested where the repository is not
+		// beside it — from the module cache, say — and the manual is the
+		// repository's, not the module's.
+		t.Skip("docs/reference.md is not here; these tests need the repository checkout")
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

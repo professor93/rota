@@ -203,7 +203,7 @@ func (l *logFile) foldAside() bool {
 	}
 	folding := l.path + ".folding"
 	for {
-		if !plain(folding) || os.Chmod(folding, 0o600) != nil {
+		if !ownPlainFile(folding) {
 			if !plain(l.old(0)) {
 				return true
 			}
@@ -219,6 +219,22 @@ func (l *logFile) foldAside() bool {
 			return false
 		}
 	}
+}
+
+// ownPlainFile reports whether name is a plain file this user owns, asked
+// of the file itself rather than of the name: it is opened without
+// following a link or waiting on a FIFO, the handle must be a plain file,
+// and the chmod that proves ownership goes through the handle. A check of
+// the name and then a chmod by name would let somebody swap in a link
+// between the two and have the chmod land on a file of this user's.
+func ownPlainFile(name string) bool {
+	f, err := os.OpenFile(name, os.O_RDONLY|owner.OpenFlags, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	return err == nil && fi.Mode().IsRegular() && f.Chmod(0o600) == nil
 }
 
 // Close closes the file for good: something still logging after the server

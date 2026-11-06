@@ -535,6 +535,71 @@ func TestLogFileFoldsAnInterruptedFold(t *testing.T) {
 	}
 }
 
+// TestLogFileFoldNeverFollowsALink: a <name>.folding that is a link — the
+// one a swap in a shared directory would leave — is not this user's leftover
+// to fold. The file it points at keeps its mode and its bytes, and no old
+// file is shifted or dropped for it.
+func TestLogFileFoldNeverFollowsALink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a link needs privileges on windows")
+	}
+	smallLogs(t, 100, 4)
+	victim := filepath.Join(t.TempDir(), "notes.txt")
+	if err := os.WriteFile(victim, []byte("mine\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(victim, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "rota.log")
+	want := map[string]string{}
+	for i := 1; i <= 4; i++ {
+		want[fmt.Sprintf(".%d", i)] = fmt.Sprintf("old %d\n", i)
+		if err := os.WriteFile(fmt.Sprintf("%s.%d", path, i), []byte(want[fmt.Sprintf(".%d", i)]), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(victim, path+".folding"); err != nil {
+		t.Fatal(err)
+	}
+	lf, err := openLogFile(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lf.Close()
+	untouched := func(when string) {
+		t.Helper()
+		fi, err := os.Stat(victim)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o644 || readFile(t, victim) != "mine\n" {
+			t.Fatalf("%s: the file behind the link was changed: %04o %q", when, fi.Mode().Perm(), readFile(t, victim))
+		}
+	}
+	// Opening folds nothing for it.
+	untouched("on opening")
+	for name, body := range want {
+		if got := readFile(t, path+name); got != body {
+			t.Fatalf("on opening, %s holds %q, want %q", name, got, body)
+		}
+	}
+	for i := range 3 { // and a rotation, which folds before and after it moves the log
+		line(lf, i)
+	}
+	untouched("at a rotation")
+	// The rotation moved the log to .1 and the old ones up by one, as any
+	// rotation does; none of it is owed to the link.
+	if got := lines(t, path+".1"); strings.Join(got, ",") != "line 00,line 01" {
+		t.Fatalf(".1 after the rotation: %q", got)
+	}
+	for i := 1; i <= 3; i++ {
+		if got := readFile(t, fmt.Sprintf("%s.%d", path, i+1)); got != want[fmt.Sprintf(".%d", i)] {
+			t.Fatalf(".%d holds %q, want %q", i+1, got, want[fmt.Sprintf(".%d", i)])
+		}
+	}
+}
+
 // TestLogFileGoesBackToTheFile: stderr is where the log goes while the file
 // cannot be opened, not for the rest of the run. The file is tried again
 // once another logFileMax has gone to stderr, or after logFileRetry, and
