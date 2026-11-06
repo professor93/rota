@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -40,6 +41,11 @@ func (p *terms) restart(tune ...func(*Options)) *terms {
 	if err != nil {
 		p.tt.Fatal(err)
 	}
+	return p.serve(s)
+}
+
+// serve is the harness for another server on the same store.
+func (p *terms) serve(s *Server) *terms {
 	h := &harness{t: p.tt, handler: s.Handler(), root: p.root, dir: p.dir, token: p.token, api: s}
 	h.srv = httptest.NewServer(h.handler)
 	p.tt.Cleanup(s.Stop)
@@ -329,22 +335,26 @@ func TestAHolderOfAnotherMajorIsListedAndNeverKilled(t *testing.T) {
 // to stop its own CLI, and only if its lock is still held then.
 func TestAHolderOfAnotherMajorThatWillNotStopIsKilled(t *testing.T) {
 	wasKill, wasLater := termKillAfter, holdKillLater
-	termKillAfter, holdKillLater = 100*time.Millisecond, 100*time.Millisecond
+	termKillAfter, holdKillLater = 300*time.Millisecond, 300*time.Millisecond
 	t.Cleanup(func() { termKillAfter, holdKillLater = wasKill, wasLater })
 	p := withHeld(t, nil)
 	id, pid := holdOutside(t, p.dir, "FAKE_HOLDER_MAJOR=9", "FAKE_HOLDER_DEAF=1")
 	q := p.restart()
+	asked := time.Now()
 	if resp, raw := q.do("DELETE", "/v1/terminals/"+id, nil); resp.StatusCode != http.StatusOK {
 		t.Fatalf("DELETE answers %d %s", resp.StatusCode, raw)
 	}
-	time.Sleep(100 * time.Millisecond)
-	if !alive(pid) {
-		t.Fatal("the holder was killed before it had its time to stop")
+	// However slow the machine, it is never killed sooner than its time:
+	// the kill waits that long from the hangup, which came after asking.
+	for deadline := time.Now().Add(10 * time.Second); alive(pid); time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the holder outlived its kill")
+		}
+	}
+	if took, after := time.Since(asked), termKillAfter+holdKillLater; took < after {
+		t.Fatalf("the holder was killed %v after the DELETE, before its %v to stop", took, after)
 	}
 	doc := q.waitFor(id, 3*time.Second, func(d map[string]any) bool { return d["ended"] == true })
-	if alive(pid) {
-		t.Fatal("the holder outlived its kill")
-	}
 	wants(t, "a killed holder", doc, map[string]any{"state": "interrupted", "exit": float64(-1)})
 }
 
@@ -420,4 +430,103 @@ func TestARecordingCarriesOnAcrossARestart(t *testing.T) {
 	if string(raw) != "ONEtwo" {
 		t.Fatalf("the recording is %q, want what it had and then two", raw)
 	}
+}
+
+// A recording carries on from where in the output it had got to, not from
+// how long its file is: what a holder kept less of than a daemon missed is
+// written down as skipped, and what it sends again is never recorded
+// twice, however many restarts there are.
+func TestARecordingSaysWhereItSkippedAndNeverRepeats(t *testing.T) {
+	p := withHeld(t, []string{"FAKE_HOLDER_KEEP=4", "FAKE_HOLDER_PRINT=one", "FAKE_HOLDER_UNLINKED=twothree"},
+		func(o *Options) { o.Terminal.Record = true })
+	id := p.start(nil)["id"].(string)
+	p.waitOffset(id, 3)
+	p.api.Stop()
+	// With no daemon there the holder prints eight bytes and keeps the last
+	// four: "hree", from offset 7. Offsets 3 to 7 reach no daemon.
+	waitLogged(t, holdwire.LogPath(holdwire.Dir(p.terminals(), id)), "printed with nobody linked")
+	out, gaps := filepath.Join(p.terminals(), id+".out"), filepath.Join(p.terminals(), id+".gaps")
+	q := p.restart()
+	q.waitOffset(id, 11)
+	if raw, _ := os.ReadFile(out); string(raw) != "onehree" {
+		t.Fatalf("the recording is %q, want one and then what the holder still had", raw)
+	}
+	if raw, err := os.ReadFile(gaps); string(raw) != "3 7\n" {
+		t.Fatalf("the skip is written down as %q (%v), want the file's byte 3 going on with offset 7", raw, err)
+	}
+
+	r := q.restart()
+	r.waitOffset(id, 11)
+	tm := r.attach(id, r.alice, "since=11")
+	tm.waitType("hello")
+	tm.typeIn("x\r")
+	tm.waitOut("got:x")
+	if raw, _ := os.ReadFile(out); string(raw) != "onehreegot:x\r\n" {
+		t.Fatalf("after another restart the recording is %q, want hree once and then the answer", raw)
+	}
+	if raw, _ := os.ReadFile(gaps); string(raw) != "3 7\n" {
+		t.Fatalf("the skips are %q, want the one", raw)
+	}
+}
+
+// waitLogged waits for a line in a holder's log.
+func waitLogged(t *testing.T, path, line string) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if raw, _ := os.ReadFile(path); strings.Contains(string(raw), line) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s never said %q", path, line)
+		}
+	}
+}
+
+// A terminal whose start loses the race with Stop — its holder linked to
+// just as the server let go of everything it holds — is let go of in turn,
+// still running, rather than kept by a server that has stopped and that
+// would go on dialling it, and taking its link from the next daemon, for
+// as long as the process lasts.
+func TestAStartThatLosesTheRaceWithStopIsLetGoOf(t *testing.T) {
+	var (
+		p    *terms
+		next *Server
+		err  error
+		once sync.Once
+	)
+	p = withHeld(t, nil, func(o *Options) {
+		hold := o.HoldCommand
+		o.HoldCommand = func() *exec.Cmd {
+			// Stop comes while the holder starts, and the daemon after this
+			// one is in this same process, so the holder takes the link.
+			once.Do(func() {
+				p.api.Stop()
+				next, err = New(p.api.opts)
+			})
+			return hold()
+		}
+	})
+	resp, raw := p.do("POST", "/v1/terminals", map[string]any{"account": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := p.serve(next)
+	if resp.StatusCode != http.StatusServiceUnavailable || !strings.Contains(string(raw), "goes on running") {
+		t.Fatalf("a start that lost the race with Stop answers %d %s", resp.StatusCode, raw)
+	}
+	if n := len(p.api.everyTerminal()); n != 0 {
+		t.Fatalf("a stopped server holds %d terminals", n)
+	}
+	records := holdwire.Scan(q.terminals())
+	if len(records) != 1 || records[0].State != holdwire.StateLive {
+		t.Fatalf("the records are %+v, want the one holder, still running", records)
+	}
+	id := records[0].ID
+	q.api.sweepRecords()
+	wants(t, "the session the next daemon took up", q.describe(id), map[string]any{"state": "live", "reachable": true})
+	time.Sleep(2 * holdRedial) // a stopped server dialling it would have taken the link by now
+	tm := q.attach(id, q.alice, "")
+	tm.waitType("hello")
+	tm.typeIn("x\r")
+	tm.waitOut("got:x")
 }

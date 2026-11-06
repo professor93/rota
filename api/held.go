@@ -62,6 +62,10 @@ const (
 	// heldQuiet is how long a session may print nothing before it reads
 	// quiet.
 	heldQuiet = 30 * time.Second
+	// holdSettle is how long a holder that has said its CLI ended is given
+	// to record the ending, read every holdSettlePoll.
+	holdSettle     = 10 * time.Second
+	holdSettlePoll = 50 * time.Millisecond
 
 	// The states a held terminal is described in.
 	heldLive        = "live"
@@ -314,6 +318,7 @@ func (h *heldTerm) run(termSink) int {
 		conn := h.link()
 		if code, ended := h.read(conn); ended {
 			h.setState(heldEnded)
+			go h.settle()
 			return code
 		}
 		h.mu.Lock()
@@ -406,11 +411,16 @@ func (h *heldTerm) relink() (code int, back bool) {
 			// The lock before the record: a holder records its ending and
 			// then lets go, so read the other way round an ending would be
 			// missed.
-			if m, err := holdwire.ReadMeta(h.dir); err == nil && m.Exit != nil {
+			m, err := holdwire.ReadMeta(h.dir)
+			if err == nil && m.Exit != nil {
 				h.setState(heldEnded)
+				h.stoppedFrom(m)
 				return *m.Exit, false
 			}
 			h.setState(heldInterrupted)
+			if err == nil {
+				h.stoppedFrom(m)
+			}
 			return -1, false
 		}
 		conn, w, err := linkHolder(h.dir, func(*holdwire.WelcomeMsg) int64 { return h.ts.end() })
@@ -429,6 +439,38 @@ func (h *heldTerm) relink() (code int, back bool) {
 		select {
 		case <-h.left:
 		case <-time.After(holdRedial):
+		}
+	}
+}
+
+// stoppedFrom makes when the session stopped the moment its record gives,
+// which is what describes it once this server stops keeping it, so
+// ended_at says the same before and after. A holder that went without
+// recording an ending is first stamped with the moment it was seen to go:
+// that is when it stopped, as nearly as anybody can say, and its record
+// says so from then on rather than the last time its holder touched it.
+func (h *heldTerm) stoppedFrom(m *holdwire.Meta) {
+	h.mu.Lock()
+	seen := h.stopped
+	h.mu.Unlock()
+	if m.Exit == nil && !seen.IsZero() {
+		_ = os.Chtimes(holdwire.MetaPath(h.dir), seen, seen)
+	}
+	if at := holdwire.StoppedAt(h.dir, m); !at.IsZero() {
+		h.mu.Lock()
+		h.stopped = at
+		h.mu.Unlock()
+	}
+}
+
+// settle waits a little for a holder that has said its CLI ended to record
+// the ending, which it does a moment after, and then takes when the
+// session stopped from the record.
+func (h *heldTerm) settle() {
+	for deadline := time.Now().Add(holdSettle); time.Now().Before(deadline); time.Sleep(holdSettlePoll) {
+		if m, err := holdwire.ReadMeta(h.dir); err == nil && m.Exit != nil {
+			h.stoppedFrom(m)
+			return
 		}
 	}
 }
