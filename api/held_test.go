@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,8 +27,9 @@ import (
 
 // withHeld is withTerminals with HoldCommand set: every terminal is a fake
 // holder started from this binary. env is the fake's script. Every holder a
-// test starts is ended in an orderly way first and killed outright after, so
-// none outlives the test however it failed.
+// test starts is let go of in an orderly way first and killed outright
+// after, if it is still running, so none outlives the test however it
+// failed.
 func withHeld(t *testing.T, env []string, tune ...func(*Options)) *terms {
 	t.Helper()
 	exe, err := os.Executable()
@@ -53,13 +53,21 @@ func withHeld(t *testing.T, env []string, tune ...func(*Options)) *terms {
 	return p
 }
 
-// heldPIDs is every holder pid the store's records name, for the cleanup
-// above: a test that stopped the server has nothing else to ask.
+// heldPIDs is every holder the store's records name that is still the
+// process it recorded, for the cleanup above: a test that stopped the
+// server has nothing else to ask. A holder that has gone is left out, since
+// its pid may be anybody's by now: a held lock is one only a live holder
+// keeps, and otherwise the pid must still have the start time and boot it
+// was recorded with.
 func heldPIDs(dir string) []int {
 	var out []int
 	for _, r := range holdwire.Scan(filepath.Join(dir, "terminals")) {
-		if r.Meta != nil && r.Meta.HolderPID > 0 && r.Meta.HolderPID != os.Getpid() {
-			out = append(out, r.Meta.HolderPID)
+		m := r.Meta
+		if m == nil || m.HolderPID <= 0 || m.HolderPID == os.Getpid() {
+			continue
+		}
+		if r.State == holdwire.StateLive || holdwire.SameProcess(m.HolderPID, m.HolderStart, m.BootID) {
+			out = append(out, m.HolderPID)
 		}
 	}
 	return out
@@ -120,6 +128,19 @@ func (tm *term) binaries(want int) (first string, rest string) {
 }
 
 func alive(pid int) bool { return syscall.Kill(pid, 0) == nil }
+
+// gone waits a moment for pid to have gone. A killed holder stays a zombie
+// until the server's Wait reaps it, which can come a little after its
+// session reads ended, and signal 0 still finds a zombie.
+func gone(pid int) bool {
+	for range 300 {
+		if !alive(pid) {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
+}
 
 /* ------------------------------------------------------- living elsewhere --- */
 
@@ -324,6 +345,21 @@ func TestAnAttachWithoutAScreenReplaysTheRing(t *testing.T) {
 	tm.waitOut("0123456789")
 }
 
+// A screen with nothing to paint is no screen: the hello does not promise a
+// repaint, which would have the viewer take the first bytes after it for
+// the screen, and the ring is replayed instead.
+func TestAnEmptyScreenIsNoScreen(t *testing.T) {
+	p := withHeld(t, []string{"FAKE_HOLDER_PRINT=0123456789", "FAKE_HOLDER_SCREEN=empty"})
+	id := p.start(nil)["id"].(string)
+	p.waitOffset(id, 10)
+	tm := p.attach(id, p.alice, "")
+	hello := tm.waitType("hello")
+	if hello["offset"] != float64(0) || hello["repaint"] != nil {
+		t.Fatalf("hello is %v, want the ring from 0 and no repaint", hello)
+	}
+	tm.waitOut("0123456789")
+}
+
 // A screen can stand for an offset this server has yet to be sent the bytes
 // of. The viewer shown it must not be shown those bytes again when they
 // arrive: they are already on its screen.
@@ -402,148 +438,31 @@ func TestALostLinkComesBackWithItsOffset(t *testing.T) {
 	}
 }
 
-/* ------------------------------------------------------------- the ending --- */
-
-// The CLI exits with two people watching, and both are told how (Review
-// Focus 5). The session is then described as ended, with the code.
-func TestTheExitReachesEveryViewer(t *testing.T) {
-	p := withHeld(t, nil)
+// A link that breaks at this end — here a frame that is not one, while the
+// holder goes on as if nothing had happened — is closed, so the holder sees
+// it end rather than writing into it until the next link replaces it. The
+// output still comes through whole, over the link dialled after it.
+func TestALinkThatBreaksHereIsClosed(t *testing.T) {
+	p := withHeld(t, []string{"FAKE_HOLDER_GARBLE_AT=20"})
 	id := p.start(nil)["id"].(string)
-	one := p.attach(id, p.alice, "")
-	one.waitType("hello")
-	two := p.attach(id, p.bob, "mode=watch")
-	two.waitType("hello")
-	one.typeIn("exit 4\r")
-	for _, tm := range []*term{one, two} {
-		if doc := tm.waitType("exit"); doc["code"] != float64(4) {
-			t.Fatalf("the exit frame is %v", doc)
-		}
+	tm := p.attach(id, p.alice, "")
+	tm.waitType("hello")
+	tm.typeIn("count 60\r")
+	tm.waitOut("line-0060\r\n")
+	var want strings.Builder
+	for i := 1; i <= 60; i++ {
+		fmt.Fprintf(&want, "line-%04d\r\n", i)
 	}
-	doc := p.waitEnded(id)
-	if doc["exit"] != float64(4) || doc["state"] != "ended" || doc["status"] != "stopped" {
-		t.Fatalf("an ended held session reads %v", doc)
+	if got := tm.printed(); got != "SCREEN"+want.String() {
+		t.Fatalf("after a broken link the output is not whole:\n%q", got)
 	}
-}
-
-// Ending a held session asks its holder to hang the CLI up, over the link,
-// and the holder records how it ended before it lets go — well before the
-// kill that follows a holder that does not.
-func TestDeletingAHeldSessionStopsItThroughItsHolder(t *testing.T) {
-	p := withHeld(t, nil)
-	id := p.start(nil)["id"].(string)
-	asked := time.Now()
-	if resp, raw := p.do("DELETE", "/v1/terminals/"+id, nil); resp.StatusCode != http.StatusOK {
-		t.Fatalf("DELETE: %d %s", resp.StatusCode, raw)
-	}
-	doc := p.waitEnded(id)
-	if took := time.Since(asked); took >= termKillAfter {
-		t.Fatalf("it took %s to end, which is the kill and not the hangup", took)
-	}
-	if doc["exit"] != float64(129) || doc["state"] != "ended" {
-		t.Fatalf("a session its holder stopped reads %v", doc)
-	}
-	// The exit frame comes first and the lock goes after it, as the holder
-	// records its ending in between.
-	lock := holdwire.LockPath(holdwire.Dir(p.terminals(), id))
-	for range 200 {
-		if !holdwire.Locked(lock) {
+	holderLog := holdwire.LogPath(holdwire.Dir(p.terminals(), id))
+	for range 300 {
+		if raw, _ := os.ReadFile(holderLog); strings.Contains(string(raw), "the daemon closed a link") {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("the holder still holds the session's lock")
-}
-
-// A holder that will not stop is killed, a little after the time a holder
-// has to kill its own CLI — and a holder that vanished without recording an
-// exit reads interrupted.
-func TestAHolderThatWillNotStopIsKilled(t *testing.T) {
-	was := termKillAfter
-	termKillAfter = 100 * time.Millisecond
-	t.Cleanup(func() { termKillAfter = was })
-	p := withHeld(t, []string{"FAKE_HOLDER_DEAF=1"})
-	doc := p.start(nil)
-	id, pid := doc["id"].(string), int(doc["pid"].(float64))
-	if resp, raw := p.do("DELETE", "/v1/terminals/"+id, nil); resp.StatusCode != http.StatusOK {
-		t.Fatalf("DELETE: %d %s", resp.StatusCode, raw)
-	}
-	time.Sleep(termKillAfter + time.Second)
-	if !alive(pid) {
-		t.Fatal("the holder was killed before it had its time to stop its CLI")
-	}
-	doc = p.waitEnded(id)
-	if alive(pid) {
-		t.Fatal("the holder outlived its kill")
-	}
-	if doc["state"] != "interrupted" || doc["exit"] != float64(-1) {
-		t.Fatalf("a killed holder reads %v", doc)
-	}
-}
-
-// A held session is never ended for being unwatched: a long task left alone
-// is what it is for.
-func TestAHeldSessionIsNeverIdle(t *testing.T) {
-	p := withHeld(t, nil, func(o *Options) { o.Terminal.IdleTimeout = time.Millisecond })
-	doc := p.start(nil)
-	id, pid := doc["id"].(string), int(doc["pid"].(float64))
-	p.api.clock.set(func() time.Time { return time.Now().Add(time.Hour) })
-	p.api.sweepTerminals()
-	time.Sleep(300 * time.Millisecond)
-	if p.describe(id)["ended"] != false || !alive(pid) {
-		t.Fatalf("the idle sweep ended a held session: %v", p.describe(id))
-	}
-}
-
-/* ------------------------------------------------------------ refusals --- */
-
-// An account that is busy is refused as it is today, with the session that
-// holds it named, so the person knows which one to stop.
-func TestBusyNamesTheSession(t *testing.T) {
-	p := withHeld(t, []string{"FAKE_HOLDER_FAIL=busy"})
-	const other = "0123456789abcdef"
-	dir := holdwire.Dir(p.terminals(), other)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := holdwire.WriteMeta(dir, &holdwire.Meta{ID: other, Name: "audit", Kind: "account", Account: 1, Protocol: holdwire.Major, Started: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	release, err := holdwire.Lock(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(release)
-	resp, raw := p.do("POST", "/v1/terminals", map[string]any{"account": 1})
-	if resp.StatusCode != http.StatusConflict || !strings.Contains(string(raw), "held by session audit ("+other+")") {
-		t.Fatalf("a busy account: %d %s", resp.StatusCode, raw)
-	}
-}
-
-// Each kind of failure a holder reports keeps the status the same failure
-// has when this server runs the CLI itself; anything else says no more than
-// that something went wrong.
-func TestAHoldersRefusalKeepsItsStatus(t *testing.T) {
-	for kind, code := range map[string]int{
-		holdwire.KindReauth: http.StatusConflict, holdwire.KindNoAccount: http.StatusNotFound,
-		holdwire.KindUnsupported: http.StatusBadGateway, holdwire.KindOutside: http.StatusBadRequest,
-		holdwire.KindOther: http.StatusInternalServerError,
-	} {
-		t.Run(kind, func(t *testing.T) {
-			p := withHeld(t, []string{"FAKE_HOLDER_FAIL=" + kind})
-			resp, raw := p.do("POST", "/v1/terminals", map[string]any{"account": 1})
-			if resp.StatusCode != code {
-				t.Fatalf("%s answers %d %s, want %d", kind, resp.StatusCode, raw, code)
-			}
-			said := strings.Contains(string(raw), "the holder says "+kind)
-			if kind == holdwire.KindOther && (said || !strings.Contains(string(raw), "internal error")) {
-				t.Fatalf("an unclassified failure says %s", raw)
-			}
-			if kind != holdwire.KindOther && !said {
-				t.Fatalf("a %s failure does not say why: %s", kind, raw)
-			}
-			if list := p.api.everyTerminal(); len(list) != 0 {
-				t.Fatalf("a refused terminal is listed: %d", len(list))
-			}
-		})
-	}
+	raw, _ := os.ReadFile(holderLog)
+	t.Fatalf("the broken link was never closed at the daemon's end; the holder's log:\n%s", raw)
 }

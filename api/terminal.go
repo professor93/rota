@@ -846,7 +846,8 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 	if gap {
 		tc.say(map[string]any{"type": "gap", "from": from, "to": at})
 	}
-	if scr != nil && len(scr.repaint) > 0 {
+	if scr != nil {
+		// Never empty: heldTerm.screen gives no screen rather than that.
 		tc.queue(termFrame{op: opBinary, data: scr.repaint, alone: true})
 	}
 	if len(data) > 0 {
@@ -1245,10 +1246,17 @@ func (s *Server) everyTerminal() []*termSession {
 
 // live counts the terminals still running, which is what max_sessions caps:
 // one that has ended is listed for a few minutes but is not holding
-// anything.
+// anything. One still starting holds its place already. Both are read in
+// one look, since a terminal moves from one to the other in one step.
 func (s *Server) liveTerminals() int {
-	n := 0
-	for _, ts := range s.everyTerminal() {
+	s.termsMu.Lock()
+	n := s.starting
+	all := make([]*termSession, 0, len(s.terms))
+	for _, ts := range s.terms {
+		all = append(all, ts)
+	}
+	s.termsMu.Unlock()
+	for _, ts := range all {
 		if !ts.over() {
 			n++
 		}

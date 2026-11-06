@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -25,17 +26,22 @@ import (
 // turns into one when ROTA_FAKE_HOLDER=1. It does what the server needs of a
 // holder — the request on stdin, the lock, the socket, meta.json, the Ready
 // line, the link with its offsets — and runs no CLI: what it prints and how
-// it misbehaves are its environment's to say.
+// it misbehaves are its environment's to say. Its holder.log says when the
+// daemon closed a link at its end.
 //
+//	FAKE_HOLDER_SLOW=<duration>   wait that long before anything else
 //	FAKE_HOLDER_FAIL=<kind>       answer Ready with that kind of failure
 //	FAKE_HOLDER_LOG=<path>        write the request and ROTA_HOME there
 //	FAKE_HOLDER_PRINT=<text>      print that before anything links
 //	FAKE_HOLDER_TITLE, _CONVERSATION, _WAITING   the State it reports
 //	FAKE_HOLDER_SCREEN=none       answer a ScreenAsk with no screen
+//	FAKE_HOLDER_SCREEN=empty      a screen with nothing to paint
 //	FAKE_HOLDER_SCREEN_AT=<n>     a screen standing for offset n
 //	FAKE_HOLDER_SCREEN_AHEAD=<t>  print t, answer for the end, send t after
 //	FAKE_HOLDER_REFUSE=<text>     refuse keystrokes holding that text
 //	FAKE_HOLDER_DROP_AT=<n>       drop the link once, after count's line n
+//	FAKE_HOLDER_GARBLE_AT=<n>     once, after count's line n, write the link
+//	                              a frame that is not one, and keep it
 //	FAKE_HOLDER_DEAF=1            ignore Stop, SIGHUP and SIGTERM
 //
 // Typed lines are its commands: "exit N" ends it with code N, "count N"
@@ -47,6 +53,9 @@ func fakeHolder() {
 	if err := json.NewDecoder(io.LimitReader(os.Stdin, 1<<20)).Decode(&req); err != nil {
 		fakeReady(holdwire.Ready{Error: "no request: " + err.Error(), Kind: holdwire.KindOther})
 		os.Exit(1)
+	}
+	if d, err := time.ParseDuration(os.Getenv("FAKE_HOLDER_SLOW")); err == nil {
+		time.Sleep(d)
 	}
 	if path := os.Getenv("FAKE_HOLDER_LOG"); path != "" {
 		raw, _ := json.Marshal(map[string]any{"request": req, "rota_home": os.Getenv("ROTA_HOME")})
@@ -90,7 +99,9 @@ type fake struct {
 	ring       *ring.Ring
 	cols, rows uint16
 	link       *share.Conn
+	raw        net.Conn // link's socket, for a frame that is not one
 	dropped    bool
+	garbled    bool
 	line       []byte
 }
 
@@ -192,9 +203,12 @@ func (f *fake) serve(c net.Conn) {
 	for {
 		kind, payload, err := conn.Read()
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				f.logf("the daemon closed a link")
+			}
 			return
 		}
-		f.frame(conn, kind, payload)
+		f.frame(conn, c, kind, payload)
 	}
 }
 
@@ -206,7 +220,7 @@ func (f *fake) state() holdwire.StateMsg {
 	return st
 }
 
-func (f *fake) frame(conn *share.Conn, kind byte, payload []byte) {
+func (f *fake) frame(conn *share.Conn, c net.Conn, kind byte, payload []byte) {
 	switch kind {
 	case holdwire.Since:
 		var msg holdwire.SinceMsg
@@ -215,7 +229,7 @@ func (f *fake) frame(conn *share.Conn, kind byte, payload []byte) {
 		if f.link != nil && f.link != conn {
 			f.link.Close() // a new link replaces the old
 		}
-		f.link = conn
+		f.link, f.raw = conn, c
 		if data, at := f.ring.Read(msg.Offset); len(data) > 0 {
 			_ = conn.Send(holdwire.Output, holdwire.PutOutput(at, data))
 		}
@@ -254,6 +268,10 @@ func (f *fake) frame(conn *share.Conn, kind byte, payload []byte) {
 // screen answers a ScreenAsk the way the environment says.
 func (f *fake) screen(conn *share.Conn, seq uint64) {
 	head := holdwire.ScreenHead{Seq: seq, OK: os.Getenv("FAKE_HOLDER_SCREEN") != "none"}
+	repaint := []byte("SCREEN")
+	if os.Getenv("FAKE_HOLDER_SCREEN") == "empty" {
+		repaint = nil
+	}
 	f.mu.Lock()
 	head.Cols, head.Rows = f.cols, f.rows
 	head.Offset = f.ring.End()
@@ -269,7 +287,7 @@ func (f *fake) screen(conn *share.Conn, seq uint64) {
 		head.Offset = f.ring.End()
 	}
 	f.mu.Unlock()
-	raw, _ := holdwire.PutScreen(head, []byte("SCREEN"))
+	raw, _ := holdwire.PutScreen(head, repaint)
 	_ = conn.Send(holdwire.Screen, raw)
 	if len(ahead) > 0 {
 		time.Sleep(200 * time.Millisecond)
@@ -314,8 +332,19 @@ func (f *fake) command(line string) {
 // dialled again while it is still printing.
 func (f *fake) count(n int) {
 	drop, _ := strconv.Atoi(os.Getenv("FAKE_HOLDER_DROP_AT"))
+	garble, _ := strconv.Atoi(os.Getenv("FAKE_HOLDER_GARBLE_AT"))
 	for i := 1; i <= n; i++ {
 		f.print(fmt.Appendf(nil, "line-%04d\r\n", i))
+		if i == garble {
+			// A length of zero, which no frame has: the daemon's reading of
+			// this link breaks while this end goes on as if nothing had.
+			f.mu.Lock()
+			if !f.garbled && f.raw != nil {
+				f.garbled = true
+				_, _ = f.raw.Write([]byte{0, 0, 0, 0})
+			}
+			f.mu.Unlock()
+		}
 		if i == drop {
 			f.mu.Lock()
 			if !f.dropped && f.link != nil {

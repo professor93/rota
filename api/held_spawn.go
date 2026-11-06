@@ -16,7 +16,6 @@ import (
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/ring"
 	rota "github.com/professor93/rota/lib"
-	"github.com/professor93/rota/rotation"
 	"github.com/professor93/rota/wire"
 )
 
@@ -53,23 +52,22 @@ func (s *Server) claimDaemon() error {
 
 /* ------------------------------------------------------------ starting one --- */
 
-// startHeld is startTerminal for a daemon: the account is chosen and judged
-// launchable here, as it is today, and everything after that — Prepare, the
-// pseudo-terminal, the CLI — is the holder's.
-func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd string) (*termSession, error) {
+// startHeld is startTerminal for a daemon: what may run is chosen here, by
+// chooseTerminal as for any terminal, and everything after that — Prepare,
+// the pseudo-terminal, the CLI — is the holder's. list is the place
+// startTerminal took for it.
+func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd string, list func(*termSession)) (*termSession, error) {
 	hreq := holdwire.Request{ID: runID(), Kind: kind, Args: req.Args, Cwd: cwd,
 		Name: strings.TrimSpace(req.Label), Scrollback: s.opts.Terminal.Scrollback}
 	hreq.Cols, hreq.Rows = boundSize(req.Cols, req.Rows)
+	st, a, err := s.chooseTerminal(r, kind, req.Account)
+	if err != nil {
+		return nil, err
+	}
 	var label, provider string
-	if kind == termKindShell {
-		if !s.opts.Terminal.Shell {
-			return nil, refuse(http.StatusForbidden, shellOff)
-		}
-	} else {
-		a, err := s.chooseHeld(r, req.Account)
-		if err != nil {
-			return nil, err
-		}
+	if a != nil {
+		// The store is let go of before a holder opens it.
+		st.Close()
 		hreq.Account, label, provider = a.ID, a.Label(), a.Provider
 	}
 	cmd, ready, err := s.spawnHolder(&hreq)
@@ -105,31 +103,10 @@ func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd s
 	ts.idleAt = ts.started
 	h.ts = ts
 	s.recordTerminal(ts)
-	s.addTerminal(ts)
+	list(ts)
 	ts.audit("terminal created", "kind", kind, "account", hreq.Account, "by", who(r).Name, "pid", h.pid)
 	go ts.run()
 	return ts, nil
-}
-
-// chooseHeld is the part of planTerminal a daemon keeps: which account, and
-// whether it may launch at all. The store is closed again before a holder
-// opens it.
-func (s *Server) chooseHeld(r *http.Request, id int) (*rota.Account, error) {
-	st, err := s.openStore()
-	if err != nil {
-		s.log.Error("opening the store", "err", err)
-		return nil, refuse(http.StatusInternalServerError, "the account store could not be opened")
-	}
-	defer st.Close()
-	rotation.Backfill(st)
-	a, err := rotation.Choose(r.Context(), st, id)
-	if err != nil {
-		return nil, err
-	}
-	if err := st.Launchable(r.Context(), a); err != nil {
-		return nil, err
-	}
-	return a, nil
 }
 
 // spawnHolder starts one holder, in a session of its own and pointed at this
