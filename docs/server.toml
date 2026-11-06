@@ -20,6 +20,7 @@
 [server]
 listen = "127.0.0.1:8787"  # host:port, or a bare port for every interface
 quiet = false              # log warnings and errors only
+log_file = ""              # an absolute path to log to instead of stderr; rotated at 20 MiB
 
 [tls]
 cert = ""  # the certificate; without it the token travels in clear text

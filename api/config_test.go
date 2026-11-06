@@ -149,6 +149,7 @@ func TestLoadConfigRefusals(t *testing.T) {
 		{"nothing at once", "[runs]\nmax_concurrent = 0\n", "runs.max_concurrent must be more than nothing"},
 		{"nothing kept", "[runs]\nreplay = -1\n", "runs.replay must be more than nothing"},
 		{"a nonsense address", "[server]\nlisten = \"not:a:port\"\n", "server.listen"},
+		{"a relative log file", "[server]\nlog_file = \"logs/rota.log\"\n", "server.log_file must be an absolute path"},
 		{"a key nobody knows", "[runs]\ntiemout = \"1m\"\n", `"tiemout" is not something [runs] has`},
 		{"a section nobody knows", "[servers]\nlisten = \"\"\n", `"servers" is not something the top level has`},
 	} {
@@ -179,10 +180,32 @@ func TestLoadConfigRefusesAFileOthersCanRead(t *testing.T) {
 	if err == nil {
 		t.Fatal("a world-readable file was accepted")
 	}
-	for _, want := range []string{"readable by other users", "chmod 600 " + path} {
+	for _, want := range []string{"readable or writable by other users", "chmod 600 " + path} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("%v\nmust say %q", err, want)
 		}
+	}
+}
+
+// TestLogFileFromTheFile: server.log_file is read like every other key, a
+// relative one is refused wherever it came from, and the default is stderr,
+// which is no file at all.
+func TestLogFileFromTheFile(t *testing.T) {
+	inFile := filepath.Join(t.TempDir(), "file.log")
+	c, err := LoadConfig(write(t, "[server]\nlog_file = "+quote(inFile)+"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Server.LogFile != inFile || c.From["server.log_file"] != "file" {
+		t.Fatalf("from the file: %q %q", c.Server.LogFile, c.From["server.log_file"])
+	}
+	if DefaultConfig().Server.LogFile != "" {
+		t.Fatal("the default must be stderr, which is no file at all")
+	}
+	// The command's flag lands in the same field, and Check catches it there.
+	c.Server.LogFile = "rota.log"
+	if err := c.Check(); err == nil || !strings.Contains(err.Error(), "server.log_file must be an absolute path") {
+		t.Fatalf("a relative path from the command line: %v", err)
 	}
 }
 

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -16,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/professor93/rota/internal/owner"
 	"github.com/professor93/rota/internal/pty"
 	"github.com/professor93/rota/internal/toml"
 )
@@ -59,10 +59,17 @@ type Config struct {
 	From map[string]string `toml:"-"`
 }
 
-// ServerSection is the address side of the server.
+// ServerSection is the address side of the server, and where it says what
+// it is doing.
 type ServerSection struct {
 	Listen string `toml:"listen"`
 	Quiet  bool   `toml:"quiet"`
+	// LogFile is where the server writes its log instead of stderr, so it
+	// can run without a terminal. Empty is stderr. The command opens it and
+	// rotates it; the configuration only insists the path is absolute,
+	// because a relative one would depend on wherever the server happened
+	// to be started.
+	LogFile string `toml:"log_file"`
 }
 
 // TLSSection is the certificate pair, or neither.
@@ -196,10 +203,10 @@ func DefaultConfig() *Config {
 // default, and every key it sets is remembered as the file's, so
 // --print-config can say so.
 //
-// The file is refused if anyone but its owner can read it: it may hold the
-// bearer token, and a token that authorizes running every account on the
-// machine is not a thing to leave world-readable. Windows has neither those
-// bits nor that convention, so the rule is unix's.
+// The file is refused if anyone but its owner can read or write it: it may
+// hold the bearer token, and a token that authorizes running every account
+// on the machine is not a thing to leave world-readable. Windows has neither
+// those bits nor that convention, so the rule is unix's.
 func LoadConfig(path string) (*Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -210,7 +217,7 @@ func LoadConfig(path string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := ownerOnly(path, fi.Mode()); err != nil {
+	if err := owner.Only(path, fi.Mode()); err != nil {
 		return nil, err
 	}
 	data, err := io.ReadAll(f)
@@ -229,19 +236,6 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return c, nil
-}
-
-// ownerOnly refuses a file group or others can read, and says the one
-// command that fixes it.
-func ownerOnly(path string, mode fs.FileMode) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	if perm := mode.Perm(); perm&0o077 != 0 {
-		return fmt.Errorf("%s is readable by other users (mode %04o); it may hold a token, so fix it with: chmod 600 %s",
-			path, perm, path)
-	}
-	return nil
 }
 
 // Check says what is wrong with a configuration, in the file's own words. It
@@ -309,6 +303,10 @@ func (c *Config) Check() error {
 	}
 	if _, err := ListenAddr(c.Server.Listen); err != nil {
 		return fmt.Errorf("server.listen: %w", err)
+	}
+	if p := c.Server.LogFile; p != "" && !filepath.IsAbs(p) {
+		return fmt.Errorf("server.log_file must be an absolute path, not %q: "+
+			"a relative one would depend on the directory the server was started in", p)
 	}
 	return nil
 }
@@ -465,7 +463,7 @@ func (c *Config) Token() (token, from string, err error) {
 		if err != nil {
 			return "", "", fmt.Errorf("auth.token_file: %w", err)
 		}
-		if err := ownerOnly(path, fi.Mode()); err != nil {
+		if err := owner.Only(path, fi.Mode()); err != nil {
 			return "", "", fmt.Errorf("auth.token_file: %w", err)
 		}
 		raw, err := io.ReadAll(io.LimitReader(f, 4096))
@@ -494,7 +492,8 @@ type Listener struct {
 //
 // It fills everything but the token and the log. Those two belong to the
 // command: only it knows what was typed on the command line, and only it
-// knows where a server's own output goes.
+// knows where a server's own output goes — server.log_file is checked here
+// and opened there.
 func (c *Config) Serve() (Options, Listener, error) {
 	if err := c.Check(); err != nil {
 		return Options{}, Listener{}, err
@@ -611,6 +610,7 @@ func (c *Config) Print(w io.Writer, token string) error {
 	body.WriteString("[server]\n")
 	str("server.listen", c.Server.Listen)
 	yes("server.quiet", c.Server.Quiet)
+	str("server.log_file", c.Server.LogFile)
 
 	body.WriteString("\n[tls]\n")
 	str("tls.cert", c.TLS.Cert)

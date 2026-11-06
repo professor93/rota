@@ -1870,13 +1870,22 @@ instead of the command line, which keeps it out of the process table:
 --token is visible to every process on this machine, the agents this
 server starts included.
 
+The server logs to stderr. --log-file PATH sends every line it writes to
+that file instead, so it can run with nothing on the terminal; a server
+that cannot start, or stops on its own, still says why on stderr. The path
+must be absolute, its directory must exist, and it must be a plain file,
+not a link or a FIFO. The file is appended to and its owner's alone — on
+unix, one others can read or write is refused — and when it would pass
+20 MiB it moves to <name>.1, keeping four old files. One log file belongs
+to one server.
+
 Everything below can also be written down once, in $ROTA_HOME/server.toml
 (or ~/.rota/server.toml), together with the groups of routes this server
 answers; --config reads another file, and --print-config shows what the
 server would use and where each value came from, printing nothing secret.
-The file must not be readable by anyone but its owner, because it may hold
-the token. A flag beats the environment, the environment beats the file, and
-the file beats the default.
+The file must not be readable or writable by anyone but its owner, because
+it may hold the token. A flag beats the environment, the environment beats
+the file, and the file beats the default.
 
 Some of the file has no flag here at all: how long a sign-in lasts, where
 the store is, the three settings a run that stays open is governed by, and
@@ -2059,9 +2068,19 @@ func (c *cli) signIn(id int, extra []string) error {
 // what an application calls its own secrets.
 func init() { store.HideFromAgents("ROTA_TOKEN") }
 
+// serveUntil is what ends a server: the first interrupt or SIGTERM. A test
+// replaces it with a context it cancels itself.
+var serveUntil = func() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
+// serveGrace is how much longer than one run a shutdown waits for the runs
+// in flight. A variable so a test can watch a shutdown run out of time.
+var serveGrace = 10 * time.Second
+
 // serve runs the HTTP API and its playground. The token is mandatory: an
 // account runner anyone can reach is not something to start by accident.
-func (c *cli) serve(args []string) error {
+func (c *cli) serve(args []string) (err error) {
 	// Three of serve's words are not a server at all: two print a block to
 	// paste into its file, and one asks a server already running for a link.
 	// They live under serve because that is what they are about, and they
@@ -2097,6 +2116,7 @@ func (c *cli) serve(args []string) error {
 		certFile  = fs.String("tls-cert", "", "TLS certificate; without it the token travels in clear text")
 		keyFile   = fs.String("tls-key", "", "TLS private key")
 		quiet     = fs.Bool("quiet", false, "log only warnings and errors")
+		logFile   = fs.String("log-file", "", "write the log to this absolute path instead of stderr, rotated at 20 MiB")
 	)
 	fs.Var(&roots, "root", "confine cwd, uploads and extra directories here (repeatable)")
 
@@ -2145,6 +2165,7 @@ func (c *cli) serve(args []string) error {
 		cfg.From[key] = "flag --" + name
 	}
 	set("quiet", "server.quiet", func() { cfg.Server.Quiet = *quiet })
+	set("log-file", "server.log_file", func() { cfg.Server.LogFile = *logFile })
 	set("tls-cert", "tls.cert", func() { cfg.TLS.Cert = *certFile })
 	set("tls-key", "tls.key", func() { cfg.TLS.Key = *keyFile })
 	set("allow-dangerous", "runs.allow_dangerous", func() { cfg.Runs.AllowDangerous = *dangerous })
@@ -2182,7 +2203,39 @@ func (c *cli) serve(args []string) error {
 	if err != nil {
 		return usageErr("%v", err)
 	}
-	logger := slog.New(slog.NewTextHandler(c.err, &slog.HandlerOptions{Level: level(cfg.Server.Quiet)}))
+	// Everything the server says from here on goes to out, through say for
+	// its own plain lines: stderr, exactly as it always was, or the log
+	// file, and then nothing reaches the terminal. In the file each plain
+	// line is dated, as slog's are, so a restart in a log that is appended
+	// to can be told from the one before it. Everything that went wrong
+	// before this point is refused on stderr, there being no log yet to put
+	// it in.
+	var out io.Writer = c.err
+	say := func(line string) { fmt.Fprintln(c.err, line) }
+	if path := cfg.Server.LogFile; path != "" {
+		// Not err: the deferred write below must see what serve returns.
+		lf, openErr := openLogFile(path, c.err)
+		if openErr != nil {
+			return openErr
+		}
+		defer lf.Close()
+		out = lf
+		say = func(line string) {
+			// The blank line before "shutting down" is for a terminal
+			// that has just echoed ^C, and a file has none.
+			fmt.Fprintf(lf, "%s %s\n", time.Now().Format(time.RFC3339), strings.TrimLeft(line, "\n"))
+		}
+		// A server that will not start, or stops on its own, is never
+		// silent: the reason goes into the log here, and report prints it
+		// on stderr as it does for every command — unless the log has had
+		// to go to stderr itself, where it would then be said twice.
+		defer func() {
+			if err != nil && lf.onFile() {
+				say("error: " + unsecret(err.Error()))
+			}
+		}()
+	}
+	logger := slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: level(cfg.Server.Quiet)}))
 	opts.Token, opts.Log = tok, logger
 	srv, err := api.New(opts)
 	if err != nil {
@@ -2192,42 +2245,42 @@ func (c *cli) serve(args []string) error {
 	if listener.Cert != "" {
 		scheme = "https"
 	}
-	fmt.Fprintf(c.err, "rota %s serving on %s://%s\n", wire.Version, scheme, listener.Addr)
+	say(fmt.Sprintf("rota %s serving on %s://%s", wire.Version, scheme, listener.Addr))
 	if given["token"] {
 		// The process table is readable by every local process, and the
 		// agents this server starts are local processes with a shell.
-		fmt.Fprintln(c.err, "warning: --token is visible to every process on this machine; put it in ROTA_TOKEN instead")
+		say("warning: --token is visible to every process on this machine; put it in ROTA_TOKEN instead")
 	}
 	if len(opts.Roots) == 0 {
-		fmt.Fprintln(c.err, "warning: no --root given, so a caller may name any directory on this machine")
+		say("warning: no --root given, so a caller may name any directory on this machine")
 	}
 	loopback := strings.HasPrefix(listener.Addr, "127.0.0.1") || strings.HasPrefix(listener.Addr, "localhost")
 	if listener.Cert == "" && !loopback {
-		fmt.Fprintln(c.err, "warning: no TLS off the loopback address; the bearer token travels in clear text")
+		say("warning: no TLS off the loopback address; the bearer token travels in clear text")
 		if len(opts.Users) > 0 {
 			// A password is worse than a token in the clear: it is typed
 			// again elsewhere, and it is the one credential rota cannot
 			// replace for whoever chose it.
-			fmt.Fprintln(c.err, "warning: [[users]] are configured without TLS; every password typed on the page travels in clear text too")
+			say("warning: [[users]] are configured without TLS; every password typed on the page travels in clear text too")
 		}
 	}
 	if opts.AllowDangerous {
-		fmt.Fprintln(c.err, "warning: --allow-dangerous is on; callers may bypass every permission check")
+		say("warning: --allow-dangerous is on; callers may bypass every permission check")
 	}
 	if opts.AllowRawFlags {
-		fmt.Fprintln(c.err, "warning: --allow-raw-flags is on; a caller can pass any vendor flag, which undoes --root and --allow-dangerous")
+		say("warning: --allow-raw-flags is on; a caller can pass any vendor flag, which undoes --root and --allow-dangerous")
 	}
 	if !opts.Routes.Playground {
-		fmt.Fprintln(c.err, "routes: the playground and the version at / are off")
+		say("routes: the playground and the version at / are off")
 	}
 	if !opts.Routes.WebSocket {
-		fmt.Fprintln(c.err, "routes: the WebSocket routes are off; a run that stays open is reached over the API instead")
+		say("routes: the WebSocket routes are off; a run that stays open is reached over the API instead")
 	}
 	if !opts.Routes.Health {
-		fmt.Fprintln(c.err, "routes: /v1/health is off; nothing here answers without a credential")
+		say("routes: /v1/health is off; nothing here answers without a credential")
 	}
 	if !opts.Routes.API {
-		fmt.Fprintln(c.err, "routes: the API is off, so this server answers nothing")
+		say("routes: the API is off, so this server answers nothing")
 	}
 	server := &nethttp.Server{
 		Addr:    listener.Addr,
@@ -2244,7 +2297,7 @@ func (c *cli) serve(args []string) error {
 
 	// Shut down on the first signal and wait for work in flight; a second
 	// signal stops waiting, for whoever is in a hurry.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := serveUntil()
 	defer stop()
 	errs := make(chan error, 1)
 	go func() {
@@ -2262,8 +2315,8 @@ func (c *cli) serve(args []string) error {
 		return err
 	case <-ctx.Done():
 		stop()
-		fmt.Fprintln(c.err, "\nrota: shutting down; waiting for runs in flight (interrupt again to stop now)")
-		shutdown, cancel := context.WithTimeout(context.Background(), opts.Timeout+10*time.Second)
+		say("\nrota: shutting down; waiting for runs in flight (interrupt again to stop now)")
+		shutdown, cancel := context.WithTimeout(context.Background(), opts.Timeout+serveGrace)
 		defer cancel()
 		err := server.Shutdown(shutdown)
 		// Shutdown waits for handlers but cannot cancel them, and each

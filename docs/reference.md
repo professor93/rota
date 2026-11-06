@@ -304,6 +304,7 @@ instead; see *One file for the server*.
 | `--allow-dangerous` | permit permission-bypass and full-access options |
 | `--allow-raw-flags` | let callers pass flags straight to the vendor CLI |
 | `--quiet` | log warnings and errors only |
+| `--log-file <path>` | log to this file instead of stderr; absolute, rotated at 20 MiB — see *A log file instead of the terminal* |
 
 **`rota serve passwd <name>`** and **`rota serve token <name>`** take
 `--role control|watch` and print a block to paste. **`rota serve invite`**
@@ -458,12 +459,15 @@ The default file is allowed not to exist, and then nothing has changed; a
 file somebody names has to be there, because naming one that is not is a
 typo nobody would otherwise be told about.
 
-The file may hold the bearer token, so on unix rota refuses to start unless
-it belongs to its owner alone, and says the command that fixes it:
+The file may hold the bearer token, so on unix rota refuses to start if
+group or others can read or write it, and says the command that fixes it.
+Windows has neither those bits nor that convention, so there is no such
+check there:
 
 ```
-/home/me/.rota/server.toml is readable by other users (mode 0644); it may
-hold a token, so fix it with: chmod 600 /home/me/.rota/server.toml
+/home/me/.rota/server.toml is readable or writable by other users (mode
+0644); it is its owner's alone, so fix it with: chmod 600
+/home/me/.rota/server.toml
 ```
 
 **A flag beats the environment, the environment beats the file, and the file
@@ -477,8 +481,9 @@ out equal to the defaults, so it cannot drift. In short:
 
 ```toml
 [server]
-listen = "127.0.0.1:8787"   # host:port, or a bare port for every interface
-quiet  = false              # log warnings and errors only
+listen   = "127.0.0.1:8787" # host:port, or a bare port for every interface
+quiet    = false            # log warnings and errors only
+log_file = ""               # an absolute path to log to instead of stderr
 
 [tls]
 cert = ""                   # cert and key go together or not at all
@@ -643,6 +648,60 @@ Files can travel with the request — either `"files": [{"path":"a.txt",
 "content":"<base64>"}]` or a multipart body whose `request` part is that same
 JSON. They land in a directory private to the request, which is added to the
 session and deleted afterwards.
+
+### A log file instead of the terminal
+
+A server logs to stderr. `log_file` in `[server]`, or `--log-file PATH`,
+sends every line it writes there instead — the start-up line and its
+warnings, each request it logs, the http server's own errors — so it can run
+with nothing on the terminal. Like `quiet`, it is the file's key and a flag,
+and no environment variable. `quiet` still decides how much is written. The
+lines are the ones stderr would have shown, except that the server's own
+plain lines — the start-up line, the warnings, `routes:` and `shutting
+down` — begin with an RFC 3339 time in the file, as slog's lines carry
+`time=`, so a restart in a log that is appended to can be dated. Without a
+log file, stderr is exactly what it always was.
+
+The one exception is a server that fails to start or stops on its own: the
+reason goes into the file and to stderr as well, so a failure is never
+silent. Anything refused before the file is open — the configuration, the
+file itself — is said on stderr alone, there being no log yet to put it in.
+
+The path must be absolute and its directory must already exist. It is
+opened for appending, so a restart adds to it, and made with mode 0600.
+Every time it is opened — at the start, and again after each rotation — a
+link at the path is refused rather than followed and a FIFO there is
+refused at once rather than waited on (both on unix), and what was opened
+must be a plain file; on unix it must also be its owner's alone, a file
+group or others can read or write being refused the way `server.toml` is.
+Windows has no such bits, so the mode is not checked there.
+
+```
+server.log_file: /var/log/rota/rota.log is readable or writable by other
+users (mode 0644); it is its owner's alone, so fix it with: chmod 600
+/var/log/rota/rota.log
+```
+
+When a write would take the file past 20 MiB it is moved to `rota.log.1`,
+the older ones move up by one, the fifth goes, and a new file is started:
+four old files are kept, the newest as `.1`, so a server left running for
+months fills a hundred mebibytes at most. The log is moved first and the
+older files only after it: if it cannot be moved, nothing older is touched,
+writing goes on into the same file, and the next try waits for another
+20 MiB. A `rota.log.0` that a crash left in the middle of a rotation is put
+into the chain as `.1` when the log is opened, and before the next rotation,
+rather than written over. If the new file cannot be opened after a
+rotation, the log goes to stderr until it can: the file is tried again
+after a minute, or once another 20 MiB has gone to stderr, whichever is
+first, and each switch, either way, is said once on stderr. A server that
+then stops with an error says it there once, not twice.
+
+One log file belongs to one server. Two servers given the same path each
+rotate it on their own count, and one may move the file out from under the
+other.
+
+Nothing new is logged for having a file, and none of the lines holds a
+token or a password.
 
 ### Who is asking, and what they may do
 

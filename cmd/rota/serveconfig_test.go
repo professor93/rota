@@ -80,6 +80,50 @@ max_concurrent = 3
 	}
 }
 
+// TestLogFileTakesTheSamePrecedence: server.log_file and --log-file are one
+// setting, like quiet, and a flag typed beats the file. No variable has a
+// say. Nothing set is stderr, which --print-config shows as an empty default.
+func TestLogFileTakesTheSamePrecedence(t *testing.T) {
+	t.Setenv("ROTA_TOKEN", "t")
+	writeConfig(t, "")
+	out, errb, code := call(t, "serve", "--print-config")
+	if code != 0 {
+		t.Fatalf("%d %q", code, errb)
+	}
+	if got := lineFor(t, out, "log_file"); got != `log_file = "" # default` {
+		t.Fatalf("with nothing set: %q", got)
+	}
+
+	dir := t.TempDir()
+	inFile, inFlag := filepath.Join(dir, "file.log"), filepath.Join(dir, "flag.log")
+	writeConfig(t, "[server]\nlog_file = "+tomlString(inFile)+"\n")
+	for _, c := range []struct {
+		flags []string
+		want  string
+		from  string
+	}{
+		{nil, inFile, "# file"},
+		{[]string{"--log-file", inFlag}, inFlag, "# flag --log-file"},
+		// A flag typed empty is a flag typed: back to stderr.
+		{[]string{"--log-file="}, "", "# flag --log-file"},
+	} {
+		out, errb, code := call(t, append([]string{"serve", "--print-config"}, c.flags...)...)
+		if code != 0 {
+			t.Fatalf("%v: %d %q", c.flags, code, errb)
+		}
+		want := "log_file = " + tomlString(c.want) + " " + c.from
+		if got := lineFor(t, out, "log_file"); got != want {
+			t.Fatalf("flags %v: %q, want %q", c.flags, got, want)
+		}
+	}
+}
+
+// tomlString is a path the way --print-config quotes it, so a Windows path's
+// backslashes compare equal.
+func tomlString(s string) string {
+	return `"` + strings.ReplaceAll(strings.ReplaceAll(s, `\`, `\\`), `"`, `\"`) + `"`
+}
+
 // TestPrintConfigIsAFileRotaWouldRead closes the loop: what it prints is
 // something the parser reads back, masked token and comments included.
 func TestPrintConfigIsAFileRotaWouldRead(t *testing.T) {
