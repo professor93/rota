@@ -187,8 +187,8 @@ func TestLoginTokenPutsASetupTokenOnTheAccountNamed(t *testing.T) {
 }
 
 // A Console API key given where a setup token belongs is refused on this
-// machine, for what it is — whether it was piped in or written on the
-// command line — and never sent to the API to be refused there as a bad key.
+// machine, for what it is — when it is piped in on standard input, the only
+// way it reaches this check — and never sent to the API to be refused there as a bad key.
 func TestLoginTokenRefusesAKeyBeforeItLeavesTheMachine(t *testing.T) {
 	asked := keyAPI(t, 401)
 	home := seedLong(t, time.Time{}, "")
