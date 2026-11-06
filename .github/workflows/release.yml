@@ -47,12 +47,21 @@ jobs:
       - name: the program the suite runs
         working-directory: rota
         run: go build -o "$RUNNER_TEMP/rota" ./cmd/rota
+      # As JSON, so each result names its package: a suite whose serve tests
+      # all skip proves nothing of serve, and fails here.
       - name: consumer suite against this commit
         working-directory: rota-sdk-test
         run: |
           go work init . ../rota
           go vet ./...
-          ROTA_BIN="$RUNNER_TEMP/rota" go test ./...
+          serve="$(go list ./serve)"
+          rc=0
+          ROTA_BIN="$RUNNER_TEMP/rota" go test -json ./... >"$RUNNER_TEMP/suite.json" || rc=$?
+          jq -rj 'select(.Action == "output" or .Action == "build-output") | .Output' "$RUNNER_TEMP/suite.json"
+          test "$rc" -eq 0
+          n="$(jq -s --arg p "$serve" '[.[] | select(.Action == "pass" and .Test != null and (.Package == $p or (.Package | startswith($p + "/"))))] | length' "$RUNNER_TEMP/suite.json")"
+          echo "serve tests passed: $n"
+          test "$n" -gt 0 || { echo "no test in $serve passed: the gate needs one"; exit 1; }
 
   publish:
     if: github.event_name == 'push' && !startsWith(github.ref_name, 'cmd/rota/')
@@ -100,13 +109,18 @@ jobs:
             asset: rota-windows-amd64.exe
     runs-on: ${{ matrix.os }}
     env:
-      TAG: ${{ inputs.tag || github.ref_name }}
+      REF: ${{ inputs.tag || github.ref_name }}
       ASSET: ${{ matrix.asset }}
       GH_TOKEN: ${{ github.token }}
     steps:
+      # By hand, either tag of a release names its binaries: cmd/rota/vX.Y.Z
+      # is checked as vX.Y.Z, which the steps after this one read as TAG.
       - name: tag is a release tag
         shell: bash
-        run: echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+        run: |
+          v="${REF#cmd/rota/}"
+          echo "$v" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "$REF is not a release tag, like v1.0.5 or cmd/rota/v1.0.5"; exit 1; }
+          echo "TAG=$v" >>"$GITHUB_ENV"
       - name: download
         shell: bash
         run: gh release download "$TAG" -R "$GITHUB_REPOSITORY" -p "$ASSET" -p checksums.txt -D bin
@@ -150,8 +164,14 @@ jobs:
   module:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref_name, 'cmd/rota/')
     runs-on: ubuntu-latest
+    # Most of it is the wait for the root's release run.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
     env:
       TAG: ${{ inputs.tag || github.ref_name }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/setup-go@v6
         with:
@@ -159,12 +179,39 @@ jobs:
       - name: tag is a release tag
         run: |
           v="${TAG#cmd/rota/}"
-          echo "$v" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
+          echo "$v" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' || { echo "$TAG is not a release tag, like v1.0.5 or cmd/rota/v1.0.5"; exit 1; }
+      # cmd/rota/vX.Y.Z is pushed after vX.Y.Z, so it runs apart and cannot
+      # need that run's gate: it waits for the whole run, gate to smoke, and
+      # is proven only once it is green.
+      - name: the root's release run is green
+        if: github.event_name == 'push'
+        run: |
+          v="${TAG#cmd/rota/}"
+          id=""
+          for i in $(seq 1 30); do
+            id="$(gh run list -R "$GITHUB_REPOSITORY" -w release.yml -e push -b "$v" -L 1 --json databaseId -q '.[0].databaseId')"
+            test -n "$id" && break
+            sleep 10
+          done
+          test -n "$id" || { echo "no release run for $v"; exit 1; }
+          while :; do
+            state="$(gh run view "$id" -R "$GITHUB_REPOSITORY" --json status,conclusion -q '.status + " " + .conclusion')"
+            case "$state" in completed*) break ;; esac
+            sleep 30
+          done
+          test "$state" = "completed success" || { echo "the release run of $v ended ${state#completed }: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$id"; exit 1; }
+      # The proxy alone, with no direct fallback, so what passes is what
+      # proxy.golang.org serves. It fetches a new version on the first
+      # request for it; the retries cover a proxy slow to have it.
       - name: go install through the proxy
         env:
-          GOPROXY: https://proxy.golang.org,direct
+          GOPROXY: https://proxy.golang.org
           GOFLAGS: -mod=mod
         run: |
           v="${TAG#cmd/rota/}"
-          go install "github.com/professor93/rota/cmd/rota@$v"
+          for i in 1 2 3 4 5; do
+            go install "github.com/professor93/rota/cmd/rota@$v" && break
+            test "$i" -lt 5 || exit 1
+            sleep 30
+          done
           "$(go env GOPATH)/bin/rota" --version | grep -qx "rota ${v#v}"
