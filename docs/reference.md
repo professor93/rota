@@ -540,6 +540,7 @@ shell            = false    # also allow a plain login shell, not only CLIs
 max_sessions     = 8
 scrollback_bytes = 2097152  # output kept per terminal, for whoever attaches
 idle_timeout     = "12h"    # a terminal nobody is attached to ends after this
+keep_stopped     = "168h"   # how long a stopped held session stays listed
 record           = false    # keep each terminal's output under <store>/terminals/
 record_max_bytes = 52428800 # how much of one terminal is kept; input never is
 share            = true     # take terminals offered by `rota run --share` here
@@ -635,11 +636,11 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/ws` | control | a WebSocket that starts a run on whichever account the rotation picks and carries it both ways |
 | `GET` | `/v1/accounts/{id}/ws` | control | the same, on that account |
 | `GET` | `/v1/runs/{id}/ws` | watch | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
-| `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended` or `interrupted`), `attachable`, `pid` (its holder), `name`, `title`, `conversation` and `status` (`running`, `needs_you`, `quiet` or `stopped`) |
-| `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard, and the same held fields |
+| `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended`, `interrupted` or `broken`), `attachable`, `reachable`, `pid` (its holder), `name`, `title`, `conversation`, `conversation_cwd`, `resumable`, `ended_at` once it has stopped, `made_by` for a holder this rota cannot attach to, and `status` (`running`, `needs_you`, `quiet` or `stopped`). The daemon also lists the held sessions its store's records describe: the stopped ones, for `keep_stopped`, and the running ones it is not linked to |
+| `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard, and the same held fields, for a stopped held session too |
 | `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one |
-| `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended |
-| `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame |
+| `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended; a running held session the daemon is not linked to is hung up by signal, and only while its pid is still the holder its record names, `409` when it is not |
+| `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame. A held session the daemon is not linked to answers `409`, saying why |
 | `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
 | `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"long_until":"...","status":"long"}`, and an API key sent as `token` is refused with `400` by its prefix, without being sent anywhere. Neither comes back or is logged |
@@ -1553,7 +1554,29 @@ which is `running`, `needs_you` while the CLI waits on a permission or a
 question, `quiet` after 30 seconds with no output, or `stopped`; and `name`,
 the first there is of the label, the title without its spinner, the CLI's
 own name for the conversation, and the folder. A held session is never
-ended for being idle.
+ended for being idle. `reachable` is whether the daemon's link to its
+holder is up; `conversation_cwd` is the folder the conversation is in,
+which for a worktree is not `cwd`; `resumable` is an interrupted session
+whose conversation is known; and `ended_at` is when a stopped one stopped.
+
+A daemon that starts takes up every holder still running on its store, as
+if it had started it, and a viewer's offsets go on meaning the same bytes:
+a restart looks like a brief reconnect. Each session's directory is judged
+on its own, so one broken record hides nothing. A holder whose link fails is
+listed `live` with `"reachable": false` and tried again at every sweep — its
+lock, not a silent socket, says whether it is still there. A holder made by
+a rota this one cannot attach to is listed `live` with `"attachable": false`
+and `made_by`, the version that made it, and is never stopped but by a
+`DELETE`. A held session that has stopped is still listed once the five
+minutes an ended terminal stays are over: from its record, for
+`[terminal] keep_stopped` after it stopped — `ended` with its exit,
+`interrupted` (exit `-1`) for a holder that went without recording one, a
+reboot or a kill, or `broken` for a record that cannot be read. Nothing
+restarts by itself. An interrupted session's age is measured from the last
+time its holder touched its record. Once `keep_stopped` has passed, the
+session's directory under `<store>/terminals/` is deleted, and nothing else:
+never a worktree, and never a directory whose lock is held. `max_sessions`
+counts every running holder on the store, these ones included.
 
 #### The socket
 
@@ -1722,7 +1745,9 @@ The audit log is always on, and never carries a keystroke or a line of
 output: `terminal created` (id, kind, account, by), `terminal attached` and
 `terminal detached` (id, name, role), `keyboard taken`, `keyboard released`,
 `keyboard granted` and `keyboard forced` (id, from, to), `terminal killed`
-(id, by) and `terminal ended` (id, exit) — and, for one that was offered from
+(id, by) and `terminal ended` (id, exit); for a held session, `terminal
+adopted` (id, kind, account, pid) when a daemon takes it up and `terminal
+relinked` (id, pid) when its link comes back — and, for one that was offered from
 a local terminal, `terminal shared` (id, account, label, pid, mode) and
 `terminal unshared` (id, exit) beside the last of those.
 

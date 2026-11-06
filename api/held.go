@@ -154,14 +154,19 @@ type heldTerm struct {
 	conn     *share.Conn // nil while the link is down
 	features []string
 	state    string
-	title    string
-	reg      holdwire.Registry
-	conv     string
-	lastOut  time.Time
-	seq      uint64
-	typed    [heldTyped]typist
-	askSeq   uint64
-	asks     map[uint64]chan *heldScreen
+	// stopped is when this server saw the session stop.
+	stopped time.Time
+	title   string
+	reg     holdwire.Registry
+	// conv and convCwd are the conversation and the folder it is in, kept
+	// once known: a registry that goes away does not take them with it.
+	conv    string
+	convCwd string
+	lastOut time.Time
+	seq     uint64
+	typed   [heldTyped]typist
+	askSeq  uint64
+	asks    map[uint64]chan *heldScreen
 }
 
 func (h *heldTerm) link() *share.Conn {
@@ -242,17 +247,27 @@ func (h *heldTerm) gone() bool {
 
 // describe adds what only a held terminal has. Called with the session's mu
 // held.
+//
+// reachable is whether the link to the holder is up now. resumable is an
+// interrupted session whose conversation is known — the one Resume can
+// start again on.
 func (h *heldTerm) describe(doc map[string]any) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	doc["held"] = true
 	doc["state"] = h.state
 	doc["attachable"] = true
+	doc["reachable"] = h.state == heldLive && h.conn != nil
 	doc["pid"] = h.pid
 	doc["title"] = h.title
 	doc["conversation"] = h.conv
+	doc["conversation_cwd"] = h.convCwd
+	doc["resumable"] = h.state == heldInterrupted && h.conv != ""
 	doc["name"] = h.name()
 	doc["status"] = h.status()
+	if h.state != heldLive && !h.stopped.IsZero() {
+		doc["ended_at"] = h.stopped.Format(time.RFC3339)
+	}
 }
 
 // name is the first of these that there is: what the person called it, the
@@ -421,6 +436,9 @@ func (h *heldTerm) relink() (code int, back bool) {
 func (h *heldTerm) setState(state string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if state != heldLive && h.stopped.IsZero() {
+		h.stopped = h.s.now()
+	}
 	h.state = state
 }
 
@@ -434,6 +452,9 @@ func (h *heldTerm) noteState(msg *holdwire.StateMsg) {
 		h.reg = *msg.Registry
 		if msg.Registry.SessionID != "" {
 			h.conv = msg.Registry.SessionID
+		}
+		if msg.Registry.Cwd != "" {
+			h.convCwd = msg.Registry.Cwd
 		}
 	}
 }

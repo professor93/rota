@@ -43,6 +43,15 @@ import (
 //	FAKE_HOLDER_GARBLE_AT=<n>     once, after count's line n, write the link
 //	                              a frame that is not one, and keep it
 //	FAKE_HOLDER_DEAF=1            ignore Stop, SIGHUP and SIGTERM
+//	FAKE_HOLDER_SIGNALS=<path>    write down each SIGHUP and SIGTERM there
+//	FAKE_HOLDER_UNLINKED=<text>   print that 200 ms after a link drops, once
+//	FAKE_HOLDER_REFUSE_LINKS=<n>  refuse the first n links from the daemon
+//	FAKE_HOLDER_MAJOR=<n>         speak protocol n alone, and record it
+//	FAKE_HOLDER_VERSION=<v>       the rota version meta.json names
+//	FAKE_HOLDER_CONVERSATION_CWD  the folder the conversation is in
+//
+// The conversation and its folder are written into meta.json as well, as a
+// real holder keeps them there for a session that has stopped.
 //
 // Typed lines are its commands: "exit N" ends it with code N, "count N"
 // prints N numbered lines, and anything else is answered "got:<line>".
@@ -102,7 +111,18 @@ type fake struct {
 	raw        net.Conn // link's socket, for a frame that is not one
 	dropped    bool
 	garbled    bool
+	unlinked   bool
+	refused    int
 	line       []byte
+}
+
+// major is the protocol this fake speaks: this rota's, or the one its
+// environment names.
+func fakeMajor() int {
+	if n, err := strconv.Atoi(os.Getenv("FAKE_HOLDER_MAJOR")); err == nil {
+		return n
+	}
+	return holdwire.Major
 }
 
 // open is steps 3 to 7 of the real holder: the directory, the lock, the
@@ -122,9 +142,14 @@ func (f *fake) open(req *holdwire.Request) error {
 	}
 	start, _ := proc.StartTime(os.Getpid())
 	boot, _ := proc.BootID()
+	version := os.Getenv("FAKE_HOLDER_VERSION")
+	if version == "" {
+		version = "fake"
+	}
 	f.meta = &holdwire.Meta{ID: req.ID, Name: req.Name, Kind: req.Kind, Account: req.Account,
 		Provider: "claude", HolderPID: os.Getpid(), HolderStart: start, BootID: boot,
-		Protocol: holdwire.Major, Version: "fake", Cwd: req.Cwd, Args: req.Args, Started: time.Now()}
+		Protocol: fakeMajor(), Version: version, Cwd: req.Cwd, Args: req.Args, Started: time.Now(),
+		Conversation: os.Getenv("FAKE_HOLDER_CONVERSATION"), ConversationCwd: os.Getenv("FAKE_HOLDER_CONVERSATION_CWD")}
 	return holdwire.WriteMeta(f.dir, f.meta)
 }
 
@@ -135,13 +160,21 @@ func (f *fake) logf(format string, args ...any) {
 }
 
 func (f *fake) signals() {
-	if os.Getenv("FAKE_HOLDER_DEAF") != "" {
-		signal.Ignore(syscall.SIGHUP, syscall.SIGTERM)
-		return
-	}
-	ch := make(chan os.Signal, 1)
+	ch := make(chan os.Signal, 4)
 	signal.Notify(ch, syscall.SIGHUP, syscall.SIGTERM)
-	go func() { <-ch; f.exit(129) }()
+	go func() {
+		for sig := range ch {
+			if path := os.Getenv("FAKE_HOLDER_SIGNALS"); path != "" {
+				if w, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+					fmt.Fprintln(w, sig)
+					w.Close()
+				}
+			}
+			if os.Getenv("FAKE_HOLDER_DEAF") == "" {
+				f.exit(129)
+			}
+		}
+	}()
 }
 
 // print keeps p in the ring and sends it down the link, under one lock, so
@@ -188,8 +221,19 @@ func (f *fake) serve(c net.Conn) {
 			return
 		}
 	}
-	major, ok := holdwire.Agree(holdwire.Majors, hello.Majors)
+	major, ok := holdwire.Agree([]int{fakeMajor()}, hello.Majors)
 	if !ok {
+		return
+	}
+	n, _ := strconv.Atoi(os.Getenv("FAKE_HOLDER_REFUSE_LINKS"))
+	f.mu.Lock()
+	refuse := f.refused < n
+	if refuse {
+		f.refused++
+	}
+	f.mu.Unlock()
+	if refuse {
+		_ = conn.SendJSON(holdwire.Refused, holdwire.RefusedMsg{Message: "not now"})
 		return
 	}
 	f.mu.Lock()
@@ -200,6 +244,7 @@ func (f *fake) serve(c net.Conn) {
 		return
 	}
 	conn.Clear()
+	defer f.unlink(conn)
 	for {
 		kind, payload, err := conn.Read()
 		if err != nil {
@@ -212,10 +257,26 @@ func (f *fake) serve(c net.Conn) {
 	}
 }
 
+// unlink is a link gone from under this fake: whatever it was told to
+// print once nobody is linked is printed a moment later, once.
+func (f *fake) unlink(conn *share.Conn) {
+	text := os.Getenv("FAKE_HOLDER_UNLINKED")
+	f.mu.Lock()
+	gone := f.link == conn && !f.unlinked && text != ""
+	if gone {
+		f.unlinked = true
+	}
+	f.mu.Unlock()
+	if gone {
+		time.AfterFunc(200*time.Millisecond, func() { f.print([]byte(text)) })
+	}
+}
+
 func (f *fake) state() holdwire.StateMsg {
 	st := holdwire.StateMsg{Title: os.Getenv("FAKE_HOLDER_TITLE")}
 	if conv, wait := os.Getenv("FAKE_HOLDER_CONVERSATION"), os.Getenv("FAKE_HOLDER_WAITING"); conv != "" || wait != "" {
-		st.Registry = &holdwire.Registry{SessionID: conv, Status: "idle", WaitingFor: wait}
+		st.Registry = &holdwire.Registry{SessionID: conv, Status: "idle", WaitingFor: wait,
+			Cwd: os.Getenv("FAKE_HOLDER_CONVERSATION_CWD")}
 	}
 	return st
 }

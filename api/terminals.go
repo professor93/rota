@@ -53,33 +53,46 @@ const (
 
 /* --------------------------------------------------------- the endpoints --- */
 
+// listTerminals is every terminal this server holds, and in a daemon every
+// session its store's records describe besides: the stopped ones, and the
+// running ones it is not linked to.
 func (s *Server) listTerminals(w http.ResponseWriter, _ *http.Request) {
 	terms := s.everyTerminal()
 	out := make([]map[string]any, 0, len(terms))
 	for _, ts := range terms {
 		out = append(out, ts.view())
 	}
+	if records := s.stored(); len(records) > 0 {
+		labels := s.accountLabels()
+		for i := range records {
+			out = append(out, describeRecord(&records[i], labels))
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"terminals": out})
 }
 
-// terminalOf finds the terminal the path names, answering for an id nobody
-// knows.
-func (s *Server) terminalOf(w http.ResponseWriter, r *http.Request) (*termSession, bool) {
+// terminalOf finds the terminal the path names: one this server holds, or
+// in a daemon a session it knows only from its record, which is rec. Both
+// nil is an id nobody knows, and has been answered.
+func (s *Server) terminalOf(w http.ResponseWriter, r *http.Request) (*termSession, *holdwire.Record) {
 	id := r.PathValue("id")
-	ts := s.findTerminal(id)
-	if ts == nil {
-		fail(w, http.StatusNotFound, "no terminal "+id)
-		return nil, false
+	if ts := s.findTerminal(id); ts != nil {
+		return ts, nil
 	}
-	return ts, true
+	if rec := s.storedRecord(id); rec != nil {
+		return nil, rec
+	}
+	fail(w, http.StatusNotFound, "no terminal "+id)
+	return nil, nil
 }
 
 func (s *Server) describeTerminal(w http.ResponseWriter, r *http.Request) {
-	ts, ok := s.terminalOf(w, r)
-	if !ok {
-		return
+	switch ts, rec := s.terminalOf(w, r); {
+	case ts != nil:
+		writeJSON(w, http.StatusOK, ts.view())
+	case rec != nil:
+		writeJSON(w, http.StatusOK, describeRecord(rec, s.accountLabels()))
 	}
-	writeJSON(w, http.StatusOK, ts.view())
 }
 
 // createTerminal starts one. The answer is the description, so the client has
@@ -101,8 +114,12 @@ func (s *Server) createTerminal(w http.ResponseWriter, r *http.Request) {
 // killTerminal ends one: a hangup, which is what closing a terminal window
 // sends, and the signal nothing survives three seconds later.
 func (s *Server) killTerminal(w http.ResponseWriter, r *http.Request) {
-	ts, ok := s.terminalOf(w, r)
-	if !ok {
+	ts, rec := s.terminalOf(w, r)
+	if rec != nil {
+		s.stopRecord(w, r, rec)
+		return
+	}
+	if ts == nil {
 		return
 	}
 	if ts.over() {
@@ -243,11 +260,15 @@ func (s *Server) reserveTerminal() (list func(*termSession), err error) {
 // terminal that could not be recorded still runs: the warning is all that
 // happens, because the alternative is refusing somebody a terminal over a
 // directory they cannot see.
-func (s *Server) recordTerminal(ts *termSession) {
+func (s *Server) recordTerminal(ts *termSession) { s.recordTerminalFrom(ts, false) }
+
+// recordTerminalFrom is recordTerminal, or with resume the recording a
+// daemon before this one kept of a held session, taken up and added to.
+func (s *Server) recordTerminalFrom(ts *termSession, resume bool) {
 	if !s.opts.Terminal.Record {
 		return
 	}
-	rec, err := s.recorderFor(ts.id)
+	rec, err := s.recorderFor(ts.id, resume)
 	if err != nil {
 		s.log.Warn("this terminal is not being recorded", "terminal", ts.id, "err", err)
 		return
@@ -383,7 +404,7 @@ func (s *Server) terminalCwd(in string) (string, error) {
 
 // recorderFor opens the files a recorded terminal writes, under the store,
 // where nothing a CLI can reach may read them.
-func (s *Server) recorderFor(id string) (*recorder, error) {
+func (s *Server) recorderFor(id string, resume bool) (*recorder, error) {
 	st, err := s.openStore()
 	if err != nil {
 		return nil, err
@@ -393,7 +414,7 @@ func (s *Server) recorderFor(id string) (*recorder, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newRecorder(dir, id, s.opts.Terminal.RecordMax)
+	return newRecorder(dir, id, s.opts.Terminal.RecordMax, resume)
 }
 
 /* ------------------------------------------------------------- the socket --- */
@@ -405,8 +426,13 @@ func (s *Server) recorderFor(id string) (*recorder, error) {
 // shoulder, so to speak. A watcher never has one: watch is what it is
 // whatever the query string says.
 func (s *Server) terminalWS(w http.ResponseWriter, r *http.Request) {
-	ts, ok := s.terminalOf(w, r)
-	if !ok {
+	ts, rec := s.terminalOf(w, r)
+	if rec != nil {
+		// Nothing to attach to: a session this server is not linked to.
+		fail(w, http.StatusConflict, recordRefusal(rec))
+		return
+	}
+	if ts == nil {
 		return
 	}
 	mode := r.URL.Query().Get("mode")
