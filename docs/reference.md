@@ -2688,6 +2688,9 @@ to read*:
 `#` is the account's place in the rotation, `-` when it is out of it. Each
 usage window has a line of its own under USAGE, most important first; rows
 that span lines are ruled apart, one-line rows (as in `--short`) are not.
+A terminal narrower than the table gets wrapped cells, STATUS first and then
+ACCOUNT, and the notes under it wrapped at their spaces; a pipe or a file gets
+the table as it is.
 
 A spent unscoped window shows as `limited`; a dead credential as `re-auth
 needed`. Model-scoped windows (a separate weekly Fable budget, say) are shown

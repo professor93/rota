@@ -125,6 +125,17 @@ type cli struct {
 	// taken once, at the start, so the goroutine reading it and a caller
 	// replacing it cannot be doing both at the same moment.
 	in io.Reader
+	// cols is the width a listing fits, when it is known without asking;
+	// 0 asks out whether it is a terminal and how wide (see termWidth).
+	cols int
+}
+
+// width is how wide a terminal the listing is drawn on, or 0 for none.
+func (c *cli) width() int {
+	if c.cols != 0 {
+		return c.cols
+	}
+	return termWidth(c.out)
 }
 
 // usageError exits with status 2; exitCode carries a vendor CLI's own status.
@@ -626,16 +637,21 @@ func (c *cli) list(args []string) error {
 
 	// The headers give their room to the numbers: "#" is the account's place
 	// in the rotation, and CLI is which one it drives.
+	//
+	// On a terminal narrower than the table, the free text gives way first:
+	// STATUS wraps inside its column, then ACCOUNT. Anywhere else the table
+	// is drawn as it always was.
+	width := c.width()
 	if short {
 		// The reading's age belongs beside it here more than anywhere else:
 		// --short reads no usage, so what it shows may be hours old and
 		// nothing else on the line would say so.
-		g := grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "CHECKED"}}
+		g := grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "CHECKED"}, width: width, give: []int{3}, keep: []int{0, 1, 2, 5}}
 		for _, a := range shown {
 			g.add(place(a), strconv.Itoa(a.ID), a.Provider, a.Label(), headline(a), checkedAgo(a))
 		}
 		g.render(c.out)
-		c.sayLongNotes(shown)
+		c.sayLongNotes(shown, width)
 		if withSessions {
 			c.showSessions(sessions.Scan(s, recent))
 		}
@@ -644,7 +660,7 @@ func (c *cli) list(args []string) error {
 		}
 		return nil
 	}
-	g := grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}}
+	g := grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{0, 1, 2, 5, 6}}
 	for _, a := range shown {
 		status := string(a.Status())
 		if a.Status() == rota.StatusReauth {
@@ -664,16 +680,16 @@ func (c *cli) list(args []string) error {
 	// UNTIL is the threshold, so say what it decides rather than leaving a
 	// column of percentages to be guessed at.
 	if pick, perr := rotation.Pick(shown); perr == nil {
-		fmt.Fprintf(c.out, "\n`rota run` without an id uses %s, and moves on at %d%% usage.\n", pick, rotation.Cutoff(pick))
+		say(c.out, width, fmt.Sprintf("\n`rota run` without an id uses %s, and moves on at %d%% usage.\n", pick, rotation.Cutoff(pick)))
 	} else {
-		fmt.Fprintf(c.out, "\n%v\n", perr)
+		say(c.out, width, fmt.Sprintf("\n%v\n", perr))
 	}
 	for _, a := range shown {
 		if a.Quota != nil && a.Quota.Note != "" {
-			fmt.Fprintf(c.out, "\n%s: %s\n", a, a.Quota.Note)
+			say(c.out, width, fmt.Sprintf("\n%s: %s\n", a, a.Quota.Note))
 		}
 	}
-	c.sayLongNotes(shown)
+	c.sayLongNotes(shown, width)
 	if withSessions {
 		c.showSessions(sessions.Scan(s, recent))
 	}
@@ -691,13 +707,15 @@ func (c *cli) list(args []string) error {
 // asks no provider anything, and this asks nothing either — while the day a
 // year-long credential lapses is the last day anybody wants to be told about
 // by a run that stopped working.
-func (c *cli) sayLongNotes(shown []*rota.Account) {
+//
+// width is the terminal's, which the notes wrap to at their spaces, or 0.
+func (c *cli) sayLongNotes(shown []*rota.Account, width int) {
 	for _, a := range shown {
 		if note := wire.LongNote(a); note != "" {
-			fmt.Fprintf(c.out, "\n%s: %s\n", a, note)
+			say(c.out, width, fmt.Sprintf("\n%s: %s\n", a, note))
 		}
 		if note := wire.LoginNote(a); note != "" {
-			fmt.Fprintf(c.out, "\n%s: %s\n", a, note)
+			say(c.out, width, fmt.Sprintf("\n%s: %s\n", a, note))
 		}
 	}
 }
