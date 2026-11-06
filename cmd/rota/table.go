@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/professor93/rota/internal/pty"
@@ -34,8 +35,8 @@ type grid struct {
 	// is left to give.
 	give []int
 	// keep is the columns whose content is short and always the same shape
-	// — a place, an id, a percentage — which are cut only once every other
-	// column is down to its "…".
+	// — a place, an id, a percentage — which are cut only once every column
+	// but give is down to its "…", in the order they give way.
 	keep []int
 }
 
@@ -61,7 +62,8 @@ func termWidth(out io.Writer) int {
 }
 
 // say prints text, each line of it wrapped at its spaces to width when
-// width is a terminal's. Without one, it is printed exactly as it is.
+// width is a terminal's, a command in backticks kept whole (see wrapLine).
+// Without one, it is printed exactly as it is.
 func say(out io.Writer, width int, text string) {
 	if width > 0 {
 		var lines []string
@@ -73,12 +75,17 @@ func say(out io.Writer, width int, text string) {
 	io.WriteString(out, text)
 }
 
-// minWrap is how narrow a column that wraps gets before the next one gives
-// way, and wrapFloor how narrow any of them gets at all: below it a sentence
-// turns into a column of single words, and cutting reads better.
+// How narrow columns get, and in which order (see fit). A column that wraps
+// goes down to minWrap before the next one gives way, and to wrapFloor
+// before anything else is cut; below hardWrap it is cut too, since three
+// letters a line is no longer reading. cutSoft is as far as the first cut
+// goes, enough for "5h 3%…", and cutHard a first character and the "…".
 const (
 	minWrap   = 16
 	wrapFloor = 10
+	hardWrap  = 4
+	cutSoft   = 6
+	cutHard   = 2
 )
 
 func (g *grid) add(cells ...string) { g.rows = append(g.rows, cells) }
@@ -114,9 +121,7 @@ func frame(w []int) int {
 // when no width was asked for, and otherwise narrowed until it does.
 //
 // The columns in give wrap first, in their order, each down to minWrap, and
-// then together down to wrapFloor; nothing of what they say is lost. Only a
-// table that still cannot fit then has its widest columns cut, a column at a
-// time, each cut line ending in "…" — so a cell always keeps its start.
+// nothing of what they say is lost. The rest of the stages are below.
 func (g *grid) fit() (header []string, rows [][]string) {
 	w := widths(g.header, g.rows)
 	if g.width <= 0 || frame(w) <= g.width {
@@ -129,51 +134,54 @@ func (g *grid) fit() (header []string, rows [][]string) {
 		w[i] -= take
 		over -= take
 	}
-	// widest is the widest of these columns that is wider than floor, or -1.
-	// A tie goes to the later column, which is the one with less to say.
-	widest := func(cols []int, floor func(int) int) int {
-		at := -1
-		for _, j := range cols {
-			if w[j] > floor(j) && (at < 0 || w[j] >= w[at]) {
-				at = j
-			}
-		}
-		return at
-	}
-	// Every column that wraps has given way to its minimum and the table
-	// still does not fit: they go on wrapping, the widest first, down to
-	// wrapFloor, which costs more lines and loses nothing.
-	for ; over > 0; over-- {
-		i := widest(g.give, func(j int) int { return min(natural[j], wrapFloor) })
-		if i < 0 {
-			break
-		}
-		w[i]--
-	}
-	// Only now is anything cut, the widest column first — the columns in
-	// keep last of all — down to a first character and the "…" that says
-	// more was there.
-	var rest, all []int
+	// The other columns: the ones nobody named, which say the most after
+	// give (USAGE), and then keep.
+	var rest []int
 	for j := range w {
-		all = append(all, j)
-		if !slices.Contains(g.keep, j) {
+		if !slices.Contains(g.give, j) && !slices.Contains(g.keep, j) {
 			rest = append(rest, j)
 		}
 	}
-	cutFloor := func(int) int { return 2 }
-	for ; over > 0; over-- {
-		i := widest(rest, cutFloor)
-		if i < 0 {
-			i = widest(all, cutFloor)
+	// Then one column at a time, the widest of each stage's columns first —
+	// a tie going to the one named first, which is the one meant to give
+	// way first — until each is down to the stage's floor:
+	//
+	//   - the wrapping columns, together, down to wrapFloor; nothing lost;
+	//   - the others cut to cutSoft, which keeps a reading's percentage;
+	//   - the wrapping columns again, down to hardWrap; still nothing lost;
+	//   - the others cut to cutHard, keep last of all;
+	//   - and only then the wrapping columns cut, to cutHard as well.
+	//
+	// A cut line keeps its start and ends in the "…" that says more was
+	// there. What is still too wide after all of it is drawn as narrow as
+	// it goes.
+	for _, stage := range []struct {
+		cols  []int
+		floor int
+	}{
+		{g.give, wrapFloor},
+		{rest, cutSoft},
+		{g.give, hardWrap},
+		{rest, cutHard},
+		{g.keep, cutHard},
+		{g.give, cutHard},
+	} {
+		for ; over > 0; over-- {
+			at := -1
+			for _, j := range stage.cols {
+				if w[j] > stage.floor && (at < 0 || w[j] > w[at]) {
+					at = j
+				}
+			}
+			if at < 0 {
+				break
+			}
+			w[at]--
 		}
-		if i < 0 {
-			break // nothing left to take: the table is drawn as narrow as it goes
-		}
-		w[i]--
 	}
 	wraps := make([]bool, len(w))
 	for _, i := range g.give {
-		wraps[i] = w[i] >= min(natural[i], wrapFloor)
+		wraps[i] = w[i] >= hardWrap
 	}
 	shape := func(cells []string, head bool) []string {
 		out := make([]string, len(cells))
@@ -189,11 +197,34 @@ func (g *grid) fit() (header []string, rows [][]string) {
 		}
 		return out
 	}
-	header = shape(g.header, true)
-	rows = make([][]string, len(g.rows))
-	for ri, r := range g.rows {
-		rows[ri] = shape(r, false)
+	draw := func() {
+		header = shape(g.header, true)
+		rows = make([][]string, len(g.rows))
+		for ri, r := range g.rows {
+			rows[ri] = shape(r, false)
+		}
 	}
+	draw()
+	// A wrapped column is often narrower than the width it was given — its
+	// lines break where its words end — and what it leaves over goes back
+	// to the cut columns, in the order they were cut, so nothing is cut that
+	// the terminal had room for.
+	got := widths(header, rows)
+	slack := g.width - frame(got)
+	if slack <= 0 {
+		return header, rows
+	}
+	copy(w, got)
+	for _, cols := range [][]int{rest, g.keep, g.give} {
+		for _, i := range cols {
+			if !wraps[i] && w[i] < natural[i] {
+				add := min(slack, natural[i]-w[i])
+				w[i] += add
+				slack -= add
+			}
+		}
+	}
+	draw()
 	return header, rows
 }
 
@@ -207,24 +238,25 @@ func wrapCell(c string, n int) string {
 }
 
 // wrapLine breaks a line longer than n at its spaces into lines no longer
-// than n. A word longer than n on its own — an address, a path — is broken
-// where n falls, since there is nowhere better to break it. A line that fits
-// is returned as it is.
+// than n. Something in backticks — `rota login` — is one word, so a command
+// is never split across lines. A word longer than n on its own is broken
+// where it reads best (see breakAt). A line that fits is returned as it is.
 func wrapLine(s string, n int) []string {
 	if n <= 0 || utf8.RuneCountInString(s) <= n {
 		return []string{s}
 	}
 	var out []string
 	cur := ""
-	for _, word := range strings.Fields(s) {
+	for _, word := range words(s) {
 		for utf8.RuneCountInString(word) > n {
 			if cur != "" {
 				out = append(out, cur)
 				cur = ""
 			}
 			r := []rune(word)
-			out = append(out, string(r[:n]))
-			word = string(r[n:])
+			k := breakAt(r, n)
+			out = append(out, strings.TrimRight(string(r[:k]), " "))
+			word = strings.TrimLeft(string(r[k:]), " ")
 		}
 		switch {
 		case word == "":
@@ -243,15 +275,74 @@ func wrapLine(s string, n int) []string {
 	return out
 }
 
-// cutCell shortens each line of a cell that is longer than n to n, the last
-// of them an ellipsis.
+// words splits a line at its spaces, except inside backticks: a command
+// quoted in a note is one word however many spaces it has.
+func words(s string) []string {
+	var out []string
+	var b strings.Builder
+	quoted := false
+	for _, r := range s {
+		switch {
+		case r == '`':
+			quoted = !quoted
+			b.WriteRune(r)
+		case unicode.IsSpace(r) && !quoted:
+			if b.Len() > 0 {
+				out = append(out, b.String())
+				b.Reset()
+			}
+		default:
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() > 0 {
+		out = append(out, b.String())
+	}
+	return out
+}
+
+// breakAt is how many of a word's runes go on the first of the lines it is
+// broken across, when it is longer than n: after the last space that fits,
+// which only a quoted command has; before an "@", so an address breaks into
+// its name and its domain; after the last ".", "/" or "-" that fits; and
+// only failing all of those, where n falls.
+func breakAt(r []rune, n int) int {
+	// last is the index of the last of marks at or before limit, and never
+	// the first rune, which would leave a line with nothing on it.
+	last := func(marks string, limit int) int {
+		for k := min(limit, len(r)-1); k > 0; k-- {
+			if strings.ContainsRune(marks, r[k]) {
+				return k
+			}
+		}
+		return 0
+	}
+	if k := last(" ", n-1); k > 0 {
+		return k + 1
+	}
+	if k := last("@", n); k > 0 {
+		return k
+	}
+	if k := last("./-", n-1); k > 0 {
+		return k + 1
+	}
+	return n
+}
+
+// cut shortens s to n runes when it is longer, the last of them an "…" that
+// says more was there; the start is always kept.
+func cut(s string, n int) string {
+	if r := []rune(s); len(r) > n {
+		return strings.TrimRight(string(r[:max(n-1, 0)]), " ") + "…"
+	}
+	return s
+}
+
+// cutCell cuts each line of a cell to n.
 func cutCell(c string, n int) string {
 	lines := strings.Split(c, "\n")
 	for i, line := range lines {
-		r := []rune(line)
-		if len(r) > n {
-			lines[i] = strings.TrimRight(string(r[:max(n-1, 0)]), " ") + "…"
-		}
+		lines[i] = cut(line, n)
 	}
 	return strings.Join(lines, "\n")
 }

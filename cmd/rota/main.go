@@ -646,7 +646,7 @@ func (c *cli) list(args []string) error {
 		// The reading's age belongs beside it here more than anywhere else:
 		// --short reads no usage, so what it shows may be hours old and
 		// nothing else on the line would say so.
-		g := grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "CHECKED"}, width: width, give: []int{3}, keep: []int{0, 1, 2, 5}}
+		g := grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "CHECKED"}, width: width, give: []int{3}, keep: []int{5, 2, 1, 0}}
 		for _, a := range shown {
 			g.add(place(a), strconv.Itoa(a.ID), a.Provider, a.Label(), headline(a), checkedAgo(a))
 		}
@@ -660,7 +660,7 @@ func (c *cli) list(args []string) error {
 		}
 		return nil
 	}
-	g := grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{0, 1, 2, 5, 6}}
+	g := grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{6, 5, 2, 1, 0}}
 	for _, a := range shown {
 		status := string(a.Status())
 		if a.Status() == rota.StatusReauth {
@@ -810,10 +810,7 @@ func clip(s string, n int) string {
 	if s == "" {
 		return "-"
 	}
-	if r := []rune(s); len(r) > n {
-		return strings.TrimRight(string(r[:n-1]), " ") + "…"
-	}
-	return s
+	return cut(s, n)
 }
 
 const runUsage = `rota run [id] <prompt> [flags]

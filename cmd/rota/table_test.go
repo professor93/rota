@@ -19,7 +19,7 @@ const clearedReason = "Claude Code cleared the login in its home after a refresh
 // the renderer as it was before tables could fit a terminal: an address too
 // long for any narrow column, three windows of usage, and that reason.
 func goldenGrid(width int) *grid {
-	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{0, 1, 2, 5, 6}}
+	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{6, 5, 2, 1, 0}}
 	g.add("1", "3", "claude", "manager.ican@gmail.com", "5h 3% (4h 12m)\n7d 29% (3d 2h)\nFable 48%", "95%", "just now", "ok")
 	g.add("2", "5", "claude", "a.very.long.address.for.work@example.com", "-", "95%", "2h ago", "re-auth needed ("+clearedReason+")")
 	g.add("-", "7", "codex", "b@x", "5h 0%", "90%", "3d ago", "ok (login ends in 2d)")
@@ -29,7 +29,7 @@ func goldenGrid(width int) *grid {
 // ownersGrid is the listing that broke, with addresses of the length people
 // have.
 func ownersGrid(width int) *grid {
-	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{0, 1, 2, 5, 6}}
+	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{6, 5, 2, 1, 0}}
 	g.add("1", "3", "claude", "manager.ican@gmail.com", "5h 3% (4h 12m)\n7d 29% (3d 2h)\nFable 48%", "95%", "just now", "ok")
 	g.add("2", "5", "claude", "work.account@example.com", "-", "95%", "2h ago", "re-auth needed ("+clearedReason+")")
 	g.add("-", "7", "codex", "b@x", "5h 0%", "90%", "3d ago", "ok (login ends in 2d)")
@@ -37,7 +37,7 @@ func ownersGrid(width int) *grid {
 }
 
 func shortGrid(width int) *grid {
-	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "CHECKED"}, width: width, give: []int{3}, keep: []int{0, 1, 2, 5}}
+	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "CHECKED"}, width: width, give: []int{3}, keep: []int{5, 2, 1, 0}}
 	g.add("1", "3", "claude", "manager.ican@gmail.com", "5h 3%", "just now")
 	g.add("2", "5", "claude", "b@x", "-", "2h ago")
 	return g
@@ -196,9 +196,53 @@ func TestTableCutsOnlyWhenWrappingCannotFit(t *testing.T) {
 		if strings.Contains(out, "……") {
 			t.Fatalf("one ellipsis per cut:\n%s", out)
 		}
-		if got := column(out, 7, "5"); !strings.HasPrefix(got, "r") || !strings.HasPrefix("re-auth needed ("+clearedReason+")", strings.TrimSuffix(got, "…")) {
+		got := squeeze(strings.TrimSuffix(column(out, 7, "5"), "…"))
+		if got == "" || !strings.HasPrefix(squeeze("re-auth needed ("+clearedReason+")"), got) {
 			t.Fatalf("the reason keeps its start at %d: %q\n%s", width, got, out)
 		}
+	}
+}
+
+// squeeze is text with its spaces taken out: a word broken across the lines
+// of a narrow column comes back whole.
+func squeeze(s string) string { return strings.ReplaceAll(s, " ", "") }
+
+// Cutting starts with the other columns: USAGE first, then the short fixed
+// ones. STATUS and ACCOUNT go on wrapping below their usual minimum, and at
+// 75 and 70 columns the whole reason is still there.
+func TestTableCutsTheOtherColumnsBeforeTheReason(t *testing.T) {
+	for _, width := range []int{76, 75, 70} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			out := drawn(ownersGrid(width))
+			framed(t, out, width)
+			if got := column(out, 7, "5"); squeeze(got) != squeeze("re-auth needed ("+clearedReason+")") {
+				t.Fatalf("the reason, read down its column: %q\n%s", got, out)
+			}
+			if got := column(out, 3, "5"); squeeze(got) != "work.account@example.com" {
+				t.Fatalf("the address, read down its column: %q\n%s", got, out)
+			}
+			for _, fixed := range []string{"│ claude │", "│ just now │", "│ 95%   │"} {
+				if !strings.Contains(out, fixed) {
+					t.Fatalf("the short fixed columns are cut last (%q):\n%s", fixed, out)
+				}
+			}
+		})
+	}
+	if out := drawn(ownersGrid(70)); !strings.Contains(out, "│ 5h 3%…") {
+		t.Fatalf("USAGE is the first column cut, and keeps its percentage:\n%s", out)
+	}
+}
+
+// The short listing at half a screen: ACCOUNT wraps rather than being cut,
+// and the whole address reassembles from its lines.
+func TestShortTableWrapsTheAddressAtFifty(t *testing.T) {
+	out := drawn(shortGrid(50))
+	framed(t, out, 50)
+	if strings.Contains(out, "…") {
+		t.Fatalf("nothing is cut:\n%s", out)
+	}
+	if got := column(out, 3, "3"); squeeze(got) != "manager.ican@gmail.com" {
+		t.Fatalf("the address, read down its column: %q\n%s", got, out)
 	}
 }
 
@@ -217,8 +261,18 @@ func TestWrapLine(t *testing.T) {
 	}{
 		{"fits as it is", 20, []string{"fits as it is"}},
 		{"breaks at the spaces it has", 12, []string{"breaks at", "the spaces", "it has"}},
-		{"a manager.ican@gmail.com b", 8, []string{"a", "manager.", "ican@gma", "il.com b"}},
 		{"exactly", 7, []string{"exactly"}},
+		// An address breaks before its "@", a name after its last ".", "/"
+		// or "-" that fits, and only what has none of them where n falls.
+		{"a manager.ican@gmail.com b", 10, []string{"a", "manager.", "ican", "@gmail.com", "b"}},
+		{"a manager.ican@gmail.com b", 8, []string{"a", "manager.", "ican", "@gmail.", "com b"}},
+		{"/usr/local/share/rota/accounts.json", 12, []string{"/usr/local/", "share/rota/", "accounts.", "json"}},
+		{"re-auth", 4, []string{"re-", "auth"}},
+		{"abcdefghijkl", 5, []string{"abcde", "fghij", "kl"}},
+		// A command in backticks is one word, and breaks at its own spaces
+		// only when it is longer than the line.
+		{"say `rota login --long` now", 20, []string{"say", "`rota login --long`", "now"}},
+		{"`rota login --long`", 12, []string{"`rota login", "--long`"}},
 	} {
 		if got := wrapLine(c.in, c.n); fmt.Sprint(got) != fmt.Sprint(c.want) {
 			t.Errorf("wrapLine(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
@@ -256,6 +310,26 @@ func TestNotesWrapAtWordsOnATerminal(t *testing.T) {
 			if !words[w] {
 				t.Fatalf("a word broken mid-way: %q in %q", w, line)
 			}
+		}
+	}
+}
+
+// At 80 columns the login note would break inside `rota login`; the command
+// moves to the next line whole.
+func TestNotesKeepACommandOnOneLine(t *testing.T) {
+	note := "\nclaude/manager.ican@gmail.com: its login ends on 2026-11-09, in 3 days; `rota login`, or /login in one of its windows, before then\n"
+	if i := strings.Index(note, "`rota login`"); i > 80 || i+len("`rota login`") <= 81 {
+		t.Fatalf("the note no longer puts the command across column 80 (%d)", i)
+	}
+	var b bytes.Buffer
+	say(&b, 80, note)
+	got := b.String()
+	if !strings.Contains(got, "\n`rota login`, or") {
+		t.Fatalf("the command starts a line, whole:\n%s", got)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if utf8.RuneCountInString(line) > 80 {
+			t.Fatalf("a line wider than the terminal: %q", line)
 		}
 	}
 }
