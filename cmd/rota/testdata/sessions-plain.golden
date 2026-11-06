@@ -1,0 +1,12 @@
+
+Running instances:
+  ●  claude  #1 manager.ican@gmail.com  /Users/someone/GolandProjects/a-rather-long-project-name/services/api  1h ago, session af7fda4d
+  ●  GoLand  -                          /Users/someone/GolandProjects/a-rather-long-project-name               pid 4243
+
+Sessions:
+  shared                                       claude  497f1383  rota run account resolution across every pr…  /Users/someone/src/x
+  #2 a.very.long.address.for.work@example.com  claude  01a048be  short                                         /Users/someone/work/clients/northwind/infrastructure/terraform
+  #1 manager.ican@gmail.com                    codex   abcdef12  Review of the account rotation when a refre…  /Users/someone/GolandProjects/a-rather-long-project-name/services/api
+  #1 manager.ican@gmail.com                    codex   0badcafe  -                                             -
+  /Users/someone/.claude holds 2648 conversations across 146 projects, shared by every account with no --config of its own.
+  note: could not read the process list: exec: "ps": executable file not found in $PATH

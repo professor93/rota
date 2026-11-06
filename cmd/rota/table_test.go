@@ -291,7 +291,7 @@ func TestTableGivesWhatACutLeavesToTheNextColumn(t *testing.T) {
 			g := mk(width)
 			header, rows := g.fit()
 			got := widths(header, rows)
-			left := width - frame(got)
+			left := width - g.frame(got)
 			if left <= 0 {
 				continue
 			}
