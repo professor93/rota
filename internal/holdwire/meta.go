@@ -17,7 +17,8 @@ import (
 // Meta is a held session's record, meta.json in its directory. It outlives
 // the holder, which is what lets a stopped session be listed and resumed:
 // whatever is in it is what is known about the session once its process is
-// gone. It never holds a secret.
+// gone. It never holds a credential rota keeps; Args may hold whatever the
+// person typed into the command line, as StoredArgs says.
 //
 // The holder's pid and start time and the boot id are there so the pid is
 // signalled only while it is still the same process; the child's are there
@@ -128,6 +129,14 @@ func writeAtomic(path string, data []byte) error {
 // the CLI was asked to run — model, permission mode, Remote Control — without
 // which conversation it was in, which is the one thing Resume and Move
 // decide afresh. The caller's slice is left as it was.
+//
+// It keeps positional arguments, and every flag's value, just as the child's
+// argv has them: a prompt given at the start, inline --mcp-config JSON with
+// whatever env it carries, an --append-system-prompt. Telling a flag's value
+// from a positional needs each CLI's arity, which rota does not keep. So a
+// later Resume or Move must not replay these args as they are: a stored
+// prompt would run its task again in the resumed conversation. It must drop
+// the positionals, or split them out where the CLI's arity is known.
 //
 // Only flags this rota knows are dropped. A provider whose session flags it
 // does not know keeps every argument: carrying one too many is a CLI that
