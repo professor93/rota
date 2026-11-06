@@ -2810,7 +2810,10 @@ Claude Code asks once, the first time it opens on this account, whether to use t
 
 The key is never taken from the command line, never printed, logged or put in
 an error; `--label` names the account, and otherwise its last four characters
-are the only part of it anything shows. It is stored in `accounts.json` beside
+are the only part of it anything shows. `list --json` and the HTTP listing carry
+raw fields only — `name`, `email`, `uuid`, never the table's display label — so
+an unnamed key account has `"credential":"apikey"` and no name, and `api key ...`
+and the last four characters exist in the table alone. It is stored in `accounts.json` beside
 every other credential, mode 0600. It is checked once, at login, with one
 request to the API's model list: a `401` or `403` refuses it, and nothing is
 stored; anything else — no network, a timeout, a server error — takes it with a
