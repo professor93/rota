@@ -371,9 +371,15 @@ func TestAPanickingEmulatorLeavesReplay(t *testing.T) {
 	if !s.OK() {
 		t.Fatal("a new screen is not OK")
 	}
+	if s.Lost() != "" {
+		t.Fatalf("a new screen lost its emulator: %s", s.Lost())
+	}
 	s.Write([]byte("hello"))
 	if s.OK() {
 		t.Fatal("the screen is OK after its emulator panicked")
+	}
+	if !strings.HasPrefix(s.Lost(), "x/vt fell over\n") {
+		t.Fatalf("the screen says it lost its emulator to %q", s.Lost())
 	}
 	if b, ok := s.Repaint(vtscan.Modes{}); b != nil || ok {
 		t.Fatalf("a retired screen repaints %q, %v", b, ok)
