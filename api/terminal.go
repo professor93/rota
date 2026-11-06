@@ -14,6 +14,7 @@ import (
 	rota "github.com/professor93/rota/lib"
 
 	"github.com/professor93/rota/internal/pty"
+	"github.com/professor93/rota/internal/ring"
 )
 
 // A terminal is an account's CLI on a pseudo-terminal that lives in this
@@ -142,75 +143,6 @@ func (c *clock) set(at func() time.Time) {
 }
 
 func (s *Server) now() time.Time { return s.clock.now() }
-
-/* ------------------------------------------------------- what was printed --- */
-
-// outRing is the last bytes a terminal printed, with absolute offsets: a
-// client says where it got to as a number that never repeats, and the ring
-// answers with everything since — or says how much it no longer has.
-//
-// It is circular because a terminal prints for hours. A slice that dropped
-// its head would copy the whole scrollback on every burst of output.
-type outRing struct {
-	buf   []byte
-	size  int   // bytes held
-	start int   // index of the oldest byte
-	end   int64 // absolute offset just past the newest byte
-}
-
-func newOutRing(keep int) *outRing {
-	if keep <= 0 {
-		keep = defaultScrollback
-	}
-	return &outRing{buf: make([]byte, keep)}
-}
-
-func (r *outRing) write(p []byte) {
-	r.end += int64(len(p))
-	if len(p) >= len(r.buf) {
-		// A burst larger than the whole ring: only its tail can be kept.
-		copy(r.buf, p[len(p)-len(r.buf):])
-		r.start, r.size = 0, len(r.buf)
-		return
-	}
-	at := (r.start + r.size) % len(r.buf)
-	n := copy(r.buf[at:], p)
-	copy(r.buf, p[n:])
-	if r.size += len(p); r.size > len(r.buf) {
-		r.start = (r.start + r.size - len(r.buf)) % len(r.buf)
-		r.size = len(r.buf)
-	}
-}
-
-// oldest is the lowest offset this ring can still answer for.
-func (r *outRing) oldest() int64 { return r.end - int64(r.size) }
-
-// read is everything from since onwards, and the offset the answer actually
-// starts at — which is later than asked for when the ring has moved on. The
-// caller compares the two to know whether to say so first.
-func (r *outRing) read(since int64) ([]byte, int64) {
-	from := since
-	if oldest := r.oldest(); from < oldest {
-		from = oldest
-	}
-	if from > r.end {
-		from = r.end
-	}
-	skip := int(from - r.oldest())
-	n := r.size - skip
-	if n <= 0 {
-		return nil, from
-	}
-	out := make([]byte, 0, n)
-	i := (r.start + skip) % len(r.buf)
-	if i+n <= len(r.buf) {
-		out = append(out, r.buf[i:i+n]...)
-	} else {
-		out = append(out, r.buf[i:]...)
-		out = append(out, r.buf[:n-(len(r.buf)-i)]...)
-	}
-	return out, from
-}
 
 /* ----------------------------------------------------------- a connection --- */
 
@@ -509,7 +441,7 @@ type termSession struct {
 
 	mu         sync.Mutex
 	cols, rows uint16
-	ring       *outRing
+	ring       *ring.Ring
 	conns      []*termConn
 	holder     *termConn
 	// holderName and freeAt are the keyboard's grace: whose it still is
@@ -622,7 +554,7 @@ func (ts *termSession) gapOf(n int64) {
 	if ts.ended {
 		return
 	}
-	at := ts.ring.end
+	at := ts.ring.End()
 	ts.tell(map[string]any{"type": "gap", "from": at, "to": at, "bytes": n})
 }
 
@@ -842,9 +774,9 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 	}
 	from := since
 	if replayAll {
-		from = ts.ring.oldest()
+		from = ts.ring.Oldest()
 	}
-	data, at := ts.ring.read(from)
+	data, at := ts.ring.Read(from)
 	gap := at > from
 	hello := map[string]any{
 		"type": "hello", "id": ts.id, "kind": ts.kind,
@@ -958,7 +890,7 @@ func (ts *termSession) output(p []byte) {
 	copy(chunk, p)
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	ts.ring.write(chunk)
+	ts.ring.Write(chunk)
 	if ts.rec != nil {
 		ts.rec.write(chunk)
 	}
@@ -1071,7 +1003,7 @@ func (ts *termSession) describe() map[string]any {
 		"cols":    ts.cols, "rows": ts.rows,
 		"holder":  nameOrNil(ts.heldBy()),
 		"viewers": ts.viewers(),
-		"offset":  ts.ring.end,
+		"offset":  ts.ring.End(),
 		"ended":   ts.ended,
 		// Whether what scrolls past is being kept, which is not something a
 		// person should have to read a configuration file to find out.
@@ -1274,7 +1206,7 @@ const (
 	// defaultScrollback is two megabytes: enough that a person scrolling
 	// back finds what they were looking at, small enough that eight
 	// terminals are sixteen megabytes.
-	defaultScrollback = 2 << 20
+	defaultScrollback = ring.DefaultKeep
 )
 
 // short is a duration in the words a person types, rounded to the second so

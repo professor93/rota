@@ -6,12 +6,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/pty"
+	"github.com/professor93/rota/internal/ring"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/rotation"
 	"github.com/professor93/rota/store"
@@ -188,7 +189,7 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 		tokenUntil: plan.tokenUntil,
 		back:       &localTerm{master: master, cmd: cmd, proc: cmd.Process},
 		release:    plan.release,
-		cols:       cols, rows: rows, ring: newOutRing(s.opts.Terminal.Scrollback),
+		cols:       cols, rows: rows, ring: ring.New(s.opts.Terminal.Scrollback),
 	}
 	ts.idleAt = ts.started
 	s.recordTerminal(ts)
@@ -270,7 +271,7 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest) (*
 	_ = st.Close()
 	plan := &termPlan{
 		path: path, args: append([]string{}, req.Args...), env: termEnv(env), release: release,
-		account: a.ID, label: a.Label(), provider: a.Provider, tokenUntil: loginUntil(a, env),
+		account: a.ID, label: a.Label(), provider: a.Provider, tokenUntil: holdwire.LoginUntil(a, env),
 	}
 	handed = true
 	return plan, nil
@@ -314,24 +315,6 @@ func setEnv(env []string, name, value string) []string {
 		}
 	}
 	return append(out, name+"="+value)
-}
-
-// loginUntil is when the credential inside this terminal stops working. A
-// claude terminal on the account's own stored login — no token in its
-// environment — runs until the login itself ends, because Claude Code
-// refreshes it; one on a token runs until that token does: the long-lived
-// one's date where that is what it was given, the access token's otherwise.
-func loginUntil(a *rota.Account, env []string) time.Time {
-	onToken := slices.ContainsFunc(env, func(e string) bool { return strings.HasPrefix(e, "CLAUDE_CODE_OAUTH_TOKEN=") })
-	switch {
-	case rota.Flavor(a.Provider) == "claude" && !onToken:
-		return a.LoginUntil()
-	case a.LongValid():
-		return a.LongUntil()
-	case a.Token.ExpiresAt != 0:
-		return time.UnixMilli(a.Token.ExpiresAt)
-	}
-	return time.Time{}
 }
 
 // terminalCwd resolves and confines the directory a terminal starts in, by
