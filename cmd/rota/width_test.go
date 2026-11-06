@@ -83,6 +83,28 @@ func TestRuneWidth(t *testing.T) {
 		"a\u200d🚀":  3,
 		"a🏽":        3,
 		"🏽":         2,
+		// Pictures joined are one picture two wide, though the first of
+		// them is one column on its own.
+		"❤\u200d🔥":    2,
+		"⛓\u200d💥":    2,
+		"☠\u200d🚀":    2,
+		"❤\u200d🔥 ok": 5,
+		// U+FE0F widens only what has a picture: a pictograph, a keycap's
+		// digit, "#" or "*", ©, ®, ‼ and ⁉. A letter or a space after which
+		// it stands is one column still.
+		"a\ufe0f":       1,
+		" \ufe0f":       1,
+		"a\ufe0f b":     3,
+		"e\u0301\ufe0f": 1,
+		"x\ufe0f\u20e3": 1,
+		"©\ufe0f":       2,
+		"®\ufe0f":       2,
+		"‼\ufe0f":       2,
+		"⁉\ufe0f":       2,
+		"#\ufe0f":       2,
+		"*\ufe0f\u20e3": 2,
+		"0\ufe0f\u20e3": 2,
+		"\ufe0f0":       1,
 		// A Hangul syllable spelled out letter by letter is two wide.
 		"\u1100\u1161\u11a8": 2,
 	} {
@@ -194,6 +216,18 @@ func TestCutAndWrapCountColumns(t *testing.T) {
 	} {
 		if got := wrapLine(c.in, c.n); fmt.Sprint(got) != fmt.Sprint(c.want) {
 			t.Errorf("wrapLine(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
+		}
+	}
+	// Found by fuzzing: a space the wrap put before a U+FE0F that began a
+	// word was counted as a picture, and the line came out a column wider
+	// than n.
+	for _, s := range []string{"❤\xef\xb8\xe2\x9d \ufe0f0", "a \ufe0fb \ufe0fc", "❤\u200d🔥 ❤\u200d🔥 ⛓\u200d💥"} {
+		for n := 2; n <= screenWidth(s)+1; n++ {
+			for _, l := range wrapLine(s, n) {
+				if screenWidth(l) > n {
+					t.Errorf("wrapLine(%q, %d) has a line %d wide: %q", s, n, screenWidth(l), l)
+				}
+			}
 		}
 	}
 	if got := clip("仕事用アカウントの名前がとても長い場合にはここで切れます", 44); screenWidth(got) > 44 || !strings.HasSuffix(got, "…") {

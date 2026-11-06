@@ -23,8 +23,11 @@ func screenWidth(s string) int {
 // takes. Mostly it is one rune and the marks on it, but an emoji may be
 // spelled with several, all drawn as one picture two columns wide: a flag
 // is two regional indicators, 🇯🇵; a skin tone follows the hand or face it
-// colours, 👍🏽; a family is its people joined by U+200D, 👨‍👩‍👧; and
-// U+FE0F after a symbol one column wide, ❤️ or 1️⃣, asks for the picture.
+// colours, 👍🏽; pictures joined by U+200D are one, a family, 👨‍👩‍👧, or a
+// heart on fire, ❤‍🔥, even when the first of them is one column on its own;
+// and U+FE0F after a symbol one column wide that has a picture, ❤️, or after
+// a keycap's digit, 1️⃣, asks for the picture. After a letter or a space it
+// changes nothing.
 func char(r []rune, i int) (end, w int) {
 	w = runeWidth(r[i])
 	flag := regional(r[i]) // the first half of a flag, waiting for its second
@@ -33,13 +36,14 @@ func char(r []rune, i int) (end, w int) {
 		switch {
 		case flag && regional(c):
 			flag, w = false, 2
-		case c == '️':
-			if w == 1 {
+		case c == '\ufe0f':
+			if w == 1 && picture(r[i]) {
 				w = 2
 			}
 		case tone(c) && pictograph(r[i]):
 			w = 2
-		case r[end-1] == '‍' && pictograph(c) && pictograph(r[i]):
+		case r[end-1] == '\u200d' && pictograph(c) && pictograph(r[i]):
+			w = 2
 		case runeWidth(c) == 0:
 		default:
 			return end, w
@@ -53,6 +57,13 @@ func regional(r rune) bool { return r >= 0x1f1e6 && r <= 0x1f1ff }
 
 // tone is a skin tone, which colours the emoji before it.
 func tone(r rune) bool { return r >= 0x1f3fb && r <= 0x1f3ff }
+
+// picture is a character one column wide as text that U+FE0F makes a
+// picture two wide: a pictograph, or one of the few below their blocks that
+// has a picture — a keycap's digit, "#" or "*", ©, ®, ‼ and ⁉.
+func picture(r rune) bool {
+	return pictograph(r) || strings.ContainsRune("#*0123456789©®‼⁉", r)
+}
 
 // pictograph is a rune of the blocks emoji come from: the symbols, arrows
 // and dingbats of 2100–2BFF, and the pictures from U+1F000 on. None of them
