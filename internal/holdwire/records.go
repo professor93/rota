@@ -81,7 +81,7 @@ func Scan(terminals string) []Record {
 	for _, e := range entries {
 		// Directories only, so a symlink is never followed out of the
 		// store, and only names a session could have.
-		if !e.IsDir() || !isID(e.Name()) {
+		if !e.IsDir() || !IsID(e.Name()) {
 			continue
 		}
 		r := judge(terminals, e.Name())
@@ -170,8 +170,11 @@ func Holding(terminals string, account int) *Record {
 	return nil
 }
 
-// isID is a session id: sixteen lower-case hex characters, as runID makes.
-func isID(s string) bool {
+// IsID says whether s is a session id: sixteen lower-case hex characters,
+// as runID makes, and so a single path element that cannot leave the
+// terminals directory. A directory under it whose name is not one is not a
+// session, so the holder refuses to make one and Scan passes it by.
+func IsID(s string) bool {
 	if len(s) != 16 {
 		return false
 	}
