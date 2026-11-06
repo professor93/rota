@@ -186,7 +186,7 @@ func (h *holder) read(in io.Reader) error {
 	if err := json.NewDecoder(io.LimitReader(in, maxRequest)).Decode(&h.req); err != nil {
 		return fmt.Errorf("reading the request: %w", err)
 	}
-	if !isID(h.req.ID) {
+	if !holdwire.IsID(h.req.ID) {
 		return fmt.Errorf("the request names no session: %q", h.req.ID)
 	}
 	if h.req.Kind != holdwire.KindAccount && h.req.Kind != holdwire.KindShell {
@@ -379,21 +379,6 @@ func (h *holder) say(r holdwire.Ready) {
 	if _, err := h.out.Write(append(raw, '\n')); err != nil && h.log != nil {
 		h.log("the answer could not be written", "err", err)
 	}
-}
-
-// isID is a session id as the daemon makes one: sixteen lower-case hex
-// characters, and so a single path element that cannot leave the
-// terminals directory.
-func isID(s string) bool {
-	if len(s) != 16 {
-		return false
-	}
-	for _, c := range []byte(s) {
-		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
-			return false
-		}
-	}
-	return true
 }
 
 // noControl drops anything that names the daemon's control socket: a CLI

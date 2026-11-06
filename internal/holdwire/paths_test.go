@@ -42,3 +42,22 @@ func TestPathsAreWhereTheyAreSaidToBe(t *testing.T) {
 		}
 	}
 }
+
+// A session id is what runID makes, and nothing that could leave the
+// terminals directory or be mistaken for what lives beside the sessions.
+func TestIsIDIsWhatRunIDMakes(t *testing.T) {
+	for id, want := range map[string]bool{
+		"0123456789abcdef":  true,
+		"0123456789ABCDEF":  false,
+		"0123456789abcde":   false,
+		"0123456789abcdef0": false,
+		"0123456789abcdeg":  false,
+		"../456789abcdef01": false,
+		"ctl.sock":          false,
+		"":                  false,
+	} {
+		if got := IsID(id); got != want {
+			t.Errorf("IsID(%q) = %v", id, got)
+		}
+	}
+}
