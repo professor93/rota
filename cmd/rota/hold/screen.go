@@ -150,15 +150,16 @@ func (s *Screen) Repaint(m vtscan.Modes) (out []byte, ok bool) {
 	defer s.catch()
 	em := s.em
 	var b bytes.Buffer
-	// Every tracked mode off and the cursor shown, but the screen left as it
-	// is: which screen to draw on is the next thing said.
-	b.Write(bytes.Replace(vtscan.ResetAll(), []byte("\x1b[?1049l"), nil, 1))
+	// Every tracked mode off and the cursor shown on the screen the viewer
+	// is on, then the session's screen, whose kitty flags are its own and
+	// are cleared too: m.Set writes nothing for none.
+	b.Write(vtscan.ResetModes())
 	if m.AltScreen {
 		b.WriteString("\x1b[?1049h")
 	} else {
 		b.WriteString("\x1b[?1049l")
 	}
-	b.WriteString("\x1b[0m\x1b[H\x1b[2J")
+	b.WriteString("\x1b[=0;1u\x1b[0m\x1b[H\x1b[2J")
 	for y := range em.Height() {
 		row(&b, em, y)
 		if b.Len() > maxRepaint {

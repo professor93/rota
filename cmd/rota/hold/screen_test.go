@@ -369,7 +369,6 @@ func TestAPanickingEmulatorLeavesReplay(t *testing.T) {
 // a pipe, and a pipe nobody reads stops it dead. The screen reads it.
 func TestQueryRepliesNeverBlockTheEmulator(t *testing.T) {
 	s := NewScreen(80, 24)
-	defer s.Close()
 	done := make(chan struct{})
 	go func() {
 		s.Write(bytes.Repeat([]byte("\x1b[c"), 10000))
@@ -378,8 +377,11 @@ func TestQueryRepliesNeverBlockTheEmulator(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(2 * time.Second):
+		// Close would wait for the stuck Write, so the screen is left to
+		// the end of the test binary.
 		t.Fatal("10,000 device attribute queries did not go through the emulator in 2s")
 	}
+	defer s.Close()
 	if !s.OK() {
 		t.Fatal("the screen is not OK")
 	}
