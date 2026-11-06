@@ -24,7 +24,8 @@ const maxHeld = 4096
 // Two things are mended on the way:
 //
 //   - A control sequence x/vt would panic on, or spend seconds on, reaches it
-//     with safe numbers; see csi. Repeats are bounded per write; see reps.
+//     with safe numbers; see csi. Repeats are bounded per batch of writes;
+//     see Refill.
 //   - The characters at the end of p are kept back until more arrives, or
 //     until somebody reads the screen. x/vt finishes a grapheme cluster at
 //     the end of every write, so a combining mark, a ZWJ or the second half
@@ -38,7 +39,6 @@ func (s *Screen) Write(p []byte) {
 		return
 	}
 	defer s.catch()
-	s.reps.budget = 2 * s.em.Width() * s.em.Height()
 	for len(p) > 0 {
 		at, next, tail := s.tame(p)
 		if at < 0 {
@@ -160,14 +160,15 @@ func (s *Screen) csi(cmd ansi.Cmd, params ansi.Params) {
 	}
 }
 
-// reps is what Write keeps about REP, so that no write of any length holds
-// the screen for longer than two screens of repeats take to draw.
+// reps is what Write keeps about REP, so that no batch of writes of any
+// length holds the screen for longer than two screens of repeats take to
+// draw.
 type reps struct {
-	// budget is how many repeats past the first row's worth of each REP
-	// this write may still draw. A REP of a row or less costs what printing
-	// a row costs, as any output may; what a REP repeats past a row is drawn
-	// only to be drawn over, and a write packed with such REPs held the
-	// screen for seconds.
+	// budget is how many repeats past the first row's worth of each REP the
+	// writes since the last refill may still draw. A REP of a row or less
+	// costs what printing a row costs, as any output may; what a REP repeats
+	// past a row is drawn only to be drawn over, and a write packed with such
+	// REPs held the screen for seconds.
 	budget int
 	// run is how many characters the emulator has drawn for the REPs read
 	// one straight after another since the last of anything else, up to two
@@ -181,10 +182,30 @@ type reps struct {
 	owe int
 }
 
+// Refill gives the writes that follow, together, two screens of repeats
+// past a row's worth each, until the next Refill.
+//
+// The holder refills once for each batch of output it catches up on, and
+// writes the batch in as many pieces as it has cursor queries. A budget for
+// every write let 32 KiB of a character, a REP and a cursor query, at
+// 200×60, hold the screen for 17 seconds. NewScreen and Resize refill too,
+// for the screen's size.
+func (s *Screen) Refill() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.ok {
+		return
+	}
+	defer s.catch()
+	s.refill()
+}
+
+func (s *Screen) refill() { s.reps.budget = 2 * s.em.Width() * s.em.Height() }
+
 // repeat decides what the emulator gets for a REP of n on a w×h screen: nil
 // for the REP as it is, or a fix. A REP is drawn whole or, past the budget,
 // not at all. That is the one place tame gives up drawing what x/vt would,
-// to stay quick, and only for a write that repeats more than two screens
+// to stay quick, and only for a batch that repeats more than two screens
 // past a row's worth.
 func (s *Screen) repeat(n, w, h int) []byte {
 	r := &s.reps
