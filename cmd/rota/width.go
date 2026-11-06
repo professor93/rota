@@ -167,11 +167,38 @@ var wide = &unicode.RangeTable{
 		{Lo: 0x1f18e, Hi: 0x1f18e, Stride: 1}, // 🆎
 		{Lo: 0x1f191, Hi: 0x1f19a, Stride: 1}, // 🆑 to 🆚
 		{Lo: 0x1f200, Hi: 0x1f2ff, Stride: 1}, // enclosed ideographs
-		{Lo: 0x1f300, Hi: 0x1f64f, Stride: 1}, // pictographs and faces
-		{Lo: 0x1f680, Hi: 0x1f6ff, Stride: 1}, // transport and maps
+		// Pictographs and faces, transport and maps, and more pictographs:
+		// all of them but the gaps, which are the ones that are text until
+		// U+FE0F asks for the picture — 🌡, 🗂, 🖥, 🛠, 👁 and the like.
+		{Lo: 0x1f300, Hi: 0x1f320, Stride: 1},
+		{Lo: 0x1f32d, Hi: 0x1f335, Stride: 1},
+		{Lo: 0x1f337, Hi: 0x1f37c, Stride: 1},
+		{Lo: 0x1f37e, Hi: 0x1f393, Stride: 1},
+		{Lo: 0x1f3a0, Hi: 0x1f3ca, Stride: 1},
+		{Lo: 0x1f3cf, Hi: 0x1f3d3, Stride: 1},
+		{Lo: 0x1f3e0, Hi: 0x1f3f0, Stride: 1},
+		{Lo: 0x1f3f4, Hi: 0x1f3f4, Stride: 1},
+		{Lo: 0x1f3f8, Hi: 0x1f43e, Stride: 1},
+		{Lo: 0x1f440, Hi: 0x1f440, Stride: 1},
+		{Lo: 0x1f442, Hi: 0x1f4fc, Stride: 1},
+		{Lo: 0x1f4ff, Hi: 0x1f53d, Stride: 1},
+		{Lo: 0x1f54b, Hi: 0x1f54e, Stride: 1},
+		{Lo: 0x1f550, Hi: 0x1f567, Stride: 1},
+		{Lo: 0x1f57a, Hi: 0x1f57a, Stride: 1},
+		{Lo: 0x1f595, Hi: 0x1f596, Stride: 1},
+		{Lo: 0x1f5a4, Hi: 0x1f5a4, Stride: 1},
+		{Lo: 0x1f5fb, Hi: 0x1f64f, Stride: 1},
+		{Lo: 0x1f680, Hi: 0x1f6c5, Stride: 1},
+		{Lo: 0x1f6cc, Hi: 0x1f6cc, Stride: 1},
+		{Lo: 0x1f6d0, Hi: 0x1f6d2, Stride: 1},
+		{Lo: 0x1f6d5, Hi: 0x1f6df, Stride: 1},
+		{Lo: 0x1f6eb, Hi: 0x1f6ef, Stride: 1},
+		{Lo: 0x1f6f4, Hi: 0x1f6ff, Stride: 1},
 		{Lo: 0x1f7e0, Hi: 0x1f7eb, Stride: 1}, // coloured circles and squares
 		{Lo: 0x1f7f0, Hi: 0x1f7f0, Stride: 1}, // 🟰
-		{Lo: 0x1f900, Hi: 0x1f9ff, Stride: 1}, // more pictographs
+		{Lo: 0x1f90c, Hi: 0x1f93a, Stride: 1},
+		{Lo: 0x1f93c, Hi: 0x1f945, Stride: 1},
+		{Lo: 0x1f947, Hi: 0x1f9ff, Stride: 1},
 		{Lo: 0x1fa70, Hi: 0x1faff, Stride: 1}, // and more
 		{Lo: 0x20000, Hi: 0x2fffd, Stride: 1}, // ideographs, Extensions B to F
 		{Lo: 0x30000, Hi: 0x3fffd, Stride: 1}, // and G on
