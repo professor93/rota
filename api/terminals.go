@@ -14,6 +14,7 @@ import (
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/pty"
 	"github.com/professor93/rota/internal/ring"
+	"github.com/professor93/rota/internal/termenv"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/rotation"
 	"github.com/professor93/rota/store"
@@ -300,7 +301,7 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest, cw
 	// a process that may run for hours starts, exactly as the handover does.
 	_ = st.Close()
 	plan := &termPlan{
-		path: path, args: append([]string{}, req.Args...), env: termEnv(env), release: release,
+		path: path, args: append([]string{}, req.Args...), env: termenv.Env(env), release: release,
 		account: a.ID, label: a.Label(), provider: a.Provider, tokenUntil: holdwire.LoginUntil(a, env),
 	}
 	handed = true
@@ -364,25 +365,7 @@ func (s *Server) planShell(req *termRequest) (*termPlan, error) {
 	// A login shell, so the person's own profile is read and the terminal
 	// behaves like one they opened themselves.
 	args := append([]string{"-l"}, req.Args...)
-	return &termPlan{path: path, args: args, env: termEnv(store.HostEnv()), release: func() {}}, nil
-}
-
-// termEnv adds what a program at a terminal expects to be told. Both are set
-// rather than appended: which of two entries with the same name a program
-// reads is not something to leave to whichever C library it was linked with.
-func termEnv(env []string) []string {
-	env = setEnv(env, "TERM", "xterm-256color")
-	return setEnv(env, "COLORTERM", "truecolor")
-}
-
-func setEnv(env []string, name, value string) []string {
-	out := make([]string, 0, len(env)+1)
-	for _, e := range env {
-		if k, _, _ := strings.Cut(e, "="); k != name {
-			out = append(out, e)
-		}
-	}
-	return append(out, name+"="+value)
+	return &termPlan{path: path, args: args, env: termenv.Env(store.HostEnv()), release: func() {}}, nil
 }
 
 // terminalCwd resolves and confines the directory a terminal starts in, by

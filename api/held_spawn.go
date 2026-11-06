@@ -15,6 +15,7 @@ import (
 
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/ring"
+	"github.com/professor93/rota/internal/termenv"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/wire"
 )
@@ -121,7 +122,7 @@ func (s *Server) spawnHolder(req *holdwire.Request) (*exec.Cmd, *holdwire.Ready,
 	if env == nil {
 		env = os.Environ()
 	}
-	cmd.Env = setEnv(env, "ROTA_HOME", filepath.Dir(s.terminals))
+	cmd.Env = termenv.Set(env, "ROTA_HOME", filepath.Dir(s.terminals))
 	detachHolder(cmd)
 	stdin, err := cmd.StdinPipe()
 	if err != nil {

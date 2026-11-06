@@ -336,6 +336,12 @@ interactive `rota run` of a codex account, it holds the account's claim until
 the CLI exits (see *One run at a time, where the CLI owns the credential*). It
 is not meant to be typed, and refuses to run without what the run hands it.
 
+Held sessions run on Linux and macOS:
+
+| | |
+|---|---|
+| `rota serve hold` | internal: one held session's process, started by the daemon with its request on standard input; refuses a terminal |
+
 The whole `[routes]` and `[terminal]` groups — the terminal page among them —
 have no flag at all and are set in the file only.
 
