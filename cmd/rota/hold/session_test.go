@@ -5,6 +5,7 @@ package hold
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/charmbracelet/x/vt"
 
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/share"
 )
 
 // A holder's session, driven through its link the way the daemon drives it,
@@ -446,5 +448,60 @@ func TestAScreenARingBehindIsRetired(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("%d lines about retiring the screen: %q", n, r.logLines())
+	}
+}
+
+// A repaint too big for a frame is none: the Screen says OK=false with no
+// repaint, the daemon replays the ring instead, and the link stays.
+func TestAScreenTooBigToRepaintIsReplayed(t *testing.T) {
+	r := newRig(t, 0, newFakeChild())
+	claim(t, r.terminals)
+	p := r.link(t)
+	p.since(0)
+	p.json(holdwire.Resize, holdwire.SizeMsg{Cols: 1000, Rows: 1000})
+	p.decode(holdwire.Resized, &holdwire.SizeMsg{})
+	// Every cell styled apart from the one before it, which a repaint draws
+	// in about 40 bytes: past a megabyte in all.
+	out := "\x1b[1;2;3;4;9;38;2;1;2;3;48;2;4;5;6m" + strings.Repeat("\x1b[7mx\x1b[27mx", 16000)
+	for b := []byte(out); len(b) > 0; {
+		n := min(len(b), 32<<10)
+		r.c.print(t, string(b[:n]))
+		b = b[n:]
+	}
+	p.output(0, len(out))
+	h, repaint := p.screen(1)
+	if h.OK || repaint != "" || h.Offset != int64(len(out)) || h.Cols != 1000 || h.Rows != 1000 {
+		t.Fatalf("a screen too big to repaint answered %+v with %d bytes", h, len(repaint))
+	}
+	p.send(holdwire.Ping, nil)
+	p.until(holdwire.Pong)
+}
+
+// A Screen the daemon could not take, made with an error or too big for a
+// frame, is answered all the same: OK=false and no repaint.
+func TestAScreenThatCannotBeSentIsStillAnswered(t *testing.T) {
+	orig := putScreen
+	t.Cleanup(func() { putScreen = orig }) // after the session is done
+	putScreen = func(h holdwire.ScreenHead, repaint []byte) ([]byte, error) {
+		switch {
+		case !h.OK:
+		case h.Seq == 1:
+			return nil, errors.New("no screen for you")
+		case h.Seq == 2:
+			return make([]byte, share.MaxFrame), nil
+		}
+		return orig(h, repaint)
+	}
+	r := newRig(t, 0, newFakeChild())
+	claim(t, r.terminals)
+	p := r.link(t)
+	p.since(0)
+	r.c.print(t, "hello")
+	p.output(0, 5)
+	for seq := uint64(1); seq <= 3; seq++ {
+		h, repaint := p.screen(seq)
+		if ok := seq == 3; h.OK != ok || (repaint == "") == ok || h.Offset != 5 {
+			t.Fatalf("Screen %d: %+v with %q", seq, h, repaint)
+		}
 	}
 }
