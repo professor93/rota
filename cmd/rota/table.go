@@ -94,13 +94,14 @@ const (
 
 func (g *grid) add(cells ...string) { g.rows = append(g.rows, cells) }
 
-// widths is the widest line in each column, header included.
+// widths is the widest line in each column, header included, in the
+// columns it takes on screen (see screenWidth).
 func widths(header []string, rows [][]string) []int {
 	w := make([]int, len(header))
 	measure := func(cells []string) {
 		for i, c := range cells {
 			for line := range strings.SplitSeq(c, "\n") {
-				w[i] = max(w[i], utf8.RuneCountInString(line))
+				w[i] = max(w[i], screenWidth(line))
 			}
 		}
 	}
@@ -205,7 +206,7 @@ func (g *grid) fit() (header []string, rows [][]string) {
 		m := 0
 		measure := func(c string, head bool) {
 			for line := range strings.SplitSeq(shape(i, c, head, n), "\n") {
-				m = max(m, utf8.RuneCountInString(line))
+				m = max(m, screenWidth(line))
 			}
 		}
 		measure(g.header[i], true)
@@ -228,7 +229,7 @@ func (g *grid) fit() (header []string, rows [][]string) {
 	cuts := false
 	for i := range w {
 		got[i] = drawn(i, w[i])
-		cuts = cuts || w[i] < natural[i] && (!wraps[i] || utf8.RuneCountInString(g.header[i]) > w[i])
+		cuts = cuts || w[i] < natural[i] && (!wraps[i] || screenWidth(g.header[i]) > w[i])
 	}
 	if slack := g.width - frame(got); cuts && slack > 0 {
 		var order []int
@@ -277,24 +278,25 @@ func wrapCell(c string, n int) string {
 	return strings.Join(out, "\n")
 }
 
-// wrapLine breaks a line longer than n at its spaces into lines no longer
-// than n. Something in backticks — `rota login` — is one word, so a command
-// is never split across lines unless it is longer than n. A word longer
-// than n on its own is broken where it reads best (see breakAt), and its
-// start goes on the line before it when it breaks within the room that line
-// has left, so a short word is not left on a line by itself. A line that
-// fits is returned as it is.
+// wrapLine breaks a line wider than n columns at its spaces into lines no
+// wider than n. Something in backticks — `rota login` — is one word, so a
+// command is never split across lines unless it is wider than n. A word
+// wider than n on its own is broken where it reads best (see breakAt), and
+// its start goes on the line before it when it breaks within the room that
+// line has left, so a short word is not left on a line by itself. Where it
+// must be broken where n falls, a wide character n would fall in the middle
+// of goes to the next line. A line that fits is returned as it is.
 func wrapLine(s string, n int) []string {
-	if n <= 0 || utf8.RuneCountInString(s) <= n {
+	if n <= 0 || screenWidth(s) <= n {
 		return []string{s}
 	}
 	var out []string
 	cur := ""
 	for _, word := range words(s) {
-		for utf8.RuneCountInString(word) > n {
+		for screenWidth(word) > n {
 			r := []rune(word)
 			if cur != "" {
-				if k := breakAt(r, n-utf8.RuneCountInString(cur)-1); k > 0 {
+				if k := breakAt(r, n-screenWidth(cur)-1); k > 0 {
 					out = append(out, cur+" "+strings.TrimRight(string(r[:k]), " "))
 					cur, word = "", strings.TrimLeft(string(r[k:]), " ")
 					continue
@@ -304,7 +306,9 @@ func wrapLine(s string, n int) []string {
 			}
 			k := breakAt(r, n)
 			if k == 0 {
-				k = n
+				// One rune at the least, so a line too narrow for even a
+				// wide one still moves on.
+				k = max(prefix(r, n), 1)
 			}
 			out = append(out, strings.TrimRight(string(r[:k]), " "))
 			word = strings.TrimLeft(string(r[k:]), " ")
@@ -313,7 +317,7 @@ func wrapLine(s string, n int) []string {
 		case word == "":
 		case cur == "":
 			cur = word
-		case utf8.RuneCountInString(cur)+1+utf8.RuneCountInString(word) <= n:
+		case screenWidth(cur)+1+screenWidth(word) <= n:
 			cur += " " + word
 		default:
 			out = append(out, cur)
@@ -353,12 +357,15 @@ func words(s string) []string {
 }
 
 // breakAt is how many of a word's runes go on the first of the lines it is
-// broken across, when it is longer than n: after the last space that fits,
-// which only a quoted command has; before an "@", so an address breaks into
-// its name and its domain; or after the last ".", "/" or "-" that fits. It
-// is 0 when the word has none of those within n, and is broken where n
+// broken across, when it is wider than n columns: after the last space that
+// fits, which only a quoted command has; before an "@", so an address breaks
+// into its name and its domain; or after the last ".", "/" or "-" that fits.
+// It is 0 when the word has none of those within n, and is broken where n
 // falls only if it must be.
 func breakAt(r []rune, n int) int {
+	// fit is how many runes there is room for; from here on every limit is
+	// counted in runes.
+	fit := prefix(r, n)
 	// last is the index of the last of marks at or before limit, and never
 	// the first rune, which would leave a line with nothing on it.
 	last := func(marks string, limit int) int {
@@ -369,23 +376,25 @@ func breakAt(r []rune, n int) int {
 		}
 		return 0
 	}
-	if k := last(" ", n-1); k > 0 {
+	if k := last(" ", fit-1); k > 0 {
 		return k + 1
 	}
-	if k := last("@", n); k > 0 {
+	if k := last("@", fit); k > 0 {
 		return k
 	}
-	if k := last("./-", n-1); k > 0 {
+	if k := last("./-", fit-1); k > 0 {
 		return k + 1
 	}
 	return 0
 }
 
-// cut shortens s to n runes when it is longer, the last of them an "…" that
-// says more was there; the start is always kept.
+// cut shortens s to n columns when it is wider, the last of them an "…"
+// that says more was there; the start is always kept, and a wide character
+// the cut would halve goes with the rest.
 func cut(s string, n int) string {
-	if r := []rune(s); len(r) > n {
-		return strings.TrimRight(string(r[:max(n-1, 0)]), " ") + "…"
+	if screenWidth(s) > n {
+		r := []rune(s)
+		return strings.TrimRight(string(r[:prefix(r, n-1)]), " ") + "…"
 	}
 	return s
 }
@@ -400,8 +409,8 @@ func cutCell(c string, n int) string {
 	for i, line := range lines {
 		lines[i] = cut(line, n)
 		r := []rune(line)
-		k := n - 1 // how many runes cut keeps
-		if len(r) <= n || k < 1 || r[k-1] == ' ' || r[k] == ' ' {
+		k := prefix(r, n-1) // how many runes cut keeps
+		if screenWidth(line) <= n || k < 1 || r[k-1] == ' ' || r[k] == ' ' {
 			continue // nothing cut, or cut between two words
 		}
 		head, kept := string(r[:k]), ""
@@ -436,7 +445,7 @@ func (g *grid) render(out io.Writer) {
 			}
 			b.WriteString("│ ")
 			b.WriteString(c)
-			b.WriteString(strings.Repeat(" ", n-utf8.RuneCountInString(c)+1))
+			b.WriteString(strings.Repeat(" ", n-screenWidth(c)+1))
 		}
 		b.WriteString("│")
 		return b.String()

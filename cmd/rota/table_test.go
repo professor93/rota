@@ -79,26 +79,29 @@ func golden(t *testing.T, name string) string {
 
 // framed checks what fitting promises of every line of a table: none wider
 // than the terminal, and all of them as wide as each other, which is what a
-// border lining up means.
+// border lining up means. Width is the columns a line takes on screen, so
+// a name in Chinese takes two a character.
 func framed(t *testing.T, out string, width int) {
 	t.Helper()
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
-	frame := utf8.RuneCountInString(lines[0])
+	frame := screenWidth(lines[0])
 	if frame > width {
 		t.Fatalf("the frame is %d wide on a %d-column terminal:\n%s", frame, width, out)
 	}
 	for i, line := range lines {
-		if n := utf8.RuneCountInString(line); n != frame {
+		if n := screenWidth(line); n != frame {
 			t.Fatalf("line %d is %d wide, the frame %d — the borders do not line up:\n%s", i+1, n, frame, out)
 		}
 	}
-	// Every border of every row sits in the same place as the frame's.
+	// Every border of every row sits in the same column as the frame's.
 	joints := func(s string, marks string) []int {
 		var at []int
-		for i, r := range []rune(s) {
+		col := 0
+		for _, r := range s {
 			if strings.ContainsRune(marks, r) {
-				at = append(at, i)
+				at = append(at, col)
 			}
+			col += runeWidth(r)
 		}
 		return at
 	}
