@@ -208,6 +208,10 @@ func Refresh(ctx context.Context, a *Account) (changed bool, err error) {
 // publishes no usage endpoint — or the account runs on an API key, which has
 // no plan and so no limits for one to read. It does not cache; a polling
 // caller keeps its own reading.
+//
+// A claude account rota holds no access token for is refused with ErrReauth
+// and nothing is sent: the endpoint could only turn the request away, and the
+// request would tell whoever watches the wire that rota runs here.
 func Usage(ctx context.Context, a *Account) (*Quota, error) {
 	if a.APIKey() {
 		return nil, nil
