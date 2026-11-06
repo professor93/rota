@@ -132,21 +132,24 @@ package is still the original implementation — v1 is only rebuilt on top of
 v2 under a GOEXPERIMENT — so this is a real change of parser, not a rename.
 
 It is not a drop-in, and `lib/jsonx.go` is the one place that says how rota
-handles the five differences that matter here:
+handles the six differences that matter here:
 
 | | encoding/json | v2 |
 |---|---|---|
 | `omitempty` on a number or bool | omits the zero | keeps it |
 | `omitempty` on a `RawMessage` | omits when empty in Go | omits when it *encodes* empty, so a deliberate `{}` disappears |
 | a nil slice or map | `null` | `[]`, `{}` |
+| a map's keys | written sorted | written in whatever order the map hands them out, which changes from run to run |
 | object names | matched case-insensitively | matched exactly |
 | duplicate names, invalid UTF-8 | last wins, replaced | rejected |
 
-The first three change what rota writes, so every affected field now says
+The first four change what rota writes, so every affected field now says
 `omitzero`, which means under both packages exactly what `omitempty` used to
-mean here, and nil slices are still written as null. `lib/jsonwire_test.go`
-pins the resulting bytes, because they are the on-disk account store, the
-HTTP replies and what `rota --json` prints.
+mean here, nil slices are still written as null, and a map's keys are still
+written sorted, so the same value is always the same bytes. A struct's fields
+keep the order they are declared in. `lib/jsonwire_test.go` pins the
+resulting bytes, because they are the on-disk account store, the HTTP replies
+and what `rota --json` prints.
 
 The last two change what rota can read, and only for JSON that arrives from
 somewhere else — a provider's token endpoint, a vendor CLI's event stream, an
@@ -619,8 +622,8 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame |
 | `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
-| `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"status":"long","long_until":"..."}`. Neither comes back or is logged |
-| `POST` | `/v1/login/{id}` | control | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"status":"long","long_until":"..."}` |
+| `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"long_until":"...","status":"long"}`. Neither comes back or is logged |
+| `POST` | `/v1/login/{id}` | control | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"long_until":"...","status":"long"}` |
 | `POST` | `/v1/auth` | control | what `POST /v1/login` was called before the API and the command agreed on one word; kept working for anything already calling it |
 | `POST` | `/v1/auth/{id}` | control | likewise for `POST /v1/login/{id}` |
 | `POST` | `/v1/invites` | control | `{"ttl":"10m"}` → `{"url","expires"}` — a single-use link that signs somebody in as a watcher |
@@ -1151,7 +1154,7 @@ CLI with no streaming input are all refused by name before anything is spent.
 A refusal is one frame and then a close:
 
 ```json
-{"type":"error","error":"unknown field \"prompts\""}
+{"error":"unknown field \"prompts\"","type":"error"}
 ```
 
 Everything else out is an event, one frame each, carrying the same JSON the
@@ -1463,10 +1466,10 @@ Among the people who may type, one holds the keyboard:
 - When the holder's socket drops the keyboard stays theirs for five seconds,
   so a reconnect by the same person gets it back rather than finding somebody
   else typing. After that it is free.
-- Every change is broadcast as `{"type":"keyboard","holder":"alice"|null}`.
+- Every change is broadcast as `{"holder":"alice"|null,"type":"keyboard"}`.
 
 Anything a non-holder sends inward — bytes, or a resize — is answered with
-`{"type":"error","message":"you are not holding the keyboard"}` and changes
+`{"message":"you are not holding the keyboard","type":"error"}` and changes
 nothing at all.
 
 #### The routes
@@ -1494,10 +1497,10 @@ The answer is the description, which is also what `GET` returns and what the
 page's information panel is built from:
 
 ```json
-{"id":"9a4c1e77b2d05f31","kind":"account","account":{"id":1,"label":"you@example.com","provider":"claude"},
- "label":"fintech","cwd":"/srv/work","started":"2026-09-21T10:11:12+05:00","cols":120,"rows":40,
- "holder":"alice","viewers":[{"name":"alice","role":"control","since":"2026-09-21T10:11:14+05:00"}],
- "offset":20418,"ended":false,"recording":false,"token_until":"2027-03-04T00:00:00Z"}
+{"account":{"id":1,"label":"you@example.com","provider":"claude"},"cols":120,"cwd":"/srv/work",
+ "ended":false,"holder":"alice","id":"9a4c1e77b2d05f31","kind":"account","label":"fintech",
+ "offset":20418,"recording":false,"rows":40,"started":"2026-09-21T10:11:12+05:00",
+ "token_until":"2027-03-04T00:00:00Z","viewers":[{"name":"alice","role":"control","since":"2026-09-21T10:11:14+05:00"}]}
 ```
 
 `token_until` is when the login inside will lapse — for a claude terminal on
@@ -1751,8 +1754,8 @@ local terminal*.
 Two things about it are different, and both are facts about where it is:
 
 - **Its size follows the window it was started in.** A `resize` from the page
-  is answered with `{"type":"error","message":"this terminal's size follows
-  the window it was started in"}` and changes nothing; the page draws it at
+  is answered with `{"message":"this terminal's size follows the window it was
+  started in","type":"error"}` and changes nothing; the page draws it at
   the session's `cols`×`rows` and follows `resized`, even for the holder.
 - **The person at the terminal can always type**, because their keystrokes
   never pass through the server at all. With `--share=watch` nobody on the

@@ -1,6 +1,7 @@
 package rota
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 )
@@ -63,5 +64,53 @@ func TestProviderRepliesParseHoweverTheyAreCased(t *testing.T) {
 	}
 	if tok.Access != "a" || tok.Expires != 60 {
 		t.Fatalf("%+v", tok)
+	}
+}
+
+// TestTheSameValueIsAlwaysTheSameBytes holds what encoding/json always did and
+// v2 does not by default: a map's keys are written sorted, so encoding a
+// value twice gives the same bytes. Without it the order follows the map's
+// own iteration, which Go changes from one run to the next. A struct is the
+// opposite case and is pinned with it: its fields keep the order they are
+// declared in, never sorted.
+func TestTheSameValueIsAlwaysTheSameBytes(t *testing.T) {
+	type entry struct {
+		Zeta  string         `json:"zeta"`
+		Alpha map[int]string `json:"alpha"`
+	}
+	v := map[string]any{
+		"warnings": []string{"w"}, "accounts": []int{1}, "sessions": map[string]int{"s2": 2, "s1": 1, "s10": 10},
+		"default": 1, "instances": nil, "notes": "n", "shared": true, "zz": map[string]any{"b": 1, "a": 2, "c": 3},
+		"entry": entry{Zeta: "z", Alpha: map[int]string{2: "two", 10: "ten", 1: "one"}},
+	}
+	const want = `{"accounts":[1],"default":1,` +
+		`"entry":{"zeta":"z","alpha":{"1":"one","10":"ten","2":"two"}},` +
+		`"instances":null,"notes":"n","sessions":{"s1":1,"s10":10,"s2":2},` +
+		`"shared":true,"warnings":["w"],"zz":{"a":2,"b":1,"c":3}}`
+
+	var buf bytes.Buffer
+	for i := range 50 {
+		raw, err := Encode(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(raw) != want {
+			t.Fatalf("Encode, try %d:\n got %s\nwant %s", i, raw, want)
+		}
+		indented, err := EncodeIndent(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var compact bytes.Buffer
+		if err := json.Compact(&compact, indented); err != nil || compact.String() != want {
+			t.Fatalf("EncodeIndent, try %d, is not Encode indented: %v\n%s", i, err, indented)
+		}
+		buf.Reset()
+		if err := EncodeTo(&buf, v); err != nil {
+			t.Fatal(err)
+		}
+		if buf.String() != want+"\n" {
+			t.Fatalf("EncodeTo, try %d:\n got %s", i, buf.Bytes())
+		}
 	}
 }

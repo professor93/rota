@@ -40,9 +40,17 @@ var lenient = jsonv2.JoinOptions(
 // a consumer of this package are all read by something else, and one — the check
 // that works out which Spec fields a caller actually set — reads the
 // difference between null and [] as the answer to that question.
+//
+// v2 also writes a map's keys in whatever order the map hands them out,
+// which changes from one run to the next, where encoding/json sorted them.
+// Deterministic sorts them again, the same way, so the same value is always
+// the same bytes: a diff of the store, a script comparing two `--json`
+// outputs and a cache keyed on a reply all depend on that. A struct is not
+// affected — its fields keep the order they are declared in.
 var asBefore = jsonv2.JoinOptions(
 	jsonv2.FormatNilSliceAsNull(true),
 	jsonv2.FormatNilMapAsNull(true),
+	jsonv2.Deterministic(true),
 )
 
 // Encode marshals a value the way rota's own files and replies are written.
