@@ -327,6 +327,12 @@ anything; see *The principals*.
 account's login alive while its CLI runs (see *Watched*). It is not meant to be
 typed.
 
+Held sessions run on Linux and macOS:
+
+| | |
+|---|---|
+| `rota serve hold` | internal: one held session's process, started by the daemon with its request on standard input; refuses a terminal |
+
 The whole `[routes]` and `[terminal]` groups — the terminal page among them —
 have no flag at all and are set in the file only.
 
