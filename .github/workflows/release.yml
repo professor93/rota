@@ -55,10 +55,8 @@ jobs:
           go work init . ../rota
           go vet ./...
           serve="$(go list ./serve)"
-          rc=0
-          ROTA_BIN="$RUNNER_TEMP/rota" go test -json ./... >"$RUNNER_TEMP/suite.json" || rc=$?
-          jq -rj 'select(.Action == "output" or .Action == "build-output") | .Output' "$RUNNER_TEMP/suite.json"
-          test "$rc" -eq 0
+          set -o pipefail
+          ROTA_BIN="$RUNNER_TEMP/rota" go test -json ./... | tee "$RUNNER_TEMP/suite.json" | jq -rj 'select(.Action == "output" or .Action == "build-output") | .Output'
           n="$(jq -s --arg p "$serve" '[.[] | select(.Action == "pass" and .Test != null and (.Package == $p or (.Package | startswith($p + "/"))))] | length' "$RUNNER_TEMP/suite.json")"
           echo "serve tests passed: $n"
           test "$n" -gt 0 || { echo "no test in $serve passed: the gate needs one"; exit 1; }
@@ -189,13 +187,13 @@ jobs:
           v="${TAG#cmd/rota/}"
           id=""
           for i in $(seq 1 30); do
-            id="$(gh run list -R "$GITHUB_REPOSITORY" -w release.yml -e push -b "$v" -L 1 --json databaseId -q '.[0].databaseId')"
+            id="$(gh run list -R "$GITHUB_REPOSITORY" -w release.yml -e push -b "$v" -L 1 --json databaseId -q '.[0].databaseId' || true)"
             test -n "$id" && break
             sleep 10
           done
           test -n "$id" || { echo "no release run for $v"; exit 1; }
           while :; do
-            state="$(gh run view "$id" -R "$GITHUB_REPOSITORY" --json status,conclusion -q '.status + " " + .conclusion')"
+            state="$(gh run view "$id" -R "$GITHUB_REPOSITORY" --json status,conclusion -q '.status + " " + .conclusion' || true)"
             case "$state" in completed*) break ;; esac
             sleep 30
           done
