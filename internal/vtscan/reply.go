@@ -7,12 +7,13 @@ import (
 
 // The fixed answers, those of a common modern terminal, the same whether or
 // not anybody is attached: a VT220 with ANSI colour, xterm 390 by its own
-// name.
-var (
-	da1       = []byte("\x1b[?62;22c")
-	da2       = []byte("\x1b[>1;10;0c")
-	xtversion = []byte("\x1bP>|xterm(390)\x1b\\")
-	dsrOK     = []byte("\x1b[0n")
+// name. They are constants, so every reply is a fresh copy its receiver may
+// change.
+const (
+	da1       = "\x1b[?62;22c"
+	da2       = "\x1b[>1;10;0c"
+	xtversion = "\x1bP>|xterm(390)\x1b\\"
+	dsrOK     = "\x1b[0n"
 )
 
 // decrpm answers DECRQM for mode n with value v: 1 set, 2 reset, 0 unknown.
@@ -88,8 +89,12 @@ func CPRReply(row, col int, private bool) []byte {
 //
 // Each frame is filtered on its own, except that an OSC, DCS or APC begun and
 // not ended is held into the next frame, up to 4 KiB, past which it is typed
-// after all. A lone ESC or a control sequence cut off at the end of a frame
-// is typed as it is, so the Escape key is never delayed.
+// after all. A lone ESC, a bare ESC ], ESC P or ESC _, or a control sequence
+// cut off at the end of a frame is typed as it is, so the Escape key and
+// Alt+] are never delayed. A control character or DEL inside a held string
+// is a key, since no reply holds one, save the ESC that may begin ST and the
+// BEL that ends an OSC: the string was typing, and it and the key are typed
+// at once, in order, so Enter and Ctrl+C are never held.
 type ReplyFilter struct{ t tokenizer }
 
 // Strip gives p without the replies in it. It does not keep p.
@@ -131,7 +136,7 @@ func (f *ReplyFilter) Strip(p []byte) []byte {
 	case stEsc, stCSI:
 		typed()
 	case stStr, stStrEsc:
-		if t.kind == '^' || t.kind == 'X' {
+		if t.kind == '^' || t.kind == 'X' || len(t.seq) == 2 {
 			typed()
 		}
 	}
@@ -139,13 +144,14 @@ func (f *ReplyFilter) Strip(p []byte) []byte {
 }
 
 // replyStart says whether a string whose content begins with b can be a
-// terminal's reply: every OSC reply begins with its number, every DCS reply
-// with a digit, '>' or '!', and a kitty graphics reply with G. Anything else
-// is somebody typing Alt+] or Alt+P, and goes through at once.
+// terminal's reply: every OSC reply begins with its number, or with l or L
+// as a title report, every DCS reply with a digit, '>' or '!', and a kitty
+// graphics reply with G. Anything else is somebody typing Alt+] or Alt+P,
+// and goes through at once.
 func replyStart(kind, b byte) bool {
 	switch kind {
 	case ']':
-		return b >= '0' && b <= '9'
+		return b >= '0' && b <= '9' || b == 'l' || b == 'L'
 	case 'P':
 		return b >= '0' && b <= '?' || b == '!'
 	case '_':
