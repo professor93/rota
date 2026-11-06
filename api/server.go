@@ -19,10 +19,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os/exec"
 	"strconv"
 	"sync"
 	"time"
 
+	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/pty"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/rotation"
 	"github.com/professor93/rota/sessions"
@@ -81,6 +84,15 @@ type Options struct {
 	// Terminal is everything about the terminals this server holds. It does
 	// nothing unless Routes.Terminal is on.
 	Terminal Terminal
+	// HoldCommand makes this server a daemon whose terminals outlive it.
+	// Each terminal is started as the command it returns — `rota serve
+	// hold`, which keeps the CLI in a process of its own — with ROTA_HOME
+	// set to this server's store and in a session of its own; the request
+	// goes to its standard input. New then claims the store's daemon lock,
+	// and refuses where another daemon holds it, and Stop lets go of those
+	// terminals instead of ending them. Nil runs every terminal in this
+	// process, as a server always has.
+	HoldCommand func() *exec.Cmd
 }
 
 // Terminal configures the terminals a server may hold: how many, how much of
@@ -216,6 +228,11 @@ type Server struct {
 	// keeperDone closes when the background refresher has returned, so Stop
 	// can promise that nothing is still writing to the store afterwards.
 	keeperDone chan struct{}
+	// terminals is the store's terminals directory and unclaim lets go of
+	// its daemon lock, for a server with HoldCommand; both are empty
+	// otherwise.
+	terminals string
+	unclaim   func()
 	// Who may ask for what: the users and tokens the configuration named,
 	// checked once here, and the two tables of live credentials a page
 	// hands out. All of it is read-only after New but the two tables, which
@@ -268,6 +285,9 @@ func New(opts Options) (*Server, error) {
 		// nothing could attach to one, or the other way round.
 		return nil, errors.New("api: the terminal needs the API and the WebSocket routes")
 	}
+	if opts.HoldCommand != nil && !pty.Supported {
+		return nil, fmt.Errorf("api: %w", holdwire.ErrPlatform)
+	}
 	if opts.Terminal.MaxSessions <= 0 {
 		opts.Terminal.MaxSessions = 8
 	}
@@ -302,12 +322,24 @@ func New(opts Options) (*Server, error) {
 		sessions: newSessions(opts.SessionTTL),
 		invites:  newInvites(),
 	}
+	// Before anything else starts: a server that may not be this store's
+	// daemon must leave nothing running behind its refusal.
+	if opts.HoldCommand != nil {
+		if err := s.claimDaemon(); err != nil {
+			cancel()
+			return nil, err
+		}
+	}
 	if opts.RefreshEvery > 0 {
 		s.keeperDone = make(chan struct{})
 		go s.keepFresh(opts.RefreshEvery)
 	}
-	if opts.Routes.Terminal {
+	// A daemon holds terminals whatever its routes say: they are reached
+	// over more than the routes this file registers.
+	if opts.Routes.Terminal || opts.HoldCommand != nil {
 		go s.keepTerminals()
+	}
+	if opts.Routes.Terminal {
 		// Before anything is served: a terminal somebody is sitting at can
 		// be offered the moment this returns, and a socket opened later
 		// would refuse the sharer that was already waiting.
@@ -461,6 +493,10 @@ func (s *Server) maintain() (reset time.Time) {
 // that is still running after Stop holds the store's lock and is about to
 // write to it, which is exactly the state a caller thinks it has left behind
 // — and, for a test, is a directory that will not delete.
+//
+// A held terminal is the exception: it is let go of, still running, for the
+// next daemon on the store to take up — and the daemon's claim on the store
+// goes last, once nothing of this one is left to compete with that daemon.
 func (s *Server) Stop() {
 	// The socket first, so nothing new is offered to a server that is
 	// stopping, and the file it left behind goes with it.
@@ -471,16 +507,18 @@ func (s *Server) Stop() {
 	// own, which is exactly what a signal to rota does not reach.
 	s.endTerminals()
 	s.cancel()
-	if s.keeperDone == nil {
-		return
+	if s.keeperDone != nil {
+		select {
+		case <-s.keeperDone:
+		case <-time.After(5 * time.Second):
+			// A sweep can be inside a provider call with its own timeout.
+			// Waiting for that is worse than leaving it: it will find the
+			// cancelled context on its next turn round the loop.
+			s.log.Warn("background refresh did not stop in time")
+		}
 	}
-	select {
-	case <-s.keeperDone:
-	case <-time.After(5 * time.Second):
-		// A sweep can be inside a provider call with its own timeout. Waiting
-		// for that is worse than leaving it: it will find the cancelled
-		// context on its next turn round the loop.
-		s.log.Warn("background refresh did not stop in time")
+	if s.unclaim != nil {
+		s.unclaim()
 	}
 }
 

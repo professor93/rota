@@ -139,6 +139,9 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 	if err != nil {
 		return nil, err
 	}
+	if s.opts.HoldCommand != nil {
+		return s.startHeld(r, kind, req, cwd)
+	}
 	plan, err := s.planTerminal(r, kind, req, cwd)
 	if err != nil {
 		return nil, err
