@@ -207,11 +207,12 @@ on_origin() {
 released() {
 	command -v gh >/dev/null 2>&1 ||
 		fail "gh is not installed; pin needs it to see that $1 has a published GitHub release"
-	if ! draft=$(gh release view "$1" -R "$(git remote get-url origin)" \
+	repo=$(git remote get-url origin)
+	if ! draft=$(gh release view "$1" -R "$repo" \
 		--json isDraft -q .isDraft 2>"$tmp/gh.err"); then
 		grep -q 'release not found' "$tmp/gh.err" &&
-			fail "$1 has no GitHub release; pin after the release run publishes it"
-		echo "module: GitHub cannot be asked for the release of $1" >&2
+			fail "$1 has no GitHub release in $repo; pin after the release run publishes it"
+		echo "module: GitHub cannot be asked for the release of $1 in $repo" >&2
 		cat "$tmp/gh.err" >&2
 		exit 1
 	fi
@@ -229,7 +230,7 @@ restore() {
 	else
 		rm -f cmd/rota/go.sum
 	fi
-	git reset -q -- cmd/rota/go.mod cmd/rota/go.sum
+	git reset -q -- cmd/rota/go.mod cmd/rota/go.sum || true
 }
 
 # pin requires the root at the pushed tag $1, checks the program builds
@@ -280,12 +281,13 @@ pin() {
 	sh "$root/scripts/module.sh" check || exit 1
 	git add cmd/rota/go.mod
 	if [ -e cmd/rota/go.sum ]; then git add cmd/rota/go.sum; fi
-	git commit -q -m "cmd/rota requires rota $tag"
+	git commit -q -m "cmd/rota requires rota $tag" ||
+		fail "commit failed; cmd/rota/go.mod and go.sum put back"
 	git tag "$app_tag"
 	if branch=$(git symbolic-ref --short -q HEAD); then
 		echo "module: tagged $app_tag; push it with: git push origin $branch $app_tag"
 	else
-		echo "module: tagged $app_tag on a detached HEAD, on no branch; push it with: git push origin $app_tag"
+		echo "module: tagged $app_tag on a detached HEAD, on no branch; push it with: git push origin $app_tag, then bring the commit onto main"
 	fi
 }
 
