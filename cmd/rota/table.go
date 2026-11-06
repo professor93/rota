@@ -284,8 +284,9 @@ func wrapCell(c string, n int) string {
 // wider than n on its own is broken where it reads best (see breakAt), and
 // its start goes on the line before it when it breaks within the room that
 // line has left, so a short word is not left on a line by itself. Where it
-// must be broken where n falls, a wide character n would fall in the middle
-// of goes to the next line. A line that fits is returned as it is.
+// must be broken where n falls, a wide character or an emoji n would fall in
+// the middle of goes to the next line whole. A line that fits is returned as
+// it is.
 func wrapLine(s string, n int) []string {
 	if n <= 0 || screenWidth(s) <= n {
 		return []string{s}
@@ -306,9 +307,11 @@ func wrapLine(s string, n int) []string {
 			}
 			k := breakAt(r, n)
 			if k == 0 {
-				// One rune at the least, so a line too narrow for even a
-				// wide one still moves on.
-				k = max(prefix(r, n), 1)
+				// One character at the least, so a line too narrow for even
+				// a wide one still moves on.
+				if k = prefix(r, n); k == 0 {
+					k, _ = char(r, 0)
+				}
 			}
 			out = append(out, strings.TrimRight(string(r[:k]), " "))
 			word = strings.TrimLeft(string(r[k:]), " ")
@@ -390,7 +393,7 @@ func breakAt(r []rune, n int) int {
 
 // cut shortens s to n columns when it is wider, the last of them an "…"
 // that says more was there; the start is always kept, and a wide character
-// the cut would halve goes with the rest.
+// or an emoji the cut would halve goes with the rest.
 func cut(s string, n int) string {
 	if screenWidth(s) > n {
 		r := []rune(s)

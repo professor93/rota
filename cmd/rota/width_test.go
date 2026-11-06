@@ -21,15 +21,25 @@ func TestRuneWidth(t *testing.T) {
 		{'…', 1}, {'─', 1}, {'│', 1}, {'┼', 1},
 		{'☀', 1}, {'✓', 1}, {'★', 1}, {'❤', 1}, {'ｱ', 1}, // halfwidth katakana
 		// None: marks on the letter before, and what is never drawn.
-		{'\u0301', 0}, {'\u20dd', 0}, {'\u3099', 0}, {'\ufe0f', 0}, {'\ufe0e', 0},
+		{'\u0301', 0}, {'\u20dd', 0}, {'\u20e3', 0}, {'\u3099', 0}, {'\ufe0f', 0}, {'\ufe0e', 0},
 		{'\u200b', 0}, {'\u200d', 0}, {'\u200f', 0}, {'\u2060', 0}, {'\ufeff', 0},
-		{'\u1160', 0}, {'\U000e0067', 0},
+		{'\u202e', 0}, {'\u2066', 0}, {'\u061c', 0}, {'\ufff9', 0},
+		{'\u1160', 0}, {'\u11ff', 0}, {'\ud7b0', 0}, {'\ud7fb', 0}, {'\U000e0067', 0},
+		// The soft hyphen is one, as a terminal draws it.
+		{'\u00ad', 1},
+		// The numbers in circles on black squares are ambiguous, not wide.
+		{'\u3248', 1}, {'\u324f', 1}, {'㉐', 2}, {'㉑', 2}, {'ㇰ', 2},
+		// A regional indicator on its own, half a flag.
+		{'\U0001f1ef', 1},
 		// Two: Chinese, Japanese, Korean, fullwidth forms, emoji.
 		{'仕', 2}, {'工', 2}, {'あ', 2}, {'ア', 2}, {'ー', 2}, {'한', 2}, {'ᄀ', 2},
 		{'、', 2}, {'。', 2}, {'　', 2}, {'Ａ', 2}, {'！', 2}, {'￥', 2},
 		{'𠀀', 2}, {'豈', 2},
 		{'⌛', 2}, {'☕', 2}, {'⚡', 2}, {'✅', 2}, {'❌', 2}, {'⭐', 2},
 		{'🚀', 2}, {'😀', 2}, {'🌍', 2}, {'🤖', 2}, {'🪐', 2}, {'🟢', 2}, {'🆗', 2},
+		{'🀄', 2}, {'🃏', 2}, {'🟰', 2}, {'〈', 2}, {'〉', 2}, {'䷀', 2}, {'䷿', 2},
+		{'\U00017000', 2}, {'\U00018b00', 2}, {'\U0001b000', 2}, {'\U0001b170', 2}, {'\U00016fe0', 2},
+		{'🏽', 2},
 	} {
 		if got := runeWidth(c.r); got != c.want {
 			t.Errorf("runeWidth(%q U+%04X) = %d, want %d", c.r, c.r, got, c.want)
@@ -48,6 +58,33 @@ func TestRuneWidth(t *testing.T) {
 		"🚀 launch":         9,
 		"⭐\ufe0f":          2,
 		"ok (login ends…)": 16,
+		// U+FE0F makes a symbol one column wide a picture two wide.
+		"❤\ufe0f":                        2,
+		"☀\ufe0f":                        2,
+		"1\ufe0f\u20e3":                  2,
+		"#\ufe0f\u20e3 1\ufe0f\u20e3 ok": 8,
+		"I ❤\ufe0f rota":                 9,
+		"☀\ufe0e":                        1,
+		// An emoji spelled with several runes is one picture, two wide.
+		"🇯🇵":              2,
+		"🇯🇵🇺🇸":            4,
+		"🇯":               1,
+		"👍🏽":              2,
+		"☝🏽":              2,
+		"👨\u200d👩\u200d👧": 2,
+		"👨🏽\u200d💻":       2,
+		"❤\ufe0f\u200d🔥":  2,
+		"🏳\ufe0f\u200d🌈":  2,
+		"🏴\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f": 2,
+		"ab👨\u200d👩\u200d👧cd":                                           6,
+		// A joiner joins pictures, not letters, and a skin tone colours a
+		// picture, not a letter.
+		"क्\u200dष": 2,
+		"a\u200d🚀":  3,
+		"a🏽":        3,
+		"🏽":         2,
+		// A Hangul syllable spelled out letter by letter is two wide.
+		"\u1100\u1161\u11a8": 2,
 	} {
 		if got := screenWidth(s); got != want {
 			t.Errorf("screenWidth(%q) = %d, want %d", s, got, want)
@@ -58,7 +95,7 @@ func TestRuneWidth(t *testing.T) {
 // unicode.Is looks a rune up by halving its table, which finds the wrong
 // answer in a table out of order.
 func TestWidthTablesAreInOrder(t *testing.T) {
-	for name, tab := range map[string]*unicode.RangeTable{"wide": wide, "unseen": unseen} {
+	for name, tab := range map[string]*unicode.RangeTable{"wide": wide, "jamo": jamo} {
 		last := rune(-1)
 		for _, r := range tab.R16 {
 			if rune(r.Lo) <= last || r.Hi < r.Lo || r.Stride != 1 {
@@ -78,8 +115,9 @@ func TestWidthTablesAreInOrder(t *testing.T) {
 	}
 }
 
-// A cut or a wrap counts columns, never halves a wide character, and keeps a
-// mark with its letter; ASCII is cut and wrapped exactly as it was.
+// A cut or a wrap counts columns, never halves a wide character or splits
+// an emoji, and keeps a mark with its letter; ASCII is cut and wrapped
+// exactly as it was.
 func TestCutAndWrapCountColumns(t *testing.T) {
 	for _, c := range []struct {
 		in   string
@@ -95,6 +133,15 @@ func TestCutAndWrapCountColumns(t *testing.T) {
 		{"ab仕事", 4, "ab…"},
 		{"🚀🚀🚀", 4, "🚀…"},
 		{"e\u0301e\u0301e\u0301", 2, "e\u0301…"},
+		// An emoji of several runes goes whole or not at all.
+		{"ab👨\u200d👩\u200d👧", 5, "ab👨\u200d👩\u200d👧"},
+		{"ab👨\u200d👩\u200d👧cd", 5, "ab👨\u200d👩\u200d👧…"},
+		{"ab👨\u200d👩\u200d👧cd", 4, "ab…"},
+		{"ab👍🏽cd", 4, "ab…"},
+		{"ab👍🏽cd", 5, "ab👍🏽…"},
+		{"🇯🇵🇺🇸", 3, "🇯🇵…"},
+		{"I ❤\ufe0f rota", 4, "I…"},
+		{"1\ufe0f\u20e32\ufe0f\u20e33\ufe0f\u20e3", 5, "1\ufe0f\u20e32\ufe0f\u20e3…"},
 	} {
 		got := cut(c.in, c.n)
 		if got != c.want {
@@ -136,6 +183,14 @@ func TestCutAndWrapCountColumns(t *testing.T) {
 		{"🚀🚀🚀", 3, []string{"🚀", "🚀", "🚀"}},
 		// Narrower than one character: one a line, and on to the next.
 		{"仕事", 1, []string{"仕", "事"}},
+		// An emoji of several runes is never split across lines.
+		{"🇯🇵🇺🇸", 3, []string{"🇯🇵", "🇺🇸"}},
+		{"ab👍🏽cd", 5, []string{"ab👍🏽c", "d"}},
+		{"ab👍🏽cd", 3, []string{"ab", "👍🏽c", "d"}},
+		{"ab👨\u200d👩\u200d👧cd", 5, []string{"ab👨\u200d👩\u200d👧c", "d"}},
+		{"ab👨\u200d👩\u200d👧cd", 3, []string{"ab", "👨\u200d👩\u200d👧c", "d"}},
+		{"❤\ufe0f❤\ufe0f❤\ufe0f", 5, []string{"❤\ufe0f❤\ufe0f", "❤\ufe0f"}},
+		{"👍🏽👍🏽", 1, []string{"👍🏽", "👍🏽"}},
 	} {
 		if got := wrapLine(c.in, c.n); fmt.Sprint(got) != fmt.Sprint(c.want) {
 			t.Errorf("wrapLine(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
@@ -147,21 +202,30 @@ func TestCutAndWrapCountColumns(t *testing.T) {
 }
 
 // wideGrid is a listing whose names take two columns a character: an
-// account in Japanese, one in Chinese, and a label with emoji in it.
+// account in Japanese, one in Chinese, and a label with emoji in it, a flag
+// and a joined pair among them.
 func wideGrid(width int) *grid {
 	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{6, 5, 2, 1, 0}}
 	g.add("1", "3", "claude", "仕事用アカウント", "5h 3% (4h 12m)\n7d 29% (3d 2h)\nFable 48%", "95%", "just now", "ok")
-	g.add("2", "5", "claude", "🚀 launch 🚀 team", "-", "95%", "2h ago", "re-auth needed ("+clearedReason+")")
+	g.add("2", "5", "claude", "🚀 launch 🇯🇵 team 👩\u200d💻", "-", "95%", "2h ago", "re-auth needed ("+clearedReason+")")
 	g.add("-", "7", "codex", "工作账户", "5h 0%", "90%", "3d ago", "ok (ログインは2日後に切れます)")
 	return g
 }
 
 // cellsWhole checks that no character of a drawn table was halved: it is
-// valid UTF-8, with nothing replaced.
+// valid UTF-8, with nothing replaced, and the flag and the joined pair of
+// wideGrid's label are never split, by a cut, a wrap or a border.
 func cellsWhole(t *testing.T, out string) {
 	t.Helper()
 	if !utf8.ValidString(out) || strings.ContainsRune(out, utf8.RuneError) {
 		t.Fatalf("a character was halved:\n%s", out)
+	}
+	flags := strings.Count(out, "🇯🇵")
+	if strings.Count(out, "🇯") != flags || strings.Count(out, "🇵") != flags {
+		t.Fatalf("a flag was split:\n%s", out)
+	}
+	if strings.Count(out, "\u200d") != strings.Count(out, "👩\u200d💻") {
+		t.Fatalf("a joined emoji was split:\n%s", out)
 	}
 }
 
@@ -176,7 +240,7 @@ func TestTableFitsNamesInWideCharacters(t *testing.T) {
 	if w := screenWidth(strings.SplitN(out, "\n", 2)[0]); w != 60 {
 		t.Fatalf("the frame is %d wide, and 60 was there to use:\n%s", w, out)
 	}
-	for id, name := range map[string]string{"3": "仕事用アカウント", "5": "🚀 launch 🚀 team", "7": "工作账户"} {
+	for id, name := range map[string]string{"3": "仕事用アカウント", "5": "🚀 launch 🇯🇵 team 👩\u200d💻", "7": "工作账户"} {
 		got := squeeze(column(out, 3, id))
 		if got != squeeze(name) && !(strings.HasSuffix(got, "…") && strings.HasPrefix(squeeze(name), strings.TrimSuffix(got, "…"))) {
 			t.Fatalf("account %s reads %q down its column, of %q:\n%s", id, got, name, out)
@@ -209,7 +273,11 @@ func TestTableWithWideNamesFitsEveryWidth(t *testing.T) {
 func TestTableOffATerminalLinesUpWideNames(t *testing.T) {
 	out := drawn(wideGrid(0))
 	framed(t, out, 1000)
-	if !strings.Contains(out, "│ 仕事用アカウント  │") || !strings.Contains(out, "│ 工作账户"+strings.Repeat(" ", 10)+"│") {
+	// The label is the widest, 20 columns: three emoji two each, one of
+	// them a flag and one a joined pair, and fourteen letters and spaces.
+	if !strings.Contains(out, "│ 🚀 launch 🇯🇵 team 👩\u200d💻 │") ||
+		!strings.Contains(out, "│ 仕事用アカウント"+strings.Repeat(" ", 5)+"│") ||
+		!strings.Contains(out, "│ 工作账户"+strings.Repeat(" ", 13)+"│") {
 		t.Fatalf("each name padded to its column:\n%s", out)
 	}
 }

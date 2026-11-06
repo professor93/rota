@@ -6,18 +6,62 @@ import "unicode"
 // and wraps by, since a name in Chinese, Japanese or Korean, or one with an
 // emoji in it, takes two columns a character where a letter takes one.
 func screenWidth(s string) int {
+	r := []rune(s)
 	n := 0
-	for _, r := range s {
-		n += runeWidth(r)
+	for i := 0; i < len(r); {
+		end, w := char(r, i)
+		n, i = n+w, end
 	}
 	return n
 }
 
-// runeWidth is the columns one rune takes: none for a mark that sits on
-// the character before it or a character that is not drawn at all, two for
-// the wide characters below, and one for everything else — every letter,
-// digit and sign of ASCII and Latin, the box the table is drawn with, and
-// its "…".
+// char is where the character that starts at r[i] ends, and the columns it
+// takes. Mostly it is one rune and the marks on it, but an emoji may be
+// spelled with several, all drawn as one picture two columns wide: a flag
+// is two regional indicators, 🇯🇵; a skin tone follows the hand or face it
+// colours, 👍🏽; a family is its people joined by U+200D, 👨‍👩‍👧; and
+// U+FE0F after a symbol one column wide, ❤️ or 1️⃣, asks for the picture.
+func char(r []rune, i int) (end, w int) {
+	w = runeWidth(r[i])
+	flag := regional(r[i]) // the first half of a flag, waiting for its second
+	for end = i + 1; end < len(r); end++ {
+		c := r[end]
+		switch {
+		case flag && regional(c):
+			flag, w = false, 2
+		case c == '️':
+			if w == 1 {
+				w = 2
+			}
+		case tone(c) && pictograph(r[i]):
+			w = 2
+		case r[end-1] == '‍' && pictograph(c) && pictograph(r[i]):
+		case runeWidth(c) == 0:
+		default:
+			return end, w
+		}
+	}
+	return end, w
+}
+
+// regional is a regional indicator, half a flag.
+func regional(r rune) bool { return r >= 0x1f1e6 && r <= 0x1f1ff }
+
+// tone is a skin tone, which colours the emoji before it.
+func tone(r rune) bool { return r >= 0x1f3fb && r <= 0x1f3ff }
+
+// pictograph is a rune of the blocks emoji come from: the symbols, arrows
+// and dingbats of 2100–2BFF, and the pictures from U+1F000 on. None of them
+// is a mark, so each takes a column or two.
+func pictograph(r rune) bool {
+	return r >= 0x2100 && r < 0x2c00 || r >= 0x1f000 && r < 0x20000
+}
+
+// runeWidth is the columns one rune takes on its own: none for a mark that
+// sits on the character before it or a character that is not drawn at all,
+// two for the wide characters below, and one for everything else — every
+// letter, digit and sign of ASCII and Latin, the soft hyphen, the box the
+// table is drawn with, and its "…".
 //
 // It is the East Asian Width property cut down to what a name is likely
 // to hold, not the whole of it: the tables below say which.
@@ -25,7 +69,7 @@ func runeWidth(r rune) int {
 	switch {
 	case r < 0x300: // ASCII and Latin, before the first combining mark
 		return 1
-	case unicode.In(r, unicode.Mn, unicode.Me, unseen):
+	case unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf, jamo):
 		return 0
 	case unicode.Is(wide, r):
 		return 2
@@ -33,21 +77,12 @@ func runeWidth(r rune) int {
 	return 1
 }
 
-// unseen is what takes no column and is not a mark: the zero-width space,
-// joiners and direction marks, the word joiner, the byte-order mark, the
-// tags a flag's emoji is spelled with, and the vowels and finals of a
-// Hangul syllable spelled out letter by letter, which a terminal draws
-// into the first letter's two columns. The variation selector that asks
-// for an emoji (U+FE0F) is a mark already, and needs no line here.
-var unseen = &unicode.RangeTable{
+// jamo is the vowels and finals of a Hangul syllable spelled out letter by
+// letter, which a terminal draws into the first letter's two columns.
+var jamo = &unicode.RangeTable{
 	R16: []unicode.Range16{
-		{Lo: 0x1160, Hi: 0x11ff, Stride: 1}, // Hangul Jamo vowels and finals
-		{Lo: 0x200b, Hi: 0x200f, Stride: 1}, // zero-width space to RLM
-		{Lo: 0x2060, Hi: 0x2064, Stride: 1}, // word joiner, invisible operators
-		{Lo: 0xfeff, Hi: 0xfeff, Stride: 1}, // byte-order mark
-	},
-	R32: []unicode.Range32{
-		{Lo: 0xe0001, Hi: 0xe007f, Stride: 1}, // tags
+		{Lo: 0x1160, Hi: 0x11ff, Stride: 1},
+		{Lo: 0xd7b0, Hi: 0xd7ff, Stride: 1},
 	},
 }
 
@@ -60,6 +95,7 @@ var wide = &unicode.RangeTable{
 		{Lo: 0x1100, Hi: 0x115f, Stride: 1}, // Hangul Jamo, first letters
 		// Emoji by default among the symbols of 2300–2BFF.
 		{Lo: 0x231a, Hi: 0x231b, Stride: 1}, // ⌚⌛
+		{Lo: 0x2329, Hi: 0x232a, Stride: 1}, // 〈〉
 		{Lo: 0x23e9, Hi: 0x23ec, Stride: 1},
 		{Lo: 0x23f0, Hi: 0x23f0, Stride: 1},
 		{Lo: 0x23f3, Hi: 0x23f3, Stride: 1},
@@ -94,10 +130,12 @@ var wide = &unicode.RangeTable{
 		{Lo: 0x2b55, Hi: 0x2b55, Stride: 1},
 		// Radicals, CJK symbols and punctuation, the ideographic space.
 		{Lo: 0x2e80, Hi: 0x303e, Stride: 1},
-		// Hiragana, Katakana, Bopomofo, Hangul letters, enclosed and
-		// compatibility CJK, and Extension A of the ideographs.
-		{Lo: 0x3041, Hi: 0x4dbf, Stride: 1},
-		{Lo: 0x4e00, Hi: 0xa4cf, Stride: 1}, // the ideographs, and Yi
+		// Hiragana, Katakana, Bopomofo, Hangul letters and enclosed CJK,
+		// up to the numbers in circles on black squares, which are not.
+		{Lo: 0x3041, Hi: 0x3247, Stride: 1},
+		// The rest of enclosed CJK, compatibility CJK, the ideographs and
+		// their Extension A, the Yijing hexagrams, and Yi.
+		{Lo: 0x3250, Hi: 0xa4cf, Stride: 1},
 		{Lo: 0xa960, Hi: 0xa97f, Stride: 1}, // more Hangul first letters
 		{Lo: 0xac00, Hi: 0xd7a3, Stride: 1}, // Hangul syllables
 		{Lo: 0xf900, Hi: 0xfaff, Stride: 1}, // compatibility ideographs
@@ -107,12 +145,17 @@ var wide = &unicode.RangeTable{
 		{Lo: 0xffe0, Hi: 0xffe6, Stride: 1}, // fullwidth signs: ￠ to ￦
 	},
 	R32: []unicode.Range32{
+		{Lo: 0x16fe0, Hi: 0x18d7f, Stride: 1}, // Tangut and Khitan
+		{Lo: 0x1aff0, Hi: 0x1b2ff, Stride: 1}, // more kana, and Nüshu
+		{Lo: 0x1f004, Hi: 0x1f004, Stride: 1}, // 🀄
+		{Lo: 0x1f0cf, Hi: 0x1f0cf, Stride: 1}, // 🃏
 		{Lo: 0x1f18e, Hi: 0x1f18e, Stride: 1}, // 🆎
 		{Lo: 0x1f191, Hi: 0x1f19a, Stride: 1}, // 🆑 to 🆚
 		{Lo: 0x1f200, Hi: 0x1f2ff, Stride: 1}, // enclosed ideographs
 		{Lo: 0x1f300, Hi: 0x1f64f, Stride: 1}, // pictographs and faces
 		{Lo: 0x1f680, Hi: 0x1f6ff, Stride: 1}, // transport and maps
 		{Lo: 0x1f7e0, Hi: 0x1f7eb, Stride: 1}, // coloured circles and squares
+		{Lo: 0x1f7f0, Hi: 0x1f7f0, Stride: 1}, // 🟰
 		{Lo: 0x1f900, Hi: 0x1f9ff, Stride: 1}, // more pictographs
 		{Lo: 0x1fa70, Hi: 0x1faff, Stride: 1}, // and more
 		{Lo: 0x20000, Hi: 0x2fffd, Stride: 1}, // ideographs, Extensions B to F
@@ -120,15 +163,17 @@ var wide = &unicode.RangeTable{
 	},
 }
 
-// prefix is how many of r's runes fit in n columns: as many as there is
-// room for, a wide one that would straddle the edge left out, and the marks
-// on the last one kept with it.
+// prefix is how many of r's runes fit in n columns: as many characters as
+// there is room for (see char), a wide one that would straddle the edge
+// left out, so neither a wide character nor an emoji is ever split.
 func prefix(r []rune, n int) int {
 	w := 0
-	for k, c := range r {
-		if w += runeWidth(c); w > n {
-			return k
+	for i := 0; i < len(r); {
+		end, cw := char(r, i)
+		if w += cw; w > n {
+			return i
 		}
+		i = end
 	}
 	return len(r)
 }
