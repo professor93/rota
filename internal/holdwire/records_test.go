@@ -3,6 +3,9 @@
 package holdwire
 
 import (
+	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -160,6 +163,91 @@ func TestScanTellsEveryStateApart(t *testing.T) {
 	}
 	if Scan(filepath.Join(terminals, "missing")) != nil {
 		t.Error("a store with no terminals has records")
+	}
+}
+
+// A locked directory whose record cannot be read is a holder running all
+// the same: unreadable, not broken. What can still be read of which process
+// it is comes with it, but only all of it, and only from a record that
+// names this session. Nobody holding the lock, the same file is broken.
+func TestALockedRecordThatCannotBeReadIsUnreadable(t *testing.T) {
+	terminals := t.TempDir()
+	start := time.Now().Add(-time.Minute).Truncate(time.Second)
+	later := `{"id":"%s","account":{"id":1},"holder_pid":42,"holder_start":"` + start.Format(time.RFC3339) +
+		`","boot_id":"b-1","protocol":3,"version":"10.0.0"}`
+	cases := []struct {
+		id, raw string
+		locked  bool
+		state   RecordState
+		pid     int
+		version string
+	}{
+		{"0000000000000001", "{not json", true, StateUnreadable, 0, ""},
+		{"0000000000000002", fmt.Sprintf(later, "0000000000000002"), true, StateUnreadable, 42, "10.0.0"},
+		{"0000000000000003", fmt.Sprintf(later, "00000000000000ff"), true, StateUnreadable, 0, ""},
+		{"0000000000000004", `{"id":"0000000000000004","holder_pid":"42","holder_start":"x","boot_id":"b-1","account":[]}`, true, StateUnreadable, 0, ""},
+		{"0000000000000005", fmt.Sprintf(later, "0000000000000005"), false, StateBroken, 0, ""},
+	}
+	for _, c := range cases {
+		dir := record(t, terminals, c.id, nil, c.raw)
+		if c.locked {
+			lock(t, dir)
+		}
+	}
+	byID := map[string]Record{}
+	for _, r := range Scan(terminals) {
+		byID[r.ID] = r
+	}
+	for _, c := range cases {
+		r := byID[c.id]
+		if r.State != c.state || r.Locked != c.locked || r.Err == nil {
+			t.Errorf("%s is %s, locked %v (%v); want %s", c.id, r.State, r.Locked, r.Err, c.state)
+			continue
+		}
+		if c.state == StateBroken {
+			if r.Meta != nil {
+				t.Errorf("%s: a broken record has %+v", c.id, r.Meta)
+			}
+			continue
+		}
+		if m := r.Meta; m == nil || m.ID != c.id || m.HolderPID != c.pid || m.Version != c.version || !r.Stopped.IsZero() {
+			t.Errorf("%s: what could be read is %+v, stopped %v", c.id, m, r.Stopped)
+		} else if c.pid != 0 && (!m.HolderStart.Equal(start) || m.BootID != "b-1" || m.Protocol != 3) {
+			t.Errorf("%s: the holder is %+v", c.id, m)
+		}
+	}
+}
+
+// Judge is Scan's judgement of one directory, and no directory at all for
+// anything that is not a session's: a name that is not an id, nothing
+// there, a file, or a symlink, which is never followed out of the store.
+func TestJudgeIsScanForOneSession(t *testing.T) {
+	terminals := t.TempDir()
+	code := 3
+	live := record(t, terminals, "000000000000000a", &Meta{Kind: KindAccount, Account: 1, Protocol: Major}, "")
+	lock(t, live)
+	record(t, terminals, "000000000000000b", &Meta{Protocol: Major, Ended: time.Now().Truncate(time.Second), Exit: &code}, "")
+	record(t, terminals, "000000000000000c", &Meta{Protocol: Major}, "")
+	record(t, terminals, "000000000000000e", nil, "{not json")
+	for _, r := range Scan(terminals) {
+		got := Judge(terminals, r.ID)
+		if got.State != r.State || got.Locked != r.Locked || !got.Stopped.Equal(r.Stopped) || got.Dir != r.Dir {
+			t.Errorf("Judge(%s) is %+v, Scan said %+v", r.ID, got, r)
+		}
+	}
+
+	outside := record(t, t.TempDir(), "000000000000000d", &Meta{Protocol: Major}, "")
+	lock(t, outside)
+	if err := os.Symlink(outside, Dir(terminals, "000000000000000d")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(Dir(terminals, "000000000000000f"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"000000000000000d", "000000000000000f", "0000000000000009", "../00000000000a", "000000000000000A"} {
+		if r := Judge(terminals, id); r.State != StateBroken || r.Meta != nil || !errors.Is(r.Err, fs.ErrNotExist) || r.Locked {
+			t.Errorf("Judge(%q) is %+v, want no record", id, r)
+		}
 	}
 }
 

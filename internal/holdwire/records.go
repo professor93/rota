@@ -2,14 +2,18 @@ package holdwire
 
 import (
 	"cmp"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/professor93/rota/internal/proc"
+	rota "github.com/professor93/rota/lib"
 )
 
 // RecordState is what a session's directory says about it, judged by its
@@ -24,13 +28,18 @@ const (
 	StateLive        RecordState = "live"        // locked, and its protocol is one this rota speaks
 	StateEnded       RecordState = "ended"       // unlocked, with an exit
 	StateInterrupted RecordState = "interrupted" // unlocked, with no exit
-	StateUnreadable  RecordState = "unreadable"  // locked, made by a rota no major agrees with
-	StateBroken      RecordState = "broken"      // meta.json missing or not a record
+	StateUnreadable  RecordState = "unreadable"  // locked, made by a rota this one cannot read
+	StateBroken      RecordState = "broken"      // meta.json missing, or not a record and nobody holding the lock
 )
 
 // Record is one session's directory as Scan found it. Stopped is when it
-// stopped: the ending meta.json records, or for an interrupted session the
-// last time its holder touched meta.json. Err says why a record is broken.
+// stopped (StoppedAt). Err says why a record is broken or unreadable.
+//
+// An unreadable record is a holder running that this rota cannot read: no
+// major agrees with the one its record names, or the record itself is not
+// one this rota can parse, a later rota's or a damaged one. Its Meta is
+// never nil, but for a record that could not be parsed it holds only what
+// could still be read of it (see identity).
 //
 // Locked is what the lock said when the record was judged, whatever the
 // state. A broken record can be locked: a holder starting holds its lock
@@ -135,6 +144,14 @@ func judge(terminals, id string) (r Record) {
 	if err == nil && m.ID != id {
 		err = fmt.Errorf("holdwire: %s names session %q", MetaPath(r.Dir), m.ID)
 	}
+	if err != nil && locked && !errors.Is(err, fs.ErrNotExist) {
+		// A holder is behind it whose record this rota cannot read. It is
+		// running all the same, and what can still be read of which
+		// process it is is kept, for a Stop that checks it before it
+		// signals anything.
+		r.State, r.Err, r.Meta = StateUnreadable, err, identity(r.Dir, id)
+		return r
+	}
 	if err != nil {
 		r.State, r.Err, r.Stopped = StateBroken, err, mtime()
 		return r
@@ -149,14 +166,82 @@ func judge(terminals, id string) (r Record) {
 			r.Err = fmt.Errorf("session %s speaks protocol %d, made by rota %s", id, m.Protocol, m.Version)
 		}
 	case m.Exit != nil:
-		r.State, r.Stopped = StateEnded, m.Ended
-		if r.Stopped.IsZero() {
-			r.Stopped = mtime()
-		}
+		r.State, r.Stopped = StateEnded, StoppedAt(r.Dir, m)
 	default:
-		r.State, r.Stopped = StateInterrupted, mtime()
+		r.State, r.Stopped = StateInterrupted, StoppedAt(r.Dir, m)
 	}
 	return r
+}
+
+// StoppedAt is when a session whose holder has gone stopped, by its record:
+// the ending it records, or with none the last time meta.json was touched —
+// by its holder, which touches it while it runs, or by the daemon that saw
+// it go. A daemon describing a session it held reads it here too, so the
+// moment is the same before and after the daemon stops keeping it.
+func StoppedAt(dir string, m *Meta) time.Time {
+	if m != nil && m.Exit != nil && !m.Ended.IsZero() {
+		return m.Ended
+	}
+	if fi, err := os.Stat(MetaPath(dir)); err == nil {
+		return fi.ModTime()
+	}
+	return time.Time{}
+}
+
+// Judge is the record of the one session id names, judged as Scan judges
+// each, for a caller after that session rather than all of them. An id that
+// is not one, or that names no directory — or a symlink, which Scan never
+// follows out of the store either — is a directory with no record.
+func Judge(terminals, id string) Record {
+	dir := Dir(terminals, id)
+	if fi, err := os.Lstat(dir); !IsID(id) || err != nil || !fi.IsDir() {
+		return Record{ID: id, Dir: dir, State: StateBroken,
+			Err: &fs.PathError{Op: "judge", Path: dir, Err: fs.ErrNotExist}}
+	}
+	return judge(terminals, id)
+}
+
+// identity is what can still be read of a record that cannot be read whole:
+// which process holds the session and which rota made it, each field on its
+// own, so one that cannot be read costs only itself. The pid comes only with
+// the start time and boot id it must be checked against, and only from a
+// record that names this session — another session's would be its holder,
+// not this one's. Never nil.
+func identity(dir, id string) *Meta {
+	m := &Meta{ID: id}
+	raw, err := readMeta(dir)
+	if err != nil {
+		return m
+	}
+	var fields map[string]jsontext.Value
+	if jsonv2.Unmarshal(raw, &fields, rota.LenientOptions()) != nil {
+		return m
+	}
+	field := func(name string, v any) bool {
+		raw, ok := fields[name]
+		return ok && jsonv2.Unmarshal(raw, v, rota.LenientOptions()) == nil
+	}
+	var named string
+	if !field("id", &named) || named != id {
+		return m
+	}
+	var (
+		pid   int
+		start time.Time
+		boot  string
+	)
+	if field("holder_pid", &pid) && field("holder_start", &start) && field("boot_id", &boot) {
+		m.HolderPID, m.HolderStart, m.BootID = pid, start, boot
+	}
+	var protocol int
+	if field("protocol", &protocol) {
+		m.Protocol = protocol
+	}
+	var version string
+	if field("version", &version) {
+		m.Version = version
+	}
+	return m
 }
 
 // Holding is the newest running session on an account, or nil. A holder
