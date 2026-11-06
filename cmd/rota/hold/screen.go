@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	uv "github.com/charmbracelet/ultraviolet"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 
 	"github.com/professor93/rota/internal/share"
@@ -31,10 +32,24 @@ var vtWrite = (*vt.Emulator).Write
 // behind recover(). The first panic retires the emulator for good, OK says
 // so from then on, and the holder falls back to replaying its ring, which is
 // what a viewer got before there was a screen at all.
+//
+// recover() is the backstop, not the plan. What x/vt v0.1.0 is known to fall
+// over on, spend seconds on or draw wrong when it comes in pieces is mended
+// on the way in, in tame.go.
 type Screen struct {
 	mu sync.Mutex
 	em *vt.Emulator
 	ok bool
+
+	// seq is x/vt's own parser, x/ansi's, fed every byte just ahead of the
+	// emulator, so it is in the emulator's state at every byte. Its CSI
+	// handler sets fix when the sequence just read must not reach x/vt as
+	// it is.
+	seq *ansi.Parser
+	fix []byte
+	// held is the end of what the program has printed so far, kept from
+	// the emulator until what follows shows whether it is finished.
+	held []byte
 }
 
 // NewScreen starts an emulator of the given size.
@@ -53,8 +68,20 @@ func NewScreen(cols, rows int) *Screen {
 	if s.ok {
 		go drain(s.em)
 	}
+	// The emulator's parser has room for as many parameters, which is what
+	// decides the values a CSI handler sees. It has room for 4 MiB of string
+	// data too, which changes nothing about where a sequence ends, so this
+	// one keeps none.
+	s.seq = ansi.NewParser()
+	s.seq.SetParamsSize(maxParams)
+	s.seq.SetDataSize(1)
+	s.seq.SetHandler(ansi.Handler{HandleCsi: s.csi})
 	return s
 }
+
+// maxParams is how many parameters x/vt's parser keeps (x/ansi's
+// parser.MaxParamsSize, which NewEmulator sets).
+const maxParams = 32
 
 // drain reads and discards the emulator's answers until the pipe closes.
 //
@@ -93,20 +120,6 @@ func (s *Screen) retire() {
 	}
 }
 
-// Write feeds the emulator what the program printed. It takes whole
-// sequences: its caller cuts at vtscan's ground points, so the emulator never
-// holds half a sequence when somebody asks for a repaint. Once the emulator
-// has panicked, or the screen is closed, it does nothing.
-func (s *Screen) Write(p []byte) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.ok {
-		return
-	}
-	defer s.catch()
-	_, _ = vtWrite(s.em, p)
-}
-
 // Resize follows the terminal to a new size.
 func (s *Screen) Resize(cols, rows int) {
 	s.mu.Lock()
@@ -115,6 +128,7 @@ func (s *Screen) Resize(cols, rows int) {
 		return
 	}
 	defer s.catch()
+	s.settle()
 	s.em.Resize(cols, rows)
 }
 
@@ -128,6 +142,7 @@ func (s *Screen) Cursor() (row, col int) {
 		return
 	}
 	defer s.catch()
+	s.settle()
 	p := s.em.CursorPosition()
 	return p.Y + 1, p.X + 1
 }
@@ -148,6 +163,7 @@ func (s *Screen) Repaint(m vtscan.Modes) (out []byte, ok bool) {
 	}
 	// A panic leaves the results as they start, nil and false.
 	defer s.catch()
+	s.settle()
 	em := s.em
 	var b bytes.Buffer
 	// Every tracked mode off and the cursor shown on the screen the viewer
