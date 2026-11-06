@@ -505,3 +505,37 @@ func TestAScreenThatCannotBeSentIsStillAnswered(t *testing.T) {
 		}
 	}
 }
+
+// An emulator that panics takes the screen with it and nothing else: one
+// line says what it panicked with, the cursor is the corner, and a Screen
+// says OK=false.
+func TestAPanickingScreenIsRetiredOutLoud(t *testing.T) {
+	orig := vtWrite
+	t.Cleanup(func() { vtWrite = orig }) // after the session is done
+	vtWrite = func(em *vt.Emulator, p []byte) (int, error) {
+		if bytes.Contains(p, []byte("boom")) {
+			panic("x/vt fell over")
+		}
+		return orig(em, p)
+	}
+	r := newRig(t, 0, newFakeChild())
+	claim(t, r.terminals)
+	r.c.reads()
+	p := r.link(t)
+	r.c.print(t, "boom\x1b[6n")
+	r.c.waitTyped(t, "\x1b[1;1R")
+	if h, repaint := p.screen(1); h.OK || repaint != "" {
+		t.Fatalf("a screen whose emulator panicked answered %+v %q", h, repaint)
+	}
+	r.c.print(t, "more\x1b[6n")
+	r.c.waitTyped(t, "\x1b[1;1R\x1b[1;1R")
+	var lines []string
+	for _, l := range r.logLines() {
+		if strings.Contains(l, "panicked") {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) != 1 || !strings.Contains(lines[0], "x/vt fell over") {
+		t.Fatalf("the log says %q about the emulator", lines)
+	}
+}
