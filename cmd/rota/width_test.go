@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -256,7 +257,7 @@ func TestCutAndWrapCountColumns(t *testing.T) {
 // account in Japanese, one in Chinese, and a label with emoji in it, a flag
 // and a joined pair among them.
 func wideGrid(width int) *grid {
-	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{6, 5, 2, 1, 0}}
+	g := listing(width)
 	g.add("1", "3", "claude", "仕事用アカウント", "5h 3% (4h 12m)\n7d 29% (3d 2h)\nFable 48%", "95%", "just now", "ok")
 	g.add("2", "5", "claude", "🚀 launch 🇯🇵 team 👩\u200d💻", "-", "95%", "2h ago", "re-auth needed ("+clearedReason+")")
 	g.add("-", "7", "codex", "工作账户", "5h 0%", "90%", "3d ago", "ok (ログインは2日後に切れます)")
@@ -282,22 +283,36 @@ func cellsWhole(t *testing.T, out string) {
 
 // At 60 columns the Japanese account is as wide as the frame says, not
 // four columns wider: every line is the frame's width, every border in the
-// frame's columns, and the names read down their columns whole or cut with
-// their start kept.
+// frame's columns, what is left over is less than any column needs to show
+// more, and the names read down their columns whole or cut with their start
+// kept.
 func TestTableFitsNamesInWideCharacters(t *testing.T) {
-	out := drawn(wideGrid(60))
+	g := wideGrid(60)
+	out := drawn(g)
 	framed(t, out, 60)
 	cellsWhole(t, out)
-	if w := screenWidth(strings.SplitN(out, "\n", 2)[0]); w != 60 {
-		t.Fatalf("the frame is %d wide, and 60 was there to use:\n%s", w, out)
+	header, rows, _ := g.fit()
+	got := widths(header, rows)
+	if left := 60 - g.frame(got); left > 0 {
+		for j, i := range shownAt(g, header) {
+			shape := cutCell
+			if slices.ContainsFunc(g.give, func(x wrap) bool { return x.col == i }) {
+				shape = wrapCell
+			}
+			for _, r := range g.rows {
+				if n := widths([]string{shape(r[i], got[j]+left)}, nil)[0]; n > got[j] && got[j] < widths(g.header, g.rows)[i] {
+					t.Fatalf("%d columns left over, and %s could have used them:\n%s", left, g.header[i], out)
+				}
+			}
+		}
 	}
 	for id, name := range map[string]string{"3": "仕事用アカウント", "5": "🚀 launch 🇯🇵 team 👩\u200d💻", "7": "工作账户"} {
-		got := squeeze(column(out, 3, id))
+		got := squeeze(column(out, "ACCOUNT", id))
 		if got != squeeze(name) && !(strings.HasSuffix(got, "…") && strings.HasPrefix(squeeze(name), strings.TrimSuffix(got, "…"))) {
 			t.Fatalf("account %s reads %q down its column, of %q:\n%s", id, got, name, out)
 		}
 	}
-	if got := squeeze(column(out, 7, "7")); got != squeeze("ok (ログインは2日後に切れます)") && !strings.HasSuffix(got, "…") {
+	if got := squeeze(column(out, "STATUS", "7")); got != squeeze("ok (ログインは2日後に切れます)") && !strings.HasSuffix(got, "…") {
 		t.Fatalf("the Japanese status reads %q:\n%s", got, out)
 	}
 }

@@ -70,7 +70,7 @@ func TestListAtATerminalFitsItsWidth(t *testing.T) {
 				}
 			}
 			framed(t, table[strings.Index(table, "┌"):]+"┘\n", 80)
-			if got := column(table, 7, "2"); squeeze(got) != squeeze("re-auth needed ("+clearedReason+")") {
+			if got := column(table, "STATUS", "2"); squeeze(got) != squeeze("re-auth needed ("+clearedReason+")") {
 				t.Fatalf("the reason, read down its column: %q\n%s", got, out)
 			}
 		})

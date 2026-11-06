@@ -634,22 +634,13 @@ func (c *cli) list(args []string) error {
 		return c.emit(doc)
 	}
 
-	// The headers give their room to the numbers: "#" is the account's place
-	// in the rotation, and CLI is which one it drives.
-	//
-	// On a terminal narrower than the table, the free text gives way first:
-	// STATUS wraps inside its column, then ACCOUNT. Anywhere else the table
-	// is drawn as it always was.
 	width := c.width()
 	if short {
-		// The reading's age belongs beside it here more than anywhere else:
-		// --short reads no usage, so what it shows may be hours old and
-		// nothing else on the line would say so.
-		g := grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "CHECKED"}, width: width, give: []int{3}, keep: []int{5, 2, 1, 0}}
+		g := shortListing(width)
 		for _, a := range shown {
 			g.add(place(a), strconv.Itoa(a.ID), a.Provider, a.Label(), headline(a), checkedAgo(a))
 		}
-		g.render(c.out)
+		c.sayLeftOut(g.render(c.out), width)
 		c.sayLongNotes(shown, width)
 		if withSessions {
 			c.showSessions(sessions.Scan(s, recent), width)
@@ -659,7 +650,7 @@ func (c *cli) list(args []string) error {
 		}
 		return nil
 	}
-	g := grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{6, 5, 2, 1, 0}}
+	g := listing(width)
 	for _, a := range shown {
 		status := string(a.Status())
 		if a.Status() == rota.StatusReauth {
@@ -675,7 +666,7 @@ func (c *cli) list(args []string) error {
 		g.add(place(a), strconv.Itoa(a.ID), a.Provider, a.Label(), strings.Join(usageLines(a), "\n"),
 			strconv.Itoa(rotation.Cutoff(a))+"%", checkedAgo(a), status)
 	}
-	g.render(c.out)
+	c.sayLeftOut(g.render(c.out), width)
 	// UNTIL is the threshold, so say what it decides rather than leaving a
 	// column of percentages to be guessed at.
 	if pick, perr := rotation.Pick(shown); perr == nil {
@@ -696,6 +687,47 @@ func (c *cli) list(args []string) error {
 		fmt.Fprintf(c.err, "warning: %v\n", e)
 	}
 	return nil
+}
+
+// listing is the table rota list draws, with no rows yet, for a terminal
+// width wide (0 for none). The headers give their room to the numbers: "#"
+// is the account's place in the rotation, and CLI is which one it drives.
+//
+// On a terminal narrower than the table, the free text gives way first,
+// but only so far: STATUS wraps to 24 columns, a reason in four or five
+// lines, and then ACCOUNT to 16, an address on two, its name and its
+// domain. Past that CHECKED and UNTIL are left out whole, and CLI only
+// once STATUS is down to 16 too, since it is all that tells a claude
+// account from a codex one with the same address. Then the text wraps on,
+// and USAGE, what the listing is for, is cut last. Anywhere else the table
+// is drawn as it always was.
+func listing(width int) *grid {
+	return &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width,
+		give: []wrap{{7, 24}, {3, 16}}, drop: []leave{{6, 0}, {5, 0}, {2, 16}}, cut: []int{4}}
+}
+
+// shortListing is the table rota list --short draws, the same way. The
+// reading's age belongs beside it here more than anywhere else: --short
+// reads no usage, so what it shows may be hours old and nothing else on the
+// line would say so, and so CHECKED is the last column left out.
+func shortListing(width int) *grid {
+	return &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "CHECKED"}, width: width,
+		give: []wrap{{3, 16}}, drop: []leave{{2, 16}, {5, 0}}, cut: []int{4}}
+}
+
+// sayLeftOut is the note under a table that left columns out to fit the
+// terminal, naming them, so a listing never shows less than it has without
+// saying so and where the rest is. It is nothing when nothing was left out,
+// which off a terminal is always.
+func (c *cli) sayLeftOut(left []string, width int) {
+	if len(left) == 0 {
+		return
+	}
+	names, are, them := left[0], "is", "it"
+	if n := len(left); n > 1 {
+		names, are, them = strings.Join(left[:n-1], ", ")+" and "+left[n-1], "are", "them"
+	}
+	say(c.out, width, fmt.Sprintf("\n%s %s left out to fit this terminal; a wider one or `rota list --json` shows %s.\n", names, are, them))
 }
 
 // sayLongNotes is what a listing has to add about long-lived tokens: nothing
