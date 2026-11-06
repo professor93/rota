@@ -65,6 +65,19 @@ const maxMeta = 1 << 20
 
 // ReadMeta reads a session's record.
 func ReadMeta(dir string) (*Meta, error) {
+	raw, err := readMeta(dir)
+	if err != nil {
+		return nil, err
+	}
+	var m Meta
+	if err := jsonv2.Unmarshal(raw, &m, rota.LenientOptions()); err != nil {
+		return nil, fmt.Errorf("holdwire: %s: %w", MetaPath(dir), err)
+	}
+	return &m, nil
+}
+
+// readMeta is a record's bytes, up to maxMeta of them.
+func readMeta(dir string) ([]byte, error) {
 	f, err := os.Open(MetaPath(dir))
 	if err != nil {
 		return nil, err
@@ -77,11 +90,7 @@ func ReadMeta(dir string) (*Meta, error) {
 	if len(raw) > maxMeta {
 		return nil, fmt.Errorf("holdwire: %s is over %d bytes", MetaPath(dir), maxMeta)
 	}
-	var m Meta
-	if err := jsonv2.Unmarshal(raw, &m, rota.LenientOptions()); err != nil {
-		return nil, fmt.Errorf("holdwire: %s: %w", MetaPath(dir), err)
-	}
-	return &m, nil
+	return raw, nil
 }
 
 // WriteMeta replaces a session's record whole, readable by its owner alone:
