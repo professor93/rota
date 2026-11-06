@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -33,12 +35,12 @@ WantedBy=default.target
 }
 
 func TestTheUnitQuotesOddPaths(t *testing.T) {
-	got := systemdUnit("/opt/my rota/rota", `/s/a "b" 100%`, []string{`PATH=/x\y$z`})
+	got := systemdUnit("/opt/my rota/r$ota", `/s/a "b" 100%`, []string{`PATH=/x\y$z`})
 	for _, w := range []string{
-		`ExecStart="/opt/my rota/rota" serve start --foreground`,
+		`ExecStart="/opt/my rota/r$$ota" serve start --foreground`,
 		`Description=rota daemon for /s/a "b" 100%%`,
 		`Environment="ROTA_HOME=/s/a \"b\" 100%%"`,
-		`Environment="PATH=/x\\y$$z"`,
+		`Environment="PATH=/x\\y$z"`,
 	} {
 		if !strings.Contains(got, w) {
 			t.Errorf("missing %q in:\n%s", w, got)
@@ -84,6 +86,10 @@ func TestAnotherStoreGetsAnotherUnit(t *testing.T) {
 		t.Fatalf("unit %q", s)
 	}
 	h := strings.TrimSuffix(strings.TrimPrefix(s, "rota-"), ".service")
+	sum := sha256.Sum256([]byte(other))
+	if h != hex.EncodeToString(sum[:])[:8] {
+		t.Fatalf("suffix %q is not hex(sha256(store))[:8]", h)
+	}
 	if l != "com.github.professor93.rota-"+h {
 		t.Fatalf("label %q does not share hash %q", l, h)
 	}

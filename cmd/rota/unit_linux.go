@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 )
@@ -56,11 +57,10 @@ func removeUnit(store string) error {
 		return err
 	}
 	name, _ := unitName(store)
-	if err := supervise("systemctl --user disable --now " + name); err != nil {
-		return err
+	serr := supervise("systemctl --user disable --now " + name)
+	rerr := os.Remove(path)
+	if os.IsNotExist(rerr) {
+		rerr = nil
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return supervise("systemctl --user daemon-reload")
+	return errors.Join(serr, rerr, supervise("systemctl --user daemon-reload"))
 }

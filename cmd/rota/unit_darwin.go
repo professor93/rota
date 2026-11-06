@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,11 +44,10 @@ func removeUnit(store string) error {
 		return err
 	}
 	_, label := unitName(store)
-	if err := unitRun("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), label)); err != nil {
-		return err
+	serr := unitRun("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), label))
+	rerr := os.Remove(path)
+	if os.IsNotExist(rerr) {
+		rerr = nil
 	}
-	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return errors.Join(serr, rerr)
 }

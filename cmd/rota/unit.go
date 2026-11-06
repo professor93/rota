@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,7 +22,13 @@ const (
 
 // unitRun runs a supervisor command (systemctl, launchctl). Tests replace it.
 var unitRun = func(name string, args ...string) error {
-	return exec.Command(name, args...).Run()
+	out, err := exec.Command(name, args...).CombinedOutput()
+	if err != nil {
+		if m := strings.TrimSpace(string(out)); m != "" {
+			return fmt.Errorf("%s: %w: %s", name, err, m)
+		}
+	}
+	return err
 }
 
 // supervise runs one supervisor command written as a line, so its option
@@ -58,17 +65,17 @@ func envValue(env []string, key string) string {
 }
 
 // unitEscape makes s safe inside a double-quoted systemd word: backslash and
-// quote are escaped, % and $ doubled (specifiers and variables), and a
-// newline written as \n.
+// quote are escaped, % doubled (specifiers), and a newline written as \n.
+// $ has no meaning in Environment=, so it is left alone there.
 func unitEscape(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "%", "%%", "$", "$$", "\n", `\n`).Replace(s)
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "%", "%%", "\n", `\n`).Replace(s)
 }
 
 func unitWord(s string) string {
 	if s != "" && !strings.ContainsAny(s, " \t\n\"'\\%$;") {
 		return s
 	}
-	return `"` + unitEscape(s) + `"`
+	return `"` + strings.ReplaceAll(unitEscape(s), "$", "$$") + `"`
 }
 
 func systemdUnit(exe, store string, env []string) string {
