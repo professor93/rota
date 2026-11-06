@@ -283,8 +283,8 @@ func TestListAsksNothingForAnAccountWithoutAToken(t *testing.T) {
 			t.Fatalf("the account without one has none, as before: %q", line)
 		}
 	}
-	if !strings.Contains(errOut, "claude/a@x") || !strings.Contains(errOut, "no credential") || strings.Contains(errOut, "http") {
-		t.Fatalf("the warning says there is no credential, not what a network did: %q", errOut)
+	if !strings.Contains(errOut, "claude/a@x") || !strings.Contains(errOut, "no access token") || strings.Contains(errOut, "http") {
+		t.Fatalf("the warning says there is no access token, not what a network did: %q", errOut)
 	}
 
 	out, _, code = call(t, "--json", "list", "--refresh")
@@ -297,7 +297,7 @@ func TestListAsksNothingForAnAccountWithoutAToken(t *testing.T) {
 	if len(got) != 2 || got[1] != "Bearer t2" {
 		t.Fatalf("a forced reading asks for the token's account alone: %q", got)
 	}
-	if !strings.Contains(out, `"warnings"`) || !strings.Contains(out, "no credential") {
+	if !strings.Contains(out, `"warnings"`) || !strings.Contains(out, "no access token") {
 		t.Fatalf("json warns the same way:\n%s", out)
 	}
 }
