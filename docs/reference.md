@@ -2689,9 +2689,12 @@ to read*:
 usage window has a line of its own under USAGE, most important first; rows
 that span lines are ruled apart, one-line rows (as in `--short`) are not.
 A terminal narrower than the table gets wrapped cells, STATUS first and then
-ACCOUNT; only a terminal too narrow even for that has its other cells cut,
-USAGE first, each with one "…" that keeps the start. The notes under the
-table wrap at their spaces too, and a pipe or a file gets the table as it is.
+ACCOUNT; only a terminal too narrow even for that has its other cells cut:
+USAGE first, between the words of a reading, then the short columns, and
+STATUS and ACCOUNT last of all, below about 45 columns. Each cut line keeps
+its start and ends in one "…", and a wrapped column narrower than its name has
+its header cut the same way, to `ACC…` or `STA…`. The notes under the table
+wrap at their spaces too, and a pipe or a file gets the table as it is.
 
 A spent unscoped window shows as `limited`; a dead credential as `re-auth
 needed`. Model-scoped windows (a separate weekly Fable budget, say) are shown

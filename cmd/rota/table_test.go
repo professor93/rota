@@ -36,6 +36,24 @@ func ownersGrid(width int) *grid {
 	return g
 }
 
+// spentGrid is a listing whose five-hour window is spent: "5h 100%" is the
+// reading a cut must not turn into another number.
+func spentGrid(width int) *grid {
+	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{6, 5, 2, 1, 0}}
+	g.add("1", "3", "claude", "manager.ican@gmail.com", "5h 100% (4h 12m)\n7d 29% (3d 2h)\nFable 48%", "95%", "just now", "limited")
+	g.add("2", "5", "claude", "work.account@example.com", "-", "95%", "2h ago", "re-auth needed ("+clearedReason+")")
+	return g
+}
+
+// longAddressGrid has one reading, on the row of an address too long for
+// any narrow column.
+func longAddressGrid(width int) *grid {
+	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{6, 5, 2, 1, 0}}
+	g.add("1", "3", "claude", "a.very.long.address.for.work@example.com", "5h 3% (4h 12m)", "95%", "just now", "ok")
+	g.add("2", "5", "claude", "b@x", "-", "95%", "2h ago", "re-auth needed ("+clearedReason+")")
+	return g
+}
+
 func shortGrid(width int) *grid {
 	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "CHECKED"}, width: width, give: []int{3}, keep: []int{5, 2, 1, 0}}
 	g.add("1", "3", "claude", "manager.ican@gmail.com", "5h 3%", "just now")
@@ -243,6 +261,120 @@ func TestShortTableWrapsTheAddressAtFifty(t *testing.T) {
 	}
 	if got := column(out, 3, "3"); squeeze(got) != "manager.ican@gmail.com" {
 		t.Fatalf("the address, read down its column: %q\n%s", got, out)
+	}
+}
+
+// A cut that lands on a space, or goes back to one, leaves its column
+// narrower than it was given, and what that frees goes on to the next
+// column that can use it. At these widths the frame used to come out a
+// column short with USAGE still cut; now it is as wide as the terminal.
+func TestTableGivesWhatACutLeavesToTheNextColumn(t *testing.T) {
+	for _, width := range []int{72, 73, 74, 77, 78} {
+		out := drawn(longAddressGrid(width))
+		framed(t, out, width)
+		if !strings.Contains(out, "…") {
+			t.Fatalf("%d columns needs a cut:\n%s", width, out)
+		}
+		if got := utf8.RuneCountInString(strings.SplitN(out, "\n", 2)[0]); got != width {
+			t.Fatalf("a frame %d wide with a cut in it, on a %d-column terminal:\n%s", got, width, out)
+		}
+	}
+	// At any width, what is left over is less than any cut column needs to
+	// show more of what it cut.
+	for name, mk := range map[string]func(int) *grid{"golden": goldenGrid, "owners": ownersGrid, "spent": spentGrid, "long address": longAddressGrid, "short": shortGrid} {
+		for width := 40; width <= 130; width++ {
+			g := mk(width)
+			header, rows := g.fit()
+			got := widths(header, rows)
+			left := width - frame(got)
+			if left <= 0 {
+				continue
+			}
+			for i := range got {
+				col := []string{g.header[i]}
+				isCut := false
+				for ri, r := range g.rows {
+					col = append(col, r[i])
+					isCut = isCut || strings.HasSuffix(rows[ri][i], "…") && !strings.HasSuffix(r[i], "…")
+				}
+				if !isCut {
+					continue // not cut, or wrapped
+				}
+				wider := 0
+				for _, c := range col {
+					for line := range strings.SplitSeq(cutCell(c, got[i]+left), "\n") {
+						wider = max(wider, utf8.RuneCountInString(line))
+					}
+				}
+				if wider > got[i] {
+					t.Errorf("%s at %d: %d left over, and %s could have shown more in it:\n%s", name, width, left, g.header[i], drawn(g))
+				}
+			}
+		}
+	}
+}
+
+// A cut reading ends at a space, never inside a number: on a narrow
+// terminal a spent window says "5h 100%…", or failing that "5h…", and never
+// "5h 10…", which reads as a different number.
+func TestTableCutsAReadingBetweenItsWords(t *testing.T) {
+	for _, width := range []int{66, 70, 72} {
+		for name, mk := range map[string]func(int) *grid{"spent": spentGrid, "golden": goldenGrid} {
+			g := mk(width)
+			out := drawn(g)
+			framed(t, out, width)
+			_, rows := g.fit()
+			for ri, r := range g.rows {
+				was := strings.Split(r[4], "\n")
+				for k, line := range strings.Split(rows[ri][4], "\n") {
+					kept, isCut := strings.CutSuffix(line, "…")
+					if !isCut {
+						continue
+					}
+					if !strings.HasPrefix(was[k], kept+" ") {
+						t.Fatalf("%s at %d: %q is %q cut inside a word:\n%s", name, width, line, was[k], out)
+					}
+				}
+			}
+			if name == "spent" && !strings.Contains(out, "│ 5h 100%…") {
+				t.Fatalf("at %d USAGE is wide enough for the spent window's percentage:\n%s", width, out)
+			}
+		}
+	}
+}
+
+func TestCutCellKeepsWholeWords(t *testing.T) {
+	for _, c := range []struct {
+		in   string
+		n    int
+		want string
+	}{
+		{"5h 100% (4h 12m)", 16, "5h 100% (4h 12m)"},
+		{"5h 100% (4h 12m)", 9, "5h 100%…"},
+		{"5h 100% (4h 12m)", 8, "5h 100%…"},
+		{"5h 100% (4h 12m)", 7, "5h…"},
+		{"5h 100% (4h 12m)", 3, "5h…"},
+		{"5h 100% (4h 12m)", 2, "5…"},
+		{"5h 3% (4h 12m)", 11, "5h 3% (4h…"},
+		{"5h 3% (4h 12m)", 9, "5h 3%…"}, // never "5h 3% (…"
+		{"7d 29% (3d 2h)", 7, "7d 29%…"},
+		{"7d 29% (3d 2h)", 6, "7d…"},
+		{"Fable 48%", 9, "Fable 48%"},
+		{"Fable 48%", 8, "Fable…"},
+		// No space to go back to, or one that would leave a single letter:
+		// cut where n falls.
+		{"Fable 48%", 5, "Fabl…"},
+		{"a bcdef", 5, "a bc…"},
+		// Each line of a cell on its own.
+		{"5h 100% (4h 12m)\n7d 29% (3d 2h)", 7, "5h…\n7d 29%…"},
+	} {
+		if got := cutCell(c.in, c.n); got != c.want {
+			t.Errorf("cutCell(%q, %d) = %q, want %q", c.in, c.n, got, c.want)
+		}
+	}
+	// What a pipe gets through clip is cut where n falls, as it always was.
+	if got := cut("5h 100% (4h 12m)", 6); got != "5h 10…" {
+		t.Errorf("cut is not cutCell: %q", got)
 	}
 }
 
