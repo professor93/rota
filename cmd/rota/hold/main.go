@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -139,7 +141,9 @@ func (h *holder) start(in io.Reader, open func() (*store.Store, error)) error {
 	// process that may run for days starts.
 	_ = st.Close()
 
-	env := noControl(termenv.Env(termenv.Scrub(p.env)))
+	env := noControl(termenv.Env(termenv.Scrub(p.env)), holdwire.CtlSock(h.terminals), func(name string) {
+		h.log("a variable that names the control socket is kept from the CLI", "name", name)
+	})
 	cwd := h.req.Cwd
 	if cwd == "" {
 		if cwd, err = os.Getwd(); err != nil {
@@ -405,15 +409,35 @@ func (h *holder) say(r holdwire.Ready) error {
 	return err
 }
 
-// noControl drops anything that names the daemon's control socket: a CLI
-// inside a held session reaches the daemon only the way everybody else
-// does, never by being told where its socket is.
-func noControl(env []string) []string {
+// ctlSock is the control socket's own name, as a path element.
+var ctlSock = filepath.Base(holdwire.CtlSock(""))
+
+// noControl drops every variable that names the daemon's control socket: a
+// CLI inside a held session reaches the daemon only the way everybody else
+// does, never by being told where its socket is. A value names it when it
+// holds ctl, the socket's path, or has ctl.sock for a whole path element;
+// a value with those letters only inside a longer name — a store under a
+// folder called myctl.sock.d — is kept, so an account's CLAUDE_CONFIG_DIR is
+// never lost to a coincidence. dropped hears each variable's name, never
+// its value.
+func noControl(env []string, ctl string, dropped func(name string)) []string {
 	out := make([]string, 0, len(env))
 	for _, e := range env {
-		if !strings.Contains(e, "ctl.sock") {
-			out = append(out, e)
+		name, value, _ := strings.Cut(e, "=")
+		if namesControl(value, ctl) {
+			dropped(name)
+			continue
 		}
+		out = append(out, e)
 	}
 	return out
+}
+
+// namesControl says whether value is, or holds, a path to a control socket.
+func namesControl(value, ctl string) bool {
+	if ctl != "" && strings.Contains(value, ctl) {
+		return true
+	}
+	elems := strings.FieldsFunc(value, func(r rune) bool { return r == '/' || r == os.PathListSeparator })
+	return slices.Contains(elems, ctlSock)
 }
