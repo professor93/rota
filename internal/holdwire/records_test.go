@@ -64,6 +64,17 @@ func TestScanTellsEveryStateApart(t *testing.T) {
 	unreadable := record(t, terminals, "000000000000000d", &Meta{Kind: KindAccount, Account: 4, Protocol: 9, Version: "9.0.0", Started: at(2)}, "")
 	lock(t, unreadable)
 	record(t, terminals, "000000000000000e", nil, "{not json")
+	// A holder starting: it holds its lock and has yet to write meta.json.
+	// Broken, as the other, but locked, which a sweep must see without
+	// asking again.
+	starting := Dir(terminals, "000000000000000f")
+	if err := os.MkdirAll(starting, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	lock(t, starting)
+	if err := os.Chtimes(starting, at(1), at(1)); err != nil {
+		t.Fatal(err)
+	}
 
 	// Things that live beside the records and are none of them.
 	for _, f := range []string{"ctl.sock", "daemon.lock", "0123456789abcdef.log"} {
@@ -79,26 +90,30 @@ func TestScanTellsEveryStateApart(t *testing.T) {
 
 	got := Scan(terminals)
 	want := []struct {
-		id    string
-		state RecordState
+		id     string
+		state  RecordState
+		locked bool
 	}{
-		{"000000000000000a", StateLive},
-		{"000000000000000b", StateEnded},
-		{"000000000000000c", StateInterrupted},
-		{"000000000000000d", StateUnreadable},
-		{"000000000000000e", StateBroken},
+		{"000000000000000a", StateLive, true},
+		{"000000000000000b", StateEnded, false},
+		{"000000000000000c", StateInterrupted, false},
+		{"000000000000000d", StateUnreadable, true},
+		{"000000000000000e", StateBroken, false},
+		{"000000000000000f", StateBroken, true},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("%d records: %+v", len(got), got)
 	}
-	// Newest first; the broken one has no start of its own and sorts by its
-	// directory, which is the newest thing here.
+	// Newest first. The broken ones have no start of their own and sort by
+	// their directories: the one with a bad meta.json is the newest thing
+	// here, and the starting one was dated before everything else.
 	byID := map[string]Record{}
 	for _, r := range got {
 		byID[r.ID] = r
 	}
-	if got[0].ID != "000000000000000e" || got[1].ID != "000000000000000a" || got[4].ID != "000000000000000d" {
-		t.Errorf("not newest first: %s %s ... %s", got[0].ID, got[1].ID, got[4].ID)
+	if got[0].ID != "000000000000000e" || got[1].ID != "000000000000000a" || got[4].ID != "000000000000000d" ||
+		got[5].ID != "000000000000000f" {
+		t.Errorf("not newest first: %s %s ... %s %s", got[0].ID, got[1].ID, got[4].ID, got[5].ID)
 	}
 	for _, w := range want {
 		r, ok := byID[w.id]
@@ -109,12 +124,20 @@ func TestScanTellsEveryStateApart(t *testing.T) {
 		if r.State != w.state {
 			t.Errorf("%s is %s, want %s (%v)", w.id, r.State, w.state, r.Err)
 		}
+		if r.Locked != w.locked {
+			t.Errorf("%s is locked: %v, want %v", w.id, r.Locked, w.locked)
+		}
 		if r.Dir != Dir(terminals, w.id) {
 			t.Errorf("%s is at %s", w.id, r.Dir)
 		}
 	}
-	if r := byID["000000000000000e"]; r.Err == nil || r.Meta != nil {
-		t.Errorf("a broken record says nothing about why: %+v", r)
+	for _, id := range []string{"000000000000000e", "000000000000000f"} {
+		if r := byID[id]; r.Err == nil || r.Meta != nil {
+			t.Errorf("a broken record says nothing about why: %+v", r)
+		}
+	}
+	if r := byID["000000000000000f"]; !r.Stopped.IsZero() {
+		t.Errorf("a session with no meta.json yet stopped at %v", r.Stopped)
 	}
 	if r := byID["000000000000000c"]; !r.Stopped.Equal(stopped) {
 		t.Errorf("interrupted at %v, want meta.json's mtime %v", r.Stopped, stopped)
