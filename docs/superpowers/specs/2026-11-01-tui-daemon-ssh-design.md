@@ -488,8 +488,8 @@ only while it runs.
   says who can reach it. `0.0.0.0` is offered last, with that warning.
 - A non-loopback address gets HTTPS with a certificate made for this run, and
   rota prints its fingerprint to compare. Plain HTTP on a non-loopback address
-  follows the owner's answer on the decisions page; rota's rule for the server
-  is TLS.
+  is refused, with no flag to allow it: the owner chose HTTPS only on
+  2026-11-04, matching rota's rule for the server.
 - The link carries a random secret of 256 bits, in the path, and any other path
   answers 404. It ends after one accepted login, after 10 minutes, or on Ctrl-C,
   whichever comes first, and the listener closes with it.
