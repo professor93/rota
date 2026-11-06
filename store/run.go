@@ -28,8 +28,9 @@ import (
 // starts the CLI as a child — a terminal, a shared session — holds it until
 // that child ends and then releases it; a caller that replaces this process
 // with the CLI calls KeepClaimsAcrossExec immediately before, so the claim
-// outlives the replacing; and a caller that does not go through with either
-// calls release.
+// outlives the replacing; a holder does both, so the claim outlives the
+// holder too while its CLI runs; and a caller that does not go through with
+// any of them calls release.
 func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env []string, release func(), err error) {
 	cmd, release, err := s.prepare(ctx, a, true)
 	if err != nil {
@@ -375,23 +376,33 @@ var (
 )
 
 // heldClaims are the claim files this process holds right now, so that the
-// one moment they must outlive it — the handover — can find them.
+// one moment they must outlive it — the handover, or a holder starting its
+// CLI — can find them.
 var (
 	heldMu     sync.Mutex
 	heldClaims = map[*os.File]bool{}
 )
 
 // KeepClaimsAcrossExec arranges for every claim this process holds to
-// survive the exec it is about to make, and is called by nothing but the
-// handover, immediately before it replaces this process with the vendor CLI.
+// survive the exec it is about to make. It has two callers, both about to
+// start the one CLI the claim is for:
+//
+//   - the handover, immediately before it replaces this process with the
+//     vendor CLI;
+//   - `rota serve hold`, immediately before it starts the CLI it holds on a
+//     pseudo-terminal. The holder keeps running, and every process it starts
+//     from then on would inherit the claim too, so it starts nothing else:
+//     the CLI is its one child.
 //
 // Go opens every file close-on-exec, which is right for every other moment:
 // a child started while a claim is held — another account's CLI, a shell on
 // the server's terminal page — must not inherit the claim and keep the
-// account looking busy long after its run ended. The handover is the one
+// account looking busy long after its run ended. These two are the
 // exception, because there the CLI is the run, and the claim has to be held
-// by whatever is running rather than by the process image that took it. The
-// kernel releases it when the CLI finally exits, however it exits.
+// by whatever is running rather than by the process that took it: a holder
+// killed outright must not free an account its CLI still works on. The
+// kernel releases it when the CLI, and whatever of its own it started, has
+// exited, however it exits.
 func KeepClaimsAcrossExec() {
 	heldMu.Lock()
 	defer heldMu.Unlock()
@@ -402,7 +413,8 @@ func KeepClaimsAcrossExec() {
 
 // claimFile claims an account whose CLI owns its credential file: shared or
 // exclusively. The claim stays close-on-exec, so no child of this process
-// holds it; KeepClaimsAcrossExec is the handover's own exception.
+// holds it; KeepClaimsAcrossExec is the exception for the handover and the
+// holder, whose CLI is the run.
 //
 // ok is false when someone else holds it in a way that excludes this claim.
 // That is an answer rather than a failure — the caller wants to know whether
