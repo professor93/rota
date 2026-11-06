@@ -78,13 +78,25 @@ func TestModesFollowTheStream(t *testing.T) {
 	if bytes.Contains(ResetModes(), []byte("1049")) || bytes.Contains(ResetModes(), []byte("?47")) {
 		t.Errorf("ResetModes() touched the screen: %q", ResetModes())
 	}
-	if got, want := string(ResetAll()), string(ResetModes())+"\x1b[?1049l"; got != want {
-		t.Errorf("ResetAll() = %q, want ResetModes() and ESC[?1049l: %q", got, want)
+	if got, want := string(ResetAll()), string(ResetModes())+"\x1b[?1049l\x1b[=0;1u"; got != want {
+		t.Errorf("ResetAll() = %q, want ResetModes(), ESC[?1049l and ESC[=0;1u: %q", got, want)
 	}
 	fresh.Feed(append([]byte("\x1b[?1049h"), want.Set()...))
 	fresh.Feed(ResetAll())
 	if fresh.Modes() != (Modes{}) {
 		t.Errorf("after ResetAll Modes = %+v, want none", fresh.Modes())
+	}
+	// The kitty flags are per screen, so ResetAll clears the main screen's
+	// too: flags a CLI pushed before it entered the alternate screen do not
+	// outlive it, and neither screen keeps any.
+	s = NewScanner()
+	s.Feed([]byte("\x1b[>1u\x1b[?1049h\x1b[>4u"))
+	s.Feed(ResetAll())
+	if s.Modes() != (Modes{}) {
+		t.Errorf("after main-screen flags, the alternate screen and ResetAll, Modes = %+v, want none", s.Modes())
+	}
+	if s.Feed([]byte("\x1b[?1049h")); s.Modes() != (Modes{AltScreen: true}) {
+		t.Errorf("back on the alternate screen after ResetAll, Modes = %+v, want no flags", s.Modes())
 	}
 	if len(Modes{}.Set()) != 0 {
 		t.Errorf("Modes{}.Set() = %q, want nothing", Modes{}.Set())
@@ -208,6 +220,7 @@ func FuzzScanner(f *testing.F) {
 		"\x1b]0;work\a\a\x1b]9;done\x1b\\\x1b]777;notify;T;B\a",
 		"x\x1b[?62;22cy\x1b[24;80R\x1b[1;2R\x1b[A\x1b",
 		"\x1b]11;rgb:0000/0000/0000\x1b\\\x1b[?2004;1$y\x1b[?1u\x1bP>|xterm(390)\x1b\\",
+		"\x1b]1\r\x03", "\x1bP1\x7f\x1b_G\t", "\x1b]1\x1b\r", "\x1b]ltitle\x1b\\\x1b[>1u\x1b[?1049h\x1b[>4u",
 	} {
 		f.Add([]byte(s), uint16(len(s)/2))
 	}
@@ -231,14 +244,32 @@ func FuzzScanner(f *testing.F) {
 		}
 
 		var f ReplyFilter
-		out := append(f.Strip(p[:k]), f.Strip(p[k:])...)
+		a, b := f.Strip(p[:k]), f.Strip(p[k:])
+		out := append(a, b...)
 		if len(out) > len(p) {
 			t.Errorf("Strip gave %d bytes for %d", len(out), len(p))
+		}
+		// A key no reply holds, Enter, Ctrl+C or Backspace among them, is
+		// typed in the frame it arrives in: never dropped, never held.
+		if !bytes.Equal(keyControls(a), keyControls(p[:k])) || !bytes.Equal(keyControls(b), keyControls(p[k:])) {
+			t.Errorf("Strip held or dropped a control key: %q and %q became %q and %q", p[:k], p[k:], a, b)
 		}
 		if !bytes.Contains(p, []byte{0x1b}) && !bytes.Equal(out, p) {
 			t.Errorf("Strip changed input without an escape: %q became %q", p, out)
 		}
 	})
+}
+
+// keyControls is the C0 controls and DELs in p other than ESC and BEL, the
+// keys no terminal's reply holds.
+func keyControls(p []byte) []byte {
+	var out []byte
+	for _, b := range p {
+		if b < 0x20 && b != 0x1b && b != 0x07 || b == 0x7f {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 func checkResult(t *testing.T, r Result, n int) {

@@ -76,19 +76,23 @@ func (m Modes) Set() []byte {
 	return b
 }
 
-// resetModes is every tracked mode off and the cursor shown, on whichever
-// screen is in use.
+// resetModes is every tracked mode off and the cursor shown, on the screen in
+// use.
 const resetModes = "\x1b[=0;1u\x1b[?1l\x1b[?2004l\x1b[?1004l" +
 	"\x1b[?9l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l" +
 	"\x1b[?25h"
 
-// ResetModes turns every tracked mode off and shows the cursor, and leaves
-// the screen alone: a repaint resets the modes and then chooses the screen.
+// ResetModes turns every tracked mode off and shows the cursor. It acts on
+// the screen in use only and never switches screens. The kitty flags are
+// each screen's own, so a caller that switches screens afterwards clears the
+// new screen's flags with ESC [ = 0 ; 1 u, as ResetAll does: Set writes
+// nothing for no flags.
 func ResetModes() []byte { return []byte(resetModes) }
 
-// ResetAll is ResetModes followed by leaving the alternate screen, which is
-// what a viewer's terminal needs when a session lets go of it.
-func ResetAll() []byte { return []byte(resetModes + "\x1b[?1049l") }
+// ResetAll is ResetModes, then leaving the alternate screen, then clearing
+// the main screen's kitty flags, which are its own. It is what a viewer's
+// terminal needs when a session lets go of it.
+func ResetAll() []byte { return []byte(resetModes + "\x1b[?1049l\x1b[=0;1u") }
 
 // The kitty keyboard protocol keeps seven bits of flags and a stack of eight
 // entries per screen, the one in use among them; these are kitty's numbers.
@@ -286,16 +290,16 @@ func (s *Scanner) csi(b []byte, end int, r *Result) {
 	case c.final == 'c' && inter == "" && isZero(ps):
 		switch c.marker {
 		case 0:
-			r.reply(da1)
+			r.reply([]byte(da1))
 		case '>':
-			r.reply(da2)
+			r.reply([]byte(da2))
 		}
 	case c.final == 'q' && c.marker == '>' && inter == "" && isZero(ps):
-		r.reply(xtversion)
+		r.reply([]byte(xtversion))
 	case c.final == 'n' && inter == "" && len(ps) == 1:
 		switch {
 		case c.marker == 0 && ps[0] == 5:
-			r.reply(dsrOK)
+			r.reply([]byte(dsrOK))
 		case (c.marker == 0 || c.marker == '?') && ps[0] == 6:
 			r.CPR = append(r.CPR, CPR{End: end, Private: c.marker == '?'})
 		}

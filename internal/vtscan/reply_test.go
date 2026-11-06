@@ -69,6 +69,18 @@ func TestAnswersAreFixed(t *testing.T) {
 		t.Errorf("XTGETTCAP with a name that is not hex answered %q, want %q", got, want)
 	}
 
+	// A reply is its receiver's own: writing over one changes no later answer.
+	fixed := "\x1b[c\x1b[>c\x1b[>q\x1b[5n"
+	want := "\x1b[?62;22c\x1b[>1;10;0c\x1bP>|xterm(390)\x1b\\\x1b[0n"
+	for _, x := range NewScanner().Feed([]byte(fixed)).Replies {
+		for i := range x {
+			x[i] = 'X'
+		}
+	}
+	if got := joined(NewScanner().Feed([]byte(fixed))); got != want {
+		t.Errorf("after a holder wrote over its replies, the fixed answers became %q, want %q", got, want)
+	}
+
 	// Plain output and sequences that ask nothing get nothing.
 	r = NewScanner().Feed([]byte("hello \x1b[1;31mred\x1b[0m\r\n\x1b]0;title\a\x1b[=c\x1bP$qm\x1b\\"))
 	if len(r.Replies) != 0 {
@@ -155,6 +167,16 @@ func TestRepliesAreStrippedAndKeysAreNot(t *testing.T) {
 		{"Escape then Ctrl+C", "\x1b\x03", "\x1b\x03"},
 		{"Alt+é", "\x1bé", "\x1bé"},
 		{"Alt+]", "\x1b]a", "\x1b]a"},
+		{"Alt+] alone", "\x1b]", "\x1b]"},
+		{"Alt+Shift+P alone", "\x1bP", "\x1bP"},
+		{"Alt+_ alone", "\x1b_", "\x1b_"},
+		{"Alt+] 1 Enter", "\x1b]1\r", "\x1b]1\r"},
+		{"Alt+Shift+P 1 Ctrl+C", "\x1bP1\x03", "\x1bP1\x03"},
+		{"Alt+] 1 Backspace", "\x1b]1\x7f", "\x1b]1\x7f"},
+		{"Alt+_ G Tab", "\x1b_G\t", "\x1b_G\t"},
+		{"Alt+Shift+P 1 Ctrl+G", "\x1bP1\a", "\x1bP1\a"},
+		{"title report", "\x1b]lsome title\x1b\\", ""},
+		{"icon label report", "\x1b]Licon\x1b\\", ""},
 		{"Alt+Space", "\x1b ", "\x1b "},
 		{"a CSI cut off", "\x1b[1;", "\x1b[1;"},
 		{"typing", "héllo\r", "héllo\r"},
@@ -165,11 +187,34 @@ func TestRepliesAreStrippedAndKeysAreNot(t *testing.T) {
 		}
 	}
 
+	// Keys are never held behind the start of a string. One alone in its
+	// frame is typed at once, like a lone Escape, and a control character or
+	// DEL inside a held string, which no reply holds, shows it was typing:
+	// the held bytes and that key are typed then, in order.
+	for _, frames := range [][2][]string{
+		{{"\x1b]", "1", "\r", "\x03"}, {"\x1b]", "1", "\r", "\x03"}},
+		{{"\x1bP", "1", "\r", "\x03"}, {"\x1bP", "1", "\r", "\x03"}},
+		{{"\x1b]1", "\r", "a"}, {"", "\x1b]1\r", "a"}},
+		{{"\x1b]1", "\x03"}, {"", "\x1b]1\x03"}},
+		{{"\x1bP1", "\x7f"}, {"", "\x1bP1\x7f"}},
+		{{"\x1b]12", "3\r"}, {"", "\x1b]123\r"}},
+		{{"\x1b]1\x1b", "\r"}, {"", "\x1b]1\x1b\r"}},
+		{{"\x1b_G", "\x03"}, {"", "\x1b_G\x03"}},
+	} {
+		var f ReplyFilter
+		for i, in := range frames[0] {
+			if got := f.Strip([]byte(in)); string(got) != frames[1][i] {
+				t.Errorf("frames %q: frame %d gave %q, want %q", frames[0], i, got, frames[1][i])
+			}
+		}
+	}
+
 	// An OSC reply split across two frames is held, then dropped whole.
-	// A cut right after its ESC is the one place it cannot be: a lone ESC
-	// at the end of a frame is the Escape key, and is never delayed.
+	// A cut right after its ESC, or right after its ESC ], is the one place
+	// it cannot be: a lone ESC at the end of a frame is the Escape key and
+	// a bare ESC ] is Alt+], and neither is delayed.
 	reply := "\x1b]11;rgb:0000/0000/0000\x1b\\"
-	for i := 2; i < len(reply); i++ {
+	for i := 3; i < len(reply); i++ {
 		var f ReplyFilter
 		a, b := f.Strip([]byte(reply[:i])), f.Strip([]byte(reply[i:]))
 		if len(a) != 0 || len(b) != 0 {
