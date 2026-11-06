@@ -1,6 +1,10 @@
 package main
 
-import "unicode"
+import (
+	"strings"
+	"unicode"
+	"unicode/utf8"
+)
 
 // screenWidth is how many columns of a terminal s takes: what a table pads
 // and wraps by, since a name in Chinese, Japanese or Korean, or one with an
@@ -176,4 +180,63 @@ func prefix(r []rune, n int) int {
 		i = end
 	}
 	return len(r)
+}
+
+// suffix is how many of r's runes, counted back from its end, fit in n
+// columns: the characters (see char) from the first one whose start leaves
+// no more than n columns to draw, so it agrees with screenWidth on every
+// width, and neither a wide character nor an emoji is ever split — the one
+// the edge would halve is left out whole, and nothing is kept from the
+// middle of one.
+func suffix(r []rune, n int) int {
+	var at, ws []int // where each character starts, and its columns
+	left := 0        // the columns from at[j] to the end
+	for i := 0; i < len(r); {
+		end, w := char(r, i)
+		at, ws = append(at, i), append(ws, w)
+		left += w
+		i = end
+	}
+	for j, i := range at {
+		if left <= n {
+			return len(r) - i
+		}
+		left -= ws[j]
+	}
+	return 0
+}
+
+// chars is how many characters s has (see char): a letter with the marks on
+// it is one, and so is an emoji however many runes spell it.
+func chars(s string) int {
+	r := []rune(s)
+	n := 0
+	for i := 0; i < len(r); n++ {
+		i, _ = char(r, i)
+	}
+	return n
+}
+
+// printable is s with every control character but the newline — a tab, a
+// carriage return, an escape, DEL — and every byte that is not UTF-8 made a
+// space. Each moves a terminal's cursor where no count of columns can
+// follow it, or is drawn in a way the count cannot know, so a directory with
+// a tab in it would push the rest of its row out of line.
+func printable(s string) string {
+	var b strings.Builder
+	done := 0 // how much of s is in b, or 0 while nothing needed a space
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if r == utf8.RuneError && size == 1 || r != '\n' && unicode.IsControl(r) {
+			b.WriteString(s[done:i])
+			b.WriteByte(' ')
+			done = i + size
+		}
+		i += size
+	}
+	if done == 0 {
+		return s
+	}
+	b.WriteString(s[done:])
+	return b.String()
 }
