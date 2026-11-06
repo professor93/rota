@@ -28,8 +28,8 @@ func (s *Session) emulate() {
 }
 
 // catchUp feeds the screen the ring up to the last ground point, cutting at
-// each cursor query to answer it with the cursor as of that byte. The caller
-// holds s.em.mu.
+// each cursor query to answer it with the cursor as of that byte. The pieces
+// are one batch, and share one budget of repeats. The caller holds s.em.mu.
 //
 // A screen the ring has overtaken cannot know what it missed, so it is
 // retired for the session's life, said once, and the cursor is the corner
@@ -65,6 +65,9 @@ func (s *Session) catchUp() {
 		s.screen.Close()
 		s.log("the screen fell a whole ring behind its CLI and is retired; viewers get the ring replayed",
 			"behind", from-s.em.off)
+	}
+	if live {
+		s.screen.Refill()
 	}
 	at := s.em.off
 	for _, d := range dues {

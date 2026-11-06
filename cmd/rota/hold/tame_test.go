@@ -259,8 +259,9 @@ func TestALongRunIsNotHeldForever(t *testing.T) {
 // lock, 4 KiB of ESC[99999999b at 200×60. A run of REPs one straight
 // after another is one REP of their total, which the screen draws two
 // screens of and then only the remainder of each. Past two screens of
-// repeats beyond a row's worth each, a write drops a REP that would draw
-// more; a REP of a row or less is never dropped.
+// repeats beyond a row's worth each, a batch of writes drops a REP that
+// would draw more, until the next Refill; a REP of a row or less is never
+// dropped.
 func TestAWriteOfRepeatsTakesNoTime(t *testing.T) {
 	const w, h, size = 200, 60, 32 << 10
 	const rep = "\x1b[99999999b"
@@ -296,6 +297,32 @@ func TestAWriteOfRepeatsTakesNoTime(t *testing.T) {
 		want := unguarded(t, w, h, fmt.Sprintf("x\x1b[%db%s", 2*w*h+99999999%w, strings.Repeat("x", k-1)))
 		if d := screenDiff("budget", "screen", doc(t, want), doc(t, s)); d != "" {
 			t.Errorf("%d REPs between characters:\n%s", k, d)
+		}
+	})
+	t.Run("a batch in pieces", func(t *testing.T) {
+		// What the holder writes for a read with a cursor query after each
+		// REP: a piece for each query, and one budget for all of them,
+		// which the next batch gets afresh.
+		unit := "x" + rep + "\x1b[6n"
+		k := size / len(unit)
+		start := time.Now()
+		s := NewScreen(w, h)
+		t.Cleanup(s.Close)
+		for range k {
+			s.Write([]byte(unit))
+		}
+		if took := time.Since(start); took > slow*200*time.Millisecond {
+			t.Errorf("%d pieces took %v", k, took)
+		}
+		s.Refill()
+		s.Write([]byte(unit))
+		if !s.OK() {
+			t.Fatal("the screen retired")
+		}
+		first := fmt.Sprintf("x\x1b[%db", 2*w*h+99999999%w)
+		want := unguarded(t, w, h, first+strings.Repeat("x", k-1)+first)
+		if d := screenDiff("budget", "screen", doc(t, want), doc(t, s)); d != "" {
+			t.Errorf("%d pieces of a REP between characters, then one more batch:\n%s", k, d)
 		}
 	})
 	t.Run("rows of a TUI", func(t *testing.T) {
