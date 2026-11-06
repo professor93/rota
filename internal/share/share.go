@@ -158,6 +158,8 @@ type Conn struct {
 	// closed is under the same lock, so a frame is never written to a
 	// descriptor that has just been handed back to the kernel.
 	closed bool
+	// shut makes the descriptor's own close happen once, outside the lock.
+	shut sync.Once
 	// beat is how long a link may go without a frame before it is treated
 	// as gone. Both ends ping well inside it, and any frame at all refreshes
 	// it: an active terminal never reaches it.
@@ -266,16 +268,17 @@ func (c *Conn) Clear() {
 }
 
 // Close ends the link. It is safe to call twice, because both the reader and
-// whatever noticed the ending call it.
+// whatever noticed the ending call it. The socket is closed before the lock
+// is taken: a Send stuck writing to a peer that stopped reading holds that
+// lock, and closing the socket is what lets it return, so waiting for the
+// lock first would wait out the write deadline.
 func (c *Conn) Close() error {
+	var err error
+	c.shut.Do(func() { err = c.c.Close() })
 	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil
-	}
 	c.closed = true
 	c.mu.Unlock()
-	return c.c.Close()
+	return err
 }
 
 // Unmarshal reads a document out of a payload, so neither end has to name

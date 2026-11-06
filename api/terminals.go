@@ -329,15 +329,23 @@ func (s *Server) chooseTerminal(r *http.Request, kind string, id int) (*store.St
 		s.log.Error("opening the store", "err", err)
 		return nil, nil, refuse(http.StatusInternalServerError, "the account store could not be opened")
 	}
+	// Closed on every way out but success, a panic included: the store's
+	// file lock is otherwise kept until the collector finds the store.
+	handed := false
+	defer func() {
+		if !handed {
+			st.Close()
+		}
+	}()
 	rotation.Backfill(st)
 	a, err := rotation.Choose(r.Context(), st, id)
 	if err == nil {
 		err = st.Launchable(r.Context(), a)
 	}
 	if err != nil {
-		st.Close()
 		return nil, nil, err
 	}
+	handed = true
 	return st, a, nil
 }
 
