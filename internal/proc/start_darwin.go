@@ -4,9 +4,9 @@ package proc
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
-	"strconv"
 	"syscall"
 	"time"
 	"unsafe"
@@ -44,21 +44,17 @@ func StartTime(pid int) (time.Time, error) {
 }
 
 // BootID names this boot of the machine: a pid and a start time recorded
-// before a reboot say nothing about the processes after it. macOS has no
-// boot id as such, so it is kern.boottime, to the second; the microseconds
-// are left out because setting the clock can move them, and a moved clock
-// is not a reboot.
+// before a reboot say nothing about the processes after it. On macOS it is
+// kern.bootsessionuuid, a UUID the kernel makes once per boot. The boot time
+// would not do: setting the clock moves kern.boottime, and a moved clock is
+// not a reboot.
 func BootID() (string, error) {
-	raw, err := syscall.Sysctl("kern.boottime")
+	id, err := syscall.Sysctl("kern.bootsessionuuid")
 	if err != nil {
-		return "", fmt.Errorf("proc: kern.boottime: %w", err)
+		return "", fmt.Errorf("proc: kern.bootsessionuuid: %w", err)
 	}
-	if len(raw) < 8 {
-		return "", fmt.Errorf("proc: kern.boottime is %d bytes", len(raw))
+	if id == "" {
+		return "", errors.New("proc: kern.bootsessionuuid is empty")
 	}
-	sec := int64(binary.NativeEndian.Uint64([]byte(raw[:8])))
-	if sec <= 0 {
-		return "", fmt.Errorf("proc: kern.boottime is %d", sec)
-	}
-	return strconv.FormatInt(sec, 10), nil
+	return id, nil
 }
