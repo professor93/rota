@@ -18,16 +18,17 @@ type stage struct {
 // it takes on screen (see screenWidth) where tabwriter counts its runes, so
 // a name in Chinese lines up too, and a control character in a cell, which
 // would move the cursor where no count can follow, is a space (see
-// printable). A table of one-column characters with no control character in
-// it that needs no fitting comes out byte for byte as tabwriter drew it. A
-// cell that spans lines leaves the other cells of its later lines empty.
+// printable). So is a newline, so a directory with one in it does not split
+// its row. A table of one-column characters with no control character in it
+// that needs no fitting comes out byte for byte as tabwriter drew it. A cell
+// the fitting wraps leaves the other cells of its later lines empty.
 func (g *grid) renderPlain(out io.Writer) {
 	clean := *g
 	clean.rows = make([][]string, len(g.rows))
 	for i, r := range g.rows {
 		clean.rows[i] = make([]string, len(r))
 		for j, c := range r {
-			clean.rows[i][j] = printable(c)
+			clean.rows[i][j] = strings.ReplaceAll(printable(c), "\n", " ")
 		}
 	}
 	_, rows := clean.fit()

@@ -1317,11 +1317,12 @@ Sessions:
 On a terminal narrower than a section its rows stay one line each and are
 cut to fit: the name and directory first (a directory keeps its end, the name
 its start), each kept eight columns wide until the account has given way as
-far, then the account, and the session id last, while a pipe or a file gets
-them whole. Either way a name or directory is measured in the columns it takes
-on screen, two a character for Chinese, Japanese, Korean and most emoji, so
-its row lines up, and a tab or any other control character in one is shown as
-a space.
+far, then the account, then the CLI or editor, and the session id last. A pipe
+or a file gets every cell whole but a conversation's name, which is never more
+than 44 columns anywhere. Either way a name or directory is measured in the
+columns it takes on screen, two a character for Chinese, Japanese, Korean and
+most emoji, so its row lines up, and a tab, a newline or any other control
+character in one is shown as a space.
 
 A claude conversation is shown by its own name, the one its resume picker
 uses: Claude Code writes a title for a conversation as it learns what it is
