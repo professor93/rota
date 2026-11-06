@@ -114,8 +114,40 @@ check() {
 		exit 1
 	fi
 
-	# 5. The committed workspace builds the program with nothing to fetch.
+	# 5. The committed workspace builds the program with nothing to fetch
+	# but the third-party modules cmd/rota/go.mod names. Those are put into an
+	# empty module cache first, from outside any module and from the
+	# machine's own cache where it has them. The root is never among them, so
+	# a build that reaches for a published root's code still fails, and
+	# go.sum still checks every hash.
 	mkdir "$tmp/modcache"
+	mods=$(go mod edit -json cmd/rota/go.mod | awk -v root="$root_module" '
+		/"Require": \[/ { in_require = 1; next }
+		in_require && /^[[:space:]]*\]/ { exit }
+		in_require && /"Path":/ { p = $2; gsub(/[",]/, "", p) }
+		in_require && /"Version":/ { v = $2; gsub(/[",]/, "", v) }
+		in_require && /^[[:space:]]*\},?$/ { if (p != root) print p "@" v; p = v = "" }
+	')
+	if [ -n "$mods" ]; then
+		cache=$(go env GOMODCACHE)
+		proxy=$(go env GOPROXY)
+		# Once a package of the program imports one of them, go reads the
+		# requirement graph through the pinned root's go.mod as well, though
+		# the workspace's root is what it builds. go list -m fetches that one
+		# file and never the root's source.
+		# shellcheck disable=SC2086 # one word per module
+		if ! (
+			cd "$tmp" &&
+				export GOWORK=off GOMODCACHE="$tmp/modcache" GOFLAGS=-modcacherw GOSUMDB=off \
+					GOPROXY="file://$cache/cache/download,$proxy" &&
+				go mod download $mods &&
+				go list -m "$root_module@$v"
+		) >"$tmp/download.out" 2>&1; then
+			echo "module: the program's modules cannot be fetched" >&2
+			cat "$tmp/download.out" >&2
+			exit 1
+		fi
+	fi
 	if ! GOWORK="$root/go.work" GOPROXY=off GOMODCACHE="$tmp/modcache" \
 		GOFLAGS="-modcacherw -buildvcs=false" \
 		go build -o "$tmp/rota" ./cmd/rota >"$tmp/build.out" 2>&1; then

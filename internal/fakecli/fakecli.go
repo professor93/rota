@@ -10,6 +10,7 @@ package fakecli
 
 import (
 	"bufio"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,8 +58,9 @@ type Spec struct {
 	// says it is ready and how big its window is, answers each line it reads
 	// with a transformed copy — so a test can tell the terminal's own echo
 	// from the program's output — says the new size whenever the window
-	// changes, prints as much as it is asked to on "noise N" and exits on
-	// "bye". Stdout is ignored in this mode.
+	// changes, prints as much as it is asked to on "noise N", writes the
+	// bytes "print <hex>" spells out and exits on "bye". Stdout is ignored
+	// in this mode.
 	Tty bool `json:"tty,omitempty"`
 	// EchoHold holds the first turn, in echo mode, until this many further
 	// lines have arrived on stdin. A test about messages that arrive
@@ -317,6 +319,20 @@ func atty(spec Spec, stdin io.Reader, stdout io.Writer) int {
 			say("noise done")
 			continue
 		}
+		// "print <hex>" writes exactly the bytes it spells, with no newline:
+		// how a test makes the fake draw what a full-screen program draws,
+		// escape sequences and all, without a full-screen program.
+		if h, ok := strings.CutPrefix(line, "print "); ok {
+			raw, err := hex.DecodeString(strings.TrimSpace(h))
+			mu.Lock()
+			if err != nil {
+				fmt.Fprintf(stdout, "bad print: %s\r\n", h)
+			} else {
+				_, _ = stdout.Write(raw)
+			}
+			mu.Unlock()
+			continue
+		}
 		switch line {
 		case "size":
 			size("size")
@@ -324,10 +340,26 @@ func atty(spec Spec, stdin io.Reader, stdout io.Writer) int {
 			say("bye")
 			return spec.Exit
 		default:
-			say("got:%s", line)
+			say("got:%s", visible(line))
 		}
 	}
 	return spec.Exit
+}
+
+// visible spells out each control byte of what was read as \xHH. Echoed
+// back raw, an escape sequence somebody typed would be acted on by the
+// terminal showing it, and a test reading the screen would see its effect
+// instead of the bytes that arrived.
+func visible(line string) string {
+	var b strings.Builder
+	for i := 0; i < len(line); i++ {
+		if c := line[i]; c < 0x20 || c == 0x7f {
+			fmt.Fprintf(&b, `\x%02x`, c)
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // echo plays a CLI with a streaming input: one turn per message, for as long
