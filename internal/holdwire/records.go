@@ -8,6 +8,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/professor93/rota/internal/proc"
 )
 
 // RecordState is what a session's directory says about it, judged by its
@@ -40,8 +42,9 @@ type Record struct {
 // ErrHeld is a lock somebody else holds.
 var ErrHeld = errors.New("held by another process")
 
-// ErrPlatform is the answer where held sessions do not run.
-var ErrPlatform = errors.New("held sessions and the rota daemon run on linux and macOS")
+// ErrPlatform is the answer where held sessions do not run. It is proc's
+// error, so the sentence is written once and errors.Is finds either.
+var ErrPlatform = proc.ErrPlatform
 
 // Lock takes a session's lock for the holder's whole life, without waiting:
 // a session is one holder's, and a second holder for it is a mistake to

@@ -2,16 +2,10 @@
 
 package proc
 
-import (
-	"errors"
-	"time"
-)
-
-// errNoHeld is the answer on a platform held sessions do not run on.
-var errNoHeld = errors.New("held sessions and the rota daemon run on linux and macOS")
+import "time"
 
 // StartTime is not known here.
-func StartTime(pid int) (time.Time, error) { return time.Time{}, errNoHeld }
+func StartTime(pid int) (time.Time, error) { return time.Time{}, ErrPlatform }
 
 // BootID is not known here.
-func BootID() (string, error) { return "", errNoHeld }
+func BootID() (string, error) { return "", ErrPlatform }
