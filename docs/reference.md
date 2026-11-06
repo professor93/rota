@@ -2695,6 +2695,8 @@ STATUS and ACCOUNT last of all, below about 45 columns. Each cut line keeps
 its start and ends in one "…", and a wrapped column narrower than its name has
 its header cut the same way, to `ACC…` or `STA…`. The notes under the table
 wrap at their spaces too, and a pipe or a file gets the table as it is.
+Widths are counted in the columns a character takes on screen, two for
+Chinese, Japanese, Korean and most emoji, so a name in them lines up too.
 
 A spent unscoped window shows as `limited`; a dead credential as `re-auth
 needed`. Model-scoped windows (a separate weekly Fable budget, say) are shown
