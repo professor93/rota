@@ -362,6 +362,7 @@ func (s *Session) emulate() {
 // retired for the session's life, said once, and the cursor is the corner
 // from then on, as it is for a screen whose emulator panicked.
 func (s *Session) catchUp() {
+	defer s.noticeLoss()
 	s.mu.Lock()
 	target, modes := s.ground, s.gmodes
 	n := 0
@@ -413,6 +414,20 @@ func (s *Session) catchUp() {
 	}
 }
 
+// noticeLoss retires the screen for the session's life once its emulator
+// has panicked, and says so in one line with what it panicked with: the
+// Screen keeps the holder up, and the log says why viewers get the ring
+// replayed. The caller holds s.em.mu.
+func (s *Session) noticeLoss() {
+	if s.em.retired {
+		return
+	}
+	if why := s.screen.Lost(); why != "" {
+		s.em.retired = true
+		s.log("the screen's emulator panicked and is retired; viewers get the ring replayed", "panic", why)
+	}
+}
+
 // putScreen makes a Screen payload. It is a variable so a test can make one
 // the daemon could not take.
 var putScreen = holdwire.PutScreen
@@ -429,6 +444,7 @@ func (s *Session) repaint(seq uint64) []byte {
 	var out []byte
 	if !s.em.retired {
 		out, h.OK = s.screen.Repaint(s.em.modes)
+		s.noticeLoss()
 	}
 	p, err := putScreen(h, out)
 	if err == nil && len(p)+1 <= share.MaxFrame {
@@ -463,6 +479,7 @@ func (s *Session) resize(ask holdwire.SizeMsg) (holdwire.SizeMsg, bool) {
 		return holdwire.SizeMsg{}, false
 	}
 	s.screen.Resize(int(cols), int(rows))
+	s.noticeLoss()
 	s.em.cols, s.em.rows = cols, rows
 	s.mu.Lock()
 	s.cols, s.rows = cols, rows

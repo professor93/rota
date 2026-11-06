@@ -4,7 +4,9 @@ package hold
 
 import (
 	"bytes"
+	"fmt"
 	"io"
+	"runtime/debug"
 	"strconv"
 	"sync"
 
@@ -40,6 +42,8 @@ type Screen struct {
 	mu sync.Mutex
 	em *vt.Emulator
 	ok bool
+	// lost is what the emulator panicked with, and where, once it has.
+	lost string
 
 	// seq is x/vt's own parser, x/ansi's, fed every byte just ahead of the
 	// emulator, so it is in the emulator's state at every byte. Its CSI
@@ -98,10 +102,12 @@ func drain(em *vt.Emulator) {
 	}
 }
 
-// catch turns a panic inside the emulator into a retired screen. It is
-// deferred by every method that calls into the emulator, under the mutex.
+// catch turns a panic inside the emulator into a retired screen, and keeps
+// what it panicked with for Lost. It is deferred by every method that calls
+// into the emulator, under the mutex.
 func (s *Screen) catch() {
-	if recover() != nil {
+	if r := recover(); r != nil {
+		s.lost = fmt.Sprintf("%v\n%s", r, debug.Stack())
 		s.retire()
 	}
 }
@@ -260,6 +266,14 @@ func (s *Screen) OK() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.ok
+}
+
+// Lost says what the emulator panicked with, and where: "" while it has not,
+// and for a screen closed without a panic.
+func (s *Screen) Lost() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.lost
 }
 
 // Close retires the emulator and ends the goroutine reading its answers.
