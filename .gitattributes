@@ -1,7 +1,9 @@
 # What the binary embeds is served byte for byte, and tests read it byte for
 # byte: the vendored emulator against the checksums its README records, the
 # pages by the exact shape of their script tags. Git must not rewrite line
-# endings in any of it at checkout, which on Windows it otherwise does.
+# endings in any of it at checkout, which on Windows it otherwise does. The
+# program's table goldens are compared byte for byte the same way.
 api/assets/**  -text
 api/*.html     -text
 api/testdata/* -text
+cmd/rota/testdata/* -text
