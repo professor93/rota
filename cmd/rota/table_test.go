@@ -20,7 +20,7 @@ const clearedReason = "Claude Code cleared the login in its home after a refresh
 // the renderer as it was before tables could fit a terminal: an address too
 // long for any narrow column, three windows of usage, and that reason.
 func goldenGrid(width int) *grid {
-	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{6, 5, 2, 1, 0}}
+	g := listing(width)
 	g.add("1", "3", "claude", "manager.ican@gmail.com", "5h 3% (4h 12m)\n7d 29% (3d 2h)\nFable 48%", "95%", "just now", "ok")
 	g.add("2", "5", "claude", "a.very.long.address.for.work@example.com", "-", "95%", "2h ago", "re-auth needed ("+clearedReason+")")
 	g.add("-", "7", "codex", "b@x", "5h 0%", "90%", "3d ago", "ok (login ends in 2d)")
@@ -30,7 +30,7 @@ func goldenGrid(width int) *grid {
 // ownersGrid is the listing that broke, with addresses of the length people
 // have.
 func ownersGrid(width int) *grid {
-	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{6, 5, 2, 1, 0}}
+	g := listing(width)
 	g.add("1", "3", "claude", "manager.ican@gmail.com", "5h 3% (4h 12m)\n7d 29% (3d 2h)\nFable 48%", "95%", "just now", "ok")
 	g.add("2", "5", "claude", "work.account@example.com", "-", "95%", "2h ago", "re-auth needed ("+clearedReason+")")
 	g.add("-", "7", "codex", "b@x", "5h 0%", "90%", "3d ago", "ok (login ends in 2d)")
@@ -40,7 +40,7 @@ func ownersGrid(width int) *grid {
 // spentGrid is a listing whose five-hour window is spent: "5h 100%" is the
 // reading a cut must not turn into another number.
 func spentGrid(width int) *grid {
-	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{6, 5, 2, 1, 0}}
+	g := listing(width)
 	g.add("1", "3", "claude", "manager.ican@gmail.com", "5h 100% (4h 12m)\n7d 29% (3d 2h)\nFable 48%", "95%", "just now", "limited")
 	g.add("2", "5", "claude", "work.account@example.com", "-", "95%", "2h ago", "re-auth needed ("+clearedReason+")")
 	return g
@@ -49,14 +49,14 @@ func spentGrid(width int) *grid {
 // longAddressGrid has one reading, on the row of an address too long for
 // any narrow column.
 func longAddressGrid(width int) *grid {
-	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}, width: width, give: []int{7, 3}, keep: []int{6, 5, 2, 1, 0}}
+	g := listing(width)
 	g.add("1", "3", "claude", "a.very.long.address.for.work@example.com", "5h 3% (4h 12m)", "95%", "just now", "ok")
 	g.add("2", "5", "claude", "b@x", "-", "95%", "2h ago", "re-auth needed ("+clearedReason+")")
 	return g
 }
 
 func shortGrid(width int) *grid {
-	g := &grid{header: []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "CHECKED"}, width: width, give: []int{3}, keep: []int{5, 2, 1, 0}}
+	g := shortListing(width)
 	g.add("1", "3", "claude", "manager.ican@gmail.com", "5h 3%", "just now")
 	g.add("2", "5", "claude", "b@x", "-", "2h ago")
 	return g
@@ -114,10 +114,11 @@ func framed(t *testing.T, out string, width int) {
 	}
 }
 
-// column is what a column says, all of its lines joined by spaces, for the
-// row whose ID is id.
-func column(out string, col int, id string) string {
+// column is what the column headed name says, all of its lines joined by
+// spaces, for the row whose ID is id; "" when the column was left out.
+func column(out, name, id string) string {
 	var words []string
+	at, idAt := -1, -1
 	in := false
 	for _, line := range strings.Split(out, "\n") {
 		if !strings.HasPrefix(line, "│") {
@@ -127,19 +128,72 @@ func column(out string, col int, id string) string {
 			continue
 		}
 		parts := strings.Split(line, "│")
-		cell := strings.TrimSpace(parts[2])
+		if idAt < 0 {
+			for i, p := range parts {
+				switch strings.TrimSpace(p) {
+				case name:
+					at = i
+				case "ID":
+					idAt = i
+				}
+			}
+			if at < 0 || idAt < 0 {
+				return ""
+			}
+			continue
+		}
+		cell := strings.TrimSpace(parts[idAt])
 		if cell == id {
 			in = true
 		} else if cell != "" && in {
 			break
 		}
 		if in {
-			if w := strings.TrimSpace(parts[col+1]); w != "" {
+			if w := strings.TrimSpace(parts[at]); w != "" {
 				words = append(words, w)
 			}
 		}
 	}
 	return strings.Join(words, " ")
+}
+
+// height is how many lines the row whose ID is id takes.
+func height(out, id string) int {
+	n := 0
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case n > 0 && !strings.HasPrefix(line, "│"):
+			return n
+		case n > 0 && strings.TrimSpace(strings.Split(line, "│")[2]) != "":
+			return n
+		case n > 0, strings.HasPrefix(line, "│") && strings.TrimSpace(strings.Split(line, "│")[2]) == id:
+			n++
+		}
+	}
+	return n
+}
+
+// headers is the header line's cells, in order.
+func headers(out string) []string {
+	for _, line := range strings.Split(out, "\n") {
+		if strings.HasPrefix(line, "│") {
+			var cells []string
+			for _, p := range strings.Split(strings.Trim(line, "│"), "│") {
+				cells = append(cells, strings.TrimSpace(p))
+			}
+			return cells
+		}
+	}
+	return nil
+}
+
+// shownAt is, for each column fit drew, the column of g it is.
+func shownAt(g *grid, header []string) []int {
+	var at []int
+	for _, h := range header {
+		at = append(at, slices.Index(g.header, h))
+	}
+	return at
 }
 
 // Off a terminal, the table is drawn exactly as it was before tables could
@@ -163,26 +217,31 @@ func TestTableOnAWideTerminalIsUnchanged(t *testing.T) {
 	}
 }
 
+var (
+	fullHeader  = []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "CHECKED", "STATUS"}
+	reason      = "re-auth needed (" + clearedReason + ")"
+	allReadings = "5h 3% (4h 12m) 7d 29% (3d 2h) Fable 48%"
+)
+
 // On a terminal narrower than the table, STATUS wraps inside its column at
-// its spaces, and every word of the reason is still there.
-func TestTableWrapsStatusToFitATerminal(t *testing.T) {
-	for _, width := range []int{120, 90} {
+// its spaces first, then ACCOUNT before its "@"; every column is still
+// there, nothing is cut, and every word of the reason is still there.
+func TestTableWrapsStatusThenAccount(t *testing.T) {
+	for _, width := range []int{120, 100} {
 		t.Run(fmt.Sprint(width), func(t *testing.T) {
 			out := drawn(ownersGrid(width))
 			framed(t, out, width)
-			if got := column(out, 7, "5"); got != "re-auth needed ("+clearedReason+")" {
-				t.Fatalf("the reason, read down its column: %q\n%s", got, out)
+			if got := fmt.Sprint(headers(out)); got != fmt.Sprint(fullHeader) {
+				t.Fatalf("every column is there: %s\n%s", got, out)
 			}
 			if strings.Contains(out, "…") {
 				t.Fatalf("nothing is cut while wrapping can fit it:\n%s", out)
 			}
-			for _, fixed := range []string{"│ claude │", "│ just now │", "│ 95%   │"} {
-				if !strings.Contains(out, fixed) {
-					t.Fatalf("the short columns keep their width (%q):\n%s", fixed, out)
-				}
+			if got := column(out, "STATUS", "5"); got != reason {
+				t.Fatalf("the reason, read down its column: %q\n%s", got, out)
 			}
-			if !strings.Contains(out, "│ 5h 3% (4h 12m) │") {
-				t.Fatalf("USAGE keeps its lines:\n%s", out)
+			if got := column(out, "USAGE", "3"); got != allReadings {
+				t.Fatalf("USAGE keeps its readings whole: %q\n%s", got, out)
 			}
 		})
 	}
@@ -190,39 +249,124 @@ func TestTableWrapsStatusToFitATerminal(t *testing.T) {
 	if out := drawn(ownersGrid(120)); !strings.Contains(out, "│ work.account@example.com │") {
 		t.Fatalf("ACCOUNT gives way only after STATUS:\n%s", out)
 	}
+	// At 100 ACCOUNT wraps too, before its "@", while STATUS keeps the
+	// reason to four lines.
+	out := drawn(ownersGrid(100))
+	if !strings.Contains(out, "│ work.account │") || !strings.Contains(out, "│ @example.com │") {
+		t.Fatalf("at 100 columns the address wraps before its @:\n%s", out)
+	}
+	if h := height(out, "5"); h > 4 {
+		t.Fatalf("the reason takes %d lines:\n%s", h, out)
+	}
 }
 
-// Once STATUS is as narrow as it goes, ACCOUNT wraps next, and an address
-// too long for the column is broken where the column ends.
-func TestTableWrapsAccountAfterStatus(t *testing.T) {
-	out := drawn(ownersGrid(90))
-	if strings.Contains(out, "│ work.account@example.com │") {
-		t.Fatalf("at 90 columns ACCOUNT gives way too:\n%s", out)
+// Once STATUS and ACCOUNT are down to their room, CHECKED and then UNTIL are
+// left out whole before either wraps any narrower, and before USAGE loses
+// anything. At 80 columns that keeps the readings with their reset times
+// and the reason in four lines.
+func TestTableLeavesCheckedAndUntilOutBeforeTheTextNarrows(t *testing.T) {
+	for _, c := range []struct {
+		width int
+		shown []string
+	}{
+		{90, []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "UNTIL", "STATUS"}},
+		{80, []string{"#", "ID", "CLI", "ACCOUNT", "USAGE", "STATUS"}},
+	} {
+		t.Run(fmt.Sprint(c.width), func(t *testing.T) {
+			out := drawn(ownersGrid(c.width))
+			framed(t, out, c.width)
+			if got := fmt.Sprint(headers(out)); got != fmt.Sprint(c.shown) {
+				t.Fatalf("the columns shown: %s, want %s\n%s", got, c.shown, out)
+			}
+			if strings.Contains(out, "…") {
+				t.Fatalf("nothing is cut:\n%s", out)
+			}
+			if got := column(out, "USAGE", "3"); got != allReadings {
+				t.Fatalf("USAGE keeps its readings whole: %q\n%s", got, out)
+			}
+			if got := column(out, "STATUS", "5"); got != reason {
+				t.Fatalf("the reason, read down its column: %q\n%s", got, out)
+			}
+			if h := height(out, "5"); h > 4 {
+				t.Fatalf("the reason takes %d lines:\n%s", h, out)
+			}
+			if got := column(out, "ACCOUNT", "5"); got != "work.account @example.com" {
+				t.Fatalf("the address, on two lines: %q\n%s", got, out)
+			}
+		})
 	}
-	if got := strings.ReplaceAll(column(out, 3, "5"), " ", ""); got != "work.account@example.com" {
-		t.Fatalf("the address, read down its column: %q\n%s", got, out)
+}
+
+// CLI is what tells a claude account from a codex one, so it stays until
+// STATUS has wrapped on down to ACCOUNT's 16 columns: at 70 it is still
+// there, and only a column narrower is it left out, giving STATUS back its
+// room.
+func TestTableKeepsCLIUntilTheTextIsDownToSixteen(t *testing.T) {
+	out := drawn(ownersGrid(70))
+	framed(t, out, 70)
+	if got := fmt.Sprint(headers(out)); got != "[# ID CLI ACCOUNT USAGE STATUS]" {
+		t.Fatalf("at 70 the columns shown: %s\n%s", got, out)
 	}
-	if got := column(out, 7, "5"); got != "re-auth needed ("+clearedReason+")" {
+	if column(out, "CLI", "3") != "claude" || column(out, "CLI", "7") != "codex" {
+		t.Fatalf("at 70 each row says its CLI:\n%s", out)
+	}
+	if strings.Contains(out, "…") {
+		t.Fatalf("nothing is cut:\n%s", out)
+	}
+	if got := column(out, "USAGE", "3"); got != allReadings {
+		t.Fatalf("USAGE keeps its readings whole: %q\n%s", got, out)
+	}
+	if got := column(out, "STATUS", "5"); got != reason {
 		t.Fatalf("the reason, read down its column: %q\n%s", got, out)
 	}
+	header, rows, _ := ownersGrid(70).fit()
+	if got := widths(header, rows)[slices.Index(header, "STATUS")]; got > 16 {
+		t.Fatalf("STATUS is %d wide with CLI kept, more than 16:\n%s", got, out)
+	}
+
+	out = drawn(ownersGrid(69))
+	framed(t, out, 69)
+	if got := fmt.Sprint(headers(out)); got != "[# ID ACCOUNT USAGE STATUS]" {
+		t.Fatalf("at 69 the columns shown: %s\n%s", got, out)
+	}
+	header, rows, _ = ownersGrid(69).fit()
+	if got := widths(header, rows)[slices.Index(header, "STATUS")]; got <= 16 {
+		t.Fatalf("with CLI gone STATUS is still only %d wide:\n%s", got, out)
+	}
 }
 
-// A terminal too narrow for even that cuts the widest cells, each cut with
-// one "…", and keeps the start of what it cuts.
-func TestTableCutsOnlyWhenWrappingCannotFit(t *testing.T) {
-	for _, width := range []int{80, 60, 40} {
-		out := drawn(goldenGrid(width))
-		framed(t, out, width)
-		if !strings.Contains(out, "…") {
-			t.Fatalf("%d columns needs a cut:\n%s", width, out)
-		}
-		if strings.Contains(out, "……") {
-			t.Fatalf("one ellipsis per cut:\n%s", out)
-		}
-		got := squeeze(strings.TrimSuffix(column(out, 7, "5"), "…"))
-		if got == "" || !strings.HasPrefix(squeeze("re-auth needed ("+clearedReason+")"), got) {
-			t.Fatalf("the reason keeps its start at %d: %q\n%s", width, got, out)
-		}
+// Once nothing is left to leave out, STATUS and ACCOUNT wrap on, down to
+// ten columns, and only then is USAGE cut, each of its lines with one "…"
+// that keeps its start. The free text is never cut: read down its column,
+// it is all still there.
+func TestTableCutsUsageOnlyWhenNothingElseCanGive(t *testing.T) {
+	for _, width := range []int{60, 50, 45, 40} {
+		t.Run(fmt.Sprint(width), func(t *testing.T) {
+			out := drawn(goldenGrid(width))
+			framed(t, out, width)
+			if got := fmt.Sprint(headers(out)); got != "[# ID ACCOUNT USAGE STATUS]" {
+				t.Fatalf("the columns shown: %s\n%s", got, out)
+			}
+			if got := column(out, "STATUS", "5"); squeeze(got) != squeeze(reason) {
+				t.Fatalf("the reason, read down its column: %q\n%s", got, out)
+			}
+			if got := column(out, "ACCOUNT", "5"); squeeze(got) != "a.very.long.address.for.work@example.com" {
+				t.Fatalf("the address, read down its column: %q\n%s", got, out)
+			}
+			usage := column(out, "USAGE", "3")
+			if strings.Contains(out, "……") {
+				t.Fatalf("one ellipsis per cut:\n%s", out)
+			}
+			if !strings.HasPrefix(usage, "5h 3") {
+				t.Fatalf("a cut reading keeps its start: %q\n%s", usage, out)
+			}
+			if width >= 60 && usage != allReadings {
+				t.Fatalf("at %d columns USAGE is still whole: %q\n%s", width, usage, out)
+			}
+			if width <= 45 && !strings.Contains(usage, "…") {
+				t.Fatalf("at %d columns USAGE is cut: %q\n%s", width, usage, out)
+			}
+		})
 	}
 }
 
@@ -230,51 +374,85 @@ func TestTableCutsOnlyWhenWrappingCannotFit(t *testing.T) {
 // of a narrow column comes back whole.
 func squeeze(s string) string { return strings.ReplaceAll(s, " ", "") }
 
-// Cutting starts with the other columns: USAGE first, then the short fixed
-// ones. STATUS and ACCOUNT go on wrapping below their usual minimum, and at
-// 75 and 70 columns the whole reason is still there.
-func TestTableCutsTheOtherColumnsBeforeTheReason(t *testing.T) {
-	for _, width := range []int{76, 75, 70} {
-		t.Run(fmt.Sprint(width), func(t *testing.T) {
-			out := drawn(ownersGrid(width))
-			framed(t, out, width)
-			if got := column(out, 7, "5"); squeeze(got) != squeeze("re-auth needed ("+clearedReason+")") {
-				t.Fatalf("the reason, read down its column: %q\n%s", got, out)
-			}
-			if got := column(out, 3, "5"); squeeze(got) != "work.account@example.com" {
-				t.Fatalf("the address, read down its column: %q\n%s", got, out)
-			}
-			for _, fixed := range []string{"│ claude │", "│ just now │", "│ 95%   │"} {
-				if !strings.Contains(out, fixed) {
-					t.Fatalf("the short fixed columns are cut last (%q):\n%s", fixed, out)
+// At every width from 30 to 200, no header is cut, the id and the place are
+// always there, and the reason and the address can be read down their
+// columns. The table is no wider than the terminal at every width its
+// headers fit in, and at a narrower one is as narrow as they go. Whatever is
+// left out is said, in the order it went.
+func TestTableNeverCutsAHeader(t *testing.T) {
+	for width := 30; width <= 200; width++ {
+		for name, g := range map[string]*grid{"full": goldenGrid(width), "owners": ownersGrid(width), "short": shortGrid(width)} {
+			out := drawn(g)
+			// least is the frame with every column that is never left out
+			// down to its header.
+			var kept []int
+			for i, n := range widths(g.header, nil) {
+				if !slices.ContainsFunc(g.drop, func(x leave) bool { return x.col == i }) {
+					kept = append(kept, n)
 				}
 			}
-		})
-	}
-	if out := drawn(ownersGrid(70)); !strings.Contains(out, "│ 5h 3%…") {
-		t.Fatalf("USAGE is the first column cut, and keeps its percentage:\n%s", out)
+			least := g.frame(kept)
+			if width >= least {
+				framed(t, out, width)
+			} else {
+				framed(t, out, least)
+				if n := screenWidth(strings.SplitN(out, "\n", 2)[0]); n != least {
+					t.Fatalf("%s at %d: too narrow for its headers, drawn %d wide, not %d:\n%s", name, width, n, least, out)
+				}
+			}
+			got := headers(out)
+			var gone []string
+			for _, x := range g.drop {
+				if !slices.Contains(got, g.header[x.col]) {
+					gone = append(gone, g.header[x.col])
+				}
+			}
+			if _, _, left := g.fit(); !slices.Equal(left, gone) {
+				t.Fatalf("%s at %d: %q left out, %q said\n%s", name, width, gone, left, out)
+			}
+			for _, h := range got {
+				if !slices.Contains(g.header, h) {
+					t.Fatalf("%s at %d: a header cut to %q\n%s", name, width, h, out)
+				}
+			}
+			if len(got) < 2 || got[0] != "#" || got[1] != "ID" {
+				t.Fatalf("%s at %d: the place and the id are always there: %q\n%s", name, width, got, out)
+			}
+			if name != "short" {
+				if got := column(out, "STATUS", "5"); squeeze(got) != squeeze(reason) {
+					t.Fatalf("%s at %d: the reason, read down its column: %q\n%s", name, width, got, out)
+				}
+			}
+			if got := column(out, "ACCOUNT", "3"); squeeze(got) != "manager.ican@gmail.com" {
+				t.Fatalf("%s at %d: the address, read down its column: %q\n%s", name, width, got, out)
+			}
+		}
 	}
 }
 
-// The short listing at half a screen: ACCOUNT wraps rather than being cut,
-// and the whole address reassembles from its lines.
+// The short listing at half a screen: ACCOUNT wraps before its "@", CLI is
+// left out, and CHECKED — the age of readings --short did not take — stays,
+// the last of the short columns to go.
 func TestShortTableWrapsTheAddressAtFifty(t *testing.T) {
 	out := drawn(shortGrid(50))
 	framed(t, out, 50)
 	if strings.Contains(out, "…") {
 		t.Fatalf("nothing is cut:\n%s", out)
 	}
-	if got := column(out, 3, "3"); squeeze(got) != "manager.ican@gmail.com" {
+	if got := fmt.Sprint(headers(out)); got != "[# ID ACCOUNT USAGE CHECKED]" {
+		t.Fatalf("the columns shown: %s\n%s", got, out)
+	}
+	if got := column(out, "ACCOUNT", "3"); got != "manager.ican @gmail.com" {
 		t.Fatalf("the address, read down its column: %q\n%s", got, out)
 	}
 }
 
 // A cut that lands on a space, or goes back to one, leaves its column
 // narrower than it was given, and what that frees goes on to the next
-// column that can use it. At these widths the frame used to come out a
-// column short with USAGE still cut; now it is as wide as the terminal.
+// column that can use it: at these widths, with USAGE cut, the frame is as
+// wide as the terminal.
 func TestTableGivesWhatACutLeavesToTheNextColumn(t *testing.T) {
-	for _, width := range []int{72, 73, 74, 77, 78} {
+	for _, width := range []int{40, 42, 44, 46, 48, 50} {
 		out := drawn(longAddressGrid(width))
 		framed(t, out, width)
 		if !strings.Contains(out, "…") {
@@ -289,29 +467,29 @@ func TestTableGivesWhatACutLeavesToTheNextColumn(t *testing.T) {
 	for name, mk := range map[string]func(int) *grid{"golden": goldenGrid, "owners": ownersGrid, "spent": spentGrid, "long address": longAddressGrid, "short": shortGrid} {
 		for width := 40; width <= 130; width++ {
 			g := mk(width)
-			header, rows := g.fit()
+			header, rows, _ := g.fit()
 			got := widths(header, rows)
 			left := width - g.frame(got)
 			if left <= 0 {
 				continue
 			}
-			for i := range got {
+			for j, i := range shownAt(g, header) {
 				col := []string{g.header[i]}
 				isCut := false
 				for ri, r := range g.rows {
 					col = append(col, r[i])
-					isCut = isCut || strings.HasSuffix(rows[ri][i], "…") && !strings.HasSuffix(r[i], "…")
+					isCut = isCut || strings.HasSuffix(rows[ri][j], "…") && !strings.HasSuffix(r[i], "…")
 				}
 				if !isCut {
 					continue // not cut, or wrapped
 				}
 				wider := 0
 				for _, c := range col {
-					for line := range strings.SplitSeq(cutCell(c, got[i]+left), "\n") {
+					for line := range strings.SplitSeq(cutCell(c, got[j]+left), "\n") {
 						wider = max(wider, utf8.RuneCountInString(line))
 					}
 				}
-				if wider > got[i] {
+				if wider > got[j] {
 					t.Errorf("%s at %d: %d left over, and %s could have shown more in it:\n%s", name, width, left, g.header[i], drawn(g))
 				}
 			}
@@ -323,15 +501,16 @@ func TestTableGivesWhatACutLeavesToTheNextColumn(t *testing.T) {
 // terminal a spent window says "5h 100%…", or failing that "5h…", and never
 // "5h 10…", which reads as a different number.
 func TestTableCutsAReadingBetweenItsWords(t *testing.T) {
-	for _, width := range []int{66, 70, 72} {
+	for _, width := range []int{46, 48, 50} {
 		for name, mk := range map[string]func(int) *grid{"spent": spentGrid, "golden": goldenGrid} {
 			g := mk(width)
 			out := drawn(g)
 			framed(t, out, width)
-			_, rows := g.fit()
+			header, rows, _ := g.fit()
+			usage := slices.Index(header, "USAGE")
 			for ri, r := range g.rows {
 				was := strings.Split(r[4], "\n")
-				for k, line := range strings.Split(rows[ri][4], "\n") {
+				for k, line := range strings.Split(rows[ri][usage], "\n") {
 					kept, isCut := strings.CutSuffix(line, "…")
 					if !isCut {
 						continue
@@ -383,11 +562,15 @@ func TestCutCellKeepsWholeWords(t *testing.T) {
 	}
 }
 
-// A width nothing can fit in still draws a whole table, as narrow as it can.
+// A width nothing can fit in still draws a whole table, as narrow as it can,
+// with its headers whole.
 func TestTableTooNarrowForAnythingStillDrawsWhole(t *testing.T) {
 	out := drawn(goldenGrid(10))
 	lines := strings.Split(strings.TrimSuffix(out, "\n"), "\n")
 	framed(t, out, utf8.RuneCountInString(lines[0]))
+	if got := fmt.Sprint(headers(out)); got != "[# ID ACCOUNT USAGE STATUS]" {
+		t.Fatalf("the columns shown: %s\n%s", got, out)
+	}
 }
 
 func TestWrapLine(t *testing.T) {
@@ -508,7 +691,7 @@ func TestListFitsTheTerminalItIsOn(t *testing.T) {
 		t.Fatalf("a table:\n%s", out.String())
 	}
 	framed(t, table+"┘\n", 90)
-	if got := column(table, 7, "2"); got != "re-auth needed ("+clearedReason+")" {
+	if got := column(table, "STATUS", "2"); got != reason {
 		t.Fatalf("the reason, read down its column: %q\n%s", got, table)
 	}
 	for _, line := range strings.Split(notes, "\n") {
@@ -524,5 +707,86 @@ func TestListFitsTheTerminalItIsOn(t *testing.T) {
 	}
 	if utf8.RuneCountInString(strings.SplitN(piped, "\n", 2)[0]) <= 90 {
 		t.Fatalf("off a terminal the table keeps its natural width:\n%s", piped)
+	}
+}
+
+// A listing that leaves columns out to fit the terminal says so, in one note
+// right under the table naming each of them in the order they went, and one
+// that leaves nothing out says nothing of it: at every width from 30 to 200,
+// for both listings. Off a terminal, nothing is left out and nothing said.
+func TestListSaysWhatItLeftOut(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	now := time.Now()
+	writeStore(t, home, fmt.Sprintf(`{"ordered":true,"nextId":4,"accounts":[
+		{"id":1,"provider":"claude","email":"manager.ican@gmail.com","order":1,"token":{"accessToken":"t"},"quotaAt":%[1]d,
+		 "quota":{"windows":[{"name":"5h","percent":3,"primary":true},{"name":"7d","percent":29},{"name":"Fable","percent":48,"scoped":true}]}},
+		{"id":2,"provider":"claude","email":"work.account@example.com","order":2,"token":{"accessToken":"t"},"quotaAt":%[1]d,
+		 "dead":true,"deadReason":%[2]q},
+		{"id":3,"provider":"codex","email":"b@x","token":{"accessToken":"t"},"quotaAt":%[1]d}]}`,
+		now.UnixMilli(), clearedReason))
+
+	notes := map[string]string{
+		"[CHECKED]":           "CHECKED is left out to fit this terminal; a wider one or `rota list --json` shows it.",
+		"[CHECKED UNTIL]":     "CHECKED and UNTIL are left out to fit this terminal; a wider one or `rota list --json` shows them.",
+		"[CHECKED UNTIL CLI]": "CHECKED, UNTIL and CLI are left out to fit this terminal; a wider one or `rota list --json` shows them.",
+		"[CLI]":               "CLI is left out to fit this terminal; a wider one or `rota list --json` shows it.",
+		"[CLI CHECKED]":       "CLI and CHECKED are left out to fit this terminal; a wider one or `rota list --json` shows them.",
+	}
+	seen := map[string]bool{}
+	for _, args := range [][]string{nil, {"-s"}} {
+		piped, _, code := call(t, append([]string{"list"}, args...)...)
+		if code != 0 || strings.Contains(piped, "left out") {
+			t.Fatalf("off a terminal nothing is left out or said (%d):\n%s", code, piped)
+		}
+		all := headers(piped)
+		order := []string{"CHECKED", "UNTIL", "CLI"}
+		if args != nil {
+			order = []string{"CLI", "CHECKED"}
+		}
+		for width := 30; width <= 200; width++ {
+			var out, errb bytes.Buffer
+			c := &cli{out: &out, err: &errb, in: strings.NewReader(""), cols: width}
+			if err := c.list(args); err != nil {
+				t.Fatal(err)
+			}
+			table, after, _ := strings.Cut(out.String(), "┘\n")
+			shown := headers(table)
+			var gone []string
+			for _, h := range order {
+				if !slices.Contains(shown, h) {
+					gone = append(gone, h)
+				}
+			}
+			if len(shown)+len(gone) != len(all) {
+				t.Fatalf("%v at %d: %q shown of %q, beyond the short columns:\n%s", args, width, shown, all, out.String())
+			}
+			said := strings.Count(strings.Join(strings.Fields(after), " "), "left out")
+			if len(gone) == 0 {
+				if said != 0 {
+					t.Fatalf("%v at %d: nothing left out, and a note says something was:\n%s", args, width, out.String())
+				}
+				continue
+			}
+			want, ok := notes[fmt.Sprint(gone)]
+			if !ok {
+				t.Fatalf("%v at %d: %q left out, a combination with no note here:\n%s", args, width, gone, out.String())
+			}
+			seen[fmt.Sprint(gone)] = true
+			first, _, _ := strings.Cut(strings.TrimPrefix(after, "\n"), "\n\n")
+			if said != 1 || strings.Join(strings.Fields(first), " ") != want {
+				t.Fatalf("%v at %d: %q left out, and the note under the table is %q:\n%s", args, width, gone, first, out.String())
+			}
+			for _, line := range strings.Split(first, "\n") {
+				if screenWidth(line) > width {
+					t.Fatalf("%v at %d: the note is wider than the terminal: %q", args, width, line)
+				}
+			}
+		}
+	}
+	for k := range notes {
+		if !seen[k] {
+			t.Errorf("no width left out %s", k)
+		}
 	}
 }

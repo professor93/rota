@@ -29,23 +29,26 @@ type grid struct {
 	// the table would otherwise wrap every long line itself, taking the
 	// borders with it and breaking every box on the screen.
 	width int
-	// give is the columns that wrap their cells to fit a narrow terminal, in
-	// the order they give way. They wrap down to wrapFloor before anything is
-	// cut, further once the columns in neither list are cut to cutSoft, and
-	// are cut themselves last of all, once every other column is down to its
-	// "…" (see fit).
-	give []int
-	// keep is the columns whose content is short and always the same shape
-	// — a place, an id, a percentage — which are cut only once every column
-	// but give is down to its "…", in the order they give way.
-	keep []int
+	// give is the columns of free text, which wrap their cells at their
+	// spaces to fit a narrow terminal, in the order they give way, each
+	// first only down to its room.
+	give []wrap
+	// drop is the short columns — an age, a threshold, a CLI's name — left
+	// out whole, in this order, while the free text still reads: each once
+	// every column in give is down to its room, or to the width it names.
+	// Cut to fit, they would say "cl…" under a header cut to "C…".
+	drop []leave
+	// cut is the columns whose lines are cut, each keeping its start and an
+	// "…", once the free text is as narrow as it reads. A column named
+	// nowhere — a place, an id — keeps its width whatever happens.
+	cut []int
 	// cutBy is how a column is cut where cutCell's way would lose what it
 	// is there for: a path keeps its end, the part no other path on the
 	// screen shares (cutStart), and "#1 a@x" is cut where the width falls
 	// (cut), since going back to its space leaves "#1…" and no account.
 	cutBy map[int]func(c string, n int) string
 	// steps, when set, is the order the columns are cut in, in place of the
-	// one give and keep make (see fit), for a table with no column to wrap
+	// one give, drop and cut make (see fit), for a table with no column to wrap
 	// whose columns each give way only so far before the next is touched:
 	// a column can be in more than one step, each with a floor of its own.
 	steps []stage
@@ -57,6 +60,14 @@ type grid struct {
 	// narrow one changes nothing anywhere else.
 	plain bool
 }
+
+// wrap is a column that wraps, and how far it wraps before any short column
+// is left out instead.
+type wrap struct{ col, room int }
+
+// leave is a short column left out to fit, and how narrow the free text
+// wraps before it goes: 0 for no narrower than its room.
+type leave struct{ col, after int }
 
 // termWidth is how many columns wide out is, when it is a terminal, and 0
 // when it is not — a pipe or a file gets what it always got, at whatever
@@ -93,17 +104,12 @@ func say(out io.Writer, width int, text string) {
 	io.WriteString(out, text)
 }
 
-// How narrow columns get, and in which order (see fit). A column that wraps
-// goes down to minWrap before the next one gives way, and to wrapFloor
-// before anything else is cut; below hardWrap it is cut too, since three
-// letters a line is no longer reading. cutSoft is as far as the first cut
-// goes: "5h 100%…", so a window with a two-letter name keeps its percentage
-// however spent it is, while a longer one, "Fable 48%", is cut to its name.
-// cutHard is a first character and the "…".
+// How narrow columns get once nothing is left to drop (see fit): the free
+// text wraps to wrapFloor before anything is cut, and the first cut goes to
+// cutSoft, "5h 100%…", a spent window keeping its percentage and "Fable 48%"
+// cut to its name. cutHard, a character and an "…", is for grid.steps.
 const (
-	minWrap   = 16
 	wrapFloor = 10
-	hardWrap  = 4
 	cutSoft   = 8
 	cutHard   = 2
 )
@@ -163,76 +169,45 @@ func (g *grid) frame(w []int) int {
 }
 
 // fit is the table's cells as drawn: as they are when the table fits, or
-// when no width was asked for, and otherwise narrowed until it does.
+// when no width was asked for, and otherwise narrowed until it does, in
+// stages, each only as far as it takes:
 //
-// The columns in give wrap first, in their order, each down to minWrap, and
-// nothing of what they say is lost. The rest of the stages are below.
-func (g *grid) fit() (header []string, rows [][]string) {
+//   - the columns in give wrap, one at a time in their order, each down to
+//     its room; nothing of what they say is lost;
+//   - the columns in drop are left out, in their order, the columns in give
+//     first wrapping on together to the width one names;
+//   - the columns in give wrap on together, down to wrapFloor;
+//   - the columns in cut are cut to cutSoft;
+//   - and then the columns in give, and last those in cut, go down to their
+//     headers.
+//
+// A table with steps of its own is cut in those instead. Within a stage the
+// widest column goes first, a tie going to the one named first. A cut line
+// keeps its start, as many whole words of it as fit (see cutCell), and ends
+// in the "…" that says more was there. A header is never cut, so a column is
+// never narrower than its own; a table still too wide after all of it is
+// drawn as narrow as it goes.
+//
+// left is the headers of the columns left out, in the order they were.
+func (g *grid) fit() (header []string, rows [][]string, left []string) {
 	w := widths(g.header, g.rows)
 	// A table with no columns, a plain one with no rows, has nothing to cut.
 	if g.width <= 0 || len(w) == 0 || g.frame(w) <= g.width {
-		return g.header, g.rows
+		return g.header, g.rows, nil
 	}
 	natural := slices.Clone(w)
-	over := g.frame(w) - g.width
-	for _, i := range g.give {
-		take := min(over, max(w[i]-min(natural[i], minWrap), 0))
-		w[i] -= take
-		over -= take
-	}
-	// The other columns: the ones nobody named, which say the most after
-	// give (USAGE), and then keep.
-	var rest []int
-	for j := range w {
-		if !slices.Contains(g.give, j) && !slices.Contains(g.keep, j) {
-			rest = append(rest, j)
-		}
-	}
-	// Then one column at a time, the widest of each stage's columns first —
-	// a tie going to the one named first, which is the one meant to give
-	// way first — until each is down to the stage's floor:
-	//
-	//   - the wrapping columns, together, down to wrapFloor; nothing lost;
-	//   - the columns in neither list (USAGE) cut to cutSoft;
-	//   - the wrapping columns again, down to hardWrap; still nothing lost;
-	//   - the columns in neither list cut to cutHard, then keep;
-	//   - and only then the wrapping columns cut, to cutHard as well.
-	//
-	// A table with steps of its own is cut in those instead. A cut line
-	// keeps its start, as many whole words of it as fit (see cutCell), and
-	// ends in the "…" that says more was there. What is still too wide after
-	// all of it is drawn as narrow as it goes.
-	steps := g.steps
-	if steps == nil {
-		steps = []stage{
-			{g.give, wrapFloor},
-			{rest, cutSoft},
-			{g.give, hardWrap},
-			{rest, cutHard},
-			{g.keep, cutHard},
-			{g.give, cutHard},
-		}
-	}
-	for _, step := range steps {
-		for ; over > 0; over-- {
-			at := -1
-			for _, j := range step.cols {
-				if w[j] > step.floor && (at < 0 || w[j] > w[at]) {
-					at = j
-				}
-			}
-			if at < 0 {
-				break
-			}
-			w[at]--
-		}
-	}
+	floor := make([]int, len(w))
+	shown := make([]bool, len(w))
 	wraps := make([]bool, len(w))
-	for _, i := range g.give {
-		wraps[i] = w[i] >= hardWrap
+	for i := range w {
+		floor[i], shown[i] = screenWidth(g.head(i)), true
 	}
-	// shape is a cell of column i as it is drawn n wide. A wrapping column's
-	// header is cut, not wrapped: it is one word.
+	var give []int
+	for _, x := range g.give {
+		wraps[x.col] = true
+		give = append(give, x.col)
+	}
+	// shape is a cell of column i as it is drawn n wide.
 	shape := func(i int, c string, head bool, n int) string {
 		switch {
 		case n >= natural[i]:
@@ -246,7 +221,9 @@ func (g *grid) fit() (header []string, rows [][]string) {
 		}
 	}
 	// drawn is how wide column i comes out when it is drawn n wide: its
-	// widest line, header included, which is n or less.
+	// widest line, header included, which is n or less — a wrapped column
+	// breaks where its words end, and a cut one at the space before the
+	// word it would split.
 	drawn := func(i, n int) int {
 		m := 0
 		measure := func(c string, head bool) {
@@ -262,63 +239,101 @@ func (g *grid) fit() (header []string, rows [][]string) {
 		}
 		return m
 	}
-	// A column often comes out narrower than the width it was given: a
-	// wrapped one breaks where its words end, and a cut one at the space
-	// before the word it would split. When anything is cut, what that leaves
-	// over goes back to the cut columns, in the order they were cut, each
-	// made as wide as the room left lets it come out, and then to the
-	// wrapping columns the same way. A table with a cut in it is then as
-	// wide as the terminal, unless what is left is less than any column
-	// needs to show more.
-	got := make([]int, len(w))
-	cuts := false
+	over := func() int {
+		var on []int
+		for i, c := range w {
+			if shown[i] {
+				on = append(on, c)
+			}
+		}
+		return g.frame(on) - g.width
+	}
+	// shrink narrows the widest of cols until the table fits or each is down
+	// to least: to what it comes out at, so a short column is never left out
+	// for room a wrap already freed, or, in a table with steps, a column at a
+	// time whatever it comes out at, what that frees going back below.
+	measured := g.steps == nil
+	shrink := func(cols []int, least int) {
+		for over() > 0 {
+			at := -1
+			for _, j := range cols {
+				if shown[j] && w[j] > max(least, floor[j]) && (at < 0 || w[j] > w[at]) {
+					at = j
+				}
+			}
+			if at < 0 {
+				return
+			}
+			if d := drawn(at, w[at]-1); measured && d < w[at] {
+				w[at] = d
+			} else {
+				w[at]--
+			}
+		}
+	}
+	// cut is the columns cut, in the order what is left over goes back to.
+	cut := g.cut
+	if !measured {
+		cut = nil
+		for _, step := range g.steps {
+			shrink(step.cols, step.floor)
+			for _, i := range step.cols {
+				if !slices.Contains(cut, i) {
+					cut = append(cut, i)
+				}
+			}
+		}
+	} else {
+		for _, x := range g.give {
+			shrink([]int{x.col}, x.room)
+		}
+		for _, x := range g.drop {
+			if x.after > 0 {
+				shrink(give, x.after)
+			}
+			if over() <= 0 {
+				break
+			}
+			shown[x.col] = false
+			left = append(left, g.header[x.col])
+		}
+		shrink(give, wrapFloor)
+		shrink(g.cut, cutSoft)
+		shrink(give, 0)
+		shrink(g.cut, 0)
+	}
+	// What is left over goes back to what was cut, and then to the free
+	// text, which reads in fewer lines the wider it is: each column as wide
+	// as the room left lets it come out.
+	got, slack := make([]int, len(w)), -over()
 	for i := range w {
-		got[i] = drawn(i, w[i])
-		cuts = cuts || w[i] < natural[i] && (!wraps[i] || screenWidth(g.head(i)) > w[i])
+		if got[i] = drawn(i, w[i]); shown[i] {
+			slack += w[i] - got[i]
+		}
 	}
-	if slack := g.width - g.frame(got); cuts && slack > 0 {
-		cutOrder := [][]int{rest, g.keep, g.give}
-		if g.steps != nil {
-			cutOrder = nil
-			for _, s := range g.steps {
-				cutOrder = append(cutOrder, s.cols)
-			}
-		}
-		var order []int
-		for _, cols := range cutOrder {
-			for _, i := range cols {
-				if !wraps[i] && !slices.Contains(order, i) {
-					order = append(order, i)
-				}
-			}
-		}
-		for _, i := range g.give {
-			if wraps[i] {
-				order = append(order, i)
-			}
-		}
-		for _, i := range order {
-			for n := natural[i]; n > w[i] && slack > 0; n-- {
-				if d := drawn(i, n); d-got[i] <= slack {
-					slack -= d - got[i]
-					w[i], got[i] = n, d
-					break
-				}
+	for _, i := range append(slices.Clone(cut), give...) {
+		for n := natural[i]; n > w[i] && slack > 0; n-- {
+			if d := drawn(i, n); d-got[i] <= slack {
+				slack -= d - got[i]
+				w[i], got[i] = n, d
+				break
 			}
 		}
 	}
-	header = make([]string, len(g.header))
-	for i, c := range g.header {
-		header[i] = shape(i, c, true, w[i])
+	keep := func(cells []string, head bool) (out []string) {
+		for i, c := range cells {
+			if shown[i] {
+				out = append(out, shape(i, c, head, w[i]))
+			}
+		}
+		return out
 	}
+	header = keep(g.header, true)
 	rows = make([][]string, len(g.rows))
 	for ri, r := range g.rows {
-		rows[ri] = make([]string, len(r))
-		for i, c := range r {
-			rows[ri][i] = shape(i, c, false, w[i])
-		}
+		rows[ri] = keep(r, false)
 	}
-	return header, rows
+	return header, rows, left
 }
 
 // wrapCell wraps each line of a cell that is longer than n at its spaces.
@@ -509,13 +524,15 @@ func cutCell(c string, n int) string {
 }
 
 // render draws the table. Every line is exactly as wide as the frame, and
-// none ends in padding: the border is the last thing on it.
-func (g *grid) render(out io.Writer) {
+// none ends in padding: the border is the last thing on it. It returns the
+// headers of the columns left out to fit the terminal, for a note to name
+// (see fit).
+func (g *grid) render(out io.Writer) []string {
 	if g.plain {
 		g.renderPlain(out)
-		return
+		return nil
 	}
-	header, rows := g.fit()
+	header, rows, gone := g.fit()
 	w := widths(header, rows)
 	rule := func(left, mid, right string) string {
 		parts := make([]string, len(w))
@@ -557,6 +574,7 @@ func (g *grid) render(out io.Writer) {
 		}
 	}
 	fmt.Fprintln(out, rule("└", "┴", "┘"))
+	return gone
 }
 
 // rowLines is a row as it is drawn, line by line: each cell split at its

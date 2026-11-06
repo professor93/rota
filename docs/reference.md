@@ -2702,13 +2702,18 @@ to read*:
 `#` is the account's place in the rotation, `-` when it is out of it. Each
 usage window has a line of its own under USAGE, most important first; rows
 that span lines are ruled apart, one-line rows (as in `--short`) are not.
-A terminal narrower than the table gets wrapped cells, STATUS first and then
-ACCOUNT; only a terminal too narrow even for that has its other cells cut:
-USAGE first, between the words of a reading, then the short columns, and
-STATUS and ACCOUNT last of all, below about 45 columns. Each cut line keeps
-its start and ends in one "…", and a wrapped column narrower than its name has
-its header cut the same way, to `ACC…` or `STA…`. The notes under the table
-wrap at their spaces too, and a pipe or a file gets the table as it is.
+A terminal narrower than the table gets wrapped cells: STATUS first, to 24
+columns, and then ACCOUNT, to 16, an address breaking before its "@".
+Narrower still, CHECKED and then UNTIL are left out whole; then STATUS wraps
+on to 16 columns, and only then is CLI left out. `--short` leaves out CLI and
+then CHECKED, once ACCOUNT is down to 16. Past that STATUS and ACCOUNT wrap
+on to 10 columns, and only then is USAGE cut, to 8, between the words of a
+reading, each line keeping its start and ending in one "…"; narrower yet,
+STATUS and ACCOUNT and then USAGE go down to the width of their headers. A
+header is never cut, and neither are `#` and ID. A note under the table names
+every column left out, which a wider terminal or `rota list --json` shows.
+The notes under the table wrap at their spaces too, and a pipe or a file gets
+the table as it is, with nothing left out.
 Widths are counted in the columns a character takes on screen, two for
 Chinese, Japanese, Korean and most emoji, a flag or a family of several
 characters among them, so a name in them lines up too.

@@ -31,7 +31,7 @@ func (g *grid) renderPlain(out io.Writer) {
 			clean.rows[i][j] = strings.ReplaceAll(printable(c), "\n", " ")
 		}
 	}
-	_, rows := clean.fit()
+	_, rows, _ := clean.fit()
 	var lines [][]string
 	for _, r := range rows {
 		lines = append(lines, rowLines(r)...)
