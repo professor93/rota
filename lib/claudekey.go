@@ -138,6 +138,29 @@ func checkClaudeKey(ctx context.Context, key string) (refused, unverified error)
 	return nil, fmt.Errorf("the Claude API could not be asked about the key, so it was not checked: %v", scrub(err, key))
 }
 
+// claudeNoCredit is what both the API and Claude Code say, case aside, when a
+// key's organisation has no credit left. The API refuses the request with a
+// 400 that reads "Your credit balance is too low to access the Anthropic API.
+// Please go to Plans & Billing to upgrade or purchase credits."; Claude Code
+// ends the turn on it, an API error of the kind its SDK calls billing_error,
+// and its print mode reports an error result whose answer is its own sentence
+// for it, "Credit balance is too low" (read in Claude Code 2.1.319). Nothing
+// was charged: the API refused before any work.
+const claudeNoCredit = "credit balance is too low"
+
+// OutOfCredit reports whether this run ended because the account's API key has
+// no credit left: Claude Code says so in an error result, and in nothing else.
+// An answer that merely mentions it is not an error, and every other CLI says
+// other things.
+//
+// The run is over either way. What it means for the account is the caller's to
+// decide — it is no window that resets, and the credit is back only when
+// somebody buys more — and Account.NoCreditUntil is where to keep that.
+func (r *Result) OutOfCredit() bool {
+	return r != nil && r.IsError && Flavor(r.Provider) == "claude" &&
+		strings.Contains(strings.ToLower(r.Result), claudeNoCredit)
+}
+
 // scrub is an error's text with a secret taken out, for an error whose words
 // this package did not choose.
 func scrub(err error, secret string) string {

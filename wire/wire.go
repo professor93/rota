@@ -72,6 +72,11 @@ type Account struct {
 	// token, not the access token refreshed under it — RFC 3339, and absent
 	// when the provider has not said.
 	LoginUntil string `json:"login_until,omitempty"`
+	// NoCreditUntil is, RFC 3339, until when an account on an API key counts
+	// as out of credit, which a run on it found, and the rotation passes it
+	// by; absent when no run has found that, or the time is over. Status is
+	// limited meanwhile.
+	NoCreditUntil string `json:"no_credit_until,omitempty"`
 	// Metered says whether this account's usage can be read at all: its
 	// provider publishes a usage endpoint, and it is not an API key, which
 	// has none. When it cannot, there are no limits to report and no check
@@ -143,6 +148,9 @@ func Describe(a *rota.Account) Account {
 	}
 	if t := a.LoginUntil(); !t.IsZero() {
 		v.LoginUntil = t.UTC().Format(time.RFC3339)
+	}
+	if a.OutOfCredit() {
+		v.NoCreditUntil = time.UnixMilli(a.NoCreditUntil).UTC().Format(time.RFC3339)
 	}
 	if a.QuotaAt > 0 {
 		t := time.UnixMilli(a.QuotaAt)
@@ -238,6 +246,29 @@ func LoginStatus(a *rota.Account) string {
 		return fmt.Sprintf("login ends in %dd", int(left.Hours())/24)
 	}
 	return ""
+}
+
+// CreditStatus is what a listing's status says of an account a run found out
+// of credit, with how much longer the rotation passes it by, or "" for every
+// other account.
+func CreditStatus(a *rota.Account) string {
+	if !a.OutOfCredit() {
+		return ""
+	}
+	return "out of credit (" + Countdown(rota.When{Time: time.UnixMilli(a.NoCreditUntil)}) + ")"
+}
+
+// CreditNote is what a listing says under its table about an account a run
+// found out of credit: what that means and what ends it. "" for every other
+// account.
+func CreditNote(a *rota.Account) string {
+	if !a.OutOfCredit() {
+		return ""
+	}
+	return "a run on its API key was refused for want of credit, so the rotation passes it by for " +
+		Countdown(rota.When{Time: time.UnixMilli(a.NoCreditUntil)}) +
+		", or until a run on it by id is answered or the key is pasted again with `rota login --key`; " +
+		"more credit is bought in the Claude Console, under Billing"
 }
 
 // Since renders how long ago an instant was, for someone reading a list.

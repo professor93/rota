@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/professor93/rota/internal/fakecli"
 	rota "github.com/professor93/rota/lib"
 )
 
@@ -125,5 +127,62 @@ func TestAKeySentAsATokenNeverLeaves(t *testing.T) {
 	}
 	if n := asked.Load(); n != 0 {
 		t.Fatalf("a key sent as a setup token must go nowhere: %d requests reached the API", n)
+	}
+}
+
+// A run over HTTP that the API refused for want of credit answers as any
+// failed run does, and leaves its key paused: the listing says limited and
+// until when, and the rotation names another account.
+func TestAKeyOutOfCreditOverHTTP(t *testing.T) {
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer api.Close()
+	old := rota.ClaudeModelsEndpoint
+	rota.ClaudeModelsEndpoint = api.URL
+	defer func() { rota.ClaudeModelsEndpoint = old }()
+
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	h := newHarness(t, Options{})
+	_, raw := h.do("POST", "/v1/login", map[string]any{"provider": "claude", "key": testKey})
+	var got struct {
+		ID int `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil || got.ID == 0 {
+		t.Fatalf("login: %s", raw)
+	}
+	id := strconv.Itoa(got.ID)
+	if resp, raw := h.do("PATCH", "/v1/accounts/"+id, map[string]any{"order": 1}); resp.StatusCode != 200 {
+		t.Fatalf("into the rotation, first: %d %s", resp.StatusCode, raw)
+	}
+
+	bin := t.TempDir()
+	refusal := fakecli.Lines(`{"type":"result","subtype":"success","is_error":true,"api_error_status":400,` +
+		`"num_turns":1,"result":"Credit balance is too low","session_id":"s-credit","total_cost_usd":0}`)
+	refusal.Exit = 1
+	fakecli.Install(t, bin, "claude", refusal)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	resp, raw := h.do("POST", "/v1/accounts/"+id+"/run", map[string]any{"prompt": "hi"})
+	if resp.StatusCode != http.StatusBadGateway || !strings.Contains(string(raw), "Credit balance is too low") {
+		t.Fatalf("a failed run, as ever: %d %s", resp.StatusCode, raw)
+	}
+	_, raw = h.do("GET", "/v1/accounts", nil)
+	var doc struct {
+		Accounts []struct {
+			ID            int    `json:"id"`
+			Status        string `json:"status"`
+			NoCreditUntil string `json:"no_credit_until"`
+		} `json:"accounts"`
+		Default int `json:"default"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range doc.Accounts {
+		if a.ID == got.ID && (a.Status != "limited" || a.NoCreditUntil == "") {
+			t.Fatalf("the key is paused: %+v", a)
+		}
+	}
+	if doc.Default == got.ID {
+		t.Fatalf("and the rotation passes it by: %s", raw)
 	}
 }

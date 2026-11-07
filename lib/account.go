@@ -103,6 +103,15 @@ type Account struct {
 	Long    *LongToken `json:"long,omitempty"`
 	Quota   *Quota     `json:"quota,omitempty"`
 	QuotaAt int64      `json:"quotaAt,omitzero"` // unix ms of last quota fetch
+	// NoCreditUntil is, in unix ms, until when this account counts as out of
+	// credit: a run on its API key ended with the API refusing it for want of
+	// credit (Result.OutOfCredit), and whoever saw that run end put it here.
+	// A key has no usage to read, so this is the only way an emptied one is
+	// ever told from a good one. How long the verdict stands is that
+	// application's choice, made when it writes the field — the credit comes
+	// back when somebody buys more, which nothing here can see — and a key
+	// pasted again forgets it. 0 when no run has found the credit gone.
+	NoCreditUntil int64 `json:"noCreditUntil,omitzero"`
 }
 
 // LongToken is a credential that outlives the run it was made for: the
@@ -174,6 +183,12 @@ func (a *Account) WhyDead() string {
 
 // String is "provider/label".
 func (a *Account) String() string { return a.Provider + "/" + a.Label() }
+
+// OutOfCredit reports whether a run found this account's API key out of credit
+// and the time it was given to count as such has not yet passed.
+func (a *Account) OutOfCredit() bool {
+	return a.NoCreditUntil != 0 && nowMS() < a.NoCreditUntil
+}
 
 // ExpiryBuffer refreshes a token slightly before it actually expires, so a
 // run never starts with seconds left on the clock. A variable rather than a
@@ -254,8 +269,11 @@ func (a *Account) apply(t *Token) {
 	// Only ever set, never cleared: a refresh says nothing about what kind of
 	// credential the account holds, and a key is never refreshed anyway. A
 	// setup token is no account's credential of its own; it is ApplyLong's.
+	// A key pasted again is somebody saying it is good, which is the one
+	// thing that ends a verdict of no credit before its time.
 	if t.Credential == credentialAPIKey {
 		a.Credential = t.Credential
+		a.NoCreditUntil = 0
 	}
 	a.Token.Access = t.Access
 	if t.Refresh != "" {

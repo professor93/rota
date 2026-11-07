@@ -660,6 +660,10 @@ func (c *cli) list(args []string) error {
 			// Why it died, beside the verdict: otherwise a reused refresh
 			// token, a lost reply and a revoked credential all read alike.
 			status += " (" + a.WhyDead() + ")"
+		} else if credit := wire.CreditStatus(a); credit != "" {
+			// A key has no window, so limited can only mean this, and says
+			// how long the rotation still passes it by.
+			status = credit
 		}
 		if note := wire.LoginStatus(a); note != "" {
 			status += " (" + note + ")"
@@ -748,6 +752,10 @@ func (c *cli) sayLongNotes(shown []*rota.Account, width int) {
 			say(c.out, width, fmt.Sprintf("\n%s: %s\n", a, note))
 		}
 		if note := wire.LoginNote(a); note != "" {
+			say(c.out, width, fmt.Sprintf("\n%s: %s\n", a, note))
+		}
+		// Here too, because --short has no STATUS to say it in.
+		if note := wire.CreditNote(a); note != "" {
 			say(c.out, width, fmt.Sprintf("\n%s: %s\n", a, note))
 		}
 	}
