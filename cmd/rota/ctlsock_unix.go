@@ -158,13 +158,9 @@ func (l ownerListener) Accept() (net.Conn, error) {
 }
 
 // mayControl reports whether the process at the other end of a control
-// socket connection may change anything: whether it is outside every held
-// session. Its session is the one getsid says its pid is in, and a held
-// session's processes are in its holder's session or its CLI's, each the
-// leader of one. Any record whose lock is held counts — one this rota cannot
-// read included, since its holder is running all the same — and one nobody
-// holds is a session that has stopped. A peer that cannot be placed may not,
-// and nobody can be placed in a store whose records cannot be listed.
+// socket connection may change anything: whether heldSessionOf places it
+// outside every held session. A peer that cannot be placed may not, and
+// nobody can be placed in a store whose records cannot be listed.
 func mayControl(c *net.UnixConn, terminals string, log *slog.Logger) bool {
 	if c == nil {
 		return false
@@ -174,15 +170,38 @@ func mayControl(c *net.UnixConn, terminals string, log *slog.Logger) bool {
 		log.Debug("a control socket caller that cannot be placed may only watch", "err", err)
 		return false
 	}
-	sid, err := sessionOf(pid)
-	if err != nil || sid <= 0 {
-		log.Debug("a control socket caller that cannot be placed may only watch", "pid", pid, "err", err)
+	switch id, err := heldSessionOf(pid, terminals); {
+	case err != nil:
+		log.Warn("a control socket caller that cannot be placed may only watch", "pid", pid, "err", err)
 		return false
+	case id != "":
+		log.Debug("a control socket caller inside a held session may only watch", "pid", pid, "terminal", id)
+		return false
+	}
+	return true
+}
+
+// heldSessionOf is the held session a process runs inside, or "" for none:
+// the one whose holder or CLI leads the session getsid says the process is
+// in, since a held session's processes are in one of those two sessions.
+// Any record whose lock is held counts — one this rota cannot read included,
+// since its holder is running all the same — and one nobody holds is a
+// session that has stopped. A process whose session cannot be had, or a
+// store whose records cannot be listed, is an error, which every caller
+// takes as inside: ctl.sock lets such a caller only watch, and serve stop
+// refuses it. It is a guard against accidents, not a wall: a process that
+// calls setsid leaves the session it was in.
+func heldSessionOf(pid int, terminals string) (string, error) {
+	sid, err := sessionOf(pid)
+	if err == nil && sid <= 0 {
+		err = fmt.Errorf("getsid gave %d", sid)
+	}
+	if err != nil {
+		return "", fmt.Errorf("the session of pid %d: %w", pid, err)
 	}
 	entries, err := os.ReadDir(terminals)
 	if err != nil {
-		log.Warn("the held sessions could not be listed, so a control socket caller may only watch", "pid", pid, "err", err)
-		return false
+		return "", fmt.Errorf("the held sessions could not be listed: %w", err)
 	}
 	for _, e := range entries {
 		if !e.IsDir() || !holdwire.IsID(e.Name()) {
@@ -190,9 +209,8 @@ func mayControl(c *net.UnixConn, terminals string, log *slog.Logger) bool {
 		}
 		r := holdwire.Judge(terminals, e.Name())
 		if r.Locked && r.Meta != nil && (r.Meta.HolderPID == sid || r.Meta.ChildPID == sid) {
-			log.Debug("a control socket caller inside a held session may only watch", "pid", pid, "terminal", r.ID)
-			return false
+			return r.ID, nil
 		}
 	}
-	return true
+	return "", nil
 }

@@ -56,9 +56,16 @@ type Client struct {
 // is. A free lock is ErrNoDaemon at once. A held lock is tried until its
 // socket accepts a connection, for up to five seconds, and is then the
 // daemon not answering; a lock let go of meanwhile is ErrNoDaemon after all.
-func Dial(terminals string) (*Client, error) {
+func Dial(terminals string) (*Client, error) { return dial(terminals, dialWait) }
+
+// DialNow is Dial without the wait: one try, for a caller with a deadline of
+// its own, such as a start waiting for the daemon it started. A held lock
+// whose socket does not accept at once is the daemon not answering, at once.
+func DialNow(terminals string) (*Client, error) { return dial(terminals, 0) }
+
+func dial(terminals string, wait time.Duration) (*Client, error) {
 	sock := holdwire.CtlSock(terminals)
-	deadline := time.Now().Add(dialWait)
+	deadline := time.Now().Add(wait)
 	for {
 		d, running := holdwire.RunningDaemon(terminals)
 		if !running {
@@ -69,7 +76,7 @@ func Dial(terminals string) (*Client, error) {
 			conn.Close()
 			return newClient(sock), nil
 		}
-		if time.Now().After(deadline) {
+		if !time.Now().Before(deadline) {
 			return nil, fmt.Errorf("the rota daemon (pid %d) is not answering on %s", d.PID, sock)
 		}
 		time.Sleep(dialPoll)

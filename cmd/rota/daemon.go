@@ -10,11 +10,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/professor93/rota/api"
+	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/store"
 )
 
@@ -166,6 +168,14 @@ func daemonConfig(conf, home string) (*api.Config, api.Options, api.Listener, er
 	if err != nil {
 		return nil, api.Options{}, api.Listener{}, err
 	}
+	// Serve makes a relative root absolute against where it runs, and a
+	// daemon runs in /: a folder under / instead of the one meant.
+	for _, root := range cfg.Runs.Roots {
+		if !filepath.IsAbs(root) {
+			return nil, api.Options{}, api.Listener{}, fmt.Errorf(
+				"runs.roots: %q is relative; a daemon runs in /, so every root must be absolute in daemon mode", root)
+		}
+	}
 	opts, listener, err := cfg.Serve()
 	if err != nil {
 		return nil, api.Options{}, api.Listener{}, err
@@ -197,14 +207,58 @@ func daemonListens(cfg *api.Config, ctlOnly bool) bool {
 }
 
 // daemonHoldCommand is how a daemon starts each holder: this binary, as
-// `rota serve hold`. Its path is resolved once, now, so that a rota replaced
-// in place — where the running binary's own path reads as deleted — starts
-// new holders from the binary that is there now.
+// `rota serve hold`. Its path is resolved now and kept, so that a rota
+// replaced in place — whose running binary's own path then reads as deleted
+// — starts new holders from the binary that is there now. An upgrade that
+// takes that file away altogether, as a versioned install does when it
+// moves its link on, is followed by resolving exe again; with nothing there
+// either, exe is run as given, and exec says what is missing.
 func daemonHoldCommand(exe string) func() *exec.Cmd {
+	var mu sync.Mutex
+	resolved := exe
 	if real, err := filepath.EvalSymlinks(exe); err == nil {
-		exe = real
+		resolved = real
 	}
-	return func() *exec.Cmd { return exec.Command(exe, "serve", "hold") }
+	return func() *exec.Cmd {
+		mu.Lock()
+		if _, err := os.Stat(resolved); err != nil {
+			resolved = exe
+			if real, err := filepath.EvalSymlinks(exe); err == nil {
+				resolved = real
+			}
+		}
+		path := resolved
+		mu.Unlock()
+		return exec.Command(path, "serve", "hold")
+	}
+}
+
+// invokedAs is the path this rota was started by, its links left as they
+// are: what was typed, found on PATH as the shell found it, so that the
+// daemon, and each holder it starts, can follow a link an upgrade moves on.
+// On linux os.Executable has followed every link already. A path that is
+// not this very binary — an argv[0] its parent made up — is not believed.
+func invokedAs() (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	path := os.Args[0]
+	if !strings.ContainsRune(path, os.PathSeparator) {
+		if path, err = exec.LookPath(path); err != nil {
+			return self, nil
+		}
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return self, nil
+	}
+	a, aerr := os.Stat(abs)
+	b, berr := os.Stat(self)
+	if aerr != nil || berr != nil || !os.SameFile(a, b) {
+		return self, nil
+	}
+	return abs, nil
 }
 
 // sessionsN is "1 session" or "n sessions".
@@ -305,4 +359,45 @@ func (c *cli) sayStatus(doc *statusDoc) error {
 		fmt.Fprintf(c.out, "sessions: %d running, %d stopped\n", s.Live, s.Stopped)
 	}
 	return nil
+}
+
+// runningRecords is every held session whose holder is running, by its
+// lock: one this rota cannot read, and one still starting, as well.
+func runningRecords(terminals string) []holdwire.Record {
+	var out []holdwire.Record
+	for _, r := range holdwire.Scan(terminals) {
+		if r.Locked {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// waitEnded waits up to within for each session's lock to be let go of,
+// and says which are still held then.
+func waitEnded(terminals string, ids []string, within time.Duration) []string {
+	left := slices.Clone(ids)
+	for deadline := time.Now().Add(within); ; time.Sleep(50 * time.Millisecond) {
+		left = slices.DeleteFunc(left, func(id string) bool {
+			return !holdwire.Locked(holdwire.LockPath(holdwire.Dir(terminals, id)))
+		})
+		if len(left) == 0 || time.Now().After(deadline) {
+			return left
+		}
+	}
+}
+
+// notEnded is the error for sessions stop --all could not end: which they
+// are, and why where it was told.
+func notEnded(said string, asked int, left []string, why map[string]error) error {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s; %s ended, and %s did not:", said, sessionsN(asked-len(left)), sessionsN(len(left)))
+	for _, id := range left {
+		if err := why[id]; err != nil {
+			fmt.Fprintf(&b, "\n  %s: %v", id, err)
+		} else {
+			fmt.Fprintf(&b, "\n  %s: still running", id)
+		}
+	}
+	return errors.New(b.String())
 }
