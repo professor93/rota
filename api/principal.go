@@ -165,15 +165,21 @@ func needs(pattern string) Role {
 }
 
 // localName is the control socket's principal, and the person it is for the
-// keyboard when nothing else is said. No user may be called it (reservedUser):
-// that user would be the same person, and its lines in the log would read as
-// the socket's.
+// keyboard when nothing else is said.
 const localName = "local"
 
-// reservedUser is the refusal of a user called localName, the same sentence
-// from the file and from Options; at names the entry.
-func reservedUser(at string) error {
-	return fmt.Errorf("%s: the name %q is reserved for the control socket's own principal; give this user another", at, localName)
+// ReservedName refuses a name that no user and no token may have: local,
+// the control socket's own principal. A user called that would be the same
+// person as the socket at a held session's keyboard, and either would read
+// as the socket wherever a name is shown — who holds a keyboard, and every
+// audit line. It is one sentence wherever a name is chosen: in the file, in
+// Options, and in the commands that print a block for the file. Any other
+// name is nil.
+func ReservedName(name string) error {
+	if name == localName {
+		return fmt.Errorf("the name %q is reserved for the control socket's own principal; choose another", localName)
+	}
+	return nil
 }
 
 // personOf is who a principal is as a person, for the keyboard of a held
@@ -331,10 +337,10 @@ func (s *Server) sameSite(w http.ResponseWriter, r *http.Request, p *Principal) 
 // originFree reports whether a principal is exempt from the Origin rule on
 // Handler, on a request and on a socket alike: it is one no browser can have
 // attached to a request by itself, so no page can have tricked it into one.
-// A bearer token is put on a request only by the code that meant to make
-// it, and local arrives over a socket no web page can open. LocalHandler
-// never asks: it reads no Origin for anybody.
-func originFree(p *Principal) bool { return p.Via == "token" || p.Via == localName }
+// Only a bearer token is: it is put on a request only by the code that meant
+// to make it. LocalHandler never asks, since it reads no Origin for anybody,
+// so no principal is exempt here for arriving there.
+func originFree(p *Principal) bool { return p.Via == "token" }
 
 // sameOrigin reports whether this request says it came from this server's
 // own page. Origin is what a browser sends; Referer is the fallback for the

@@ -792,10 +792,10 @@ role   = "watch"
 sha256 = "<hex of sha256(the token)>"
 ```
 
-Names are unique within each table and non-empty, and no user is called
-`local`, which is the control socket's own; a role is one of the two words;
-a password must parse, with at least 100 000 iterations, a salt of at least
-16 bytes and a 32-byte hash; a digest is 64 hexadecimal characters.
+Names are unique within each table and non-empty, and no user or token is
+called `local`, which is the control socket's own; a role is one of the two
+words; a password must parse, with at least 100 000 iterations, a salt of at
+least 16 bytes and a 32-byte hash; a digest is 64 hexadecimal characters.
 Every refusal names the entry — `[[users]] "inoyat": password: …` — because
 whoever reads it is looking at a file with several of them in it.
 
@@ -893,14 +893,17 @@ The rota daemon — a server holding a store's held sessions — also listens on
 a unix socket, `<store>/terminals/ctl.sock`. It is the daemon's API for this
 machine's own user: what a command on this machine talks to.
 
-**Who reaches it.** The socket is `0600` in a directory that is `0700`, so
-only the user the daemon runs as can connect, and that is its whole
-authorization. Nothing on a request is read to find out who is asking — no
-token, no cookie, no `Origin`, and no header ever names anybody — and a
-wrong token there is not a guess. The `Origin` rule is not applied there at
-all, whoever the principal is: it protects a cookie from a page, and no page
-can open a unix socket. Every request is the principal `local`,
-`"via":"local"`, and the role table decides what it may do, as for anyone.
+**Who reaches it.** The socket is `0600` in a directory that is `0700` — a
+terminals directory somebody opened to others is closed again before the
+socket is made, and one the daemon cannot close is refused — and a
+connection from any user but the daemon's, as the kernel names it, is
+closed before it is served. That is its whole authorization. Nothing on a
+request is read to find out who is asking — no token, no cookie, no
+`Origin`, and no header ever names anybody — and a wrong token there is not
+a guess. The `Origin` rule is not applied there at all, whoever the
+principal is: it protects a cookie from a page, and no page can open a unix
+socket. Every request is the principal `local`, `"via":"local"`, and the
+role table decides what it may do, as for anyone.
 
 **What it serves.** Every route that takes a principal — the API, the
 WebSockets, and the terminals with their `send` — whatever `[routes]` says:
@@ -909,7 +912,9 @@ answers `GET /v1/health`, and `GET /v1/session` with
 `{"name":"local","role":…,"via":"local"}`, so a client can ask whether it
 may change anything before it tries. There is no page, asset or invite
 landing, and no signing in or out: nothing that reaches a unix socket is a
-browser.
+browser. An invite made over the socket links to the `Host` the client
+sent, which on a socket is whatever it wrote, so put the port's address in
+its place before handing the link on.
 
 **Inside a held session it only watches.** A caller is `local` with
 `control`, unless it is running inside a held session — the agent in it, or
@@ -928,9 +933,11 @@ calls `setsid` leaves its session and escapes it.
 (*[Roles, and the keyboard](#roles-and-the-keyboard)*): two clients of the
 socket are one person on two devices, and with `[auth] local_user` — or a
 single `[[users]]` entry that may control — it is that user's device. That
-is why no user may be called `local`: a file with one is refused at start-up
+is why no user or token may be called `local`: either would read as the
+socket wherever a name is shown. A file with one is refused at start-up
 with *`[[users]] "local"`: the name "local" is reserved for the control
-socket's own principal; give this user another*.
+socket's own principal; choose another*, and `rota serve passwd local` and
+`rota serve token local` are refused in the same words.
 
 **Only the daemon listens there.** The socket is opened by the process
 holding the store's daemon claim, and by no other. Holding it, the daemon

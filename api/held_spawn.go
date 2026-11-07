@@ -48,7 +48,18 @@ func (s *Server) claimDaemon() error {
 		return fmt.Errorf("api: %w", err)
 	}
 	s.terminals, s.unclaim = terminals, release
+	s.claimed.Store(true)
 	return nil
+}
+
+// HoldsDaemon reports whether this server holds the daemon claim on the
+// store whose terminals directory this is: from New, for a server with
+// HoldCommand, until Stop lets go of it. Whatever only a store's daemon may
+// do — listening on its control socket, above all — asks this rather than
+// daemon.pid, which says which process held the claim last, not which server
+// holds it now.
+func (s *Server) HoldsDaemon(terminals string) bool {
+	return s.claimed.Load() && s.terminals != "" && filepath.Clean(terminals) == filepath.Clean(s.terminals)
 }
 
 /* ------------------------------------------------------------ starting one --- */

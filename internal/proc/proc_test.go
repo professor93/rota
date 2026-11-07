@@ -10,8 +10,9 @@ import (
 	"time"
 )
 
-// The process at the other end of a unix socket is named by the kernel, not
-// by anything it says: here both ends are this test.
+// The process at the other end of a unix socket, and the user it runs as,
+// are named by the kernel, not by anything it says: here both ends are this
+// test.
 func TestPeerPIDOfAUnixSocket(t *testing.T) {
 	dir, err := os.MkdirTemp("", "rota")
 	if err != nil {
@@ -39,6 +40,7 @@ func TestPeerPIDOfAUnixSocket(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid, err := PeerPID(c)
+	uid, uerr := PeerUID(c)
 	_ = c.Close()
 	if derr := <-dialed; derr != nil {
 		t.Fatal(derr)
@@ -48,6 +50,10 @@ func TestPeerPIDOfAUnixSocket(t *testing.T) {
 	}
 	if pid != os.Getpid() {
 		t.Fatalf("the peer is %d, want %d", pid, os.Getpid())
+	}
+	// And the user it runs as, which is this test's too.
+	if uerr != nil || uid != os.Geteuid() {
+		t.Fatalf("the peer's user is %d (%v), want %d", uid, uerr, os.Geteuid())
 	}
 }
 

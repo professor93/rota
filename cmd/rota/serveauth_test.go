@@ -115,6 +115,8 @@ func TestServePasswdRefusesTheObviousMistakes(t *testing.T) {
 			want: `--role is "control" or "watch"`},
 		{name: "nothing typed", in: "\n", args: []string{"serve", "passwd", "a"},
 			want: "a password with nothing in it"},
+		{name: "the control socket's name", in: "x\nx\n", args: []string{"serve", "passwd", "local"},
+			want: `the name "local" is reserved for the control socket's own principal; choose another`},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			_, errOut, code := runCLIStdin(t, c.in, c.args...)
@@ -146,6 +148,16 @@ func TestServeTokenPrintsATokenAndItsHash(t *testing.T) {
 	}
 	if strings.Contains(blockOf(t, out, "tokens"), token) {
 		t.Fatalf("the token itself is in the block:\n%s", out)
+	}
+}
+
+// TestServeTokenRefusesTheControlSocketsName: a block the server would
+// refuse is not printed, and no token is made for it.
+func TestServeTokenRefusesTheControlSocketsName(t *testing.T) {
+	out, errOut, code := runCLIStdin(t, "", "serve", "token", "local")
+	want := `the name "local" is reserved for the control socket's own principal; choose another`
+	if code == 0 || !strings.Contains(errOut, want) || out != "" {
+		t.Fatalf("exit %d\nout %q\nerr %s\nmust refuse with %q and print nothing", code, out, errOut, want)
 	}
 }
 
