@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/professor93/rota/store"
 )
 
 // The daemon as a supervised service. These renderers are pure: env is the
@@ -59,19 +61,14 @@ func (c *cli) serveUninstall(args []string) error {
 
 // unitEnv is what of this environment a supervised daemon is given: PATH,
 // and the person's own Claude Code directory as CLAUDE_CONFIG_DIR when a
-// variable names one, by absolute path, since a daemon runs in /. Inside a
-// CLI rota launched, CLAUDE_CONFIG_DIR is the account's mirror, and
-// ROTA_CLAUDE_HOME is the person's — set but empty when that is the
-// default — so where it is set it is the one written. Nothing else is,
-// ROTA_TOKEN least of all; ROTA_HOME is the store's, written by the
-// renderers.
+// variable names one, by absolute path, since a daemon runs in /. Which
+// directory is the person's is the store's rule, PersonalClaudeWorld:
+// inside a CLI rota launched, CLAUDE_CONFIG_DIR is the account's mirror,
+// never written here. Nothing else is, ROTA_TOKEN least of all; ROTA_HOME
+// is the store's, written by the renderers.
 func unitEnv() []string {
 	env := []string{"PATH=" + os.Getenv("PATH")}
-	d, ok := os.LookupEnv("ROTA_CLAUDE_HOME")
-	if !ok {
-		d = os.Getenv("CLAUDE_CONFIG_DIR")
-	}
-	if d != "" {
+	if d, named := store.PersonalClaudeWorld(); named && d != "" {
 		if abs, err := filepath.Abs(d); err == nil {
 			d = abs
 		}

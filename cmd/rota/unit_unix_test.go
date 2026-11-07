@@ -467,7 +467,9 @@ func TestTheUnitRunsTheRotaThatWasTyped(t *testing.T) {
 // Inside a CLI rota launched, CLAUDE_CONFIG_DIR is the account's mirror and
 // ROTA_CLAUDE_HOME the person's own directory, which is what the unit
 // carries, by absolute path; set but empty, the person's is the default,
-// and the unit names none.
+// and the unit names none. A CLI an older rota launched has ROTA_ACCOUNT_ID
+// and no ROTA_CLAUDE_HOME: its CLAUDE_CONFIG_DIR is the mirror too, and the
+// unit names none either.
 func TestTheUnitCarriesThePersonsClaudeDirectory(t *testing.T) {
 	r := newUnitRig(t)
 	exe, err := invokedAs()
@@ -477,14 +479,25 @@ func TestTheUnitCarriesThePersonsClaudeDirectory(t *testing.T) {
 	mirror, cwd := t.TempDir(), t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", mirror)
 	t.Chdir(cwd)
-	for _, c := range []struct{ home, want string }{
-		{filepath.Join(cwd, "real"), filepath.Join(cwd, "real")},
-		{"real", filepath.Join(cwd, "real")},
-		{"", ""},
+	for _, c := range []struct {
+		home, account string
+		set           bool
+		want          string
+	}{
+		{filepath.Join(cwd, "real"), "", true, filepath.Join(cwd, "real")},
+		{"real", "", true, filepath.Join(cwd, "real")},
+		{"", "", true, ""},
+		{"", "1", false, ""},
 	} {
-		t.Setenv("ROTA_CLAUDE_HOME", c.home)
+		if c.set {
+			t.Setenv("ROTA_CLAUDE_HOME", c.home)
+		} else {
+			t.Setenv("ROTA_CLAUDE_HOME", "")
+			os.Unsetenv("ROTA_CLAUDE_HOME")
+		}
+		t.Setenv("ROTA_ACCOUNT_ID", c.account)
 		if _, errb, code := call(t, "serve", "install"); code != 0 {
-			t.Fatalf("install with ROTA_CLAUDE_HOME=%q: exit %d %q", c.home, code, errb)
+			t.Fatalf("install with ROTA_CLAUDE_HOME=%q (set %v), ROTA_ACCOUNT_ID=%q: exit %d %q", c.home, c.set, c.account, code, errb)
 		}
 		raw, err := os.ReadFile(r.want.path)
 		if err != nil {
@@ -495,10 +508,10 @@ func TestTheUnitCarriesThePersonsClaudeDirectory(t *testing.T) {
 			env = append(env, "CLAUDE_CONFIG_DIR="+c.want)
 		}
 		if got, want := string(raw), r.textWith(exe, env); got != want {
-			t.Fatalf("ROTA_CLAUDE_HOME=%q: unit:\n%s\nwant:\n%s", c.home, got, want)
+			t.Fatalf("ROTA_CLAUDE_HOME=%q (set %v), ROTA_ACCOUNT_ID=%q: unit:\n%s\nwant:\n%s", c.home, c.set, c.account, got, want)
 		}
 		if strings.Contains(string(raw), mirror) {
-			t.Fatalf("ROTA_CLAUDE_HOME=%q: the account's mirror reached the unit", c.home)
+			t.Fatalf("ROTA_CLAUDE_HOME=%q (set %v), ROTA_ACCOUNT_ID=%q: the account's mirror reached the unit", c.home, c.set, c.account)
 		}
 	}
 }
