@@ -86,9 +86,11 @@ func (s *Store) Maintain(ctx context.Context) []error {
 // whatever state the account is in — a dead one may have been signed in
 // again inside Claude Code, which is how rota learns of it. A login kept in
 // the home is refreshed only while nothing is alive there and it is not in the
-// hold, and goes back into the home at once; one rota alone holds is refreshed
-// as it always was. A home owed something although something is alive there is
-// left for the Refresh Maintain ends with, whose first step that is.
+// hold, and goes back into the home at once; so is one held as a refresh token
+// alone, which a live Claude Code there may hold too. One rota alone holds is
+// refreshed as it always was. A home owed something although something is
+// alive there is left for the Refresh Maintain ends with, whose first step that
+// is.
 func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, error) {
 	if !s.loginInHome(a) {
 		if a.Dead {
@@ -106,7 +108,7 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 	if a.Dead || h.hold != "" {
 		return changed, nil
 	}
-	if !rota.StoresLogin(a, h.home) {
+	if !rota.StoresLogin(a, h.home) && !unrefreshed(a) {
 		did, err := rota.Refresh(ctx, a)
 		return changed || did, wrapAccount(a, err)
 	}

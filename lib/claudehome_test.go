@@ -554,6 +554,64 @@ func TestAClaudeAccountHeldAsARefreshTokenAloneIsRefreshedBeforeItIsStaged(t *te
 	}
 }
 
+// Staging never writes a login with an empty access token, for a caller that
+// did not refresh first. A claude account held as a refresh token alone takes
+// no stored route, whatever expiry it carries, so nothing is planned or
+// written into its home. Codex's staging repairs a missing access token with
+// one refresh, as it repairs a missing id_token, and refuses when there is no
+// refresh token to repair it with.
+func TestStagingNeverWritesAnEmptyAccessToken(t *testing.T) {
+	onDisk(t)
+	for _, tok := range []Token{{Refresh: "R1"}, {Refresh: "R1", ExpiresAt: nowMS() + 3_600_000}} {
+		a := &Account{ID: 5, Provider: "claude", Token: tok, Staged: stagedNone}
+		if StoresLogin(a, "/h") {
+			t.Fatalf("no stored route for a refresh token alone: %+v", tok)
+		}
+		if _, files, err := StagePlan(context.Background(), a, t.TempDir()); err != nil || len(files) != 0 {
+			t.Fatalf("nothing planned: %v %v", files, err)
+		}
+		home := t.TempDir()
+		if _, err := Stage(a, home); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(home, claudeCredentials)); !os.IsNotExist(err) {
+			t.Fatalf("nothing written into the home: %v", err)
+		}
+	}
+
+	f := newFakeServer(t, false)
+	setURL(t, &CodexEndpoints.Token, f.URL+"/token")
+	f.reply["/token"] = func(_ *http.Request, b map[string]any) (int, any) {
+		if b["grant_type"] != "refresh_token" || b["refresh_token"] != "R1" {
+			return 400, map[string]string{"error": "invalid_grant"}
+		}
+		return 200, map[string]any{"access_token": "A2", "refresh_token": "R2", "id_token": "idt-2", "expires_in": 864000}
+	}
+	c := &Account{ID: 6, Provider: "codex", Token: Token{Refresh: "R1"},
+		Extra: map[string]string{"id_token": "idt", "account_id": "acct"}, Staged: stagedNone}
+	home := t.TempDir()
+	if _, err := Stage(c, home); err != nil || f.count("/token") != 1 || c.Token.Access != "A2" {
+		t.Fatalf("repaired with one refresh: %v %d %+v", err, f.count("/token"), c.Token)
+	}
+	var doc struct {
+		Tokens struct {
+			Access  string `json:"access_token"`
+			Refresh string `json:"refresh_token"`
+		} `json:"tokens"`
+	}
+	if !readJSON(filepath.Join(home, "auth.json"), &doc) || doc.Tokens.Access != "A2" || doc.Tokens.Refresh != "R2" {
+		t.Fatalf("auth.json carries the new tokens: %+v", doc)
+	}
+	none := &Account{ID: 7, Provider: "codex", Extra: map[string]string{"id_token": "idt", "account_id": "acct"}, Staged: stagedNone}
+	home = t.TempDir()
+	if _, err := Stage(none, home); !errors.Is(err, ErrReauth) || f.count("/token") != 1 {
+		t.Fatalf("no token at all needs a login: %v %d", err, f.count("/token"))
+	}
+	if _, err := os.Stat(filepath.Join(home, "auth.json")); !os.IsNotExist(err) {
+		t.Fatalf("and nothing is written: %v", err)
+	}
+}
+
 // Remote Control is Claude Code's, and an account of another provider is
 // refused it rather than told something it cannot obey.
 func TestRemoteControlIsClaudeCodesSetting(t *testing.T) {
