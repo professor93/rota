@@ -58,12 +58,20 @@ func (c *cli) serveUninstall(args []string) error {
 }
 
 // unitEnv is what of this environment a supervised daemon is given: PATH,
-// and CLAUDE_CONFIG_DIR when it is set, by absolute path, since a daemon
-// runs in /. Nothing else is, ROTA_TOKEN least of all; ROTA_HOME is the
-// store's, written by the renderers.
+// and the person's own Claude Code directory as CLAUDE_CONFIG_DIR when a
+// variable names one, by absolute path, since a daemon runs in /. Inside a
+// CLI rota launched, CLAUDE_CONFIG_DIR is the account's mirror, and
+// ROTA_CLAUDE_HOME is the person's — set but empty when that is the
+// default — so where it is set it is the one written. Nothing else is,
+// ROTA_TOKEN least of all; ROTA_HOME is the store's, written by the
+// renderers.
 func unitEnv() []string {
 	env := []string{"PATH=" + os.Getenv("PATH")}
-	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
+	d, ok := os.LookupEnv("ROTA_CLAUDE_HOME")
+	if !ok {
+		d = os.Getenv("CLAUDE_CONFIG_DIR")
+	}
+	if d != "" {
 		if abs, err := filepath.Abs(d); err == nil {
 			d = abs
 		}
