@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -60,7 +62,8 @@ func TestAKeyOutOfCreditIsPassedByUntilItIsAnswered(t *testing.T) {
 		t.Fatalf("JSON says it in fields: %s", out)
 	}
 
-	claudeSays(t, `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"hi","session_id":"s-ok"}`)
+	claudeSays(t, `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"hi","session_id":"s-ok",`+
+		`"total_cost_usd":0.0123}`)
 	if out, errOut, code := call(t, "run", "1", "hello there"); code != 0 || strings.TrimSpace(out) != "hi" {
 		t.Fatalf("by id it runs: %d %q %q", code, out, errOut)
 	}
@@ -80,4 +83,37 @@ func lineWith(t *testing.T, out, s string) string {
 	}
 	t.Fatalf("no line with %q in:\n%s", s, out)
 	return ""
+}
+
+// A run that stays open records what its end said about the key's credit
+// before rota exits: the write is a goroutine's, and an exit straight after
+// the session would lose it. Run as a process of its own, because only a real
+// exit shows that.
+func TestAnInputRunOutOfCreditPausesItsKeyBeforeRotaExits(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin := t.TempDir()
+	refusal := fakecli.Lines(`{"type":"result","subtype":"success","is_error":true,"api_error_status":400,"num_turns":1,` +
+		`"result":"Credit balance is too low","session_id":"s-credit","total_cost_usd":0}`)
+	refusal.Exit = 1
+	fakecli.Install(t, bin, "claude", refusal)
+	for i := range 5 {
+		home := t.TempDir()
+		writeStore(t, home, fmt.Sprintf(`{"ordered":true,"nextId":2,"accounts":[
+			{"id":1,"provider":"claude","uuid":"apikey-test","credential":"apikey","order":1,"token":{"accessToken":"%s"}}]}`, testKey))
+		cmd := exec.Command(self, "run", "1", "hi", "--input")
+		cmd.Env = append(os.Environ(), "ROTA_AS_RUN=1", "ROTA_HOME="+home,
+			"PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+		cmd.Stdin = strings.NewReader("")
+		out, err := cmd.CombinedOutput()
+		if code := cmd.ProcessState.ExitCode(); code != 1 {
+			t.Fatalf("the run ends as Claude Code ended it: %v %q", err, out)
+		}
+		raw, rerr := os.ReadFile(filepath.Join(home, "accounts.json"))
+		if rerr != nil || !strings.Contains(string(raw), `"noCreditUntil"`) {
+			t.Fatalf("run %d: rota exited before writing the verdict down: %v", i+1, rerr)
+		}
+	}
 }

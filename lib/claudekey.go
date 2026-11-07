@@ -138,27 +138,35 @@ func checkClaudeKey(ctx context.Context, key string) (refused, unverified error)
 	return nil, fmt.Errorf("the Claude API could not be asked about the key, so it was not checked: %v", scrub(err, key))
 }
 
-// claudeNoCredit is what both the API and Claude Code say, case aside, when a
-// key's organisation has no credit left. The API refuses the request with a
-// 400 that reads "Your credit balance is too low to access the Anthropic API.
-// Please go to Plans & Billing to upgrade or purchase credits."; Claude Code
-// ends the turn on it, an API error of the kind its SDK calls billing_error,
-// and its print mode reports an error result whose answer is its own sentence
-// for it, "Credit balance is too low" (read in Claude Code 2.1.319). Nothing
-// was charged: the API refused before any work.
-const claudeNoCredit = "credit balance is too low"
+// What the API and Claude Code say when a key's organisation has no credit
+// left. The API refuses the request with a 400 that reads claudeNoCreditAPI
+// and goes on "Please go to Plans & Billing to upgrade or purchase credits.";
+// Claude Code ends the turn on it, an API error of the kind its SDK calls
+// billing_error, and its print mode reports an error result whose whole
+// answer is its own sentence for it, claudeNoCredit (read in Claude Code
+// 2.1.319). Nothing was charged: the API refused before any work.
+const (
+	claudeNoCredit    = "Credit balance is too low"
+	claudeNoCreditAPI = "Your credit balance is too low to access the Anthropic API"
+)
 
 // OutOfCredit reports whether this run ended because the account's API key has
-// no credit left: Claude Code says so in an error result, and in nothing else.
-// An answer that merely mentions it is not an error, and every other CLI says
-// other things.
+// no credit left. Only the CLI's own verdict counts: its result event says it
+// is an error, and its answer is Claude Code's sentence for this refusal and
+// nothing else, or carries the API's own. A run that failed for any other
+// reason — a non-zero exit, a limit rota stopped it for — over an answer that
+// quotes either is not this, and every other CLI says other things.
 //
 // The run is over either way. What it means for the account is the caller's to
 // decide — it is no window that resets, and the credit is back only when
 // somebody buys more — and Account.NoCreditUntil is where to keep that.
 func (r *Result) OutOfCredit() bool {
-	return r != nil && r.IsError && Flavor(r.Provider) == "claude" &&
-		strings.Contains(strings.ToLower(r.Result), claudeNoCredit)
+	if r == nil || !r.cliError || Flavor(r.Provider) != "claude" {
+		return false
+	}
+	text := strings.TrimSpace(r.Result)
+	return strings.EqualFold(text, claudeNoCredit) ||
+		strings.Contains(strings.ToLower(text), strings.ToLower(claudeNoCreditAPI))
 }
 
 // scrub is an error's text with a secret taken out, for an error whose words

@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	rota "github.com/professor93/rota/lib"
@@ -52,6 +53,8 @@ type Store struct {
 	backend  Backend
 	unlock   func()
 	released bool
+	// ended counts the sessions Start began whose end is not yet settled.
+	ended sync.WaitGroup
 	// homeRoot is the backend's HomeRoot made absolute once, when the store
 	// is opened. Every account's home is built from it, and a home's path is
 	// what Claude Code is pointed at and what its keychain item is named

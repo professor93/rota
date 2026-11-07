@@ -14,28 +14,46 @@ const creditRefusal = `{"type":"result","subtype":"success","is_error":true,"api
 	`"session_id":"s-credit","total_cost_usd":0}`
 
 // A run that ended for want of credit is told apart by what Claude Code says
-// and by nothing that merely mentions it: the answer has to be the error, and
-// it has to be Claude Code's.
+// of it and by nothing else: its own result has to call the run an error, and
+// its answer has to be the refusal, not something that quotes it.
 func TestARunOutOfCreditIsToldApart(t *testing.T) {
-	var buffered Result
-	absorb([]byte(creditRefusal), false, caps{}, &buffered)
-	buffered.Provider = "claude"
-	if !buffered.OutOfCredit() {
-		t.Fatalf("Claude Code's own verdict: %+v", buffered)
+	read := func(provider, line string) *Result {
+		res := &Result{Provider: provider}
+		absorb([]byte(line), false, caps{}, res)
+		return res
 	}
-	for name, c := range map[string]struct {
-		res  *Result
-		want bool
-	}{
-		"the API's own words": {&Result{Provider: "claude", IsError: true,
-			Result: "Your credit balance is too low to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}, true},
-		"an answer about credit": {&Result{Provider: "claude", Result: "Your credit balance is too low, it says."}, false},
-		"another refusal":        {&Result{Provider: "claude", IsError: true, Result: "Prompt is too long"}, false},
-		"another CLI":            {&Result{Provider: "codex", IsError: true, Result: "Credit balance is too low"}, false},
-		"no result":              {nil, false},
+	if res := read("claude", creditRefusal); !res.OutOfCredit() {
+		t.Fatalf("Claude Code's own verdict: %+v", res)
+	}
+	apiWords := `{"type":"result","subtype":"success","is_error":true,"result":"API Error: 400 Your credit balance is too low ` +
+		`to access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits."}`
+	if !read("claude", apiWords).OutOfCredit() {
+		t.Fatal("the API's own words, passed on")
+	}
+	quoted := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,` +
+		`"result":"Your app shows \"Credit balance is too low\" because the org has no prepaid credit."}`
+	for name, res := range map[string]*Result{
+		"an answer about credit": read("claude", quoted),
+		"another refusal":        read("claude", `{"type":"result","is_error":true,"result":"Prompt is too long"}`),
+		"a refusal that quotes it": read("claude",
+			`{"type":"result","is_error":true,"result":"Error: Credit balance is too low? retry later"}`),
+		"another CLI": read("codex", creditRefusal),
+		"no result":   nil,
 	} {
-		if got := c.res.OutOfCredit(); got != c.want {
-			t.Fatalf("%s: got %v", name, got)
+		if res.OutOfCredit() {
+			t.Fatalf("%s: counted as out of credit", name)
+		}
+	}
+	// rota's own verdict over an answer the CLI called a success: a non-zero
+	// exit, or a limit rota stopped the run for, as finishRun records them.
+	for name, mark := range map[string]func(*Result){
+		"exit 1":        func(r *Result) { r.IsError, r.ExitCode = true, 1 },
+		"stopped early": func(r *Result) { r.IsError, r.ExitCode, r.Truncated = true, -1, true },
+	} {
+		res := read("claude", quoted)
+		mark(res)
+		if res.OutOfCredit() {
+			t.Fatalf("%s: rota's own verdict is not the CLI's", name)
 		}
 	}
 }
