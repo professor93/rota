@@ -116,9 +116,8 @@ func TestWriteAndRemoveUnitRunTheSupervisor(t *testing.T) {
 	}
 }
 
-// A unit the supervisor will not take away — a launchd agent that was
-// never loaded, say, because its install failed — still has its file
-// deleted, and what the supervisor said is the error.
+// A unit the supervisor will not take away — with no bus to reach it, say
+// — still has its file deleted, and what the supervisor said is the error.
 func TestRemovingAUnitDeletesItWhateverTheSupervisorSays(t *testing.T) {
 	home := unitHome(t, true)
 	store := filepath.Join(home, ".rota")

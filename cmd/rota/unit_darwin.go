@@ -54,8 +54,22 @@ func writeUnit(exe, store string, env []string, _ bool) (string, error) {
 	return path, err
 }
 
+// bootoutNotLoaded is launchctl bootout's exit status for a label nothing
+// is loaded under: "Boot-out failed: 3: No such process".
+const bootoutNotLoaded = 3
+
+// exitedWith says whether err is a supervisor command that ran and failed
+// with exit status code: runSupervisor's wraps an *exec.ExitError, whose
+// ExitCode says it, and a test's stand-in answers the same.
+func exitedWith(err error, code int) bool {
+	var e interface{ ExitCode() int }
+	return errors.As(err, &e) && e.ExitCode() == code
+}
+
 // removeUnit boots the agent out and deletes its file. Sessions keep running:
-// the plist has AbandonProcessGroup.
+// the plist has AbandonProcessGroup. An agent not loaded — booted out by
+// hand, or never bootstrapped — is already what bootout asks for, so that
+// answer is not an error; any other failure is.
 func removeUnit(store string) error {
 	path, err := unitFile(store)
 	if err != nil {
@@ -63,6 +77,9 @@ func removeUnit(store string) error {
 	}
 	_, label := unitName(store)
 	serr := unitRun("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), label))
+	if exitedWith(serr, bootoutNotLoaded) {
+		serr = nil
+	}
 	rerr := os.Remove(path)
 	if os.IsNotExist(rerr) {
 		rerr = nil

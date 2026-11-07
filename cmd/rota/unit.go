@@ -168,9 +168,12 @@ func launchdPlist(label, exe, store string, env []string) string {
 	b.WriteString("\t</dict>\n")
 	b.WriteString("\t<key>RunAtLoad</key>\n\t<true/>\n")
 	b.WriteString("\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n")
-	// No ProcessType: launchd's default, Standard. Background would have
-	// the kernel throttle the daemon's CPU and I/O, and every held CLI's
-	// after it, which inherits it, unlike under a daemon started by hand.
+	// Interactive, as measured: with no ProcessType, launchd's default, the
+	// daemon, its holders and every held CLI, which inherit it, ran at
+	// priority 20 under a ceiling of 20 at UTILITY QoS; with Interactive at
+	// 31 under 63, as under a daemon started by hand. Held CLIs are typed
+	// into by people.
+	str("ProcessType", "Interactive")
 	b.WriteString("\t<key>AbandonProcessGroup</key>\n\t<true/>\n")
 	str("StandardOutPath", "/dev/null")
 	str("StandardErrorPath", "/dev/null")
