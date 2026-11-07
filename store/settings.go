@@ -83,13 +83,15 @@ func settingsEnvKeys() []string {
 
 // sayRunSettings is sayRiskySettings for a run: the directory, the sources
 // and the hermetic flag are the spec's, and a run that names no directory
-// starts in this process's.
+// starts in this process's. The active Anthropic profile is said after it.
 func (s *Store) sayRunSettings(a *rota.Account, cmd *rota.Command, spec rota.Spec) {
 	cwd, err := filepath.Abs(spec.Cwd)
 	if err != nil {
 		cwd = ""
 	}
-	s.sayRiskySettings(a, rota.Environ(cmd.BaseEnv, cmd), cwd, spec.SettingSources, spec.Hermetic)
+	env := rota.Environ(cmd.BaseEnv, cmd)
+	s.sayRiskySettings(a, env, cwd, spec.SettingSources, spec.Hermetic)
+	s.sayFederationProfile(a, env)
 }
 
 // sayRiskySettings warns, once, about every settings file this launch of a's
