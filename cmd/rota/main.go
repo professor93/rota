@@ -646,7 +646,7 @@ func (c *cli) list(args []string) error {
 			c.showSessions(sessions.Scan(s, recent), width)
 		}
 		for _, e := range errs {
-			fmt.Fprintf(c.err, "warning: %v\n", e)
+			say(c.err, 0, fmt.Sprintf("warning: %v\n", e))
 		}
 		return nil
 	}
@@ -684,7 +684,7 @@ func (c *cli) list(args []string) error {
 		c.showSessions(sessions.Scan(s, recent), width)
 	}
 	for _, e := range errs {
-		fmt.Fprintf(c.err, "warning: %v\n", e)
+		say(c.err, 0, fmt.Sprintf("warning: %v\n", e))
 	}
 	return nil
 }
@@ -816,8 +816,12 @@ func (c *cli) showSessions(rep sessions.Report, width int) {
 }
 
 // sayIn prints a line two spaces in, and on a terminal wraps it at its
-// spaces with every line it wraps onto two spaces in as well.
+// spaces with every line it wraps onto two spaces in as well. A control
+// character in it, which a directory or an error may carry, is a space
+// (see printable), and so is a newline, which would start a line that is
+// not two spaces in.
 func sayIn(out io.Writer, width int, line string) {
+	line = strings.ReplaceAll(printable(line), "\n", " ")
 	if width <= 2 {
 		fmt.Fprintf(out, "  %s\n", line)
 		return
