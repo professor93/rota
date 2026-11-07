@@ -76,8 +76,13 @@ type Spec struct {
 	// Spawn is the path of another fake to start and leave running, in the
 	// fake's own process group, as a CLI starts a helper.
 	Spawn string `json:"spawn,omitempty"`
-	// Ready names a file the fake writes its pid to once Term and Spawn are
-	// in force, so a test can signal it without racing its start.
+	// Detach is the path of another fake to start in a process group of its
+	// own, holding this fake's stdout and stderr, as a CLI that daemonises a
+	// helper leaves it: the pipes stay open after the CLI is gone, and a
+	// signal to the CLI's group does not reach it.
+	Detach string `json:"detach,omitempty"`
+	// Ready names a file the fake writes its pid to once Term, Spawn and
+	// Detach are in force, so a test can signal it without racing its start.
 	Ready string `json:"ready,omitempty"`
 }
 
@@ -230,6 +235,15 @@ func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		// Nothing of this fake's is passed on, so the helper holds no pipe of
 		// the run's open: only the group keeps it within reach.
 		if err := exec.Command(spec.Spawn).Start(); err != nil {
+			fmt.Fprintln(stderr, "fake cli:", err)
+			return 70
+		}
+	}
+	if spec.Detach != "" {
+		helper := exec.Command(spec.Detach)
+		helper.Stdout, helper.Stderr = stdout, stderr
+		detach(helper)
+		if err := helper.Start(); err != nil {
 			fmt.Fprintln(stderr, "fake cli:", err)
 			return 70
 		}
