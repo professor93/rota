@@ -2,10 +2,14 @@ package store
 
 import (
 	"context"
+	"encoding/binary"
 	"os"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
 	"github.com/professor93/rota/internal/fakecli"
 	rota "github.com/professor93/rota/lib"
@@ -86,9 +90,13 @@ func TestASettingsFileThatSetsBackWhatALaunchDropsIsNamedOnce(t *testing.T) {
 	if len(said) != 1 {
 		t.Fatalf("one warning for the launch: %q", said)
 	}
-	want := resolved(t, settings) + " sets apiKeyHelper, env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_BASE_URL, env.CLAUDE_CONFIG_DIR, env.HTTPS_PROXY"
-	if !strings.Contains(said[0], want) || !strings.HasPrefix(said[0], a.String()+": ") {
-		t.Fatalf("the account, the person's own file and the keys it sets:\n%s\nwant %s", said[0], want)
+	// The credentials and hosts first, said as the risk they are; the proxy
+	// after, said as what it is.
+	cred := "so its login may go to another host or another credential be used in its place: " +
+		resolved(t, settings) + " sets apiKeyHelper, env.ANTHROPIC_AUTH_TOKEN, env.ANTHROPIC_BASE_URL, env.CLAUDE_CONFIG_DIR. "
+	network := "nothing is wrong if they are your network's: " + resolved(t, settings) + " sets env.HTTPS_PROXY"
+	if !strings.Contains(said[0], cred) || !strings.HasSuffix(said[0], network) || !strings.HasPrefix(said[0], a.String()+": ") {
+		t.Fatalf("the account, the person's own file and the keys it sets:\n%s\nwant %s ... %s", said[0], cred, network)
 	}
 	for _, never := range []string{"SECRET", "proxy.example", "DISABLE_AUTO_COMPACT", "model"} {
 		if strings.Contains(said[0], never) {
@@ -343,5 +351,103 @@ func TestPrepareInReadsTheProjectWhereTheCLIStarts(t *testing.T) {
 	want := resolved(t, filepath.Join(there, ".claude", "settings.json")) + " sets env.ANTHROPIC_API_KEY"
 	if len(said) != 1 || !strings.Contains(said[0], want) || strings.Contains(said[0], "VERTEX") {
 		t.Fatalf("want only %q: %q", want, said)
+	}
+}
+
+// A proxy or a certificate in a settings file is what many people set on
+// purpose: Claude Code's own docs put a corporate proxy there. It is still
+// named, because a launch drops it, but as what it is rather than as a login
+// going elsewhere.
+func TestAProxyInSettingsIsNamedAsWhatItIs(t *testing.T) {
+	noManaged(t)
+	src := claudeWorld(t)
+	settings := filepath.Join(src, "settings.json")
+	writeFile(t, settings, `{"env":{"HTTPS_PROXY":"http://SECRET-proxy:8080","NODE_EXTRA_CA_CERTS":"/SECRET/ca.pem"}}`)
+	t.Chdir(t.TempDir())
+	onPath(t, "claude")
+	s, a := claudeStore(t)
+
+	said := prepared(t, s, a)
+	want := a.String() + ": Claude Code will use the proxy or the certificates its settings name, which rota otherwise keeps " +
+		"out of an account's environment; nothing is wrong if they are your network's: " +
+		resolved(t, settings) + " sets env.HTTPS_PROXY, env.NODE_EXTRA_CA_CERTS"
+	if len(said) != 1 || said[0] != want {
+		t.Fatalf("got %q\nwant %q", said, want)
+	}
+}
+
+// A settings file is read the way Claude Code reads it: a UTF-8 byte-order
+// mark is dropped, and a file that starts FF FE is UTF-16 little-endian.
+// Any other start is UTF-8, so a big-endian file is no JSON to Claude Code
+// and none to rota either.
+func TestASettingsFileIsDecodedAsClaudeCodeDecodesIt(t *testing.T) {
+	const doc = `{"env":{"ANTHROPIC_BASE_URL":"https://x"}}`
+	utf16As := func(order binary.AppendByteOrder, bom bool) string {
+		units := utf16.Encode([]rune(doc))
+		if bom {
+			units = append([]uint16{0xFEFF}, units...)
+		}
+		out := make([]byte, 0, 2*len(units))
+		for _, u := range units {
+			out = order.AppendUint16(out, u)
+		}
+		return string(out)
+	}
+	dir := t.TempDir()
+	for _, c := range []struct {
+		name, body string
+		named      bool
+	}{
+		{"plain", doc, true},
+		{"utf-8 with a mark", "\xEF\xBB\xBF" + doc, true},
+		{"utf-16le with a mark", utf16As(binary.LittleEndian, true), true},
+		{"utf-16be with a mark", utf16As(binary.BigEndian, true), false},
+		{"two utf-8 marks", "\xEF\xBB\xBF\xEF\xBB\xBF" + doc, false},
+	} {
+		path := filepath.Join(dir, strings.ReplaceAll(c.name, " ", "-")+".json")
+		writeFile(t, path, c.body)
+		got := riskyKeys(path)
+		if named := slices.Equal(got, []string{"env.ANTHROPIC_BASE_URL"}); named != c.named {
+			t.Fatalf("%s: %q, named %v, want %v", c.name, got, named, c.named)
+		}
+	}
+}
+
+// Claude Code reads a settings file of up to 2 MiB and refuses a larger one,
+// and so does rota.
+func TestASettingsFileIsReadUpToTwoMiB(t *testing.T) {
+	dir := t.TempDir()
+	sized := func(n int) string {
+		head, tail := `{"env":{"ANTHROPIC_API_KEY":"k"},"pad":"`, `"}`
+		path := filepath.Join(dir, strconv.Itoa(n)+".json")
+		writeFile(t, path, head+strings.Repeat("x", n-len(head)-len(tail))+tail)
+		return path
+	}
+	if got := riskyKeys(sized(2 << 20)); len(got) != 1 {
+		t.Fatalf("a file of exactly 2 MiB is read: %q", got)
+	}
+	if got := riskyKeys(sized(2<<20 + 1)); len(got) != 0 {
+		t.Fatalf("a larger one is not: %q", got)
+	}
+}
+
+// Without a home directory and without CLAUDE_CONFIG_DIR there is no user
+// settings file to read, and a settings.json wherever the process happens
+// to be is not one.
+func TestNoHomeDirectoryMeansNoUserSettings(t *testing.T) {
+	noManaged(t)
+	cwd := t.TempDir()
+	writeFile(t, filepath.Join(cwd, "settings.json"), `{"apiKeyHelper":"h"}`)
+	t.Chdir(cwd)
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Setenv("home", "")
+	s, a := claudeStore(t)
+	var said []string
+	s.Warn = func(msg string) { said = append(said, msg) }
+
+	s.sayRiskySettings(a, nil, "", []string{"user"}, false)
+	if len(said) != 0 {
+		t.Fatalf("no home, no user settings: %q", said)
 	}
 }

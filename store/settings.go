@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/json/jsontext"
 	"fmt"
 	"io"
@@ -11,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf16"
 
 	rota "github.com/professor93/rota/lib"
 )
@@ -41,10 +43,10 @@ const (
 	sourceLocal   = "local"
 )
 
-// maxSettingsFile bounds what is read of one settings file. No settings
-// document is anywhere near it, and a larger one is not worth a launch's time
-// for a warning.
-const maxSettingsFile = 1 << 20
+// maxSettingsFile bounds what is read of one settings file: 2 MiB, the most
+// Claude Code reads of one — it refuses a larger file whole — so what rota
+// passes over is what Claude Code does not apply.
+const maxSettingsFile = 2 << 20
 
 // managedSettingsDir is the directory Claude Code reads the machine's managed
 // settings from: managed-settings.json, and the drop-ins in
@@ -96,14 +98,20 @@ func (s *Store) sayRunSettings(a *rota.Account, cmd *rota.Command, spec rota.Spe
 // configuration directory it runs in; cwd the directory it starts in;
 // sources the run's setting_sources, nil for all of them; and hermetic that
 // the run gets a fresh configuration directory with no settings in it.
+//
+// The warning says two things apart. A credential or a host is a risk to
+// the account and is said as one. A proxy or a certificate is what a person
+// on a corporate network sets on purpose — Claude Code's own docs put them
+// in settings — so it is said as what it is: rota drops them too, and the
+// person should know they are back, without being told the login is leaving.
 func (s *Store) sayRiskySettings(a *rota.Account, env []string, cwd string, sources []string, hermetic bool) {
 	if s.Warn == nil || rota.Flavor(a.Provider) != "claude" {
 		return
 	}
 	reads := func(source string) bool { return sources == nil || slices.Contains(sources, source) }
 	var files []string
-	if reads(sourceUser) && !hermetic {
-		files = append(files, filepath.Join(configDirOf(env), "settings.json"))
+	if dir := configDirOf(env); dir != "" && reads(sourceUser) && !hermetic {
+		files = append(files, filepath.Join(dir, "settings.json"))
 	}
 	if cwd != "" && reads(sourceProject) {
 		files = append(files, filepath.Join(cwd, ".claude", "settings.json"))
@@ -119,7 +127,11 @@ func (s *Store) sayRiskySettings(a *rota.Account, env []string, cwd string, sour
 		}
 	}
 	files = append(files, managedSettingsFiles()...)
-	var said []string
+	network := map[string]bool{}
+	for _, k := range rota.NetworkRedirecting() {
+		network["env."+k] = true
+	}
+	var risks, routes []string
 	seen := map[string]bool{}
 	for _, f := range files {
 		// The file as it is, links resolved: through the mirror that is the
@@ -130,19 +142,32 @@ func (s *Store) sayRiskySettings(a *rota.Account, env []string, cwd string, sour
 			continue
 		}
 		seen[f] = true
-		if keys := riskyKeys(f); len(keys) > 0 {
-			said = append(said, f+" sets "+strings.Join(keys, ", "))
+		keys := riskyKeys(f)
+		if risk := slices.DeleteFunc(slices.Clone(keys), func(k string) bool { return network[k] }); len(risk) > 0 {
+			risks = append(risks, f+" sets "+strings.Join(risk, ", "))
+		}
+		if route := slices.DeleteFunc(keys, func(k string) bool { return !network[k] }); len(route) > 0 {
+			routes = append(routes, f+" sets "+strings.Join(route, ", "))
 		}
 	}
-	if len(said) == 0 {
-		return
+	var said []string
+	if len(risks) > 0 {
+		said = append(said, "settings Claude Code reads put back what rota keeps out of this account's environment, "+
+			"so its login may go to another host or another credential be used in its place: "+strings.Join(risks, "; "))
 	}
-	s.Warn(fmt.Sprintf("%s: settings Claude Code reads put back what rota keeps out of this account's environment, "+
-		"so its login may go to another host or another credential be used in its place: %s", a, strings.Join(said, "; ")))
+	if len(routes) > 0 {
+		said = append(said, "Claude Code will use the proxy or the certificates its settings name, which rota otherwise "+
+			"keeps out of an account's environment; nothing is wrong if they are your network's: "+strings.Join(routes, "; "))
+	}
+	if len(said) > 0 {
+		s.Warn(fmt.Sprintf("%s: %s", a, strings.Join(said, ". ")))
+	}
 }
 
 // configDirOf is the configuration directory a child with this environment
-// runs Claude Code in.
+// runs Claude Code in, or "" when there is none to name: no
+// CLAUDE_CONFIG_DIR and no home directory. "" is never a directory to read
+// from — joined to a name it is the process's own directory.
 func configDirOf(env []string) string {
 	dir := ""
 	for _, e := range env {
@@ -184,7 +209,7 @@ func riskyKeys(path string) []string {
 		return nil
 	}
 	var doc map[string]jsontext.Value
-	if rota.UnmarshalLenient(raw, &doc) != nil {
+	if rota.UnmarshalLenient(settingsText(raw), &doc) != nil {
 		return nil
 	}
 	var keys []string
@@ -201,6 +226,24 @@ func riskyKeys(path string) []string {
 	}
 	slices.Sort(keys)
 	return keys
+}
+
+// settingsText is a settings file's bytes as the JSON text Claude Code
+// parses: a file that starts FF FE is UTF-16 little-endian, any other is
+// UTF-8, and one byte-order mark at the start of the text is dropped
+// (Claude Code 2.1.319 decodes a file so, and strips U+FEFF before
+// JSON.parse). A big-endian file is not decoded, as Claude Code does not
+// decode one; a last odd byte of a little-endian one is dropped, as Node's
+// decoder drops it.
+func settingsText(raw []byte) []byte {
+	if len(raw) >= 2 && raw[0] == 0xFF && raw[1] == 0xFE {
+		units := make([]uint16, len(raw)/2)
+		for i := range units {
+			units[i] = binary.LittleEndian.Uint16(raw[2*i:])
+		}
+		raw = []byte(string(utf16.Decode(units)))
+	}
+	return bytes.TrimPrefix(raw, []byte("\uFEFF"))
 }
 
 // setting reports whether a settings value sets anything. "" is how a

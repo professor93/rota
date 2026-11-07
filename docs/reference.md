@@ -2036,10 +2036,10 @@ is in (the main checkout's, for a worktree); and the machine's managed
 settings, `managed-settings.json` and the `*.json` files in
 `managed-settings.d` beside it, in `/etc/claude-code`,
 `/Library/Application Support/ClaudeCode` or `C:\Program Files\ClaudeCode`.
-When one sets `apiKeyHelper`, or sets in `env` any variable a claude launch
-drops — the proxy and certificate variables among them — or
-`CLAUDE_CONFIG_DIR`, the launch prints one warning naming each such file, its
-links resolved, and the keys it sets, never a value:
+When one sets `apiKeyHelper`, or sets in `env` `CLAUDE_CONFIG_DIR` or any
+variable a claude launch drops except `CLAUDECODE` — the proxy and certificate
+variables among them — the launch prints one warning naming each such file,
+its links resolved, and the keys it sets, never a value:
 
 ```
 warning: claude/you@example.com: settings Claude Code reads put back what
@@ -2048,15 +2048,31 @@ host or another credential be used in its place:
 /home/you/.claude/settings.json sets env.ANTHROPIC_BASE_URL
 ```
 
+A proxy or certificates are what a corporate network sets on purpose, and
+Claude Code's own docs put them in settings, so those are said as what they
+are, after anything else the same launch has to say:
+
+```
+warning: claude/you@example.com: Claude Code will use the proxy or the
+certificates its settings name, which rota otherwise keeps out of an
+account's environment; nothing is wrong if they are your network's:
+/home/you/.claude/settings.json sets env.HTTPS_PROXY
+```
+
+A file is read as Claude Code reads it — a byte-order mark at its start
+dropped, and one starting `FF FE` read as UTF-16 — and up to the same 2 MiB.
 A key set to `""`, which is how a settings file cancels an inherited variable,
-is not counted, and a file that is not one JSON object, or is over 1 MB, is
+is not counted, and a file that is not one JSON object, or is over 2 MiB, is
 not read. A run that names `setting_sources` is held to the sources it names,
 managed settings counting whatever it says, so a `rota serve` run, which names
 none unless asked, is checked against the managed files alone; a hermetic run
 has no user settings. A `rota serve` terminal is checked in the directory it
-starts in, and the server writes the warning to its log. The macOS
-configuration profile and the Windows registry, which can also carry managed
-settings, are not read. For the SDK, `Store.Prepare` takes the CLI to start
+starts in, and the server writes the warning to its log. Some settings are
+not read: the macOS configuration profile and the Windows registry, which can
+carry managed settings; the settings an account's organisation sends from
+claude.ai, which Claude Code caches per login in `remote-settings.json`; and
+the output of a `policyHelper` that managed settings name, which rota would
+have to run to see. For the SDK, `Store.Prepare` takes the CLI to start
 in the calling process's directory, as the handover does; `Store.PrepareIn(ctx,
 a, dir)` is the same launch for a CLI started in `dir`.
 
