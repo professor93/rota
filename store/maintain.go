@@ -59,26 +59,34 @@ func (s *Store) Maintain(ctx context.Context) []error {
 		//
 		// What adoption read back is saved, not only what a refresh changed:
 		// while a daemon Codex left in the home refreshes the login (see
-		// codexDaemon), adoption is how the store keeps up with it.
-		var err error
+		// codexDaemon), adoption is how the store keeps up with it. What rota
+		// refreshes goes into a codex home at once, as a launch's refresh
+		// does, so a daemon started there again reads the token that is still
+		// good rather than the one just spent; should the save below fail, the
+		// home's copy is read back by the next adoption.
+		//
+		// Adopting, asking after the daemon, refreshing and that write happen
+		// under one claim, so nothing the CLI does between them goes unseen.
+		var (
+			err error
+			did bool
+		)
 		before := snapshot(a)
-		if !s.whileIdle(a, func() { err = rota.Adopt(a, s.Home(a)) }) {
-			continue
-		}
-		changed = changed || before.differs(a)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", a, err))
-			continue
-		}
-		var did bool
 		if !s.whileIdle(a, func() {
-			if !s.heldByDaemon(a) {
-				did, err = rota.Refresh(ctx, a)
+			home := s.Home(a)
+			if err = rota.Adopt(a, home); err != nil || s.heldByDaemon(a) {
+				return
+			}
+			if did, err = rota.Refresh(ctx, a); err != nil || !did || a.Dead {
+				return
+			}
+			if rota.Flavor(a.Provider) == "codex" {
+				_, err = rota.Stage(a, home)
 			}
 		}) {
 			continue
 		}
-		changed = changed || did
+		changed = changed || did || before.differs(a)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", a, err))
 		}

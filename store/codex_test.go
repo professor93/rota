@@ -2,32 +2,89 @@ package store
 
 import (
 	"context"
-	"io"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sync/atomic"
+	"slices"
+	"sync"
 	"testing"
+	"time"
 
 	rota "github.com/professor93/rota/lib"
 )
 
-// codexRefreshes stands in for OpenAI's token endpoint and counts the refresh
-// grants it is sent.
-func codexRefreshes(t *testing.T) *atomic.Int32 {
+// codexEndpoint stands in for OpenAI's token endpoint as it behaves: every
+// refresh token is good once, and presenting one again is refused for good.
+// It records every refresh token presented to it, in order.
+type codexEndpoint struct {
+	mu        sync.Mutex
+	presented []string
+}
+
+func (e *codexEndpoint) grants() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return slices.Clone(e.presented)
+}
+
+func codexRefreshes(t *testing.T) *codexEndpoint {
 	t.Helper()
-	var n atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		n.Add(1)
+	e := &codexEndpoint{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		rt := r.PostForm.Get("refresh_token")
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		spent := slices.Contains(e.presented, rt)
+		e.presented = append(e.presented, rt)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"access_token":"a-rota","refresh_token":"r-rota","id_token":"i","expires_in":864000}`)
+		if spent {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":"invalid_grant","error_description":"refresh_token_reused"}`))
+			return
+		}
+		fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"r-rota-%d","id_token":"i","expires_in":864000}`,
+			codexJWT(time.Now().Add(240*time.Hour)), len(e.presented))
 	}))
 	t.Cleanup(srv.Close)
 	old := rota.CodexEndpoints.Token
 	rota.CodexEndpoints.Token = srv.URL
 	t.Cleanup(func() { rota.CodexEndpoints.Token = old })
-	return &n
+	return e
+}
+
+// codexJWT is an access token that says when it expires, as codex's do.
+func codexJWT(exp time.Time) string {
+	enc := base64.RawURLEncoding.EncodeToString
+	return enc([]byte(`{"alg":"none"}`)) + "." + enc([]byte(fmt.Sprintf(`{"exp":%d}`, exp.Unix()))) + ".x"
+}
+
+// daemonWrote writes the auth.json Codex's daemon leaves after it refreshed:
+// a new refresh token, and an access token expiring at exp.
+func daemonWrote(t *testing.T, home, refresh string, exp time.Time) {
+	t.Helper()
+	writeFile(t, filepath.Join(home, "auth.json"),
+		`{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"i","access_token":"`+
+			codexJWT(exp)+`","refresh_token":"`+refresh+`","account_id":"acct"}}`)
+}
+
+// homeHolds is the refresh token the home's auth.json carries.
+func homeHolds(t *testing.T, home string) string {
+	t.Helper()
+	var doc struct {
+		Tokens struct {
+			Refresh string `json:"refresh_token"`
+		} `json:"tokens"`
+	}
+	raw, err := os.ReadFile(filepath.Join(home, "auth.json"))
+	if err != nil || json.Unmarshal(raw, &doc) != nil {
+		t.Fatalf("auth.json: %v %s", err, raw)
+	}
+	return doc.Tokens.Refresh
 }
 
 // dueCodex is a codex account whose access token is due for a refresh, staged
@@ -87,25 +144,26 @@ func TestACodexDaemonIsAliveByTheRecordCodexKeeps(t *testing.T) {
 // refuses a reused one for good. So maintenance reads back what the daemon
 // wrote, keeps it, and refreshes nothing.
 func TestMaintenanceLeavesACodexLoginToItsDaemon(t *testing.T) {
-	n := codexRefreshes(t)
+	e := codexRefreshes(t)
 	s, a := dueCodex(t)
 	codexDaemonAt(t, s.Home(a), "daemon.pid", os.Getpid())
 
 	if errs := s.Maintain(context.Background()); len(errs) != 0 {
 		t.Fatalf("%v", errs)
 	}
-	if n.Load() != 0 || a.Token.Refresh != "r-old" {
-		t.Fatalf("a login a daemon holds is the daemon's to refresh: %d refreshes, token %q", n.Load(), a.Token.Refresh)
+	if len(e.grants()) != 0 || a.Token.Refresh != "r-old" {
+		t.Fatalf("a login a daemon holds is the daemon's to refresh: presented %v, token %q", e.grants(), a.Token.Refresh)
 	}
 
 	// The daemon refreshes; the next sweep adopts what it wrote and keeps it.
-	writeFile(t, filepath.Join(s.Home(a), "auth.json"),
-		`{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"tokens":{"id_token":"i","access_token":"a-daemon","refresh_token":"r-daemon","account_id":"acct"}}`)
+	// What it wrote is due again, so only the daemon's being alive keeps
+	// rota from refreshing it.
+	daemonWrote(t, s.Home(a), "r-daemon", time.Now().Add(time.Minute))
 	if errs := s.Maintain(context.Background()); len(errs) != 0 {
 		t.Fatalf("%v", errs)
 	}
-	if n.Load() != 0 || a.Token.Refresh != "r-daemon" {
-		t.Fatalf("what the daemon rotated is read back: %d refreshes, token %q", n.Load(), a.Token.Refresh)
+	if len(e.grants()) != 0 || a.Token.Refresh != "r-daemon" {
+		t.Fatalf("what the daemon rotated is read back: presented %v, token %q", e.grants(), a.Token.Refresh)
 	}
 	s.Close()
 	again, err := Open(storeDir(s))
@@ -118,17 +176,53 @@ func TestMaintenanceLeavesACodexLoginToItsDaemon(t *testing.T) {
 	}
 }
 
-// Once the daemon is gone the login is rota's again, as it always was.
+// Once the daemon is gone the login is rota's again, as it always was, and
+// what rota refreshes goes into the home at once, so whatever reads the home
+// next — a daemon started again, a CLI — finds the token that is still good.
 func TestMaintenanceRefreshesACodexLoginOnceItsDaemonIsGone(t *testing.T) {
-	n := codexRefreshes(t)
+	e := codexRefreshes(t)
 	s, a := dueCodex(t)
 	codexDaemonAt(t, s.Home(a), "daemon.pid", deadPID)
 
 	if errs := s.Maintain(context.Background()); len(errs) != 0 {
 		t.Fatalf("%v", errs)
 	}
-	if n.Load() != 1 || a.Token.Refresh != "r-rota" {
-		t.Fatalf("a due login with no daemon is refreshed: %d refreshes, token %q", n.Load(), a.Token.Refresh)
+	if !slices.Equal(e.grants(), []string{"r-old"}) || a.Token.Refresh != "r-rota-1" {
+		t.Fatalf("a due login with no daemon is refreshed: presented %v, token %q", e.grants(), a.Token.Refresh)
+	}
+	if got := homeHolds(t, s.Home(a)); got != "r-rota-1" {
+		t.Fatalf("the refreshed login is written into the home: %q", got)
+	}
+}
+
+// The whole way a daemon's login comes back to rota: the daemon rotates, rota
+// reads that back, the daemon goes away — a reboot, a stop — and rota's
+// sweeps carry on. No refresh token is ever presented twice. Before, rota
+// remembered only what it had written itself, so once it refreshed past the
+// daemon's token the next sweep took the daemon's file for a newer rotation,
+// read the spent token back over the good one, and presented it again.
+func TestALoginBackFromADeadDaemonPresentsNoRefreshTokenTwice(t *testing.T) {
+	e := codexRefreshes(t)
+	s, a := dueCodex(t)
+	home := s.Home(a)
+	codexDaemonAt(t, home, "daemon.pid", os.Getpid())
+	daemonWrote(t, home, "r-daemon", time.Now().Add(time.Minute))
+	if errs := s.Maintain(context.Background()); len(errs) != 0 || a.Token.Refresh != "r-daemon" {
+		t.Fatalf("the daemon's rotation is read back: %v %q", errs, a.Token.Refresh)
+	}
+
+	codexDaemonAt(t, home, "daemon.pid", deadPID)
+	for sweep := range 3 {
+		if errs := s.Maintain(context.Background()); len(errs) != 0 {
+			t.Fatalf("sweep %d after the daemon died: %v (presented %v)", sweep, errs, e.grants())
+		}
+	}
+	got := e.grants()
+	if !slices.Equal(got, []string{"r-daemon"}) {
+		t.Fatalf("each refresh token is presented once, the daemon's last one by rota: presented %v", got)
+	}
+	if a.Dead || a.Token.Refresh != "r-rota-1" {
+		t.Fatalf("the account keeps the token rota got: dead=%v %q, token %q", a.Dead, a.DeadReason, a.Token.Refresh)
 	}
 }
 
@@ -139,13 +233,13 @@ func TestARunLeavesACodexLoginToItsDaemon(t *testing.T) {
 	for _, c := range []struct {
 		what      string
 		daemon    bool
-		refreshes int32
+		refreshes int
 		token     string
 	}{
 		{"with the daemon alive", true, 0, "r-old"},
-		{"with no daemon", false, 1, "r-rota"},
+		{"with no daemon", false, 1, "r-rota-1"},
 	} {
-		n := codexRefreshes(t)
+		e := codexRefreshes(t)
 		s, a := dueCodex(t)
 		if c.daemon {
 			codexDaemonAt(t, s.Home(a), "app-server.pid", os.Getpid())
@@ -154,8 +248,8 @@ func TestARunLeavesACodexLoginToItsDaemon(t *testing.T) {
 		if release != nil {
 			release()
 		}
-		if n.Load() != c.refreshes || a.Token.Refresh != c.token {
-			t.Fatalf("%s: %d refreshes, token %q", c.what, n.Load(), a.Token.Refresh)
+		if len(e.grants()) != c.refreshes || a.Token.Refresh != c.token {
+			t.Fatalf("%s: presented %v, token %q", c.what, e.grants(), a.Token.Refresh)
 		}
 	}
 }

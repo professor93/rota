@@ -150,21 +150,26 @@ func TestCodexLeavesAnAuthFileThatAlreadyHoldsTheLogin(t *testing.T) {
 	held := `{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"last_refresh":"2026-01-02T03:04:05Z",` +
 		`"tokens":{"id_token":"i","access_token":"a1","refresh_token":"r1","account_id":"acct","login_owner_id":"o"}}`
 	for _, c := range []struct {
-		what, file string
-		kept       bool
+		what, file, staged string
+		kept               bool
 	}{
-		{"the same login", held, true},
-		{"another access token", strings.Replace(held, `"a1"`, `"a0"`, 1), false},
-		{"another id token", strings.Replace(held, `"id_token":"i"`, `"id_token":"j"`, 1), false},
-		{"an API key beside it", strings.Replace(held, `"OPENAI_API_KEY":null`, `"OPENAI_API_KEY":"sk-x"`, 1), false},
-		{"no auth mode", strings.Replace(held, `"auth_mode":"chatgpt",`, ``, 1), false},
+		{"the same login", held, fingerprint("r1"), true},
+		// Nothing known of the file, or a file from before this login: the
+		// login it holds is still this one, and it is rota's from now on.
+		{"the same login, provenance unknown", held, "", true},
+		{"the same login, staged before this login", held, stagedNone, true},
+		{"another access token", strings.Replace(held, `"a1"`, `"a0"`, 1), fingerprint("r1"), false},
+		{"another id token", strings.Replace(held, `"id_token":"i"`, `"id_token":"j"`, 1), fingerprint("r1"), false},
+		{"another ChatGPT account", strings.Replace(held, `"account_id":"acct"`, `"account_id":"other"`, 1), fingerprint("r1"), false},
+		{"an API key beside it", strings.Replace(held, `"OPENAI_API_KEY":null`, `"OPENAI_API_KEY":"sk-x"`, 1), fingerprint("r1"), false},
+		{"no auth mode", strings.Replace(held, `"auth_mode":"chatgpt",`, ``, 1), fingerprint("r1"), false},
 	} {
 		home := t.TempDir()
 		path := filepath.Join(home, "auth.json")
 		if err := os.WriteFile(path, []byte(c.file), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		a := &Account{ID: 1, Provider: "codex", Staged: fingerprint("r1"),
+		a := &Account{ID: 1, Provider: "codex", Staged: c.staged,
 			Token: Token{Access: "a1", Refresh: "r1"}, Extra: map[string]string{"id_token": "i", "account_id": "acct"}}
 		if _, err := p.Launch(a, home); err != nil {
 			t.Fatalf("%s: %v", c.what, err)
@@ -189,5 +194,28 @@ func TestCodexLeavesAnAuthFileThatAlreadyHoldsTheLogin(t *testing.T) {
 		Token: Token{Access: "a1", Refresh: "r1"}, Extra: map[string]string{"id_token": "i", "account_id": "acct"}}
 	if _, err := p.Launch(a, home); err != nil || a.Token.Refresh != "r2" {
 		t.Fatalf("a rotation beside odd fields is adopted: %v %+v", err, a.Token)
+	}
+}
+
+// A rotation read back from auth.json is read back once. Adopting a token
+// records that the home holds it, so once rota refreshes past that token —
+// in the store alone, as maintenance does — the file is known to lag behind
+// rota rather than taken for a newer rotation. Taking it for one would put a
+// spent refresh token back over the good one, and the next refresh would
+// present it a second time, which codex refuses for good.
+func TestACodexRotationIsReadBackOnce(t *testing.T) {
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte(
+		`{"auth_mode":"chatgpt","tokens":{"id_token":"i","access_token":"a2","refresh_token":"r2","account_id":"acct"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &Account{ID: 1, Provider: "codex", Staged: fingerprint("r1"),
+		Token: Token{Access: "a1", Refresh: "r1"}, Extra: map[string]string{"id_token": "i", "account_id": "acct"}}
+	if err := Adopt(a, home); err != nil || a.Token.Refresh != "r2" || !a.StagedCurrent() {
+		t.Fatalf("the CLI's rotation is read back, and the home is known to hold it: %v %+v %q", err, a.Token, a.Staged)
+	}
+	a.Token = Token{Access: "a3", Refresh: "r3"} // rota refreshed r2 in the store alone
+	if err := Adopt(a, home); err != nil || a.Token.Refresh != "r3" {
+		t.Fatalf("a file holding a token rota has refreshed past is not read back again: %v %+v", err, a.Token)
 	}
 }

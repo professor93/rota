@@ -251,6 +251,12 @@ func adoptCodex(a *Account, doc codexAuth) {
 		return
 	}
 	a.Token.Refresh = tok.RefreshToken
+	// The home is known to hold this token now, as it is after a write. A
+	// later refresh rota makes in the store alone then leaves a file that
+	// merely lags behind rota, rather than one taken for a newer rotation and
+	// read back again: that would put this token, spent by that refresh, back
+	// over the good one, to be presented a second time.
+	a.Staged = fingerprint(tok.RefreshToken)
 	if tok.AccessToken != "" {
 		a.Token.Access = tok.AccessToken
 		a.Token.ExpiresAt = jwtExpiryMS(tok.AccessToken) // the CLI records no expiry
