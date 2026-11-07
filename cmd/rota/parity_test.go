@@ -68,6 +68,9 @@ func mustPost(t *testing.T, dir, body string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Its background sweep looks at the store as it starts, and must be over
+	// before the directory goes.
+	defer srv.Stop()
 	ts := httptest.NewServer(srv.Handler())
 	defer ts.Close()
 

@@ -356,10 +356,12 @@ which is deliberate: spreading work evenly across accounts arrives at all of
 them being half-spent at once, and the reason to hold several is to have one
 that is still whole.
 
-Usage is read from the cached quota, refreshed if older than five minutes,
-and only for the accounts the queue actually looks at. A provider that
-publishes no usage endpoint reports nothing, so it is treated as unspent
-rather than dropped — otherwise an unmetered account could never be picked.
+Usage is read from the cached quota, refreshed if older than five minutes
+or once a window it reported has reset, and only for the accounts the queue
+actually looks at: an account spent until five is picked again at five, not
+when the cache runs out. A provider that publishes no usage endpoint reports
+nothing, so it is treated as unspent rather than dropped — otherwise an
+unmetered account could never be picked.
 `rota list` marks the account a bare `rota run` would use.
 
 Accounts added before rotation existed are numbered by id the first time they
@@ -457,12 +459,14 @@ the flag.
 
 A running server keeps itself current: every two minutes it rotates any
 access token close to expiring and re-reads the usage whose cached value has
-aged past five minutes. A request should never be the thing that discovers
-its credential expired, and the rotation decides from stored numbers — a
-stale one sends work to an account that is already spent. Nothing there is
-fatal: a provider that cannot be reached leaves its account exactly as it
-was, and the next sweep tries again. `--refresh-every 0` turns it off, and
-the command line still refreshes what it is about to use.
+aged past five minutes, and a few seconds after a usage window resets it
+reads that account again rather than waiting for the next sweep. A request
+should never be the thing that discovers its credential expired, and the
+rotation decides from stored numbers — a stale one sends work to an account
+that is already spent. Nothing there is fatal: a provider that cannot be
+reached leaves its account exactly as it was, and the next sweep tries
+again. `--refresh-every 0` turns it off, and the command line still
+refreshes what it is about to use.
 
 ### One file for the server
 
@@ -2684,9 +2688,13 @@ Only claude publishes a usage endpoint, and only for a login: a claude
 account on an API key has none, is never asked about, and shows `api key`
 under USAGE. Readings are cached for **five
 minutes** and refreshed on the first request past that age; `list -r` and
-`?refresh=1` force one. Both listings say when each account's limits were
-last read, and distinguish *not read yet* from *this provider has no limits
-to read*:
+`?refresh=1` force one. A reading taken before one of its windows resets is
+refreshed on the first request after the reset (five seconds after, for the
+provider to roll the window over), however young it is. A reading taken
+after the reset it reports is not: a provider slow to roll a window over is
+asked again when the five minutes are up, not on every look. Both listings
+say when each account's limits were last read, and distinguish *not read yet*
+from *this provider has no limits to read*:
 
 ```
 ┌───┬────┬────────┬─────────────────┬──────────────────┬───────┬─────────┬────────┐
