@@ -879,6 +879,13 @@ names the session. It turns the account's remote control setting on first
 could not work: one on a token rather than the account's own login, or one
 whose home still runs Claude Code from before the setting was on.
 
+--detach hands the CLI to a session this store's daemon holds instead of to
+this terminal, and returns: it starts in this folder, at this terminal's
+size, with this environment, and runs on with no terminal open. A daemon is
+started, on its control socket alone, when none runs. The CLI's arguments go
+after -- or -i, and it takes no prompt. --label names the session; rota list
+--sessions lists it and rota send types into it. linux and macOS.
+
 Conversations carry on: every run has a session id, and --resume <id>
 continues from it. On its own, --resume picks up the most recent
 conversation, which every provider can find without being told its id, and
@@ -896,6 +903,7 @@ conversation, which every provider can find without being told its id, and
   rota run 2 --share                 the same, watchable on this machine's page
   rota run --share=watch --label api offered to be read, under that name
   rota run 2 --remote-control=laptop open it, controllable from claude.ai
+  rota run 2 --detach --label api    held by the daemon, with no terminal open
 
 Flags:
 `
@@ -925,9 +933,10 @@ func (c *cli) run(args []string) error {
 		rest = rest[1:]
 	}
 
-	// --share and --label are rota's own and belong to the handover, so they
-	// are taken out here rather than in the flag set a question is parsed
-	// with: two of the three ways to open a CLI never reach one.
+	// --share, --detach and --label are rota's own and belong to the
+	// handover, so they are taken out here rather than in the flag set a
+	// question is parsed with: two of the three ways to open a CLI never
+	// reach one.
 	rest, ask, err := takeShareFlags(rest)
 	if err != nil {
 		return err
@@ -935,6 +944,9 @@ func (c *cli) run(args []string) error {
 	rest, remote, err := takeRemoteControl(rest)
 	if err != nil {
 		return err
+	}
+	if ask.detach {
+		return c.detach(id, rest, ask, remote)
 	}
 
 	// Two ways to say "not rota's vocabulary": -- for the arguments that

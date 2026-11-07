@@ -69,7 +69,7 @@ func (s *Server) HoldsDaemon(terminals string) bool {
 // the pseudo-terminal, the CLI — is the holder's. list is the place
 // startTerminal took for it.
 func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd string, list func(*termSession) bool) (*termSession, error) {
-	hreq := holdwire.Request{ID: runID(), Kind: kind, Args: req.Args, Cwd: cwd,
+	hreq := holdwire.Request{ID: runID(), Kind: kind, Args: req.Args, Cwd: cwd, Env: req.Env,
 		Name: strings.TrimSpace(req.Label), Scrollback: s.opts.Terminal.Scrollback}
 	hreq.Cols, hreq.Rows = boundSize(req.Cols, req.Rows)
 	st, a, err := s.chooseTerminal(r, kind, req.Account)
@@ -78,8 +78,12 @@ func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd s
 	}
 	var label, provider string
 	if a != nil {
+		hreq.Args, err = s.argsFor(r, st, a, req)
 		// The store is let go of before a holder opens it.
 		st.Close()
+		if err != nil {
+			return nil, err
+		}
 		hreq.Account, label, provider = a.ID, a.Label(), a.Provider
 	}
 	// On its way from here: a sweep finding its record before this has

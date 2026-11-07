@@ -213,3 +213,47 @@ func TestNoUserOrTokenMayBeCalledLocal(t *testing.T) {
 		t.Errorf("a token called local in Options answers %v, want %q", err, want)
 	}
 }
+
+// The environment a session starts from, and an account's Remote Control
+// turned on for it, are this machine's own user's to hand a daemon (P30,
+// P14): over the control socket, as local. A bearer token, or a user even
+// through LocalHandler, is refused before anything starts, an empty env
+// included. Over the socket both are read, and remote_control is true,
+// false or a name.
+func TestEnvIsTakenOnlyOverTheControlSocket(t *testing.T) {
+	s, err := New(Options{Token: "x", Dir: t.TempDir(), RefreshEvery: -1, Routes: &Routes{API: true, WebSocket: true, Terminal: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Stop)
+	user := s.LocalHandler(&Principal{Name: "alice", Role: RoleControl, Via: "user"})
+	const env, rc = "env is taken only over the control socket", "remote_control is taken only over the control socket"
+	for _, c := range []struct{ body, want string }{
+		{`{"account":1,"env":["FOO=bar"]}`, env},
+		{`{"account":1,"env":[]}`, env},
+		{`{"account":1,"remote_control":true}`, rc},
+		{`{"account":1,"remote_control":"laptop"}`, rc},
+	} {
+		for name, h := range map[string]http.Handler{"a token": s.Handler(), "a user": user} {
+			if code, body := ask(h, "POST", "/v1/terminals", c.body, "Authorization", "Bearer x"); code != http.StatusForbidden || errorOf(body) != c.want {
+				t.Errorf("%s sending %s answers %d %s, want 403 %q", name, c.body, code, body, c.want)
+			}
+		}
+	}
+	if code, body := ask(s.Handler(), "POST", "/v1/terminals", `{"account":1,"env":null,"remote_control":false}`, "Authorization", "Bearer x"); code == http.StatusForbidden {
+		t.Errorf("a token sending no env and remote_control false is refused: %s", body)
+	}
+	local := s.LocalHandler(&localControl)
+	for _, body := range []string{`{"account":1,"env":["FOO=bar"]}`, `{"account":1,"remote_control":"laptop"}`} {
+		// Past the guard: the store here has no account 1, or this platform
+		// no pseudo-terminal, and either says so.
+		if code, answer := ask(local, "POST", "/v1/terminals", body); code == http.StatusForbidden || code == http.StatusBadRequest {
+			t.Errorf("local sending %s answers %d %s", body, code, answer)
+		}
+	}
+	for _, body := range []string{`{"remote_control":""}`, `{"remote_control":"  "}`, `{"remote_control":1}`} {
+		if code, answer := ask(local, "POST", "/v1/terminals", body); code != http.StatusBadRequest {
+			t.Errorf("local sending %s answers %d %s, want 400", body, code, answer)
+		}
+	}
+}

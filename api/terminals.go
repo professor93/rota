@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,6 +47,48 @@ type termRequest struct {
 	Cols  uint16   `json:"cols,omitempty"`
 	Rows  uint16   `json:"rows,omitempty"`
 	Label string   `json:"label,omitempty"`
+	// Env, set, is the environment a held session starts from in place of
+	// the daemon's: the caller's own, which its holder keeps whatever
+	// describes another terminal out of. Only this machine's own user hands
+	// it over, on the control socket; from anybody else it would be choosing
+	// what runs as the daemon's user. A server that runs its terminals
+	// itself has no control socket, and so never sees one.
+	Env []string `json:"env,omitempty"`
+	// RemoteControl starts an account's CLI with Claude Code's Remote
+	// Control on, for whichever account is chosen, as `rota run
+	// --remote-control` does: the account's setting turned on first, and
+	// Claude Code's flag added last. It changes the account, so it too is
+	// taken only on the control socket.
+	RemoteControl remoteControl `json:"remote_control"`
+}
+
+// remoteControl is a request's remote_control: true, or the name to give
+// the session in Remote Control, which is on as well. false and null are
+// off.
+type remoteControl struct {
+	on   bool
+	name string
+}
+
+func (rc *remoteControl) UnmarshalJSON(raw []byte) error {
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return err
+	}
+	switch v := v.(type) {
+	case nil:
+		*rc = remoteControl{}
+		return nil
+	case bool:
+		*rc = remoteControl{on: v}
+		return nil
+	case string:
+		if name := strings.TrimSpace(v); name != "" {
+			*rc = remoteControl{on: true, name: name}
+			return nil
+		}
+	}
+	return errors.New("remote_control is true, false, or the name to give the session")
 }
 
 // The refusals this file answers with, as constants because they are part of
@@ -53,6 +97,9 @@ const (
 	shellOff     = "this server runs accounts' CLIs only; a plain shell needs terminal.shell = true in the server file"
 	noTermFor    = "a terminal needs a pseudo-terminal, and this machine has none"
 	termStopping = "this server is stopping; start the terminal again once it is back"
+	envLocal     = "env is taken only over the control socket"
+	remoteLocal  = "remote_control is taken only over the control socket"
+	remoteShell  = "remote_control is Claude Code's, and a shell runs no account"
 )
 
 /* --------------------------------------------------------- the endpoints --- */
@@ -103,6 +150,18 @@ func (s *Server) createTerminal(w http.ResponseWriter, r *http.Request) {
 	if err := strictJSON(r.Body, &req); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
+	}
+	// What only this machine's own user hands a daemon, refused from
+	// anybody else before anything is chosen or started.
+	if p := who(r); p == nil || p.Via != "local" {
+		switch {
+		case req.Env != nil:
+			fail(w, http.StatusForbidden, envLocal)
+			return
+		case req.RemoteControl.on:
+			fail(w, http.StatusForbidden, remoteLocal)
+			return
+		}
 	}
 	ts, err := s.startTerminal(r, &req)
 	if err != nil {
@@ -261,6 +320,9 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 	}
 	if kind == termKindShell && req.Account != 0 {
 		return nil, refuse(http.StatusBadRequest, "a shell runs no account: name one or the other, not both")
+	}
+	if kind == termKindShell && req.RemoteControl.on {
+		return nil, refuse(http.StatusBadRequest, remoteShell)
 	}
 	list, err := s.reserveTerminal()
 	if err != nil {
@@ -424,6 +486,10 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest) (*
 		return s.planShell(req)
 	}
 	defer st.Close()
+	args, err := s.argsFor(r, st, a, req)
+	if err != nil {
+		return nil, err
+	}
 	path, env, release, err := st.Prepare(r.Context(), a)
 	if err != nil {
 		return nil, err
@@ -439,7 +505,7 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest) (*
 	// a process that may run for hours starts, exactly as the handover does.
 	_ = st.Close()
 	plan := &termPlan{
-		path: path, args: append([]string{}, req.Args...), env: termenv.Env(env), release: release,
+		path: path, args: args, env: termenv.Env(env), release: release,
 		account: a.ID, label: a.Label(), provider: a.Provider, tokenUntil: holdwire.LoginUntil(a, env),
 	}
 	handed = true
@@ -486,6 +552,46 @@ func (s *Server) chooseTerminal(r *http.Request, kind string, id int) (*store.St
 	}
 	handed = true
 	return st, a, nil
+}
+
+// argsFor is what the account's CLI is handed: the request's arguments, and
+// where it asked for Remote Control, Claude Code's flag last, so nothing
+// before it is read as its name. Remote Control is readied first as `rota
+// run --remote-control` readies it: the account's setting is turned on and
+// saved, since it is what gives the account the .claude.json Remote Control
+// reads its identity from, and a session whose Remote Control could not
+// work is refused, saying why.
+func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req *termRequest) ([]string, error) {
+	args := slices.Clone(req.Args)
+	rc := req.RemoteControl
+	if !rc.on {
+		return args, nil
+	}
+	if rota.Flavor(a.Provider) != "claude" {
+		return nil, refuse(http.StatusBadRequest, fmt.Sprintf("remote_control is Claude Code's, and %s is a %s account", a, a.Provider))
+	}
+	if !a.RemoteControl {
+		on := *a
+		on.RemoteControl = true
+		if err := st.CheckRemoteControl(&on); err != nil {
+			return nil, err
+		}
+		a.RemoteControl = true
+		if err := st.Save(); err != nil {
+			return nil, err
+		}
+		s.log.Info("remote control turned on", "account", a.ID, "by", who(r).Name)
+	}
+	if err := st.RemoteControlNow(a); errors.Is(err, rota.ErrBusy) {
+		return nil, fmt.Errorf("%w; until then Remote Control would act as the wrong account, so this session is not started", err)
+	} else if err != nil {
+		return nil, err
+	}
+	args = append(args, "--remote-control")
+	if rc.name != "" {
+		args = append(args, rc.name)
+	}
+	return args, nil
 }
 
 // planShell is the opt-in, once chooseTerminal has allowed it: the person's
