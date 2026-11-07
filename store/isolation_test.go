@@ -26,7 +26,8 @@ func personWorld(t *testing.T) string {
 	}
 	for _, name := range []string{"settings.json", "CLAUDE.md", "history.jsonl", "daemon.lock", "daemon.log",
 		".credentials.json", "policy-limits.json", "policy-limits.json.signature.json", "remote-settings.json",
-		"remote-settings.json.synced-at", "mcp-needs-auth-cache.json", "ide.lock"} {
+		"remote-settings.json.synced-at", "remote-settings-consent.json", "remote-settings-helper-consent",
+		"mcp-needs-auth-cache.json", "mcp-discovery-cache", "hfi-auth.json", ".session_ingress_token.e1", "ide.lock"} {
 		writeFile(t, filepath.Join(src, name), name)
 	}
 	writeFile(t, filepath.Join(src, ".claude.json"), `{
@@ -44,7 +45,9 @@ func personWorld(t *testing.T) string {
 // login or one running Claude Code, and never resolve to anybody else's.
 var neverShared = []string{"sessions", "telemetry", "daemon", "daemon.lock", "daemon.log",
 	".credentials.json", "policy-limits.json", "policy-limits.json.signature.json", "remote-settings.json",
-	"remote-settings.json.synced-at", "statsig", "mcp-needs-auth-cache.json", "bridge-spawn", "ide.lock"}
+	"remote-settings.json.synced-at", "remote-settings-consent.json", "remote-settings-helper-consent",
+	"statsig", "mcp-needs-auth-cache.json", "mcp-discovery-cache", "hfi-auth.json", ".session_ingress_token.e1",
+	"bridge-spawn", "ide.lock"}
 
 // sameThing reports whether two paths lead to the same file or directory.
 func sameThing(a, b string) bool {
@@ -323,41 +326,47 @@ func TestALinkForANameNoLongerSharedWaitsForAQuietHome(t *testing.T) {
 	absent(t, filepath.Join(dst, "statsig"))
 }
 
-// orgPolicy is every name Claude Code keeps an organisation's policy and
-// remote settings under, as seen in its directory: the policy itself, its
-// signature and stamp, and the remote settings with what it notes beside
-// them.
-var orgPolicy = []string{
+// loginState is every name Claude Code keeps one login's own state under, as
+// seen in its directory: the organisation's policy and remote settings with
+// their signatures, stamps and the consent recorded for them, the MCP
+// discovery cache named for the account, an auth file, and the session
+// token a runner hands a session, with the epoch it writes after the name.
+var loginState = []string{
 	"policy-limits.json", "policy-limits.json.signature.json", "policy-limits.json.stamp.json",
 	"remote-settings.json", "remote-settings.json.synced-at", "remote-settings.json.signature.json",
+	"remote-settings-consent.json", "remote-settings-consent.json.tmp.0a1b2c3d", "remote-settings-helper-consent",
+	"mcp-discovery-cache", "hfi-auth.json", ".session_ingress_token", ".session_ingress_token.e3",
 }
 
-// nearOrgPolicy are names that only look like those, and are shared like
-// any other entry.
-var nearOrgPolicy = []string{"policy-limits.jsonx", "policy-limits-other.json", "remote-settings-other.json", "remote-settings.jsonl"}
+// nearLoginState are names that only look like those, and are shared like any
+// other entry.
+var nearLoginState = []string{
+	"policy-limits.jsonx", "policy-limits-other.json", "remote-settings-other.json", "remote-settings.jsonl",
+	"remote-settings-consent", "remote-settings-consent.jsonl", "remote-settings-helper-consents",
+	"mcp-discovery-cache-old", "mcp-discovery", "hfi-auth.jsonl", "hfi-auth", ".session_ingress_tokens",
+}
 
-// Which names are an organisation's policy is decided by exact prefix: the
-// name itself, or the name followed by a dot and anything.
-func TestOrganisationPolicyIsDecidedByExactPrefix(t *testing.T) {
-	for _, name := range orgPolicy {
+// Which names are one login's own is decided by exact prefix: the name
+// itself, or the name followed by a dot and anything.
+func TestPerLoginStateIsDecidedByExactPrefix(t *testing.T) {
+	for _, name := range loginState {
 		if sharedWithClaude(name) {
 			t.Fatalf("%s is shared", name)
 		}
 	}
-	for _, name := range append(slices.Clone(nearOrgPolicy), "settings.json", "skills", "remote-settings", "policy-limits") {
+	for _, name := range append(slices.Clone(nearLoginState), "settings.json", "skills", "remote-settings", "policy-limits", "cache", "state") {
 		if !sharedWithClaude(name) {
 			t.Fatalf("%s is not shared", name)
 		}
 	}
 }
 
-// One organisation's cached policy or remote settings never applies under
-// another account: a fresh mirror links none of them from the person's
-// directory, and everything else, names that merely look like them
-// included, is linked as before.
-func TestAFreshMirrorLinksNoOrganisationPolicy(t *testing.T) {
+// One login's own state never applies under another account: a fresh
+// mirror links none of it from the person's directory, and everything else,
+// names that merely look like it included, is linked as before.
+func TestAFreshMirrorLinksNoPerLoginState(t *testing.T) {
 	src := personWorld(t)
-	for _, name := range append(slices.Clone(orgPolicy), nearOrgPolicy...) {
+	for _, name := range append(slices.Clone(loginState), nearLoginState...) {
 		writeFile(t, filepath.Join(src, name), name)
 	}
 	s, a := claudeStore(t)
@@ -365,13 +374,13 @@ func TestAFreshMirrorLinksNoOrganisationPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 	dst := s.ownHome(a)
-	for _, name := range orgPolicy {
+	for _, name := range loginState {
 		absent(t, filepath.Join(dst, name))
 		if readFile(filepath.Join(src, name)) != name {
 			t.Fatalf("the person's %s is untouched", name)
 		}
 	}
-	for _, name := range append(slices.Clone(nearOrgPolicy), "settings.json", "CLAUDE.md", "skills", "projects") {
+	for _, name := range append(slices.Clone(nearLoginState), "settings.json", "CLAUDE.md", "skills", "projects") {
 		linksTo(t, filepath.Join(dst, name), filepath.Join(src, name))
 	}
 }
@@ -380,9 +389,9 @@ func TestAFreshMirrorLinksNoOrganisationPolicy(t *testing.T) {
 // refresh that finds the home quiet, as every link for a name no longer
 // shared does, while a real file of that name Claude Code wrote in the home
 // stays exactly as it is, and the person's own files are never touched.
-func TestAnExistingHomeLosesItsLinksToOrganisationPolicy(t *testing.T) {
+func TestAnExistingHomeLosesItsLinksToPerLoginState(t *testing.T) {
 	src := personWorld(t)
-	for _, name := range append(slices.Clone(orgPolicy), nearOrgPolicy...) {
+	for _, name := range append(slices.Clone(loginState), nearLoginState...) {
 		writeFile(t, filepath.Join(src, name), name)
 	}
 	s, a := claudeStore(t)
@@ -392,7 +401,7 @@ func TestAnExistingHomeLosesItsLinksToOrganisationPolicy(t *testing.T) {
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	linked, real := orgPolicy[1:], orgPolicy[0]
+	linked, real := loginState[1:], loginState[0]
 	for _, name := range linked {
 		if err := os.Symlink(filepath.Join(src, name), filepath.Join(dst, name)); err != nil {
 			t.Fatal(err)
@@ -422,17 +431,19 @@ func TestAnExistingHomeLosesItsLinksToOrganisationPolicy(t *testing.T) {
 			t.Fatalf("the home's own %s stays: %v %v", name, fi, err)
 		}
 	}
-	for _, name := range orgPolicy {
+	for _, name := range loginState {
 		if fi, err := os.Lstat(filepath.Join(src, name)); err != nil || !fi.Mode().IsRegular() || readFile(filepath.Join(src, name)) != name {
 			t.Fatalf("the person's %s is untouched: %v %v", name, fi, err)
 		}
 	}
-	for _, name := range nearOrgPolicy {
+	for _, name := range nearLoginState {
 		linksTo(t, filepath.Join(dst, name), filepath.Join(src, name))
 	}
 	for _, msg := range said {
-		if strings.Contains(msg, "policy-limits") || strings.Contains(msg, "remote-settings") {
-			t.Fatalf("a home's own policy is not in the way of anything: %s", msg)
+		for _, name := range loginState {
+			if strings.Contains(msg, name) {
+				t.Fatalf("a home's own per-login state is not in the way of anything: %s", msg)
+			}
 		}
 	}
 }
