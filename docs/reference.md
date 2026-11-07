@@ -2020,6 +2020,44 @@ Vertex, Foundry, Mantle and Claude Platform on AWS switches,
 the account's stored login drops `CLAUDE_CODE_OAUTH_TOKEN` as well, so no
 token reaches the child at all.
 
+A settings file can put those variables back. Claude Code writes the `env`
+block of every settings file it reads into its own environment, over what it
+inherited, and `apiKeyHelper` is a command whose output it sends as the
+credential, ranked above the account's own login — so `ANTHROPIC_BASE_URL` in
+`~/.claude/settings.json`, which every account reads through its mirror,
+undoes the drop above. rota edits none of these files and refuses no run for
+them, because what they say may be meant. Every launch of a claude account —
+`rota run` with or without a prompt, a session, a run or a terminal of
+`rota serve`'s — reads the settings files that launch's Claude Code will read:
+`settings.json` in the configuration directory it runs in;
+`.claude/settings.json` and `.claude/settings.local.json` in the directory it
+starts in, and the local one at the root of the git repository that directory
+is in (the main checkout's, for a worktree); and the machine's managed
+settings, `managed-settings.json` and the `*.json` files in
+`managed-settings.d` beside it, in `/etc/claude-code`,
+`/Library/Application Support/ClaudeCode` or `C:\Program Files\ClaudeCode`.
+When one sets `apiKeyHelper`, or sets in `env` any variable a claude launch
+drops — the proxy and certificate variables among them — or
+`CLAUDE_CONFIG_DIR`, the launch prints one warning naming each such file, its
+links resolved, and the keys it sets, never a value:
+
+```
+warning: claude/you@example.com: settings Claude Code reads put back what
+rota keeps out of this account's environment, so its login may go to another
+host or another credential be used in its place:
+/home/you/.claude/settings.json sets env.ANTHROPIC_BASE_URL
+```
+
+A key set to `""`, which is how a settings file cancels an inherited variable,
+is not counted, and a file that is not one JSON object, or is over 1 MB, is
+not read. A run that names `setting_sources` is held to the sources it names,
+managed settings counting whatever it says, so a `rota serve` run, which names
+none unless asked, is checked against the managed files alone; a hermetic run
+has no user settings. A `rota serve` terminal is checked as if it started
+where the server runs, and the server writes the warning to its log. The
+macOS configuration profile and the Windows registry, which can also carry
+managed settings, are not read.
+
 Every child is also told which account it is: `ROTA_PROVIDER` is the
 provider name, `ROTA_ACCOUNT_ID` the account's id as a decimal, and
 `ROTA_ACCOUNT` the label rota itself shows — the e-mail, else the shortened
@@ -3219,6 +3257,7 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `message/` | Reading a finished answer: blocks, the normalized event vocabulary, `ask`. Outside lib on purpose — the SDK has no business knowing what markdown is |
 | `sessions/` | What the vendor CLIs are doing: the runs rota started, the editors holding one open, and the conversations `--resume` could pick up |
 | `store/mirror.go` | The Claude world each account gets: what is linked, what stays its own, and the warning for an entry that stopped being a link |
+| `store/settings.go` | The warning at launch for a Claude Code settings file that sets back what the launch drops |
 | `store/claude.go` | A claude account's login in its home: what is alive there, reading, writing and refreshing it, the daemon, removal |
 | `store/watch.go`, `cmd/rota/watch*.go` | The watcher an interactive run leaves: its looks, its lock, starting it in a session of its own, its log |
 | `store/claudejson.go` | An account's own `.claude.json` for Remote Control: switching it, the identity in it, and the one-way fold |
