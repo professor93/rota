@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	rota "github.com/professor93/rota/lib"
@@ -50,75 +50,110 @@ func init() { rota.Register(resetter{}) }
 // to a whole sweep later: the sweep is an hour apart here, and the reading
 // arrives all the same, and the rotation's choice moves back to the account
 // that was spent. It is the sweep that was coming anyway, woken early, and
-// nothing reads again before the reset or after it.
+// nothing reads again before the reset or after it. The server runs in a
+// bubble of its own whose clock moves only when everything in it waits, so
+// the test says exactly when, on no machine's schedule.
 func TestTheServerReadsAnAccountAgainOnceItsWindowResets(t *testing.T) {
-	resetReads.Lock()
-	resetReads.at = nil
-	resetReads.Unlock()
-	start := time.Now()
-	// Far enough off that a busy machine still starts the server first: a
-	// reading already due when the server looks is left to the next look.
-	due := start.Add(1500 * time.Millisecond)
-	// Inside the cache's lifetime and before the reset, so the reading is
-	// fresh until the reset makes it due — and it does at `due`.
-	at := start.Add(-10 * time.Second).UnixMilli()
-	reset := due.Add(-store.ResetGrace).Format(time.RFC3339Nano)
-	blob := fmt.Sprintf(`{"ordered":true,"nextId":3,"accounts":[
-		{"id":1,"provider":"t-api-reset","order":1,"token":{"accessToken":"a"},"quotaAt":%d,
-		 "quota":{"windows":[{"name":"5h","percent":100,"primary":true,"resetsAt":%q}]}},
-		{"id":2,"provider":"t-api-reset","order":2,"token":{"accessToken":"b"},"quotaAt":%d,
-		 "quota":{"windows":[{"name":"5h","percent":50,"primary":true}]}}]}`, at, reset, at)
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "accounts.json"), []byte(blob), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	srv, err := New(Options{Token: "t", Dir: dir, RefreshEvery: time.Hour})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer srv.Stop()
-	web := httptest.NewServer(srv.Handler())
-	defer web.Close()
-	choice := func() int {
-		t.Helper()
-		req, _ := http.NewRequest("GET", web.URL+"/v1/accounts", nil)
-		req.Header.Set("Authorization", "Bearer t")
-		resp, err := http.DefaultClient.Do(req)
+	synctest.Test(t, func(t *testing.T) {
+		resetReads.Lock()
+		resetReads.at = nil
+		resetReads.Unlock()
+		start := time.Now()
+		due := start.Add(90 * time.Second)
+		// Inside the cache's lifetime and before the reset, so the reading
+		// is fresh until the reset makes it due — and it does at `due`.
+		at := start.Add(-time.Minute).UnixMilli()
+		reset := due.Add(-store.ResetGrace).Format(time.RFC3339Nano)
+		blob := fmt.Sprintf(`{"ordered":true,"nextId":3,"accounts":[
+			{"id":1,"provider":"t-api-reset","order":1,"token":{"accessToken":"a"},"quotaAt":%d,
+			 "quota":{"windows":[{"name":"5h","percent":100,"primary":true,"resetsAt":%q}]}},
+			{"id":2,"provider":"t-api-reset","order":2,"token":{"accessToken":"b"},"quotaAt":%d,
+			 "quota":{"windows":[{"name":"5h","percent":50,"primary":true}]}}]}`, at, reset, at)
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "accounts.json"), []byte(blob), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		srv, err := New(Options{Token: "t", Dir: dir, RefreshEvery: time.Hour})
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer resp.Body.Close()
-		var doc struct {
-			Default int `json:"default"`
+		defer srv.Stop()
+		handler := srv.Handler()
+		choice := func() int {
+			t.Helper()
+			req := httptest.NewRequest("GET", "/v1/accounts", nil)
+			req.Header.Set("Authorization", "Bearer t")
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+			var doc struct {
+				Default int `json:"default"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &doc); err != nil {
+				t.Fatalf("%d %s: %v", rec.Code, rec.Body, err)
+			}
+			return doc.Default
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-			t.Fatal(err)
+		reads := func() []time.Time {
+			resetReads.Lock()
+			defer resetReads.Unlock()
+			return append([]time.Time(nil), resetReads.at...)
 		}
-		return doc.Default
-	}
-	reads := func() []time.Time {
-		resetReads.Lock()
-		defer resetReads.Unlock()
-		return append([]time.Time(nil), resetReads.at...)
-	}
+		// Until the moment d from the start, with the server done with
+		// whatever that moment asked of it.
+		until := func(d time.Duration) {
+			time.Sleep(time.Until(start.Add(d)))
+			synctest.Wait()
+		}
 
-	if got := choice(); got != 2 {
-		t.Fatalf("before the reset the spent account is passed by: %d", got)
-	}
-	for deadline := time.Now().Add(10 * time.Second); len(reads()) == 0; {
-		if time.Now().After(deadline) {
-			t.Fatal("the window reset and nothing read the account again")
+		until(0)
+		if got := choice(); got != 2 {
+			t.Fatalf("before the reset the spent account is passed by: %d", got)
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if got := reads(); got[0].Before(due) {
-		t.Fatalf("read %v before the reset made the reading due", due.Sub(got[0]))
-	}
-	if got := choice(); got != 1 {
-		t.Fatalf("once read again, the account that was spent is the rotation's choice: %d", got)
-	}
-	time.Sleep(300 * time.Millisecond)
-	if got := reads(); len(got) != 1 {
-		t.Fatalf("one reset is one read: %v", got)
-	}
+		until(due.Sub(start) - time.Millisecond)
+		if got := reads(); len(got) != 0 {
+			t.Fatalf("read before the reset made the reading due: %v", got)
+		}
+		until(due.Sub(start))
+		if got := reads(); len(got) != 1 || !got[0].Equal(due) {
+			t.Fatalf("the window reset, and the account is read again then, once: %v, due %v", got, due)
+		}
+		if got := choice(); got != 1 {
+			t.Fatalf("once read again, the account that was spent is the rotation's choice: %d", got)
+		}
+		until(time.Hour - time.Millisecond)
+		if got := reads(); len(got) != 1 {
+			t.Fatalf("one reset is one read, and nothing else is due before the sweep: %v", got)
+		}
+	})
+}
+
+// untilNext is how long the keeper sleeps: until the sweep, or until a reset
+// if that is sooner — but never less than a second for a reset, so a clock
+// that disagrees about when it is cannot make the keeper sweep without
+// pause. A sweep that is due is due at once, as a ticker's would be.
+func TestTheKeeperSleepsUntilTheSweepOrAReset(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now()
+		for _, c := range []struct {
+			why          string
+			sweep, reset time.Duration // from now; reset 0 is none
+			want         time.Duration
+		}{
+			{"no reset waits for the sweep", 2 * time.Minute, 0, 2 * time.Minute},
+			{"a sooner reset comes first", 2 * time.Minute, 10 * time.Second, 10 * time.Second},
+			{"a later reset waits for the sweep", 2 * time.Minute, time.Hour, 2 * time.Minute},
+			{"a reset already past is a second off", 2 * time.Minute, -time.Hour, soonestReset},
+			{"so is one sooner than a second", 2 * time.Minute, time.Millisecond, soonestReset},
+			{"a sweep sooner than that still comes first", 200 * time.Millisecond, -time.Hour, 200 * time.Millisecond},
+			{"a sweep already due is due now", -time.Second, 0, -time.Second},
+		} {
+			var reset time.Time
+			if c.reset != 0 {
+				reset = now.Add(c.reset)
+			}
+			if got := untilNext(now.Add(c.sweep), reset); got != c.want {
+				t.Errorf("%s: %v, want %v", c.why, got, c.want)
+			}
+		}
+	})
 }
