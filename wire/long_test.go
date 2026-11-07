@@ -103,12 +103,15 @@ func TestWhenTheLoginEndsIsShownAndSaidOnlyNearTheEnd(t *testing.T) {
 	if Describe(a).LoginUntil == "" || LoginNote(a) != "" {
 		t.Fatal("a month away is shown and not said")
 	}
-	a.Extra = at(3 * 24 * time.Hour)
-	if !strings.Contains(LoginNote(a), "in 2 days") {
-		t.Fatal(LoginNote(a))
+	// Halfway through a day, not on its edge: exactly three days left is
+	// rightly "in 3 days", and on a clock that reads whole microseconds
+	// against an expiry kept in milliseconds, no time passing is common.
+	a.Extra = at(2*24*time.Hour + 12*time.Hour)
+	if note := LoginNote(a); !strings.Contains(note, "in 2 days") {
+		t.Fatal(note)
 	}
 	a.Extra = at(-time.Hour)
-	if !strings.Contains(LoginNote(a), "ended") {
-		t.Fatal(LoginNote(a))
+	if note := LoginNote(a); !strings.Contains(note, "ended") {
+		t.Fatal(note)
 	}
 }
