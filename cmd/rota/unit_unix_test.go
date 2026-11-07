@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"os"
@@ -12,7 +11,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -377,43 +375,15 @@ func TestReinstallStopsTheDaemonFirst(t *testing.T) {
 // it would end the daemon, and take away what starts it again, from inside
 // one by mistake. Once the session is over, the same process may. The
 // probe is this binary as a rota in a session of its own, which a held
-// session's record names as its holder.
+// session's record names as its holder: sessionProbe, which serve stop's
+// test drives too.
 func TestUninstallIsRefusedInsideAHeldSession(t *testing.T) {
 	r := newUnitRig(t)
 	if _, errb, code := call(t, "serve", "install"); code != 0 {
 		t.Fatalf("install: exit %d %q", code, errb)
 	}
 	record := filepath.Join(t.TempDir(), "calls")
-	cmd := exec.Command(os.Args[0], "-test.run=^$")
-	cmd.Env = append(os.Environ(), "ROTA_SESSION_PROBE=1", "ROTA_UNIT_RECORD="+record)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	in, err := cmd.StdinPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { in.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() })
-	answers := bufio.NewScanner(stdout)
-	ask := func(line string) (int, string) {
-		t.Helper()
-		fmt.Fprintln(in, line)
-		if !answers.Scan() {
-			t.Fatalf("the probe said nothing to %q: %v", line, answers.Err())
-		}
-		code, said, _ := strings.Cut(answers.Text(), " ")
-		n, cerr := strconv.Atoi(code)
-		s, qerr := strconv.Unquote(said)
-		if cerr != nil || qerr != nil {
-			t.Fatalf("the probe answered %q", answers.Text())
-		}
-		return n, s
-	}
+	probe, ask := sessionProbe(t, append(os.Environ(), "ROTA_UNIT_RECORD="+record))
 
 	const id = "00000000000000e1"
 	dir := holdwire.Dir(r.terminals, id)
@@ -421,7 +391,7 @@ func TestUninstallIsRefusedInsideAHeldSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	m := &holdwire.Meta{ID: id, Kind: holdwire.KindAccount, Account: 1, Provider: "claude",
-		HolderPID: cmd.Process.Pid, Protocol: holdwire.Major, Version: wire.Version, Started: time.Now()}
+		HolderPID: probe, Protocol: holdwire.Major, Version: wire.Version, Started: time.Now()}
 	if err := holdwire.WriteMeta(dir, m); err != nil {
 		t.Fatal(err)
 	}
