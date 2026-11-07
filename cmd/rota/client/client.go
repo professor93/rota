@@ -247,7 +247,8 @@ func (c *Client) Get(id string) (Session, error) {
 // error that names their ids, so the person can choose. So a label that
 // could begin an id — beef, or cafe1 — is read as an id first: a session
 // whose id it begins is the one found, and two such are an error even when
-// a live session has that very label, which is then named by its id.
+// a live session has that very label, which is then named by its id. None
+// at all is an error that is ErrNoSession.
 func (c *Client) Resolve(nameOrID string) (Session, error) {
 	all, err := c.List()
 	if err != nil {
@@ -277,8 +278,21 @@ func (c *Client) Resolve(nameOrID string) (Session, error) {
 	case len(named) > 1:
 		return Session{}, fmt.Errorf("%d live sessions are called %q, %s; name one by its id", len(named), nameOrID, ids(named))
 	}
-	return Session{}, fmt.Errorf("no session is %q: it is not an id, the start of one, or the name of a live session", nameOrID)
+	return Session{}, noSession(nameOrID)
 }
+
+// ErrNoSession is Resolve finding no session at all by what it was given,
+// as against finding more than one.
+var ErrNoSession = errors.New("no such session")
+
+// noSession is ErrNoSession for one thing typed, said as that.
+type noSession string
+
+func (n noSession) Error() string {
+	return fmt.Sprintf("no session is %q: it is not an id, the start of one, or the name of a live session", string(n))
+}
+
+func (noSession) Is(target error) bool { return target == ErrNoSession }
 
 // ids is the sessions' ids, in order, for a sentence.
 func ids(sessions []Session) string {
@@ -367,10 +381,12 @@ func (c *Client) Stop(id string) error {
 
 // Refusal is the daemon saying no, in its own words: the status it answered
 // with, the reason a program can act on where it gave one, and the sentence
-// for a person, which is its Error.
+// for a person, which is its Error. Holder is who holds the keyboard, for a
+// send refused because somebody does.
 type Refusal struct {
 	Status          int
 	Reason, Message string
+	Holder          string
 }
 
 func (r *Refusal) Error() string { return r.Message }
@@ -411,11 +427,12 @@ func (c *Client) do(method, path string, in, out any) error {
 		var e struct {
 			Error  string `json:"error"`
 			Reason string `json:"reason"`
+			Holder string `json:"holder"`
 		}
 		if json.Unmarshal(raw, &e) != nil || strings.TrimSpace(e.Error) == "" {
 			e.Error = fmt.Sprintf("the rota daemon answered %s to %s %s", resp.Status, method, path)
 		}
-		return &Refusal{Status: resp.StatusCode, Reason: e.Reason, Message: e.Error}
+		return &Refusal{Status: resp.StatusCode, Reason: e.Reason, Message: e.Error, Holder: e.Holder}
 	}
 	if out == nil {
 		return nil

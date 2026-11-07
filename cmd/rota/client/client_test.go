@@ -242,9 +242,12 @@ func TestResolveByIDPrefixAndLabel(t *testing.T) {
 		}
 	}
 	for _, in := range []string{"old", "c3d", "nobody", ""} {
-		if s, err := c.Resolve(in); err == nil {
-			t.Errorf("Resolve(%q) found %s; it matches no live session", in, s.ID)
+		if s, err := c.Resolve(in); err == nil || !errors.Is(err, ErrNoSession) {
+			t.Errorf("Resolve(%q) found %s, %v; it matches no live session", in, s.ID, err)
 		}
+	}
+	if _, err := c.Resolve("twin"); errors.Is(err, ErrNoSession) {
+		t.Errorf("two sessions called twin are not none: %v", err)
 	}
 }
 
@@ -346,7 +349,7 @@ func TestCreateGetAndARefusedSend(t *testing.T) {
 	}
 	err = c.Send("a1b2c3d4e5f60718", SendReq{Text: "hi", Force: true})
 	if !errors.As(err, &no) || no.Status != http.StatusConflict || no.Reason != "keyboard" ||
-		no.Message != "alice holds the keyboard of this session" || err.Error() != no.Message {
+		no.Message != "alice holds the keyboard of this session" || no.Holder != "alice" || err.Error() != no.Message {
 		t.Fatalf("a refused send: %#v", err)
 	}
 }

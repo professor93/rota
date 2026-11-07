@@ -16,6 +16,8 @@ import (
 	"strings"
 	"time"
 
+	rotaclient "github.com/professor93/rota/cmd/rota/client"
+	"github.com/professor93/rota/internal/holdwire"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
 	"github.com/professor93/rota/store"
@@ -311,7 +313,7 @@ func answerSend(sess *rota.Session, line []byte) sendReply {
 
 /* ------------------------------------------------- sending from elsewhere --- */
 
-const sendUsage = `rota send <run> [text] [flags]
+const sendUsage = `rota send <run-or-session> [text] [flags]
 
 Sends one more message into a run started with --input, from another terminal
 or another program. The run id is the one that run printed when it started,
@@ -326,11 +328,23 @@ is printing, not here — here is only what became of the message.
   rota send 7f3c1a --interrupt              stop what it is doing
   rota send 7f3c1a --close                  no more messages; let it finish
 
+With no run of that id, it types into a held session — one rota run --detach
+handed to this store's daemon — named by its id, the start of one, or its
+name: the text, then Enter, once the CLI is ready for one. A CLI waiting on
+its person for a permission or a question is not typed into, since Enter
+there may approve a tool, unless --force says to.
+
+  rota send api "and the tests?"            type into the held session api
+  rota send api "yes" --force               even while it waits on its person
+
 Flags:
 `
 
 // sendShort is what a mistyped send says: the shape, and where the rest is.
-const sendShort = usageError("usage: send <run> <text>   (or --interrupt, --steer, --close; `rota send -h` for the whole of it)")
+const sendShort = usageError("usage: send <run-or-session> <text>   (or --interrupt, --steer, --close for a run; `rota send -h` for the whole of it)")
+
+// sendRunOnly is --interrupt, --steer or --close given for a held session.
+const sendRunOnly = "those are for a run started with --input"
 
 // send is the other end of --input: one request over the run's socket, one
 // reply, printed.
@@ -342,6 +356,7 @@ func (c *cli) send(args []string) error {
 		interrupt = fs.Bool("interrupt", false, "stop the tool the agent is running")
 		steer     = fs.Bool("steer", false, "interrupt first, so the message starts the next turn instead of joining this one")
 		shut      = fs.Bool("close", false, "say there is nothing more: the run finishes its turn and exits")
+		force     = fs.Bool("force", false, "type into a held session even while it waits on its person, where Enter may approve a tool")
 	)
 	words, err := parseFlags(fs, args)
 	if err != nil {
@@ -380,12 +395,17 @@ func (c *cli) send(args []string) error {
 		return err
 	}
 	path, err := sockPath(s, id)
+	terminals, terr := s.TerminalDir()
 	s.Close() // the run itself holds no store lock, and neither should this
 	if err != nil {
 		return err
 	}
 	if _, err := os.Stat(path); err != nil {
-		return c.sendFailed("no run %s; rota list --sessions shows what is running", id)
+		// No such run: a held session, then, which is typed into.
+		if terr != nil {
+			return terr
+		}
+		return c.sendHeld(terminals, id, text, *force, *interrupt || *steer || *shut)
 	}
 	conn, err := net.Dial("unix", path)
 	if err != nil {
@@ -430,6 +450,98 @@ func (c *cli) send(args []string) error {
 		fmt.Fprintln(c.out, "accepted", oneLine(rep.ID))
 	}
 	return nil
+}
+
+// sendHeld types text and Enter into the held session target names, as
+// client.Resolve finds one, once its CLI is ready: nothing printed when it
+// is typed, or {"ok":true} with --json, and every refusal exits 1 in
+// sendRefusal's words. Only reaching the session needs the daemon: with
+// none running, the store's records say whether target names a held
+// session, so that is said rather than that nothing does. runOnly is
+// --interrupt, --steer or --close, which a held session has no use for.
+func (c *cli) sendHeld(terminals, target, text string, force, runOnly bool) error {
+	cl, err := rotaclient.Dial(terminals)
+	if errors.Is(err, rotaclient.ErrNoDaemon) {
+		return c.sendUnserved(terminals, target, runOnly)
+	}
+	if err != nil {
+		return c.sendFailed("%v", err)
+	}
+	sess, err := cl.Resolve(target)
+	switch {
+	case errors.Is(err, rotaclient.ErrNoSession):
+		return c.sendFailed(noRunOrSession, target)
+	case err != nil:
+		return c.sendFailed("%v", err)
+	case runOnly:
+		return usageErr("%s", sendRunOnly)
+	}
+	if err := cl.Send(sess.ID, rotaclient.SendReq{Text: text, Force: force}); err != nil {
+		return c.sendFailed("%s", sendRefusal(heldCell(sess.Name), err))
+	}
+	if c.json {
+		return c.emit(map[string]bool{"ok": true})
+	}
+	return nil
+}
+
+// noRunOrSession is a send to something that is neither.
+const noRunOrSession = "no run or session %s; rota list --sessions shows what is running"
+
+// sendUnserved is a send with no daemon to reach the session through. The
+// records are read the way Resolve reads the daemon's listing: a whole id,
+// the start of one, or the name of one that is running. A running one is
+// said to want a daemon; a stopped one, which only an id finds, has ended.
+func (c *cli) sendUnserved(terminals, target string, runOnly bool) error {
+	var running, stopped *holdwire.Record
+	for _, r := range holdwire.Scan(terminals) {
+		if r.State == holdwire.StateBroken {
+			continue
+		}
+		live := r.State == holdwire.StateLive || r.State == holdwire.StateUnreadable
+		named := r.ID == target || len(target) >= 4 && strings.HasPrefix(r.ID, target) ||
+			live && target != "" && (heldName(&r) == target || r.Meta.Name == target)
+		switch {
+		case !named:
+		case live && running == nil:
+			running = &r
+		case !live && stopped == nil:
+			stopped = &r
+		}
+	}
+	switch {
+	case running == nil && stopped == nil:
+		return c.sendFailed(noRunOrSession, target)
+	case runOnly:
+		return usageErr("%s", sendRunOnly)
+	case running != nil:
+		return c.sendFailed("session %s is running, but no rota daemon serves %s to type into it; rota serve start starts one",
+			heldCell(heldName(running)), filepath.Dir(terminals))
+	}
+	return c.sendFailed("session %s has ended", heldCell(heldName(stopped)))
+}
+
+// sendRefusal is why a send into the held session called name was not
+// typed, in rota's own words where the daemon gave a reason it knows, and
+// in the daemon's otherwise.
+func sendRefusal(name string, err error) string {
+	var no *rotaclient.Refusal
+	if !errors.As(err, &no) {
+		return err.Error()
+	}
+	switch no.Reason {
+	case "waiting":
+		return "session " + name + " is waiting for a permission or a question, and Enter there may approve a tool; --force sends anyway"
+	case "keyboard":
+		if no.Holder != "" {
+			return heldCell(no.Holder) + " holds the keyboard of " + name
+		}
+	case "timeout":
+		return "session " + name + " did not become ready within 30s; nothing was typed"
+	case "ended":
+		return "session " + name + " has ended"
+	}
+	return no.Message
 }
 
 // sendFailed says what went wrong in rota's own voice and exits 1. It is

@@ -199,6 +199,7 @@ rota run 2                    # open account 2's CLI, as it comes
 rota run 2 --share            # the same, watchable from this machine's terminal page
 rota run --share=watch --label api   # ...offered to be read and never typed into
 rota run 2 --detach --label api   # held by this store's daemon instead, with no terminal open
+rota send api "and the tests?"    # type into that held session, once its CLI is ready for it
 rota set 2 --order 1          # put account 2 first in the queue (0 = out of it)
 rota set 2 --threshold 80     # move on to the next account at 80% usage
 rota set 2                    # what account 2 is set to
@@ -253,7 +254,7 @@ Anything after an account id is passed to the vendor CLI's own login
 |---|---|
 | `-r`, `--refresh` | read the quotas now, rather than using the five-minute cache |
 | `-s`, `--short` | what is already known, reading no usage; a home that needs rescuing is rescued all the same (see *Stranded*) |
-| `--sessions` | also what the CLIs are running and what could be resumed |
+| `--sessions` | also what the CLIs are running, what could be resumed, and the held sessions, when there are any |
 | `--all` | with `--sessions`: every conversation, not five per account |
 
 **`rota run [id] [prompt]`** — with no prompt it opens the CLI itself.
@@ -286,13 +287,14 @@ Anything after an account id is passed to the vendor CLI's own login
 | `--remote-control[=name]` | open a claude account's Claude Code with its own Remote Control on, turning the account's setting on first — see *Remote Control* |
 | `--` | everything after it belongs to the vendor CLI, untouched |
 
-**`rota send <run-id> [text]`** — into a run started with `--input`.
+**`rota send <run-or-session> [text]`** — into a run started with `--input`, or, with no run of that id, into a held session named by its id, the start of one, or its name (see *Sending into a held session* in *[The daemon](#the-daemon)*).
 
 | | |
 |---|---|
 | `--steer` | interrupt first, so the message starts the next turn |
 | `--interrupt` | stop the tool the agent is running, and send nothing |
 | `--close` | no more messages: the run finishes its turn and exits |
+| `--force` | a held session: type even while its CLI waits on its person for a permission or a question, where Enter may approve a tool. A run takes it and has no use for it |
 
 **`rota set <id>`** — with no flags it prints what the account is set to.
 
@@ -980,6 +982,37 @@ daemon readies whichever it chooses. A daemon that holds the store and
 does not answer within five seconds is an error, and no second daemon is
 started beside it.
 
+An account a held session is running is busy as it would be under any run,
+and `rota run <id>` on it says which session has it, at the end of its
+error: *— held by session api (0123456789abcdef)*.
+
+**Sending into a held session.** `rota send <session> "text"` types the text
+into a held session, and then Enter, the way a person would: as a paste
+where the CLI has bracketed paste on. The session is named by its id, the
+start of one four characters or longer, or the name of a running one; a
+run started with `--input` of that id is tried first, as it always was. It
+waits until the CLI is ready for a message — idle, by Claude Code's own
+record of the session, or quiet for a moment where there is none — for up
+to 30 seconds, and while it waits nobody else types into the session but
+one Esc or Ctrl-C. It prints nothing once the
+text is in, or `{"ok":true}` with `--json`. Every refusal exits 1:
+
+```
+rota: session api is waiting for a permission or a question, and Enter there may approve a tool; --force sends anyway
+rota: alice holds the keyboard of api
+rota: session api did not become ready within 30s; nothing was typed
+rota: session api has ended
+rota: no run or session api; rota list --sessions shows what is running
+```
+
+`--force` counts a CLI waiting on its person as ready, and types into it.
+`--interrupt`, `--steer` and `--close` are a usage error for a held session:
+*those are for a run started with --input*. Only reaching the session needs
+the daemon. With none running, a send that names a running held session
+says so — *session api is running, but no rota daemon serves
+/home/me/.rota to type into it; rota serve start starts one* — and one that
+names a stopped one says it has ended.
+
 ### Who is asking, and what they may do
 
 Every request is made by a **principal**: a name to put in the log, a role
@@ -1379,11 +1412,12 @@ rota send 7f3c1a5d --close                     # let it finish
 ```
 
 It prints `accepted <id>`, `interrupted <id>` or `closed`, and with `--json`
-the reply as it came. The answer itself comes out where the run is printing,
-not where the send was typed. A run whose socket could not be opened — a
-directory that will not take one, a path too long for the platform's limit —
-says so when it starts and goes on running; only sending into it from
-elsewhere is lost.
+the reply as it came. With no run of that id, `rota send` types into a held
+session of that id or name instead — see *Sending into a held session*. The
+answer itself comes out where the run is printing, not where the send was
+typed. A run whose socket could not be opened — a directory that will not
+take one, a path too long for the platform's limit — says so when it starts
+and goes on running; only sending into it from elsewhere is lost.
 
 Three event types say what became of each message, so a client never has to
 guess: `input` with `state` `accepted`, `answered` or `failed`;
@@ -1628,7 +1662,8 @@ The playground's **Running** section shows all of this in a page, and
 `rota list --sessions` adds two sections: the vendor CLIs and editors open
 right now, and the conversations `--resume` could pick up. Five per account by
 default; `--all` for the rest. Over HTTP it is `GET /v1/accounts?sessions=1`,
-with `&recent=0` for all of them.
+with `&recent=0` for all of them. A third, **Held sessions**, follows them
+whenever the store has a record of one — see below.
 
 ```
 Running instances:
@@ -1706,6 +1741,25 @@ kimi keeps its conversations somewhere rota has not been able to confirm, so a
 kimi account is reported as unlisted rather than as none. Inventing a layout
 would mean showing the wrong conversations, which is worse than showing none
 and saying so.
+
+**Held sessions** — the ones `rota run --detach` hands to the store's daemon
+— are listed from their records, which outlive the daemon and every holder,
+so neither needs to be running. The section is there only when there is a
+record, newest first: `●` for a session that is running and `○` for one that
+has stopped, then its name, the account, the CLI, `running` or how it
+stopped (`ended`, or `interrupted` when its holder went without its CLI
+ending), its folder, and the start of its id, which `rota send` takes:
+
+```
+Held sessions:
+  ● api  #2 you@example.com  claude  running      /home/me/src/api  0123abcd
+  ○ old  #3 me@example.com   codex   interrupted  /home/me/src/old  4567ef01
+```
+
+`--json` carries them as `"held"`, only when there are any, each as
+`rota run --detach --json` prints one, with `exit` and `ended_at` once it
+has stopped and `resumable` for one interrupted on a conversation that is
+known.
 
 ### Where an account belongs
 
