@@ -201,8 +201,28 @@ func (p codexProvider) Plan(ctx context.Context, a *Account, home string) (*Comm
 	return &Command{
 		Bin:  "codex",
 		Env:  []string{"CODEX_HOME=" + home},
-		Drop: dropList("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_BASE_URL"),
+		Drop: dropList(codexCompeting...),
 	}, []StagedFile{{Path: "auth.json", Mode: 0o600, Content: raw}}, nil
+}
+
+// codexCompeting are the variables that would have codex sign in some other
+// way than the auth.json in its home, send its requests or its tokens
+// somewhere else, bill another organization, or believe it runs inside
+// another codex: exact names, as codex's own source reads them. The account's
+// refresh token goes wherever CODEX_REFRESH_TOKEN_URL_OVERRIDE says, and the
+// workload identity variables replace the login altogether.
+var codexCompeting = []string{
+	// A credential of another kind.
+	"OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_CONNECTORS_TOKEN",
+	"OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+	// Whom a request bills, and the client a login is refreshed under.
+	"OPENAI_ORGANIZATION", "OPENAI_PROJECT", "CODEX_APP_SERVER_LOGIN_CLIENT_ID", "CODEX_APP_SERVER_LOGIN_ISSUER",
+	// Another endpoint, or another certificate to trust on the way.
+	"OPENAI_BASE_URL", "CODEX_REFRESH_TOKEN_URL_OVERRIDE", "CODEX_REVOKE_TOKEN_URL_OVERRIDE",
+	"CODEX_AUTHAPI_BASE_URL", "CODEX_AGENT_IDENTITY_AUTHAPI_BASE_URL", "CODEX_AGENT_IDENTITY_JWKS_BASE_URL",
+	"CODEX_CA_CERTIFICATE",
+	// The marks of a process another codex started.
+	"CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "CODEX_SANDBOX",
 }
 
 // codexAuth is what rota reads of the CLI's auth.json: the fields it writes.

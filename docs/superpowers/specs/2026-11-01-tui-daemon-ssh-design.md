@@ -654,8 +654,13 @@ one of them shipped; where a rule and an earlier section differ, this one wins.
 
 **The process.**
 - The holder applies an explicit scrub list to the child's environment, beyond
-  secrets: `TMUX`, host terminal ids, `CLAUDECODE`, `CLAUDE_CODE_SESSION_ID`,
-  `CLAUDE_CODE_ENTRYPOINT`, `CODEX_THREAD_ID`. `run --detach` and New from the
+  secrets: `TMUX`, host terminal ids, and the marks a CLI puts on what it
+  starts — `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`,
+  `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_THREAD_ID`,
+  `CODEX_SESSION_ID`, `CODEX_TOOL_CALL_ID`. An account's CLI also gets its
+  provider's own drop list (lib's `claudeCompeting` and `codexCompeting`),
+  which names exactly everything that would sign it in some other way, send it
+  elsewhere, or say it is nested. `run --detach` and New from the
   TUI send the caller's environment, filtered like `termEnv`, in the stdin
   request, so `PATH`, keys and direnv match the shell; sessions started from the
   web or SSH get the daemon's, and the New form says so.
