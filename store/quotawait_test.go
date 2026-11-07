@@ -444,3 +444,79 @@ func TestARefusalLongAfterTheLastWaitStartsTheBackoffAgain(t *testing.T) {
 		t.Fatalf("a refusal soon after the last is the next in the run: %+v, want %+v", a.QuotaWait, want)
 	}
 }
+
+// A store without its lock that is refused long after the last wait ran out
+// starts a new run on disk too: the count of the old run, which it read from
+// the store before asking, is not written back over the new one's, so the
+// next refusal waits two minutes rather than thirty-two. A count on disk from
+// a wait that ran out within the hour is still the same run, and is kept.
+func TestARefusalWithoutTheLockLongAfterTheLastWaitStartsTheBackoffAgainOnDisk(t *testing.T) {
+	clock := holdClock(t)
+	u := fakeUsage(t)
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a := tokenClaude(t, s)
+	a.QuotaWait = rota.QuotaWait{Until: clock.now.Add(-2 * time.Hour).UnixMilli(), Status: 429, Count: 5}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	s.Release()
+	onDisk := func() rota.QuotaWait {
+		t.Helper()
+		d, err := Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer d.Close()
+		return d.Find(a.ID).QuotaWait
+	}
+
+	u.next(429, "", "")
+	s.Refresh(context.Background(), true, a)
+	want := rota.QuotaWait{Until: clock.now.Add(time.Minute).UnixMilli(), Status: 429, Count: 1}
+	if a.QuotaWait != want {
+		t.Fatalf("in memory: %+v, want %+v", a.QuotaWait, want)
+	}
+	if got := onDisk(); got != want {
+		t.Fatalf("on disk: %+v, want %+v", got, want)
+	}
+	clock.pass(time.Minute + time.Second)
+	u.next(429, "", "")
+	s.Refresh(context.Background(), true, a)
+	if got, want := onDisk(), (rota.QuotaWait{Until: clock.now.Add(2 * time.Minute).UnixMilli(), Status: 429, Count: 2}); got != want {
+		t.Fatalf("the next refusal is the second of the new run: %+v, want %+v", got, want)
+	}
+
+	// Written straight in, as a store that read the disk before another
+	// process recorded its run would.
+	keep := func(onDisk rota.QuotaWait) rota.QuotaWait {
+		t.Helper()
+		d, err := Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Find(a.ID).QuotaWait = onDisk
+		if err := d.Save(); err != nil {
+			t.Fatal(err)
+		}
+		d.Close()
+		x := *a
+		x.QuotaWait = rota.QuotaWait{Until: clock.now.Add(time.Minute).UnixMilli(), Status: 429, Count: 1}
+		if err := (&Store{backend: s.backend, released: true}).keepReadings([]*rota.Account{&x}); err != nil {
+			t.Fatal(err)
+		}
+		return x.QuotaWait
+	}
+	ran := keep(rota.QuotaWait{Until: clock.now.Add(-30 * time.Minute).UnixMilli(), Status: 503, Count: 5})
+	if got, want := onDisk(), (rota.QuotaWait{Until: ran.Until, Status: 429, Count: 5}); got != want {
+		t.Fatalf("a wait that ran out within the hour is the same run: %+v, want %+v", got, want)
+	}
+	ran = keep(rota.QuotaWait{Until: clock.now.Add(-QuotaWaitMax - time.Second).UnixMilli(), Status: 503, Count: 5})
+	if got := onDisk(); got != ran {
+		t.Fatalf("one that ran out longer ago than that is not: %+v, want %+v", got, ran)
+	}
+}
