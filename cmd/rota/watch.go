@@ -81,6 +81,9 @@ type watchLog struct {
 	path string
 }
 
+// say writes one remark as a dated line, each control character in it a
+// space (see printable): what the store warns of names an account, and a
+// `tail -f` on this log is a terminal too.
 func (l *watchLog) say(msg string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -92,5 +95,5 @@ func (l *watchLog) say(msg string) {
 		return
 	}
 	defer f.Close()
-	fmt.Fprintf(f, "%s [%d] %s\n", time.Now().Format(time.RFC3339), os.Getpid(), msg)
+	fmt.Fprintf(f, "%s [%d] %s\n", time.Now().Format(time.RFC3339), os.Getpid(), printable(msg))
 }

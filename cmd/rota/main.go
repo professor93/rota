@@ -511,7 +511,7 @@ func (c *cli) finish(s *store.Store, id, code string) error {
 				"uuid": a.UUID, "status": "long", "long_until": a.LongUntil().UTC().Format(time.RFC3339)})
 		}
 		fmt.Fprintf(c.out, "long-lived token stored for #%d %s, good until %s; a run without the account's home, or on a dead login, uses it from now on.\n",
-			a.ID, a, a.LongUntil().Format(time.DateOnly))
+			a.ID, nameOf(a), a.LongUntil().Format(time.DateOnly))
 		return nil
 	}
 	status, verb := "refreshed", "Refreshed"
@@ -527,7 +527,7 @@ func (c *cli) finish(s *store.Store, id, code string) error {
 		}
 		return c.emit(doc)
 	}
-	fmt.Fprintf(c.out, "%s %s account %d (%s).\n", verb, a.Provider, a.ID, a.Label())
+	fmt.Fprintf(c.out, "%s %s account %d (%s).\n", verb, a.Provider, a.ID, labelOf(a))
 	if !added && rota.SharedHome(a.Provider) && s.InUse(a) {
 		// The new login is not written under a running Claude Code, which
 		// owns the one in the home until it stops.
@@ -616,11 +616,11 @@ func (c *cli) list(args []string) error {
 			doc["default"] = pick.ID
 		}
 		if len(errs) > 0 {
-			warn := make([]string, 0, len(errs))
+			warnings := make([]string, 0, len(errs))
 			for _, e := range errs {
-				warn = append(warn, e.Error())
+				warnings = append(warnings, e.Error())
 			}
-			doc["warnings"] = warn
+			doc["warnings"] = warnings
 		}
 		if withSessions {
 			rep := sessions.Scan(s, recent)
@@ -1165,7 +1165,7 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 			ask.label = shareLabel(cwd)
 		}
 		code, serr := c.startShare(sharePlan{
-			who: a.String(), bin: bin, path: path, args: args, env: env, cwd: cwd,
+			who: nameOf(a), bin: bin, path: path, args: args, env: env, cwd: cwd,
 			sock: sock, ask: ask,
 			account: a.ID, label: a.Label(), provider: a.Provider,
 		})
@@ -1183,7 +1183,7 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 	}
 	// Status goes to stderr so a redirected stdout carries only the CLI's
 	// own output.
-	fmt.Fprintf(c.err, "rota: %s via %s\n", a, bin)
+	fmt.Fprintf(c.err, "rota: %s via %s\n", nameOf(a), bin)
 	// execve keeps the process id, so the entry above goes on describing
 	// what is running and is cleaned up by the liveness check rather than
 	// by anything rota runs afterwards -- there is no afterwards. The claim
@@ -1415,7 +1415,7 @@ func (c *cli) answer(id int, args []string) error {
 		})
 	}
 	if *verbose {
-		fmt.Fprintf(c.err, "rota: %s\n", a)
+		fmt.Fprintf(c.err, "rota: %s\n", nameOf(a))
 	}
 	if runID != "" {
 		// On stderr whether or not -v was asked for: without the id nobody
@@ -1677,7 +1677,7 @@ func (c *cli) set(args []string) error {
 // sayMoved is what a move did, in two lines: what moved and who made room,
 // then the rotation as it now stands.
 func (c *cli) sayMoved(a *rota.Account, m rotation.Moved, all []*rota.Account) {
-	name := func(x *rota.Account) string { return fmt.Sprintf("#%d %s", x.ID, x.Label()) }
+	name := func(x *rota.Account) string { return fmt.Sprintf("#%d %s", x.ID, labelOf(x)) }
 	var did string
 	switch {
 	case m.Was == 0 && m.Now == 0:
@@ -1755,7 +1755,7 @@ func (c *cli) show(a *rota.Account, home string) error {
 		where = "wherever rota is run from"
 	}
 	fmt.Fprintf(c.out, "#%d %s\n  rotation    %s\n  runs in     %s\n  configured  %s\n",
-		a.ID, a.Label(), place, where, home)
+		a.ID, labelOf(a), place, where, home)
 	if rota.Flavor(a.Provider) == "claude" {
 		fmt.Fprintf(c.out, "  sessions    %s\n", conversations(a))
 	}
@@ -1931,7 +1931,7 @@ func (c *cli) remove(args []string) error {
 		}
 		removed = append(removed, map[string]any{"id": a.ID, "provider": a.Provider, "email": a.Email})
 		if !c.json {
-			fmt.Fprintf(c.out, "Removed %s account %d (%s).\n", a.Provider, a.ID, a.Label())
+			fmt.Fprintf(c.out, "Removed %s account %d (%s).\n", a.Provider, a.ID, labelOf(a))
 			if lost != "" {
 				fmt.Fprintf(c.out, "Its own conversations went with it: the transcripts in %s.\n", lost)
 			}
@@ -2114,7 +2114,7 @@ func (c *cli) signIn(id int, extra []string) error {
 	// The lock is not rota's to hold while a person reads a browser page.
 	_ = s.Release()
 
-	fmt.Fprintf(c.err, "rota: signing %s in, in %s\n", a, home)
+	fmt.Fprintf(c.err, "rota: signing %s in, in %s\n", nameOf(a), home)
 	login := exec.Command(path, append(plan.Args, extra...)...)
 	login.Env = rota.Environ(store.HostEnv(), &rota.Command{Env: plan.Env, Drop: plan.Drop})
 	login.Stdin, login.Stdout, login.Stderr = os.Stdin, c.out, c.err
@@ -2142,7 +2142,7 @@ func (c *cli) signIn(id int, extra []string) error {
 	if err := s2.Save(); err != nil {
 		return fmt.Errorf("signed in, but the account could not be updated: %w", err)
 	}
-	fmt.Fprintf(c.err, "rota: %s is signed in\n", again)
+	fmt.Fprintf(c.err, "rota: %s is signed in\n", nameOf(again))
 	return nil
 }
 
@@ -2462,6 +2462,16 @@ func place(a *rota.Account) string {
 	}
 	return strconv.Itoa(a.Order)
 }
+
+// nameOf is how a line rota prints names an account, "claude/a@x", with
+// each control character in it a space (see printable): an account with no
+// --label is named by the email its provider gave, which may carry
+// anything. JSON, a run's record and what a server is told take the label
+// as it is.
+func nameOf(a *rota.Account) string { return printable(a.String()) }
+
+// labelOf is an account's label alone, cleaned as nameOf cleans it.
+func labelOf(a *rota.Account) string { return printable(a.Label()) }
 
 // checkedAgo says how old a quota reading is. An unmetered provider has no
 // limits to read, so "never checked" would misreport a fact rather than a gap.

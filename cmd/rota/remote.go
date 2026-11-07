@@ -74,7 +74,7 @@ func (c *cli) remoteControl(s *store.Store, a *rota.Account, ask remoteAsk) ([]s
 			return nil, err
 		}
 		fmt.Fprintf(c.err, "rota: remote control is on for %s from now on; `rota set %d --remote-control off` turns it off\n",
-			a, a.ID)
+			nameOf(a), a.ID)
 	}
 	if err := s.RemoteControlNow(a); errors.Is(err, rota.ErrBusy) {
 		return nil, fmt.Errorf("%w; until then Remote Control would act as the wrong account, so this session is not started", err)

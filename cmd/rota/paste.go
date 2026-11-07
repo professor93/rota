@@ -110,7 +110,7 @@ func (c *cli) loginKey(provider string, long bool, rest []string, label string) 
 		warn(c.err, "%v", unverified)
 	}
 	fmt.Fprintf(c.out, "%s %s account %d (%s): it runs on an API key, and every run on it is paid for from that key's credit.\n",
-		verb, a.Provider, a.ID, a.Label())
+		verb, a.Provider, a.ID, labelOf(a))
 	if a.Order == 0 {
 		fmt.Fprintf(c.out, "It is out of the rotation, so it runs only by id (`rota %d \"...\"`); `rota set %d --order last` puts it in.\n",
 			a.ID, a.ID)
@@ -155,7 +155,7 @@ func (c *cli) loginToken(provider string, long bool, rest []string) error {
 			"note": store.PastedLongCaveat})
 	}
 	fmt.Fprintf(c.out, "long-lived token stored for #%d %s, good until %s; a run without the account's home, or on a dead login, uses it from now on.\n",
-		a.ID, a, a.LongUntil().Format(time.DateOnly))
+		a.ID, nameOf(a), a.LongUntil().Format(time.DateOnly))
 	fmt.Fprintln(c.out, store.PastedLongCaveat)
 	return nil
 }

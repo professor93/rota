@@ -375,3 +375,45 @@ func TestServeSaysItsErrorWithAControlCharacterAsASpace(t *testing.T) {
 		t.Fatalf("the log has %s in it: %q", c, logged)
 	}
 }
+
+// An account with no --label is named by the email its provider gave, which
+// may carry anything, so the line a run starts with names it with its
+// control characters as spaces: the one before the CLI takes the terminal,
+// and the one -v adds to a run with a prompt.
+func TestARunNamesItsAccountWithItsControlCharactersAsSpaces(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	writeStore(t, home, fmt.Sprintf(`{"ordered":true,"nextId":2,"accounts":[
+		{"id":1,"provider":"claude","email":%s,"order":1,"token":{"accessToken":"t"}}]}`, jsonString("a\x1b]0;owned\x07@x")))
+	answering(t, "claude")
+	handover(t)
+
+	_, errOut, code := call(t, "run", "1")
+	if code != 0 || !strings.Contains(errOut, "rota: claude/a ]0;owned @x via ") {
+		t.Fatalf("the CLI is handed the terminal under a clean name: %d %q", code, errOut)
+	}
+	if c := controls(errOut); c != "" {
+		t.Fatalf("the line a run starts with has %s in it: %q", c, errOut)
+	}
+	out, errOut, code := call(t, "run", "-v", "1", "hello")
+	if code != 0 || out != "ANSWERED\n" || !strings.Contains(errOut, "rota: claude/a ]0;owned @x\n") {
+		t.Fatalf("-v names the account cleanly: %d %q %q", code, out, errOut)
+	}
+	if c := controls(errOut); c != "" {
+		t.Fatalf("-v's line has %s in it: %q", c, errOut)
+	}
+}
+
+// The watcher's log takes the store's warnings as stderr does, with their
+// control characters as spaces: `tail -f` on it is a terminal too.
+func TestTheWatchLogSaysAControlCharacterAsASpace(t *testing.T) {
+	l := &watchLog{path: filepath.Join(t.TempDir(), "watch.log")}
+	l.say("claude/a\x1b]0;owned\x07@x no longer keeps its login in its home")
+	logged := readFile(t, l.path)
+	if !strings.Contains(logged, "claude/a ]0;owned @x no longer keeps") {
+		t.Fatalf("the warning, its control characters spaces: %q", logged)
+	}
+	if c := controls(logged); c != "" {
+		t.Fatalf("the log has %s in it: %q", c, logged)
+	}
+}
