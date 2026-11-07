@@ -175,6 +175,18 @@ func TestTheKeyboardFollowsThePersonNotTheConnection(t *testing.T) {
 		t.Fatalf("attaching a second device moved the keyboard: %v", helloB)
 	}
 
+	// A frame that held only its terminal's answers is nothing at all: the
+	// same person's other device answering a query it saw replayed does not
+	// take the keyboard.
+	b.typeIn("\x1b[?62;22c")
+	b.settled()
+	a.settled()
+	for _, d := range a.c.log {
+		if d["type"] == "keyboard" && d["holder_conn"] == connOf(helloB) {
+			t.Fatalf("a frame of nothing but replies moved the keyboard: %v", d)
+		}
+	}
+
 	b.typeIn("from b\r")
 	b.waitOut("got:from b")
 	if errs := b.errors(); len(errs) > 0 {
@@ -349,6 +361,11 @@ func TestAttachingAndTypingNeverResize(t *testing.T) {
 // fell behind on is thrown away, and it is sent the screen as it is now
 // and what came after that, after a repaint frame that says where its
 // offsets go on from. The holder of the keyboard never notices.
+//
+// The holder's emulator here is half a megabyte behind its output, as one
+// flooded is, so what comes after the screen is a lot: it comes in pieces,
+// each written with its own deadline, never as one frame a slow viewer
+// cannot finish.
 func TestASlowViewerIsRepaintedNotDropped(t *testing.T) {
 	was := termQueueFor
 	termQueueFor = func(_ *Principal, watch bool) int {
@@ -359,7 +376,7 @@ func TestASlowViewerIsRepaintedNotDropped(t *testing.T) {
 	}
 	t.Cleanup(func() { termQueueFor = was })
 
-	p := withHeld(t, nil)
+	p := withHeld(t, []string{"FAKE_HOLDER_SCREEN_BEHIND=" + strconv.Itoa(512<<10)})
 	id := p.start(nil)["id"].(string)
 	alice := p.attach(id, p.alice, "")
 	held := drain(alice.c)
@@ -406,6 +423,9 @@ func TestASlowViewerIsRepaintedNotDropped(t *testing.T) {
 				repaints++
 			}
 		case opBinary:
+			if len(payload) > 2*termJoin {
+				t.Fatalf("a slow viewer was sent %d bytes in one frame", len(payload))
+			}
 			if screenNext {
 				if string(payload) != "SCREEN" {
 					t.Fatalf("after a repaint frame came %q, not the screen", payload)
@@ -427,6 +447,118 @@ func TestASlowViewerIsRepaintedNotDropped(t *testing.T) {
 	alice.typeIn("after\r")
 	held.waitOut(t, "got:after")
 	looker.waitOut("got:after")
+}
+
+// A holder with no screen to give is asked twice, and then a viewer that
+// fell behind is reset and replayed the end of the scrollback, after a gap
+// for the rest: never the whole scrollback as one write, which a viewer slow
+// enough to fall behind cannot finish before its deadline, to be dropped and
+// come back for the same again. Every frame it is sent is a piece no bigger
+// than a joined frame, and reading it as a page does gets to where the
+// session is.
+func TestASlowViewerWithoutAScreenIsRepaintedInPieces(t *testing.T) {
+	was := termQueueFor
+	termQueueFor = func(_ *Principal, watch bool) int {
+		if watch {
+			return 1
+		}
+		return 1 << 14
+	}
+	t.Cleanup(func() { termQueueFor = was })
+
+	rec := filepath.Join(t.TempDir(), "record")
+	p := withHeld(t, []string{"FAKE_HOLDER_SCREEN=none", "FAKE_HOLDER_RECORD=" + rec})
+	id := p.start(nil)["id"].(string)
+	alice := p.attach(id, p.alice, "")
+	held := drain(alice.c)
+	p.waitViewers(id, 1)
+	looker := p.attach(id, p.watch, "")
+	p.waitViewers(id, 2)
+	alice.typeIn("flood 20000\r")
+	held.waitOut(t, "flood done")
+
+	end := int64(p.describe(id)["offset"].(float64))
+	at, screenNext, repaints, gaps := int64(0), false, 0, 0
+	for range 200000 {
+		if repaints > 0 && !screenNext && at == end {
+			break
+		}
+		op, payload := looker.step()
+		switch op {
+		case opClose:
+			t.Fatalf("a slow viewer of a held session was closed with %d", closeCode(payload))
+		case opText:
+			var doc map[string]any
+			_ = json.Unmarshal(payload, &doc)
+			switch doc["type"] {
+			case "hello":
+				if doc["repaint"] == true {
+					t.Fatalf("a holder with no screen gave one on attach: %v", doc)
+				}
+				at = int64(doc["offset"].(float64))
+			case "repaint":
+				at, screenNext = int64(doc["offset"].(float64)), true
+				repaints++
+			case "gap":
+				to := int64(doc["to"].(float64))
+				if screenNext || to < at {
+					t.Fatalf("a gap at %d (screen still to come: %v) took the offset from %d to %d", at, screenNext, at, to)
+				}
+				at = to
+				gaps++
+			}
+		case opBinary:
+			if len(payload) > 2*termJoin {
+				t.Fatalf("a slow viewer was sent %d bytes in one frame", len(payload))
+			}
+			if screenNext {
+				if string(payload) != termReset {
+					t.Fatalf("after a repaint frame with no screen came %q, not a reset", payload)
+				}
+				screenNext = false
+				continue
+			}
+			at += int64(len(payload))
+		}
+	}
+	if repaints == 0 || gaps == 0 || at != end {
+		t.Fatalf("the slow viewer was repainted %d times with %d gaps and got to offset %d of %d", repaints, gaps, at, end)
+	}
+	asks := 0
+	for _, line := range recorded(rec) {
+		if line == "screen" {
+			asks++
+		}
+	}
+	// One for each attach, and two for each repaint.
+	if asks < 2+2*repaints {
+		t.Fatalf("the holder was asked for its screen %d times for 2 attaches and %d repaints", asks, repaints)
+	}
+	alice.typeIn("after\r")
+	held.waitOut(t, "got:after")
+	looker.waitOut("got:after")
+
+	// Attaching now, with no screen to be had, replays the whole scrollback,
+	// in pieces as well.
+	late := p.attach(id, p.bob, "")
+	from := int64(late.waitType("hello")["offset"].(float64))
+	end, got := int64(p.describe(id)["offset"].(float64)), int64(0)
+	for from+got < end {
+		op, payload := late.step()
+		if op == opClose {
+			t.Fatalf("a late attach was closed with %d", closeCode(payload))
+		}
+		if op != opBinary {
+			continue
+		}
+		if len(payload) > 2*termJoin {
+			t.Fatalf("a late attach was replayed %d bytes in one frame", len(payload))
+		}
+		got += int64(len(payload))
+	}
+	if got < 1<<20 {
+		t.Fatalf("a late attach was replayed %d bytes, not the scrollback", got)
+	}
 }
 
 // A viewer that is behind when the CLI ends is still told how it ended, with
