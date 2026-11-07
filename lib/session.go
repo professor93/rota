@@ -89,8 +89,9 @@ const (
 	outBuffer = 1024
 )
 
-// Start launches an account's CLI as a session and returns once it is
-// running with the prompt delivered.
+// Start launches an account's CLI as a session and returns once the prompt has
+// reached its stdin. A CLI already gone by then — killed as it started, or
+// quit without reading — has exited like any other, and Wait reports it.
 //
 // The spec must ask for both Input and Stream: the CLI's streaming input goes
 // with its streaming output, and a run that takes more messages has events to
@@ -113,6 +114,14 @@ func Start(ctx context.Context, a *Account, home string, cmd *Command, spec Spec
 			"a session needs %s: Start keeps the CLI open for more messages and reads its events as they arrive",
 			strings.Join(missing, " and "))
 	}
+	// The prompt is the first message, in the same shape as every message
+	// after it: with a streaming input the CLI takes JSON lines, not text. It
+	// is encoded before anything starts, so one that cannot be sent leaves no
+	// CLI behind to stop.
+	line, err := messageLine(spec.Prompt)
+	if err != nil {
+		return nil, err
+	}
 	l, err := launch(ctx, a, home, cmd, &spec, lim)
 	if err != nil {
 		spec.cleanup()
@@ -125,23 +134,15 @@ func Start(ctx context.Context, a *Account, home string, cmd *Command, spec Spec
 		done:    make(chan struct{}),
 	}
 	go s.writer()
-	// The prompt is the first message, in the same shape as every message
-	// after it: with a streaming input the CLI takes JSON lines, not text.
-	line, err := messageLine(spec.Prompt)
-	if err == nil {
-		err = s.hand(line)
-	}
-	if err != nil {
-		// Nothing was ever said to this child, so there is no result to keep:
-		// stop it, let go of what the launch took, and report the failure.
-		_ = s.hand(nil) // ends the writer, which owns stdin
-		l.halt.stop()
-		_ = l.child.Wait()
-		l.halt.settle()
-		l.stop()
-		l.done()
-		spec.cleanup()
-		return nil, err
+	if err := s.hand(line); err != nil {
+		// The CLI is gone before its prompt reached it. That is an exit like
+		// any other and the reader below collects it, so Wait says what the
+		// CLI exited with and what it printed, as Run does — and as it would
+		// had the CLI died just after the write rather than just before it.
+		// The pipe's error is what a later send is told.
+		s.mu.Lock()
+		s.closed, s.writeErr = true, err
+		s.mu.Unlock()
 	}
 	go func() {
 		// One reader for the whole session: the stream is read as any stream
@@ -336,15 +337,22 @@ func (s *Session) hand(line []byte) error {
 	return <-o.done
 }
 
-// writer is the only goroutine that touches stdin.
+// writer is the only goroutine that touches stdin. A write that fails ends it
+// as the close marker does: nothing more can reach a CLI that stopped reading,
+// and whoever handed the line marks the session closed before anyone else may
+// hand another, so no line waits on a writer that has gone.
 func (s *Session) writer() {
 	for o := range s.out {
 		if o.line == nil {
 			o.done <- s.l.stdin.Close()
 			return // nothing is sent after the close marker
 		}
-		_, err := s.l.stdin.Write(o.line)
-		o.done <- err
+		if _, err := s.l.stdin.Write(o.line); err != nil {
+			_ = s.l.stdin.Close()
+			o.done <- err
+			return
+		}
+		o.done <- nil
 	}
 }
 

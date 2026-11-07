@@ -368,3 +368,36 @@ func TestASessionRecordsItsInputFormat(t *testing.T) {
 		t.Fatalf("a session is launched with the streaming input format: %v", res.Argv)
 	}
 }
+
+// A CLI that is gone before its prompt reaches it — killed as it started, as
+// macOS now and then kills a new executable, or failed on its command line
+// without reading a byte — ends the session as any exit does: Wait says what
+// it exited with and what it printed, as Run would. Start does not report the
+// broken pipe instead, which names a write rather than the CLI, and did so
+// only when the CLI died just before the write rather than just after it. A
+// prompt larger than any pipe holds makes the write the one that finds the CLI
+// gone, however the two are scheduled.
+func TestACLIGoneBeforeItsPromptEndsTheSessionWithItsOwnExit(t *testing.T) {
+	bin := fakecli.Install(t, t.TempDir(), "claude", fakecli.Spec{KeepStdin: true, Stderr: []string{"no prompt taken"}, Exit: 3})
+	Register(&fakeProvider{name: "t-session-gone", launched: &Command{Bin: bin}})
+	a := &Account{ID: 1, Provider: "t-session-gone"}
+	a.Token.Access = "tok"
+	spec := Spec{Prompt: strings.Repeat("x", 1<<20), Input: true, Stream: true, flavorOverride: "claude"}
+	s, err := Start(context.Background(), a, "", nil, spec, nil, nil)
+	if err != nil {
+		t.Fatalf("a CLI that exits has a result, like any run: %v", err)
+	}
+	res, err := s.Wait()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || res.ExitCode != 3 || !strings.Contains(res.Stderr, "no prompt taken") {
+		t.Fatalf("the session ends with what the CLI exited with and said: %+v", res)
+	}
+	if _, err := s.Send("more"); !errors.Is(err, ErrClosed) || !strings.Contains(err.Error(), "write failed") {
+		t.Fatalf("a send afterwards says the write that failed: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}

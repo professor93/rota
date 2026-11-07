@@ -197,6 +197,7 @@ func specPath(exe string) string { return exe + ".spec.json" }
 // a real test binary has no spec and carries on.
 func Maybe() {
 	if len(os.Args) == 2 && os.Args[1] == warmArg {
+		refuseWarm()
 		os.Exit(0)
 	}
 	exe, err := os.Executable()
