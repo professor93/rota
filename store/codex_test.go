@@ -256,94 +256,34 @@ func TestARunLeavesACodexLoginToItsDaemon(t *testing.T) {
 	}
 }
 
-// savesAllowed is a memBackend that lets a number of saves through and then
-// fails every one; -1 lets them all through.
-type savesAllowed struct {
-	*memBackend
-	allow int
-}
-
-func (f *savesAllowed) Save(b []byte) error {
-	if f.allow == 0 {
-		return errors.New("the disk is full")
+// A sweep leaves a codex home whose daemon is alive to that daemon, a login
+// held as a refresh token alone and a superseded file included: nothing is
+// presented and the file stays, even when no save after the first succeeds.
+func TestASweepLeavesARefreshTokenAloneToTheDaemonInItsHome(t *testing.T) {
+	e := codexRefreshes(t)
+	m := &memBackend{home: t.TempDir()}
+	left := -1
+	s, err := NewStore(savesThenFails{memBackend: m, left: &left})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if f.allow > 0 {
-		f.allow--
+	defer s.Close()
+	a := s.add("codex")
+	a.Extra = map[string]string{"id_token": "i", "account_id": "acct"}
+	a.Token = rota.Token{Access: "a-prev", Refresh: "r-prev", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}
+	if _, err := rota.Stage(a, s.Home(a)); err != nil {
+		t.Fatal(err)
 	}
-	return f.memBackend.Save(b)
-}
-
-// The save before a sweep's refresh succeeds and the one after it fails: the
-// new token is then nowhere but in the home, and the next sweep must read it
-// back rather than present the spent one again. That holds for an account
-// signed in and never run since, whose home is empty or holds the previous
-// login's file, whether its login is due or held as a refresh token alone;
-// and a home whose daemon is alive is left to the daemon, its file as it was.
-func TestASweepWhoseLastSaveFailsReadsItsRefreshBackFromTheHome(t *testing.T) {
-	for _, c := range []struct {
-		what   string
-		alone  bool
-		file   string // the refresh token of the file the home holds; "" none
-		daemon bool
-	}{
-		{"a due login, empty home", false, "", false},
-		{"a due login, the previous login's file", false, "r-prev", false},
-		{"a refresh token alone, empty home", true, "", false},
-		{"a refresh token alone, the previous login's file", true, "r-prev", false},
-		{"a refresh token alone, the previous login's file, its daemon alive", true, "r-prev", true},
-	} {
-		t.Run(c.what, func(t *testing.T) {
-			e := codexRefreshes(t)
-			b := &savesAllowed{memBackend: &memBackend{home: t.TempDir()}, allow: -1}
-			s, err := NewStore(b)
-			if err != nil {
-				t.Fatal(err)
-			}
-			a := s.add("codex")
-			due := time.Now().Add(time.Minute)
-			a.Extra = map[string]string{"id_token": "i", "account_id": "acct"}
-			a.Token = rota.Token{Access: codexJWT(due), Refresh: "r-old", ExpiresAt: due.UnixMilli()}
-			if c.file != "" {
-				a.Token.Refresh = c.file
-				if _, err := rota.Stage(a, s.Home(a)); err != nil {
-					t.Fatal(err)
-				}
-				a.Token.Refresh = "r-old"
-			}
-			if c.alone {
-				a.Token = rota.Token{Refresh: "r-old"}
-			}
-			a.Staged = "-" // signed in, never run
-			if c.daemon {
-				codexDaemonAt(t, s.Home(a), "app-server.pid", os.Getpid())
-			}
-			if err := s.Save(); err != nil {
-				t.Fatal(err)
-			}
-			b.allow = 1 // the save before the refresh, and none after it
-			s.Maintain(context.Background())
-			s.Close()
-			b.allow = -1
-
-			if c.daemon {
-				if got := e.grants(); len(got) != 0 || homeHolds(t, s.Home(a)) != c.file {
-					t.Fatalf("left to the daemon: presented %v, the home holds %q", got, homeHolds(t, s.Home(a)))
-				}
-				return
-			}
-			again, err := NewStore(b)
-			if err != nil {
-				t.Fatal(err)
-			}
-			got := again.Find(a.ID)
-			for range 2 {
-				again.Maintain(context.Background())
-			}
-			again.Close()
-			if p := e.grants(); !slices.Equal(p, []string{"r-old"}) || got.Dead || got.Token.Refresh != "r-rota-1" {
-				t.Fatalf("presented %v, dead=%v %q, token %q", p, got.Dead, got.DeadReason, got.Token.Refresh)
-			}
-		})
+	a.Token = rota.Token{Refresh: "r-old"}
+	a.Staged = "-" // signed in, never run
+	codexDaemonAt(t, s.Home(a), "app-server.pid", os.Getpid())
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	left = 1
+	s.Maintain(context.Background())
+	if got := e.grants(); len(got) != 0 || homeHolds(t, s.Home(a)) != "r-prev" {
+		t.Fatalf("left to the daemon: presented %v, the home holds %q", got, homeHolds(t, s.Home(a)))
 	}
 }
 
@@ -497,6 +437,12 @@ func (w watchedSaves) Save(b []byte) error {
 // home the store records as holding an older login's file — an account
 // signed in and never run since — is never read back: the new token would
 // be lost, and the next sweep would present the spent one again.
+//
+// When that save gets through and every save after it fails, the token is
+// spent, and the new one is in the home alone. The store on disk then says
+// the home holds the login the refresh replaced, which is what makes the next
+// adoption read the new one back, an account signed in and never run since
+// included: the write before the save is what put that record there.
 func TestASweepThatCannotSaveSpendsNoToken(t *testing.T) {
 	for _, c := range []struct {
 		what   string
@@ -510,60 +456,82 @@ func TestASweepThatCannotSaveSpendsNoToken(t *testing.T) {
 		{"held as a refresh token alone, empty home", "", "alone"},
 		{"held as a refresh token alone, the previous login's file", "r-prev", "alone"},
 	} {
-		e := codexRefreshes(t)
-		m := &memBackend{home: t.TempDir()}
-		s, err := NewStore(m)
-		if err != nil {
-			t.Fatal(err)
-		}
-		a := s.add("codex")
-		due := time.Now().Add(time.Minute)
-		a.Extra = map[string]string{"id_token": "i", "account_id": "acct"}
-		a.Token = rota.Token{Access: codexJWT(due), Refresh: "r-old", ExpiresAt: due.UnixMilli()}
-		if c.file != "" {
-			if c.file != "store" {
-				a.Token.Refresh = c.file
-			}
-			if _, err := rota.Stage(a, s.Home(a)); err != nil {
+		// good is how many saves the sweep gets through before every one
+		// fails.
+		for _, good := range []int{0, 1} {
+			what := fmt.Sprintf("%s, %d good saves", c.what, good)
+			e := codexRefreshes(t)
+			m := &memBackend{home: t.TempDir()}
+			left := -1
+			s, err := NewStore(savesThenFails{memBackend: m, left: &left})
+			if err != nil {
 				t.Fatal(err)
 			}
-			a.Token.Refresh = "r-old"
-		}
-		switch c.staged {
-		case "keep":
-		case "alone":
-			a.Token = rota.Token{Refresh: "r-old"}
-			a.Staged = "-"
-		default:
-			a.Staged = c.staged
-		}
-		if err := s.Save(); err != nil {
-			t.Fatal(err)
-		}
+			a := s.add("codex")
+			due := time.Now().Add(time.Minute)
+			a.Extra = map[string]string{"id_token": "i", "account_id": "acct"}
+			a.Token = rota.Token{Access: codexJWT(due), Refresh: "r-old", ExpiresAt: due.UnixMilli()}
+			if c.file != "" {
+				if c.file != "store" {
+					a.Token.Refresh = c.file
+				}
+				if _, err := rota.Stage(a, s.Home(a)); err != nil {
+					t.Fatal(err)
+				}
+				a.Token.Refresh = "r-old"
+			}
+			switch c.staged {
+			case "keep":
+			case "alone":
+				a.Token = rota.Token{Refresh: "r-old"}
+				a.Staged = "-"
+			default:
+				a.Staged = c.staged
+			}
+			if err := s.Save(); err != nil {
+				t.Fatal(err)
+			}
 
-		m.failOn = "save"
-		if errs := s.Maintain(context.Background()); len(errs) == 0 {
-			t.Fatalf("%s: a store that cannot be saved is reported", c.what)
-		}
-		if got := e.grants(); len(got) != 0 {
-			t.Fatalf("%s: a sweep that cannot save spends nothing: presented %v", c.what, got)
-		}
-		s.Close() // the server drops each sweep's store, as a process that ends does
-		m.failOn = ""
+			left = good
+			if errs := s.Maintain(context.Background()); len(errs) == 0 {
+				t.Fatalf("%s: a store that cannot be saved is reported", what)
+			}
+			if got, want := e.grants(), []string{"r-old"}[:good]; !slices.Equal(got, want) {
+				t.Fatalf("%s: a sweep that cannot save the login before refreshing it spends nothing, "+
+					"and one that can spends it once: presented %v", what, got)
+			}
+			s.Close() // the server drops each sweep's store, as a process that ends does
+			left = -1
 
-		again, err := NewStore(m)
-		if err != nil {
-			t.Fatal(err)
-		}
-		b := again.Find(a.ID)
-		for sweep := range 2 {
-			if errs := again.Maintain(context.Background()); len(errs) != 0 {
-				t.Fatalf("%s, sweep %d after: %v (presented %v)", c.what, sweep, errs, e.grants())
+			again, err := NewStore(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := again.Find(a.ID)
+			for sweep := range 2 {
+				if errs := again.Maintain(context.Background()); len(errs) != 0 {
+					t.Fatalf("%s, sweep %d after: %v (presented %v)", what, sweep, errs, e.grants())
+				}
+			}
+			again.Close()
+			if got := e.grants(); !slices.Equal(got, []string{"r-old"}) || b.Dead || b.Token.Refresh != "r-rota-1" {
+				t.Fatalf("%s: presented %v, dead=%v %q, token %q", what, got, b.Dead, b.DeadReason, b.Token.Refresh)
 			}
 		}
-		again.Close()
-		if got := e.grants(); !slices.Equal(got, []string{"r-old"}) || b.Dead || b.Token.Refresh != "r-rota-1" {
-			t.Fatalf("%s: presented %v, dead=%v %q, token %q", c.what, got, b.Dead, b.DeadReason, b.Token.Refresh)
-		}
 	}
+}
+
+// savesThenFails is a memBackend that takes the next left saves and refuses
+// every one after them; left below zero takes them all.
+type savesThenFails struct {
+	*memBackend
+	left *int
+}
+
+func (f savesThenFails) Save(b []byte) error {
+	if *f.left == 0 {
+		return errors.New("the disk is full")
+	}
+	*f.left--
+	return f.memBackend.Save(b)
 }
