@@ -35,11 +35,26 @@ func (s *Store) Maintain(ctx context.Context) []error {
 		return s.Refresh(ctx, false)
 	}
 	var errs []error
-	changed := false
+	// unsaved is whether the store holds something the sweep has not yet
+	// saved. Every save writes the whole store, so one that succeeds settles
+	// whatever any account changed before it, and the sweep ends with a save
+	// only when something is still owed one. A save that fails settles
+	// nothing, and the one at the end tries again.
+	unsaved := false
+	save := func() error {
+		err := s.Save()
+		if err == nil {
+			unsaved = false
+		}
+		return err
+	}
 	for _, a := range s.Accounts {
 		if rota.SharedHome(a.Provider) {
+			// What a claude account changed is never taken as saved here:
+			// its home is written after the save its refresh makes, and the
+			// store records that write.
 			did, err := s.maintainShared(ctx, a)
-			changed = changed || did
+			unsaved = unsaved || did
 			if err != nil {
 				errs = append(errs, err)
 			}
@@ -74,8 +89,11 @@ func (s *Store) Maintain(ctx context.Context) []error {
 		var (
 			err error
 			did bool
+			// saved is whether a refresh that did something was saved.
+			saved bool
 		)
-		before := snapshot(a)
+		// since is the account as the sweep last saved it, or found it.
+		since := snapshot(a)
 		if !s.whileIdle(a, func() {
 			home := s.Home(a)
 			if err = rota.Adopt(a, home); err != nil || s.heldByDaemon(a) {
@@ -92,16 +110,19 @@ func (s *Store) Maintain(ctx context.Context) []error {
 				if _, err = rota.Stage(a, home); err != nil {
 					return
 				}
-				if serr := s.Save(); serr != nil {
+				if serr := save(); serr != nil {
 					err = fmt.Errorf("not refreshed, the store could not be saved: %w", serr)
 					return
 				}
+				since = snapshot(a)
 			}
 			if did, err = rota.Refresh(ctx, a); err != nil || !did || a.Dead {
 				return
 			}
-			if serr := s.Save(); serr != nil {
+			if serr := save(); serr != nil {
 				err = fmt.Errorf("refreshed token could not be saved: %w", serr)
+			} else {
+				saved, since = true, snapshot(a)
 			}
 			if rota.Flavor(a.Provider) == "codex" {
 				if _, serr := rota.Stage(a, home); serr != nil {
@@ -111,12 +132,12 @@ func (s *Store) Maintain(ctx context.Context) []error {
 		}) {
 			continue
 		}
-		changed = changed || did || before.differs(a)
+		unsaved = unsaved || (did && !saved) || since.differs(a)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", a, err))
 		}
 	}
-	if changed {
+	if unsaved {
 		if err := s.Save(); err != nil {
 			errs = append(errs, fmt.Errorf("tokens could not be saved: %w", err))
 		}
