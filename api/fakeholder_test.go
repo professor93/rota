@@ -100,13 +100,16 @@ func fakeHolder() {
 		fakeReady(holdwire.Ready{Error: err.Error(), Kind: holdwire.KindOther})
 		os.Exit(1)
 	}
+	// Before the answer, as the real holder does: whoever reads it may
+	// signal at once, and a hangup before Notify would end this process by
+	// default rather than be recorded.
+	f.signals()
 	fakeReady(holdwire.Ready{OK: true, PID: os.Getpid()})
 	if null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
 		os.Stdout.Close()
 		os.Stdout = null
 	}
 	f.print([]byte(os.Getenv("FAKE_HOLDER_PRINT")))
-	f.signals()
 	f.accept()
 	os.Exit(0)
 }
