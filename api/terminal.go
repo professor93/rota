@@ -78,12 +78,17 @@ const (
 	// but a keyboard change or the exit is not output, and has to arrive.
 	termDocRoom = 64
 	// termLate bounds the documents a viewer that fell behind keeps for
-	// after its repaint.
+	// after its repaint. A viewer owed more than that is closed with 1013,
+	// as any other terminal's reader is: a document lost is not said again.
 	termLate = 1024
 	// termReset is the repaint of a held session whose holder has no screen
-	// to give: a reset, and then everything the ring still holds, which is
-	// what attaching without a screen is shown.
+	// to give: a reset, and then the last termTail of what the ring holds,
+	// with a gap for the rest.
 	termReset = "\x1bc"
+	// termTail is how much output a repaint without a screen replays. A
+	// viewer that fell behind is slow, and the whole scrollback is more than
+	// a slow viewer takes in before it falls behind again.
+	termTail = 64 << 10
 )
 
 var (
@@ -101,6 +106,10 @@ var (
 	// termSweep is how often terminals nobody is attached to are measured
 	// against the idle timeout.
 	termSweep = 30 * time.Second
+	// termRepaintGap is the least time between two repaints of one held
+	// session's viewer. A viewer that stays slow falls behind again soon
+	// after each, and each asks the holder for a screen.
+	termRepaintGap = 250 * time.Millisecond
 )
 
 // termQueueFor is how deep one connection's queue is, given who is behind it
@@ -132,6 +141,9 @@ const (
 	// every size, and only an explicit fit by the keyboard's holder changes
 	// it, so a stray tap on a phone does not reflow the desk.
 	heldNoFit = "this session's size changes only when a viewer asks to fit it"
+	// sendFirst is somebody typing into a held session while another
+	// person's send waits there to be typed, naming who sent it.
+	sendFirst = "a send from %s is waiting to be typed into this session; type once it is in"
 )
 
 var (
@@ -185,6 +197,10 @@ type termFrame struct {
 	// behind: it is sent after the repaint, not before, so the exit frame
 	// is never followed by the screen it ended on.
 	late bool
+	// covered is a document about the output, a gap, which a held session's
+	// viewer that is behind is not sent: its repaint goes on from past it,
+	// and the gap's offsets after that would take it backwards.
+	covered bool
 }
 
 // termConn is one attached socket: who is behind it, whether it may ever
@@ -233,11 +249,13 @@ type termConn struct {
 	// closed with 1013. depth is how many frames of output it may fall
 	// behind by, and queued how many of them are in its queue. behind is it
 	// having fallen behind: its output is thrown away until it is
-	// repainted, which shows all of it.
-	catchUp func(*termConn) []termFrame
-	depth   int32
-	queued  atomic.Int32
-	behind  atomic.Bool
+	// repainted, which shows all of it. repaintAt is the soonest the next
+	// repaint may go, and belongs to the writing goroutine.
+	catchUp   func(*termConn) []termFrame
+	depth     int32
+	queued    atomic.Int32
+	behind    atomic.Bool
+	repaintAt time.Time
 }
 
 func newTermConn(c *wsConn, p *Principal, watch bool, at time.Time) *termConn {
@@ -281,11 +299,16 @@ func (tc *termConn) queue(f termFrame) {
 	}
 }
 
-// queueHeld is queue for a held session's viewer, which is never closed for
-// being slow. Output past its depth marks it behind, and from then on its
-// output is thrown away: the repaint it is sent once its queue has drained
-// shows all of it. A document still goes in, in the room kept for them,
-// marked late when it came while the viewer was behind.
+// queueHeld is queue for a held session's viewer, which is not closed for
+// falling behind on output. Output past its depth marks it behind, and from
+// then on its output is thrown away: the repaint it is sent once its queue
+// has drained shows all of it. A document still goes in, in the room kept
+// for them, marked late when it came while the viewer was behind — except a
+// gap, which the repaint goes on from past.
+//
+// A document is not output, and no repaint says it again, so one that finds
+// even that room full closes the viewer with 1013 after all: reattaching is
+// told in its hello what it would have missed.
 func (tc *termConn) queueHeld(f termFrame) {
 	behind := tc.behind.Load()
 	if f.op == opBinary {
@@ -298,18 +321,46 @@ func (tc *termConn) queueHeld(f termFrame) {
 		}
 		tc.queued.Add(1)
 	} else {
+		if behind && f.covered {
+			return
+		}
 		f.late = behind
 	}
 	select {
 	case tc.out <- f:
 	default:
-		// Not even the room kept for documents is left. What this was is
-		// lost; the repaint says the size and the screen again.
 		if f.op == opBinary {
 			tc.queued.Add(-1)
+			tc.behind.Store(true)
+			return
 		}
-		tc.behind.Store(true)
+		tc.slow.Store(true)
+		tc.stop()
 	}
+}
+
+// pushOutput queues output. A held session's viewer is given it in pieces
+// no bigger than a joined frame, so a replay of the whole scrollback is many
+// writes, each with its own deadline, rather than one a slow viewer cannot
+// finish in time and is dropped for, to come back for the same again.
+func (tc *termConn) pushOutput(p []byte) {
+	if tc.catchUp == nil {
+		tc.push(opBinary, p)
+		return
+	}
+	for _, piece := range pieces(p) {
+		tc.push(opBinary, piece)
+	}
+}
+
+// pieces cuts output into frames of at most termJoin.
+func pieces(p []byte) [][]byte {
+	var out [][]byte
+	for len(p) > 0 {
+		n := min(len(p), termJoin)
+		out, p = append(out, p[:n:n]), p[n:]
+	}
+	return out
 }
 
 // took is one frame taken off the queue by the writing goroutine.
@@ -350,8 +401,8 @@ func (tc *termConn) done() bool {
 //
 // A held session's viewer that fell behind has the output in its queue
 // thrown away and the documents queued before it fell behind sent, and once
-// the queue is empty it is repainted, and then sent the documents that came
-// while it was behind.
+// the queue is empty, and termRepaintGap after its last repaint, it is
+// repainted, and then sent the documents that came while it was behind.
 func (tc *termConn) write() {
 	defer close(tc.drained)
 	var late []termFrame
@@ -360,29 +411,32 @@ func (tc *termConn) write() {
 		switch {
 		case tc.pending != nil:
 			f, tc.pending = *tc.pending, nil
-		case tc.behind.Load() && len(tc.out) == 0 && !tc.done():
+		case tc.behind.Load() && len(tc.out) == 0 && !tc.done() && !time.Now().Before(tc.repaintAt):
 			if !tc.repaint(late) {
 				tc.stop()
 				return
 			}
-			late = nil
+			late, tc.repaintAt = nil, time.Now().Add(termRepaintGap)
 			continue
 		default:
-			select {
-			case f = <-tc.out:
-				tc.took(f)
-			case <-tc.gone:
+			var got, gone bool
+			if f, got, gone = tc.next(); gone {
 				tc.goodbye(late)
 				return
+			} else if !got {
+				continue // the next repaint may go
 			}
 		}
 		if tc.behind.Load() {
 			switch {
 			case f.op == opBinary:
 			case f.late:
-				if len(late) < termLate {
-					late = append(late, f)
+				if len(late) == termLate {
+					tc.slow.Store(true)
+					tc.stop()
+					return
 				}
+				late = append(late, f)
 			default:
 				if err := tc.c.send(f.op, f.data); err != nil {
 					tc.stop()
@@ -398,6 +452,27 @@ func (tc *termConn) write() {
 			tc.stop()
 			return
 		}
+	}
+}
+
+// next is the next frame off the queue, waiting for one as long as it
+// takes, or, for a viewer that is behind, only until its next repaint may
+// go: got is false then. gone is the connection having been finished with.
+func (tc *termConn) next() (f termFrame, got, gone bool) {
+	var soon <-chan time.Time
+	if wait := time.Until(tc.repaintAt); wait > 0 && tc.behind.Load() {
+		t := time.NewTimer(wait)
+		defer t.Stop()
+		soon = t.C
+	}
+	select {
+	case f = <-tc.out:
+		tc.took(f)
+		return f, true, false
+	case <-tc.gone:
+		return f, false, true
+	case <-soon:
+		return f, false, false
 	}
 }
 
@@ -686,16 +761,28 @@ func (ts *termSession) typeInto(tc *termConn, p []byte) error {
 		ts.mu.Unlock()
 		return errSharedWatch
 	}
-	if !ts.holds(tc) {
-		if !ts.follows(tc) {
+	holds := ts.holds(tc)
+	if !holds && !ts.follows(tc) {
+		ts.mu.Unlock()
+		return errNotHolding
+	}
+	h, held := ts.back.(*heldTerm)
+	if held {
+		// A send waiting to be typed was let in under the keyboard's rule,
+		// and holds the session for its person until it is in: somebody
+		// else's keystrokes would be typed into the middle of it, and its
+		// Enter would submit them.
+		if by, ok := h.sendingFor(tc.person); ok {
 			ts.mu.Unlock()
-			return errNotHolding
+			return fmt.Errorf(sendFirst, by)
 		}
+	}
+	if !holds {
 		ts.move(tc)
 	}
 	back := ts.back
 	ts.mu.Unlock()
-	if h, ok := back.(*heldTerm); ok {
+	if held {
 		// By connection, so a refusal that comes back later finds who typed.
 		return h.typeFrom(tc, p)
 	}
@@ -762,7 +849,7 @@ func (ts *termSession) gapOf(n int64) {
 		return
 	}
 	at := ts.ring.End()
-	ts.tell(map[string]any{"type": "gap", "from": at, "to": at, "bytes": n})
+	ts.tellGap(map[string]any{"type": "gap", "from": at, "to": at, "bytes": n})
 }
 
 // free reports whether the keyboard is nobody's, letting a lapsed grace go
@@ -1078,7 +1165,7 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 		tc.queue(termFrame{op: opBinary, data: scr.repaint, alone: true})
 	}
 	if len(data) > 0 {
-		tc.push(opBinary, data)
+		tc.pushOutput(data)
 	}
 	if ts.ended {
 		tc.say(map[string]any{"type": "exit", "code": ts.exit})
@@ -1131,6 +1218,18 @@ func (ts *termSession) attached(tc *termConn) bool {
 func (ts *termSession) tell(doc map[string]any) {
 	for _, tc := range ts.conns {
 		tc.say(doc)
+	}
+}
+
+// tellGap is tell for a gap in the output, which a held session's viewer
+// that is behind is not sent (termFrame.covered). Called with mu held.
+func (ts *termSession) tellGap(doc map[string]any) {
+	raw, err := rota.Encode(doc)
+	if err != nil {
+		return
+	}
+	for _, tc := range ts.conns {
+		tc.queue(termFrame{op: opText, data: raw, covered: true})
 	}
 }
 
@@ -1213,7 +1312,7 @@ func (ts *termSession) outputAt(off int64, p []byte) {
 		p, off = p[end-off:], end
 	}
 	if off > end {
-		ts.tell(map[string]any{"type": "gap", "from": end, "to": off, "bytes": off - end})
+		ts.tellGap(map[string]any{"type": "gap", "from": end, "to": off, "bytes": off - end})
 		ts.ring = ring.NewAt(ts.s.opts.Terminal.Scrollback, off)
 	}
 	chunk := make([]byte, len(p))
@@ -1241,19 +1340,28 @@ func (ts *termSession) outputAt(off int64, p []byte) {
 // offset that screen stands for. It is called on the viewer's writing
 // goroutine with its queue drained, and asks for the screen before taking
 // the lock, as attach does; the output that arrives meanwhile is on the
-// screen or after it.
+// screen or after it. It asks twice before it does without: a holder
+// flooded with output is slowest to answer, and a flood is when a viewer
+// falls behind.
 //
-// A holder with no screen to give is replayed from the oldest byte kept,
-// after a reset, as a viewer attaching without a screen is.
+// Without a screen the viewer is reset and replayed the last termTail of
+// the ring, after a gap for what is kept before that: the whole scrollback
+// is more than a viewer that just fell behind takes in before it falls
+// behind again. The output goes in frames of at most termJoin, each written
+// with its own deadline.
 func (ts *termSession) catchUp(tc *termConn) []termFrame {
 	var scr *heldScreen
 	if h, ok := ts.back.(*heldTerm); ok {
-		scr = h.screen()
+		if scr = h.screen(); scr == nil {
+			scr = h.screen()
+		}
 	}
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	paint, from := []byte(termReset), ts.ring.Oldest()
-	if scr != nil && scr.head.Offset >= ts.ring.Oldest() {
+	oldest := ts.ring.Oldest()
+	screened := scr != nil && scr.head.Offset >= oldest
+	paint, from := []byte(termReset), max(oldest, ts.ring.End()-termTail)
+	if screened {
 		paint, from = scr.repaint, scr.head.Offset
 	}
 	tail, _ := ts.ring.Read(from)
@@ -1264,8 +1372,12 @@ func (ts *termSession) catchUp(tc *termConn) []termFrame {
 	tc.behind.Store(false)
 	doc, _ := rota.Encode(map[string]any{"type": "repaint", "offset": from, "cols": ts.cols, "rows": ts.rows})
 	out := []termFrame{{op: opText, data: doc}, {op: opBinary, data: paint}}
-	if len(tail) > 0 {
-		out = append(out, termFrame{op: opBinary, data: tail})
+	if !screened && from > oldest {
+		gap, _ := rota.Encode(map[string]any{"type": "gap", "from": oldest, "to": from, "bytes": from - oldest})
+		out = append(out, termFrame{op: opText, data: gap})
+	}
+	for _, piece := range pieces(tail) {
+		out = append(out, termFrame{op: opBinary, data: piece})
 	}
 	return out
 }
