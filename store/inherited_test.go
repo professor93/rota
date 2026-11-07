@@ -19,15 +19,18 @@ func TestNothingRotaInheritedSignsInAnAccountsCLI(t *testing.T) {
 		"claude": {"CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SESSION_ID",
 			"CLAUDE_CODE_OAUTH_CLIENT_ID", "ANTHROPIC_CONFIG_DIR", "CLAUDE_CODE_USE_GATEWAY", "ANTHROPIC_UNIX_SOCKET",
 			"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "ANTHROPIC_FOUNDRY_AUTH_TOKEN", "CLAUDE_CODE_USER_EMAIL"},
-		"codex": {"CODEX_REFRESH_TOKEN_URL_OVERRIDE", "OPENAI_FEDERATION_RULE_ID", "CODEX_SANDBOX",
-			"CODEX_APP_SERVER_LOGIN_CLIENT_ID", "OPENAI_ORGANIZATION"},
+		"codex": {"CODEX_REFRESH_TOKEN_URL_OVERRIDE", "OPENAI_FEDERATION_RULE_ID", "CODEX_CONNECTORS_TOKEN",
+			"CODEX_APP_SERVER_LOGIN_CLIENT_ID", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"},
 	}
 	for _, names := range never {
 		for _, n := range names {
 			t.Setenv(n, "inherited")
 		}
 	}
-	t.Setenv("AWS_PROFILE", "inherited")
+	kept := []string{"AWS_PROFILE", "ANTHROPIC_VERTEX_PROJECT_ID", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CODEX_SANDBOX", "OPENAI_ORGANIZATION"}
+	for _, n := range kept {
+		t.Setenv(n, "inherited")
+	}
 
 	s := openTemp(t)
 	claude := livingClaude(s, "u1")
@@ -62,8 +65,10 @@ func TestNothingRotaInheritedSignsInAnAccountsCLI(t *testing.T) {
 		if !slices.Contains(c.env, c.own) || !slices.Contains(c.env, "ROTA_PROVIDER="+c.kind) {
 			t.Errorf("%s: rota's own values reach the CLI: %v", what, c.env)
 		}
-		if !slices.Contains(c.env, "AWS_PROFILE=inherited") {
-			t.Errorf("%s: everything else is inherited as it was", what)
+		for _, n := range kept {
+			if !slices.Contains(c.env, n+"=inherited") {
+				t.Errorf("%s: %s is inherited as it was", what, n)
+			}
 		}
 	}
 }

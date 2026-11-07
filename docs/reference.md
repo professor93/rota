@@ -2012,12 +2012,11 @@ is added. Runtimes disagree on which duplicate wins — libc and Node take the
 first, Python the last — so the child only ever sees one.
 
 Every route also drops what would sign the CLI in some other way, send its
-requests or its credential somewhere else, change which login, organization
-or configuration it uses, or tell it that it runs inside another session of
+requests or its credential somewhere else, change whose login or which
+configuration it uses, or tell it that it runs inside another session of
 itself — a shell profile, a host application or an outer Claude Code may have
-exported any of them. Each goes by its exact name, never by a prefix. For
-`claude` these are the names Claude Code reads only to reach something other
-than the account's login, so dropping one costs a run nothing:
+exported any of them. Each goes by its exact name, never by a prefix, and
+nothing else is dropped. For `claude`:
 
 - **another credential:** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `ANTHROPIC_AWS_API_KEY`, `ANTHROPIC_FOUNDRY_API_KEY`,
@@ -2045,14 +2044,13 @@ than the account's login, so dropping one costs a run nothing:
   `CLAUDE_CODE_OAUTH_CLIENT_ID`, `CLAUDE_CODE_CUSTOM_OAUTH_URL`,
   `CLAUDE_SECURESTORAGE_CONFIG_DIR`, `CLAUDE_CODE_SIMPLE` (which reads no
   stored login at all), `CLAUDE_CODE_ACCOUNT_UUID`, `CLAUDE_CODE_USER_EMAIL`,
-  `CLAUDE_CODE_ORGANIZATION_UUID`, `CLAUDE_CODE_ACCOUNT_TAGGED_ID`;
+  `CLAUDE_CODE_ORGANIZATION_UUID`;
 - **another provider:** the Bedrock, Vertex, Foundry, Mantle, Claude Platform
-  on AWS, Claude Platform on Google Cloud and gateway switches
-  (`CLAUDE_CODE_USE_*`, each named), `ANTHROPIC_FOUNDRY_RESOURCE`,
-  `ANTHROPIC_VERTEX_PROJECT_ID`, `ANTHROPIC_AWS_WORKSPACE_ID`,
-  `ANTHROPIC_GOOGLE_CLOUD_PROJECT`, `ANTHROPIC_GOOGLE_CLOUD_LOCATION`,
-  `ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID`, and the six
-  `CLAUDE_CODE_SKIP_*_AUTH` switches;
+  on AWS, Claude Platform on Google Cloud and gateway switches,
+  `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`,
+  `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_MANTLE`,
+  `CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`,
+  `CLAUDE_CODE_USE_GATEWAY`;
 - **another endpoint:** `ANTHROPIC_BASE_URL` (a stray one would send the
   OAuth token to whatever host it names), `ANTHROPIC_BEDROCK_BASE_URL`,
   `ANTHROPIC_VERTEX_BASE_URL`, `ANTHROPIC_FOUNDRY_BASE_URL`,
@@ -2060,11 +2058,13 @@ than the account's login, so dropping one costs a run nothing:
   `ANTHROPIC_BEDROCK_MANTLE_BASE_URL`,
   `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`, `ANTHROPIC_UNIX_SOCKET`,
   `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_API_BASE_URL`,
-  `CLAUDE_CODE_HTTP_PROXY`, `CLAUDE_CODE_HTTPS_PROXY`,
   `CLAUDE_BRIDGE_BASE_URL`, `CLAUDE_BRIDGE_SESSION_INGRESS_URL`,
   `CLAUDE_REMOTE_TOOLS_BRIDGE_URL`, the artifacts and memory APIs' base URLs
-  and tokens (`CLAUDE_CODE_ARTIFACTS_API_*`, `CLAUDE_CODE_ARTIFACT_*_BASE_URL`,
-  `CLAUDE_CODE_MEMORY_API_*`, each named), `CLAUDE_CODE_GB_BASE_URL`,
+  and tokens — `CLAUDE_CODE_ARTIFACTS_API_BASE_URL`,
+  `CLAUDE_CODE_ARTIFACTS_API_TOKEN`, `CLAUDE_CODE_ARTIFACT_ASSET_BASE_URL`,
+  `CLAUDE_CODE_ARTIFACT_LIVE_BASE_URL`, `CLAUDE_CODE_ARTIFACT_SYNC_BASE_URL`,
+  `CLAUDE_CODE_ARTIFACT_VIEWER_BASE_URL`, `CLAUDE_CODE_MEMORY_API_BASE_URL`,
+  `CLAUDE_CODE_MEMORY_API_TOKEN` — `CLAUDE_CODE_GB_BASE_URL` and
   `VOICE_STREAM_BASE_URL`;
 - **the marks of a process another Claude Code started:** `CLAUDECODE`,
   `CLAUDE_CODE_CHILD_SESSION` (which would leave an interactive run out of
@@ -2073,28 +2073,41 @@ than the account's login, so dropping one costs a run nothing:
   `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_ENTRYPOINT`,
   `CLAUDE_CODE_SPAWNED_BY_SERVER`, `CLAUDE_CODE_REMOTE`,
   `CLAUDE_CODE_REMOTE_SESSION_ID`, `CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE`,
-  `CLAUDE_CODE_ENVIRONMENT_KIND`, `CLAUDE_CODE_CONTAINER_ID`.
+  `CLAUDE_CODE_ENVIRONMENT_KIND`, `CLAUDE_CODE_CONTAINER_ID`. A run inside a
+  cloud session is therefore not one to the account's Claude Code, and its
+  hooks do not see `CLAUDE_CODE_REMOTE`.
 
 A launch on the account's stored login drops `CLAUDE_CODE_OAUTH_TOKEN` as
-well, so no token reaches the child at all. The cloud vendors' own variables —
-`AWS_PROFILE`, `AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_CLOUD_PROJECT`,
-`CLOUD_ML_REGION` and their like — stay: Claude Code reads them only once a
-dropped switch has chosen the cloud, and other programs the run starts read
-them too. `CLAUDE_CONFIG_DIR` stays as well; a route that points Claude Code
-at a directory sets it, and one that does not leaves your own.
+well, so no token reaches the child at all. What configures a provider stays:
+its project, region, resource or workspace (`ANTHROPIC_VERTEX_PROJECT_ID`,
+`ANTHROPIC_FOUNDRY_RESOURCE`, `ANTHROPIC_AWS_WORKSPACE_ID`,
+`ANTHROPIC_GOOGLE_CLOUD_PROJECT`, `ANTHROPIC_GOOGLE_CLOUD_LOCATION`,
+`ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID`), its `CLAUDE_CODE_SKIP_*_AUTH` switch,
+and the cloud vendors' own variables — `AWS_PROFILE`,
+`AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_CLOUD_PROJECT`, `CLOUD_ML_REGION` and
+their like. Claude Code reads them only once a dropped switch has chosen the
+provider, and Anthropic's SDKs and the clouds' own tools in the run read them
+too. So do `CLAUDE_CODE_HTTP_PROXY` and `CLAUDE_CODE_HTTPS_PROXY`, which only
+a cloud session reads, for the package managers it starts, and
+`CLAUDE_CODE_ACCOUNT_TAGGED_ID`, a telemetry label. `CLAUDE_CONFIG_DIR` stays
+as well; a route that points Claude Code at a directory sets it, and one that
+does not leaves your own.
 
 For `codex`, the CLI signs in from the `auth.json` in its private
 `CODEX_HOME`, and these are dropped: `OPENAI_API_KEY`, `CODEX_API_KEY`,
 `CODEX_ACCESS_TOKEN`, `CODEX_CONNECTORS_TOKEN`, the workload identity
 variables `OPENAI_FEDERATION_RULE_ID`, `OPENAI_IDENTITY_TOKEN_FILE` and
 `OPENAI_WORKLOAD_IDENTITY_CONTEXT` (which replace the login altogether),
-`OPENAI_ORGANIZATION`, `OPENAI_PROJECT`, `CODEX_APP_SERVER_LOGIN_CLIENT_ID`,
-`CODEX_APP_SERVER_LOGIN_ISSUER`, `OPENAI_BASE_URL`,
+`CODEX_APP_SERVER_LOGIN_CLIENT_ID`, `CODEX_APP_SERVER_LOGIN_ISSUER`,
+`OPENAI_BASE_URL`,
 `CODEX_REFRESH_TOKEN_URL_OVERRIDE` (the account's refresh token would go
 there), `CODEX_REVOKE_TOKEN_URL_OVERRIDE`, `CODEX_AUTHAPI_BASE_URL`,
 `CODEX_AGENT_IDENTITY_AUTHAPI_BASE_URL`, `CODEX_AGENT_IDENTITY_JWKS_BASE_URL`,
-`CODEX_CA_CERTIFICATE`, `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` and
-`CODEX_SANDBOX`.
+`CODEX_CA_CERTIFICATE` and `CODEX_INTERNAL_ORIGINATOR_OVERRIDE`.
+`OPENAI_ORGANIZATION` and `OPENAI_PROJECT` stay: they are request headers, and
+a ChatGPT login picks its account by its own token. So does `CODEX_SANDBOX`,
+which codex sets only inside its macOS sandbox, which a child inherits too;
+it only stops codex looking for a proxy.
 
 A settings file can put those variables back. Claude Code writes the `env`
 block of every settings file it reads into its own environment, over what it

@@ -13,8 +13,8 @@ import (
 
 // claudeInheritedNever is every variable that would sign Claude Code in some
 // other way, send its requests or its credential somewhere else, change
-// which login, organization or configuration it uses, or tell it that it
-// runs inside another Claude Code. They are written out here rather than
+// whose login or which configuration it uses, or tell it that it runs inside
+// another Claude Code. They are written out here rather than
 // read from the list the code keeps, so that a name dropped from that list
 // fails this test. Measured against Claude Code 2.1.319: its documented
 // variables, and the lists it keeps of its own credentials, endpoints and
@@ -40,19 +40,14 @@ var claudeInheritedNever = []string{
 	// The OAuth client, where its login is kept, and whose login it is.
 	"CLAUDE_CODE_OAUTH_CLIENT_ID", "CLAUDE_CODE_CUSTOM_OAUTH_URL", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
 	"CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_ACCOUNT_UUID", "CLAUDE_CODE_USER_EMAIL", "CLAUDE_CODE_ORGANIZATION_UUID",
-	"CLAUDE_CODE_ACCOUNT_TAGGED_ID",
 	// Another provider.
 	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE",
 	"CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_USE_GATEWAY",
-	"ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_AWS_WORKSPACE_ID",
-	"ANTHROPIC_GOOGLE_CLOUD_PROJECT", "ANTHROPIC_GOOGLE_CLOUD_LOCATION", "ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID",
-	"CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
-	"CLAUDE_CODE_SKIP_MANTLE_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH",
 	// Another endpoint.
 	"ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL", "ANTHROPIC_FOUNDRY_BASE_URL",
 	"ANTHROPIC_AWS_BASE_URL", "ANTHROPIC_GOOGLE_CLOUD_BASE_URL", "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
 	"_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL", "ANTHROPIC_UNIX_SOCKET", "ANTHROPIC_CUSTOM_HEADERS",
-	"CLAUDE_CODE_API_BASE_URL", "CLAUDE_CODE_HTTP_PROXY", "CLAUDE_CODE_HTTPS_PROXY",
+	"CLAUDE_CODE_API_BASE_URL",
 	"CLAUDE_BRIDGE_BASE_URL", "CLAUDE_BRIDGE_SESSION_INGRESS_URL", "CLAUDE_REMOTE_TOOLS_BRIDGE_URL",
 	"CLAUDE_CODE_ARTIFACTS_API_BASE_URL", "CLAUDE_CODE_ARTIFACTS_API_TOKEN", "CLAUDE_CODE_ARTIFACT_ASSET_BASE_URL",
 	"CLAUDE_CODE_ARTIFACT_LIVE_BASE_URL", "CLAUDE_CODE_ARTIFACT_SYNC_BASE_URL", "CLAUDE_CODE_ARTIFACT_VIEWER_BASE_URL",
@@ -70,21 +65,30 @@ var claudeInheritedNever = []string{
 var codexInheritedNever = []string{
 	"OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "OPENAI_BASE_URL",
 	"OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
-	"OPENAI_ORGANIZATION", "OPENAI_PROJECT",
 	"CODEX_REFRESH_TOKEN_URL_OVERRIDE", "CODEX_REVOKE_TOKEN_URL_OVERRIDE",
 	"CODEX_APP_SERVER_LOGIN_CLIENT_ID", "CODEX_APP_SERVER_LOGIN_ISSUER",
 	"CODEX_AUTHAPI_BASE_URL", "CODEX_AGENT_IDENTITY_AUTHAPI_BASE_URL", "CODEX_AGENT_IDENTITY_JWKS_BASE_URL",
 	"CODEX_CONNECTORS_TOKEN", "CODEX_CA_CERTIFICATE",
-	"CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "CODEX_SANDBOX",
+	"CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
 	"HTTPS_PROXY", "NODE_EXTRA_CA_CERTS",
 }
 
-// Close to the dropped names and not dropped: a variable that shares a prefix
-// with one, or that the cloud's own tools read and that does nothing to the
-// CLI once its provider switch is gone, stays for everything the run starts.
+// Close to the dropped names and not dropped, because none changes how the
+// CLI itself signs in or where it sends its requests: a variable that shares
+// a prefix with one; a provider's configuration, which Claude Code reads only
+// behind a dropped CLAUDE_CODE_USE_* switch and Anthropic's SDKs and the
+// clouds' own tools read too; Claude Code's proxies for the package managers
+// a cloud session starts; a telemetry label; codex's request headers and its
+// sandbox's own fact. Each stays for everything the run starts.
 var inheritedKept = []string{
 	"CLAUDE_CODE_USE_POWERSHELL_TOOL", "ANTHROPIC_MODEL", "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
 	"AWS_PROFILE", "AWS_BEARER_TOKEN_BEDROCK", "GOOGLE_CLOUD_PROJECT", "CLOUD_ML_REGION",
+	"ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_AWS_WORKSPACE_ID",
+	"ANTHROPIC_GOOGLE_CLOUD_PROJECT", "ANTHROPIC_GOOGLE_CLOUD_LOCATION", "ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID",
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+	"CLAUDE_CODE_SKIP_MANTLE_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH",
+	"CLAUDE_CODE_HTTP_PROXY", "CLAUDE_CODE_HTTPS_PROXY", "CLAUDE_CODE_ACCOUNT_TAGGED_ID",
+	"OPENAI_ORGANIZATION", "OPENAI_PROJECT", "CODEX_SANDBOX",
 	"CODEX_SQLITE_HOME", "CODEX_THREAD_ID",
 }
 

@@ -86,16 +86,18 @@ func ClaudeCredentialVars() []string {
 // CLAUDE_CODE_CHILD_SESSION would leave an interactive run out of --resume,
 // --continue, the prompt history and the agents list.
 //
-// They are exact names, never prefixes. Each is one Claude Code reads only
-// to sign in to, or reach, something other than the account's own login —
-// as code.claude.com/docs/en/env-vars documents them, and as Claude Code's
-// own lists of its credentials, endpoints and provider switches name them —
-// so dropping one costs a run on an account nothing. The cloud vendors' own
-// variables (AWS_PROFILE, GOOGLE_CLOUD_PROJECT and their like) stay: Claude
-// Code reads them only once a switch below selects the cloud, and other
-// programs the run starts read them too. CLAUDE_CONFIG_DIR stays as well;
-// a route that points Claude Code somewhere sets it, and one that does not
-// leaves the person's own.
+// They are exact names, never prefixes, and each changes how Claude Code
+// itself signs in or where it sends its requests — as
+// code.claude.com/docs/en/env-vars documents them, and as Claude Code's own
+// lists of its credentials, endpoints and provider switches name them. What
+// configures a provider stays: its project, region, resource or workspace,
+// its skip-auth switch, and the cloud vendors' own variables (AWS_PROFILE,
+// GOOGLE_CLOUD_PROJECT and their like). Claude Code reads those only once a
+// CLAUDE_CODE_USE_* switch below has chosen that provider, and the programs a
+// run starts — Anthropic's SDKs, the clouds' own tools — read them too. A
+// provider's base URL is an endpoint, and goes with ANTHROPIC_BASE_URL.
+// CLAUDE_CONFIG_DIR stays as well; a route that points Claude Code somewhere
+// sets it, and one that does not leaves the person's own.
 var claudeCompeting = []string{
 	// A credential of another kind.
 	"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AWS_API_KEY",
@@ -118,19 +120,13 @@ var claudeCompeting = []string{
 	// The OAuth client, where its login is kept, and whose login it is.
 	"CLAUDE_CODE_OAUTH_CLIENT_ID", "CLAUDE_CODE_CUSTOM_OAUTH_URL", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
 	"CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_ACCOUNT_UUID", "CLAUDE_CODE_USER_EMAIL", "CLAUDE_CODE_ORGANIZATION_UUID",
-	"CLAUDE_CODE_ACCOUNT_TAGGED_ID",
 	// Another provider.
 	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE",
 	"CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_USE_GATEWAY",
-	"ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_AWS_WORKSPACE_ID",
-	"ANTHROPIC_GOOGLE_CLOUD_PROJECT", "ANTHROPIC_GOOGLE_CLOUD_LOCATION", "ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID",
-	"CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
-	"CLAUDE_CODE_SKIP_MANTLE_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH",
 	// Another endpoint.
 	"ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL", "ANTHROPIC_FOUNDRY_BASE_URL",
 	"ANTHROPIC_AWS_BASE_URL", "ANTHROPIC_GOOGLE_CLOUD_BASE_URL", "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
-	"_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL", "ANTHROPIC_UNIX_SOCKET", "ANTHROPIC_CUSTOM_HEADERS",
-	"CLAUDE_CODE_API_BASE_URL", "CLAUDE_CODE_HTTP_PROXY", "CLAUDE_CODE_HTTPS_PROXY",
+	"_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL", "ANTHROPIC_UNIX_SOCKET", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_API_BASE_URL",
 	"CLAUDE_BRIDGE_BASE_URL", "CLAUDE_BRIDGE_SESSION_INGRESS_URL", "CLAUDE_REMOTE_TOOLS_BRIDGE_URL",
 	"CLAUDE_CODE_ARTIFACTS_API_BASE_URL", "CLAUDE_CODE_ARTIFACTS_API_TOKEN", "CLAUDE_CODE_ARTIFACT_ASSET_BASE_URL",
 	"CLAUDE_CODE_ARTIFACT_LIVE_BASE_URL", "CLAUDE_CODE_ARTIFACT_SYNC_BASE_URL", "CLAUDE_CODE_ARTIFACT_VIEWER_BASE_URL",
