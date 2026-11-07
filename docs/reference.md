@@ -2053,10 +2053,12 @@ is not counted, and a file that is not one JSON object, or is over 1 MB, is
 not read. A run that names `setting_sources` is held to the sources it names,
 managed settings counting whatever it says, so a `rota serve` run, which names
 none unless asked, is checked against the managed files alone; a hermetic run
-has no user settings. A `rota serve` terminal is checked as if it started
-where the server runs, and the server writes the warning to its log. The
-macOS configuration profile and the Windows registry, which can also carry
-managed settings, are not read.
+has no user settings. A `rota serve` terminal is checked in the directory it
+starts in, and the server writes the warning to its log. The macOS
+configuration profile and the Windows registry, which can also carry managed
+settings, are not read. For the SDK, `Store.Prepare` takes the CLI to start
+in the calling process's directory, as the handover does; `Store.PrepareIn(ctx,
+a, dir)` is the same launch for a CLI started in `dir`.
 
 Every child is also told which account it is: `ROTA_PROVIDER` is the
 provider name, `ROTA_ACCOUNT_ID` the account's id as a decimal, and

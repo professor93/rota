@@ -319,3 +319,29 @@ func TestASessionNamesWhatItReads(t *testing.T) {
 		t.Fatalf("want %q: %q", want, said)
 	}
 }
+
+// A CLI started somewhere other than this process's directory is prepared
+// with PrepareIn, and the project settings read for it are that directory's.
+func TestPrepareInReadsTheProjectWhereTheCLIStarts(t *testing.T) {
+	noManaged(t)
+	claudeWorld(t)
+	here := t.TempDir()
+	writeFile(t, filepath.Join(here, ".claude", "settings.json"), `{"env":{"CLAUDE_CODE_USE_VERTEX":"1"}}`)
+	t.Chdir(here)
+	there := t.TempDir()
+	writeFile(t, filepath.Join(there, ".claude", "settings.json"), `{"env":{"ANTHROPIC_API_KEY":"k"}}`)
+	onPath(t, "claude")
+	s, a := claudeStore(t)
+	var said []string
+	s.Warn = func(msg string) { said = append(said, msg) }
+
+	_, _, release, err := s.PrepareIn(context.Background(), a, there)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	want := resolved(t, filepath.Join(there, ".claude", "settings.json")) + " sets env.ANTHROPIC_API_KEY"
+	if len(said) != 1 || !strings.Contains(said[0], want) || strings.Contains(said[0], "VERTEX") {
+		t.Fatalf("want only %q: %q", want, said)
+	}
+}
