@@ -2691,7 +2691,11 @@ login as ever, and the CLI refreshes a token that is due when it starts. An
 `auth.json` that already holds the login rota would write is left as it is,
 so what Codex adds to the file stays and a rotation the daemon has just
 written is never written over. Once the daemon is gone the login is rota's to
-refresh again.
+refresh again, and a refresh in a server's maintenance goes into the home at
+once, as a run's does, so a daemon started there later reads the token that is
+still good. A token read back from the home is recorded as the one the home
+holds, the same as one rota wrote, so a file rota has since refreshed past is
+never taken for a newer rotation and read back over the good token.
 
 ## Quota
 
@@ -2754,9 +2758,10 @@ rota refreshes a token within five minutes of expiry, and only while running
 a command — and a claude login kept in its home only while nothing of Claude
 Code's runs there, because then Claude Code refreshes it itself, unless that
 home is stranded or blanked; and a codex login only while no daemon of
-Codex's is alive in its home, for the same reason. A refresh is never retried within one look: if the
-reply was lost, the retry would reuse a rotated token and kill the lineage. Treat `re-auth needed` as normal
-rather than as a fault. The refusal that ended the lineage is kept: `rota
+Codex's is alive in its home, for the same reason. A refresh is never retried
+within one look: if the reply was lost, the retry would reuse a rotated token
+and kill the lineage. Treat `re-auth needed` as normal rather than as a
+fault. The refusal that ended the lineage is kept: `rota
 list` shows it in parentheses after `re-auth needed` — `re-auth needed
 (invalid_grant: refresh token reused)` — and JSON carries it as `deadReason`.
 

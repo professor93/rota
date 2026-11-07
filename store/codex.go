@@ -40,6 +40,16 @@ var codexDaemonRecords = []string{"daemon.pid", "app-server.pid"}
 // it. A record nobody can read counts as alive, as a Claude Code one does: a
 // home wrongly thought quiet is one rota refreshes underneath the process
 // holding its login.
+//
+// Every mistake it can make is on that side. Codex also records when the
+// process started, to tell its daemon from another process that has since
+// been given the same pid; rota reads the pid alone, so a record left behind
+// whose pid now belongs to something else, or an empty one from a start that
+// crashed, reads as alive. That only leaves the refresh to the CLI, which
+// makes it itself when it next starts. A record missing for the moment a
+// restart takes is the other way round; what rota refreshes then goes into
+// the home at once (see Maintain), and the daemon reads the file again
+// before it refreshes.
 func codexDaemon(home string) (string, bool) {
 	for _, name := range codexDaemonRecords {
 		raw, err := os.ReadFile(filepath.Join(home, codexDaemonDir, name))
