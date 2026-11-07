@@ -66,6 +66,10 @@ func TestMain(m *testing.M) {
 	os.Unsetenv("ROTA_ACCOUNT_ID")
 	os.Setenv("HOME", person)
 	os.Setenv("USERPROFILE", person)
+	// Nor the person's Anthropic profiles: a claude launch looks for the
+	// active one by these two before it looks in the home.
+	os.Unsetenv("ANTHROPIC_CONFIG_DIR")
+	os.Unsetenv("XDG_CONFIG_HOME")
 	dir, err := os.MkdirTemp("", "rota-claude")
 	if err != nil {
 		panic(err)

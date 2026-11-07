@@ -2175,6 +2175,38 @@ have to run to see. For the SDK, `Store.Prepare` takes the CLI to start
 in the calling process's directory, as the handover does; `Store.PrepareIn(ctx,
 a, dir)` is the same launch for a CLI started in `dir`.
 
+One more sign-in outranks the account's login without being a variable or
+a setting: the active profile of the Anthropic configuration directory Claude
+Code shares with the `ant` CLI and the Anthropic SDKs. The directory is
+`ANTHROPIC_CONFIG_DIR`, else `anthropic` in `XDG_CONFIG_HOME`, else
+`.config/anthropic` in `HOME`, as the launch's environment gives them; the
+profile is `configs/<name>.json` in it, `<name>` being what `active_config`
+there says, or `default`. When that file's `authentication.type` is
+`oidc_federation` — workload identity federation — Claude Code signs in with
+it ahead of the login in its credential store, so ahead of the login rota keeps
+in every account's home. rota changes nothing and stops nothing for it, and a
+launch on the account's login prints one warning naming the file, never
+anything in it:
+
+```
+warning: claude/you@example.com: /home/you/.config/anthropic/configs/ci.json
+is the active Anthropic profile and signs Claude Code in by workload identity
+federation, in place of this account's login and every other account's;
+activate another profile with `ant profile activate <name>`, or move the file
+away, to turn it off
+```
+
+A launch with `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` in its
+environment (the table above says when) signs in with that, which Claude Code
+ranks above the profile, and is not warned; nor is a `user_oauth` profile,
+which gives way to a stored login. `ANTHROPIC_PROFILE` and the federation
+variables, which would choose a profile or stand in for one, are already
+dropped by every launch. The files are read as Claude Code reads them:
+`active_config` trimmed as JavaScript trims, and the profile parsed as
+`JSON.parse` parses it, every name in its exact case. A file that is not a
+regular one, or is over 256 KiB, is not read. `rota serve` writes the warning
+to its log.
+
 Every child is also told which account it is: `ROTA_PROVIDER` is the
 provider name, `ROTA_ACCOUNT_ID` the account's id as a decimal, and
 `ROTA_ACCOUNT` the label rota itself shows — the e-mail, else the shortened
@@ -3387,6 +3419,7 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `sessions/` | What the vendor CLIs are doing: the runs rota started, the editors holding one open, and the conversations `--resume` could pick up |
 | `store/mirror.go` | The Claude world each account gets: what is linked, what stays its own, and the warning for an entry that stopped being a link |
 | `store/settings.go` | The warning at launch for a Claude Code settings file that sets back what the launch drops |
+| `store/profile.go` | The warning at launch for an active Anthropic workload identity federation profile, which outranks the account's login |
 | `store/claude.go` | A claude account's login in its home: what is alive there, reading, writing and refreshing it, the daemon, removal |
 | `store/watch.go`, `cmd/rota/watch*.go` | The watcher an interactive run leaves: its looks, its lock, starting it in a session of its own, its log |
 | `store/claudejson.go` | An account's own `.claude.json` for Remote Control: switching it, the identity in it, and the one-way fold |
