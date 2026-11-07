@@ -285,7 +285,7 @@ func (c *cli) startShare(p sharePlan) (int, error) {
 		// A server that will not have this terminal says so in a sentence,
 		// and that sentence is printed instead of the opening line: the two
 		// are about the same thing and it is the more useful of them.
-		fmt.Fprintf(c.err, "rota: %s\n", why)
+		fmt.Fprintf(c.err, "rota: %s\n", oneLine(why))
 		fmt.Fprintf(c.err, "rota: %s via %s — running here, unshared\n", p.who, p.bin)
 	} else {
 		fmt.Fprint(c.err, shareOpening(p.who, p.bin, id, p.sock, p.ask.mode))

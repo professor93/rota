@@ -28,7 +28,7 @@ func (g *grid) renderPlain(out io.Writer) {
 	for i, r := range g.rows {
 		clean.rows[i] = make([]string, len(r))
 		for j, c := range r {
-			clean.rows[i][j] = strings.ReplaceAll(printable(c), "\n", " ")
+			clean.rows[i][j] = oneLine(c)
 		}
 	}
 	_, rows, _ := clean.fit()

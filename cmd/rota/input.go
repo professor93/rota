@@ -124,7 +124,7 @@ func (c *cli) feed(sess *rota.Session) {
 			_, err = sess.Interrupt()
 		case line == "/close":
 			if cerr := sess.Close(); cerr != nil {
-				fmt.Fprintf(c.err, "rota: %v\n", cerr)
+				fmt.Fprintf(c.err, "rota: %s\n", printable(cerr.Error()))
 			}
 			return // nothing more can be sent, so nothing more is read
 		case line == "/steer":
@@ -139,16 +139,16 @@ func (c *cli) feed(sess *rota.Session) {
 			_, err = sess.Send(line)
 		}
 		if err != nil {
-			fmt.Fprintf(c.err, "rota: %v\n", err)
+			fmt.Fprintf(c.err, "rota: %s\n", printable(err.Error()))
 		}
 	}
 	if err := sc.Err(); err != nil {
-		fmt.Fprintf(c.err, "rota: %v\n", err)
+		fmt.Fprintf(c.err, "rota: %s\n", printable(err.Error()))
 	}
 	// Nothing more is coming, which is what closing stdin says to the CLI:
 	// it finishes the turn it is on and exits.
 	if err := sess.Close(); err != nil {
-		fmt.Fprintf(c.err, "rota: %v\n", err)
+		fmt.Fprintf(c.err, "rota: %s\n", printable(err.Error()))
 	}
 }
 
@@ -162,7 +162,7 @@ func (c *cli) notices(sess *rota.Session, live *eventStream, verbose bool) {
 		case live != nil && live.json:
 			_ = live.emit(message.FromNotice(n))
 		case verbose:
-			fmt.Fprintf(c.err, "rota: %s %s\n", n.Kind, n.ID)
+			fmt.Fprintf(c.err, "rota: %s %s\n", n.Kind, oneLine(n.ID))
 		}
 	}
 }
@@ -423,11 +423,11 @@ func (c *cli) send(args []string) error {
 	}
 	switch req.Kind {
 	case "interrupt":
-		fmt.Fprintln(c.out, "interrupted", rep.ID)
+		fmt.Fprintln(c.out, "interrupted", oneLine(rep.ID))
 	case "close":
 		fmt.Fprintln(c.out, "closed")
 	default:
-		fmt.Fprintln(c.out, "accepted", rep.ID)
+		fmt.Fprintln(c.out, "accepted", oneLine(rep.ID))
 	}
 	return nil
 }
@@ -435,13 +435,15 @@ func (c *cli) send(args []string) error {
 // sendFailed says what went wrong in rota's own voice and exits 1. It is
 // separate from the usual error path because these are facts about a run on
 // this machine — no such run, a run that has ended — rather than conditions
-// the SDK stated, and they read better as themselves.
+// the SDK stated, and they read better as themselves. What they carry, the
+// id that was typed, the run's reply, a socket's path, is said with each
+// control character a space (see printable); JSON carries it as it is.
 func (c *cli) sendFailed(format string, a ...any) error {
 	msg := fmt.Sprintf(format, a...)
 	if c.json {
 		_ = c.emit(map[string]string{"error": msg})
 	} else {
-		fmt.Fprintln(c.err, "rota: "+msg)
+		fmt.Fprintln(c.err, "rota: "+printable(msg))
 	}
 	return exitCode(1)
 }

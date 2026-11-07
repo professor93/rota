@@ -272,8 +272,8 @@ func (c *cli) serveInvite(args []string) error {
 		}
 		return fmt.Errorf("the server answered %d", resp.StatusCode)
 	}
-	fmt.Fprintln(c.out, out.URL)
-	fmt.Fprintf(c.err, "rota: one use, until %s. Whoever opens it can watch and change nothing.\n", out.Expires)
+	fmt.Fprintln(c.out, oneLine(out.URL))
+	fmt.Fprintf(c.err, "rota: one use, until %s. Whoever opens it can watch and change nothing.\n", oneLine(out.Expires))
 	return nil
 }
 
