@@ -16,8 +16,11 @@ import (
 // started by — links kept, so an upgrade that moves one on is followed —
 // with this environment's PATH and CLAUDE_CONFIG_DIR. A daemon running with
 // no unit of this store's installed was started by hand, and is not taken
-// over; with one installed, it is rewritten and restarted, which is how an
-// install takes up a new binary or PATH.
+// over. With one installed, it is rewritten and restarted, which is how an
+// install takes up a new binary or PATH; a daemon running then, the unit's
+// or one started by hand meanwhile, is stopped first as serve stop stops
+// one, its sessions running on, so the daemon the unit starts never finds
+// the store taken.
 func (c *cli) installDaemon() error {
 	home, terminals, err := daemonStore()
 	if err != nil {
@@ -37,14 +40,17 @@ func (c *cli) installDaemon() error {
 	}
 	_, err = os.Lstat(path)
 	again := err == nil
-	if !again {
-		if d, ok := daemonOf(terminals); ok {
-			return fmt.Errorf("a rota daemon is running for %s%s, started by hand; rota serve stop it, then install", home, pidOf(d))
-		}
-	}
 	exe, err := invokedAs()
 	if err != nil {
 		return err
+	}
+	if d, ok := daemonOf(terminals); ok {
+		if !again {
+			return fmt.Errorf("a rota daemon is running for %s%s, started by hand; rota serve stop it, then install", home, pidOf(d))
+		}
+		if err := endDaemon(terminals); err != nil {
+			return err
+		}
 	}
 	if written, err := writeUnit(exe, home, unitEnv(), again); err != nil {
 		if written == "" {
@@ -66,10 +72,14 @@ func (c *cli) installDaemon() error {
 // uninstallDaemon is `rota serve uninstall`: the unit stopped and taken
 // away, its file deleted whatever the supervisor says. Every session goes on
 // running, for the next daemon to take up. With no unit installed there is
-// nothing to do, and the supervisor is not asked.
+// nothing to do, and the supervisor is not asked. Like serve stop, it is not
+// run from inside a held session.
 func (c *cli) uninstallDaemon() error {
 	home, terminals, err := daemonStore()
 	if err != nil {
+		return err
+	}
+	if err := refusedInsideHeldSession("rota serve uninstall", terminals); err != nil {
 		return err
 	}
 	path, err := unitFile(home)

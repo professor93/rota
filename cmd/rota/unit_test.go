@@ -10,6 +10,13 @@ import (
 	"testing"
 )
 
+// No systemctl or launchctl ever runs from this binary: neither in a test,
+// nor in a rota it runs as — whose calls a test reads from the file
+// ROTA_UNIT_RECORD names — nor in a session probe, which answers from an
+// init and never reaches TestMain. A package's variables are set before any
+// of its init functions runs.
+var _ = func() bool { unitRun = standInSupervisor; return true }()
+
 // standInSupervisor is every test's systemctl and launchctl: it runs
 // nothing. In a rota this binary runs as, it writes each call as a line to
 // the file ROTA_UNIT_RECORD names; anywhere else it refuses.
