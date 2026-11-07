@@ -11,13 +11,16 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/professor93/rota/internal/fakecli"
 	rota "github.com/professor93/rota/lib"
 )
 
@@ -415,5 +418,116 @@ func TestTheWatchLogSaysAControlCharacterAsASpace(t *testing.T) {
 	}
 	if c := controls(logged); c != "" {
 		t.Fatalf("the log has %s in it: %q", c, logged)
+	}
+}
+
+// dirtyLabel is an address a provider might give, with an escape, a tab and
+// a newline in it, and cleanLabel how a line of rota's own says it.
+const dirtyLabel, cleanLabel = "x\x1b[2J\ty\nz@x", "x [2J y z@x"
+
+// escLogin is an API-key provider whose login names its account with
+// dirtyLabel, as a provider's profile may.
+type escLogin struct{ cliFakeProvider }
+
+func (escLogin) Name() string { return "t-esc-login" }
+func (escLogin) Complete(_ context.Context, key string, _ map[string]string) (*rota.Token, error) {
+	return &rota.Token{Access: key, Identity: &rota.Identity{Email: dirtyLabel}}, nil
+}
+
+func init() { rota.Register(escLogin{}) }
+
+// A label, a session's name or id, and a directory from the store are set
+// in a line of rota's own with each control character in them, the newline
+// too, a space: the line stays one line, ends as it always did, and nothing
+// in it reaches the terminal as a command.
+func TestALineOfRotasOwnSaysWhatItCarriesAsOneCleanLine(t *testing.T) {
+	const dirtyDir, cleanDir = "/p\x1b]0;owned\x07\tq\nr", "/p ]0;owned  q r"
+	store := func(t *testing.T, extra string) {
+		t.Helper()
+		home := t.TempDir()
+		t.Setenv("ROTA_HOME", home)
+		writeStore(t, home, fmt.Sprintf(`{"ordered":true,"nextId":2,"accounts":[
+			{"id":1,"provider":"claude","email":%s,"order":1,"token":{"accessToken":"t"}%s}]}`, jsonString(dirtyLabel), extra))
+	}
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T) (stdout, stderr string, code int)
+		// want is what one line of stdout, or of stderr when it is
+		// prefixed "2:", has in it.
+		want []string
+	}{
+		{"a run's start", func(t *testing.T) (string, string, int) {
+			store(t, "")
+			answering(t, "claude")
+			handover(t)
+			return call(t, "run", "1")
+		}, []string{"2:rota: claude/" + cleanLabel + " via claude"}},
+		{"a run's session", func(t *testing.T) (string, string, int) {
+			store(t, "")
+			bin := t.TempDir()
+			fakecli.Install(t, bin, "claude", fakecli.Lines(
+				`{"type":"result","result":"ANSWERED","session_id":`+jsonString("s\x1b[2J\t1\n2")+`}`))
+			t.Setenv("PATH", bin)
+			return call(t, "run", "-v", "1", "hello")
+		}, []string{"2:rota: claude/" + cleanLabel, "2:rota: session s [2J 1 2 — continue it with `rota run 1 <prompt> --resume s [2J 1 2`"}},
+		{"a login", func(t *testing.T) (string, string, int) {
+			t.Setenv("ROTA_HOME", t.TempDir())
+			t.Setenv("PATH", t.TempDir())
+			out, _, code := call(t, "login", "t-esc-login")
+			m := regexp.MustCompile(`rota login ([0-9a-f]{6}) <key>`).FindStringSubmatch(out)
+			if code != 0 || m == nil {
+				t.Fatalf("begin: %d %q", code, out)
+			}
+			return call(t, "login", m[1], "sk-test-key")
+		}, []string{"Added t-esc-login account 1 (" + cleanLabel + ")."}},
+		{"rota show", func(t *testing.T) (string, string, int) {
+			store(t, fmt.Sprintf(`,"cwd":%[1]s,"config_dir":%[1]s,"sessions":%[1]s`, jsonString(dirtyDir)))
+			return call(t, "set", "1")
+		}, []string{"#1 " + cleanLabel, "  runs in     " + cleanDir, "  configured  " + cleanDir,
+			"  sessions    " + cleanDir + " (shared with any account pointed at it)"}},
+		{"a move", func(t *testing.T) (string, string, int) {
+			store(t, "")
+			return call(t, "set", "1", "--order", "1")
+		}, []string{"#1 " + cleanLabel + " is already 1st in the rotation.", "Rotation: #1 " + cleanLabel + "."}},
+		{"rota remove", func(t *testing.T) (string, string, int) {
+			store(t, "")
+			return call(t, "remove", "1")
+		}, []string{"Removed claude account 1 (" + cleanLabel + ")."}},
+		{"a name under --sessions", func(t *testing.T) (string, string, int) {
+			store(t, "")
+			claude := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", claude)
+			transcript := filepath.Join(claude, "projects", "-p-q", "abcdef12-0000-0000-0000-000000000001.jsonl")
+			if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := `{"type":"user","cwd":` + jsonString(dirtyDir) + `,"message":{"role":"user","content":"hi"}}` + "\n" +
+				`{"type":"ai-title","aiTitle":` + jsonString("n\x1b[2J\to\np") + `}` + "\n"
+			if err := os.WriteFile(transcript, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return call(t, "list", "--short", "--sessions")
+		}, []string{"abcdef12  n [2J o  " + cleanDir}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, errOut, code := tc.run(t)
+			if code != 0 {
+				t.Fatalf("exit %d\nstdout %q\nstderr %q", code, out, errOut)
+			}
+			for name, text := range map[string]string{"stdout": out, "stderr": errOut} {
+				if c := controls(text); c != "" {
+					t.Fatalf("%s has %s in it: %q", name, c, text)
+				}
+			}
+			for _, want := range tc.want {
+				text := out
+				if rest, ok := strings.CutPrefix(want, "2:"); ok {
+					text, want = errOut, rest
+				}
+				if !slices.ContainsFunc(strings.Split(text, "\n"), func(l string) bool { return strings.Contains(l, want) }) {
+					t.Fatalf("no line has %q in it:\n%s", want, text)
+				}
+			}
+		})
 	}
 }

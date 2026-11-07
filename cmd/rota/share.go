@@ -609,11 +609,12 @@ func (l *shareLink) link() *share.Conn {
 
 // say prints one thing the server refused with, once. A sentence repeated
 // every three seconds on top of somebody's full-screen editor is worse than
-// no sentence at all.
+// no sentence at all. It is the server's, so it is said as one line with
+// each control character a space (see oneLine).
 func (l *shareLink) say(msg string) {
 	l.said.Do(func() {
 		if l.err != nil {
-			fmt.Fprintf(l.err, "rota: %s\n", msg)
+			fmt.Fprintf(l.err, "rota: %s\n", oneLine(msg))
 		}
 	})
 }
@@ -646,6 +647,9 @@ func shareLabel(cwd string) string {
 // Whichever of the two it is, it is the truth at that moment: there is a
 // server and this terminal is on it, or there is not and it will be as soon
 // as there is.
+//
+// The id is the server's and the path is under the store's directory, so
+// each is said with its control characters as spaces (see oneLine).
 func shareOpening(who, bin, id, path, mode string) string {
 	watching := ""
 	if mode == share.ModeWatch {
@@ -653,14 +657,14 @@ func shareOpening(who, bin, id, path, mode string) string {
 	}
 	if id != "" {
 		return fmt.Sprintf("rota: %s via %s — shared to the rota server on this machine as terminal %s%s\n",
-			who, bin, id, watching)
+			who, bin, oneLine(id), watching)
 	}
 	if len(path) > shareMaxPath {
 		return fmt.Sprintf("rota: %s via %s — this terminal cannot be shared: %s is too long for a unix socket\n",
-			who, bin, path)
+			who, bin, oneLine(path))
 	}
 	return fmt.Sprintf("rota: %s via %s — no rota server is listening at %s; sharing begins when one is\n",
-		who, bin, path)
+		who, bin, oneLine(path))
 }
 
 // shareStat is the store-side check rota makes before anything else, so the

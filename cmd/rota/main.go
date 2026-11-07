@@ -589,7 +589,7 @@ func (c *cli) list(args []string) error {
 			return c.emit(map[string]any{"accounts": []wire.Account{}})
 		}
 		if filter != "" {
-			fmt.Fprintf(c.out, "No %s accounts. Run `rota login %s`.\n", filter, filter)
+			fmt.Fprintf(c.out, "No %[1]s accounts. Run `rota login %[1]s`.\n", oneLine(filter))
 		} else {
 			fmt.Fprintf(c.out, "No accounts yet. Run `rota login [provider]`.\nProviders: %s\n", strings.Join(wire.LoginProviders(), ", "))
 		}
@@ -823,7 +823,7 @@ func (c *cli) showSessions(rep sessions.Report, width int) {
 // (see printable), and so is a newline, which would start a line that is
 // not two spaces in.
 func sayIn(out io.Writer, width int, line string) {
-	line = strings.ReplaceAll(printable(line), "\n", " ")
+	line = oneLine(line)
 	if width <= 2 {
 		fmt.Fprintf(out, "  %s\n", line)
 		return
@@ -1402,7 +1402,7 @@ func (c *cli) answer(id int, args []string) error {
 		// still a run: the warning is all that happens.
 		var lerr error
 		if reach, lerr = listenForSends(s, runID); lerr != nil {
-			fmt.Fprintf(c.err, "rota: send is not available: %v\n", lerr)
+			fmt.Fprintf(c.err, "rota: send is not available: %s\n", printable(lerr.Error()))
 		}
 		defer reach.close()
 	}
@@ -1469,8 +1469,8 @@ func (c *cli) answer(id int, args []string) error {
 	// and a terminal full of rota's own commentary is noise whether or not
 	// it is on stderr.
 	if *verbose && res.SessionID != "" {
-		fmt.Fprintf(c.err, "rota: session %s — continue it with `rota run %d <prompt> --resume %s`\n",
-			res.SessionID, a.ID, res.SessionID)
+		id := oneLine(res.SessionID)
+		fmt.Fprintf(c.err, "rota: session %s — continue it with `rota run %d <prompt> --resume %s`\n", id, a.ID, id)
 	}
 	if res.Stderr != "" && (res.IsError || res.ExitCode != 0) {
 		fmt.Fprintln(c.err, res.Stderr)
@@ -1750,12 +1750,12 @@ func (c *cli) show(a *rota.Account, home string) error {
 	if a.Order == 0 {
 		place = fmt.Sprintf("out of the rotation; run it by id, or put it back with `rota set %d --order last`", a.ID)
 	}
-	where := a.Cwd
+	where := oneLine(a.Cwd)
 	if where == "" {
 		where = "wherever rota is run from"
 	}
 	fmt.Fprintf(c.out, "#%d %s\n  rotation    %s\n  runs in     %s\n  configured  %s\n",
-		a.ID, labelOf(a), place, where, home)
+		a.ID, labelOf(a), place, where, oneLine(home))
 	if rota.Flavor(a.Provider) == "claude" {
 		fmt.Fprintf(c.out, "  sessions    %s\n", conversations(a))
 	}
@@ -1793,7 +1793,7 @@ func longLine(a *rota.Account) string {
 func conversations(a *rota.Account) string {
 	switch {
 	case a.SessionsDir() != "":
-		return a.SessionsDir() + " (shared with any account pointed at it)"
+		return oneLine(a.SessionsDir()) + " (shared with any account pointed at it)"
 	case a.Sessions == rota.SessionsOwn:
 		return "this account's own, in its home"
 	case a.ConfigDir != "":
@@ -1931,9 +1931,9 @@ func (c *cli) remove(args []string) error {
 		}
 		removed = append(removed, map[string]any{"id": a.ID, "provider": a.Provider, "email": a.Email})
 		if !c.json {
-			fmt.Fprintf(c.out, "Removed %s account %d (%s).\n", a.Provider, a.ID, labelOf(a))
+			fmt.Fprintf(c.out, "Removed %s account %d (%s).\n", oneLine(a.Provider), a.ID, labelOf(a))
 			if lost != "" {
-				fmt.Fprintf(c.out, "Its own conversations went with it: the transcripts in %s.\n", lost)
+				fmt.Fprintf(c.out, "Its own conversations went with it: the transcripts in %s.\n", oneLine(lost))
 			}
 		}
 	}
@@ -2114,7 +2114,7 @@ func (c *cli) signIn(id int, extra []string) error {
 	// The lock is not rota's to hold while a person reads a browser page.
 	_ = s.Release()
 
-	fmt.Fprintf(c.err, "rota: signing %s in, in %s\n", nameOf(a), home)
+	fmt.Fprintf(c.err, "rota: signing %s in, in %s\n", nameOf(a), oneLine(home))
 	login := exec.Command(path, append(plan.Args, extra...)...)
 	login.Env = rota.Environ(store.HostEnv(), &rota.Command{Env: plan.Env, Drop: plan.Drop})
 	login.Stdin, login.Stdout, login.Stderr = os.Stdin, c.out, c.err
@@ -2464,14 +2464,14 @@ func place(a *rota.Account) string {
 }
 
 // nameOf is how a line rota prints names an account, "claude/a@x", with
-// each control character in it a space (see printable): an account with no
-// --label is named by the email its provider gave, which may carry
-// anything. JSON, a run's record and what a server is told take the label
-// as it is.
-func nameOf(a *rota.Account) string { return printable(a.String()) }
+// each control character in it, the newline too, a space (see oneLine): an
+// account with no --label is named by the email its provider gave, which
+// may carry anything. JSON, a run's record and what a server is told take
+// the label as it is.
+func nameOf(a *rota.Account) string { return oneLine(a.String()) }
 
 // labelOf is an account's label alone, cleaned as nameOf cleans it.
-func labelOf(a *rota.Account) string { return printable(a.Label()) }
+func labelOf(a *rota.Account) string { return oneLine(a.Label()) }
 
 // checkedAgo says how old a quota reading is. An unmetered provider has no
 // limits to read, so "never checked" would misreport a fact rather than a gap.

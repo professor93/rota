@@ -124,7 +124,7 @@ func (l *logFile) Write(p []byte) (int, error) {
 	if l.lost && (l.lostBytes >= logFileMax || time.Since(l.lostSince) >= logFileRetry) {
 		if err := l.open(); err == nil {
 			l.lost = false
-			fmt.Fprintf(l.fallback, "rota: the log goes to %s again\n", l.path)
+			fmt.Fprintf(l.fallback, "rota: the log goes to %s again\n", oneLine(l.path))
 		} else {
 			l.lostSince, l.lostBytes = time.Now(), 0
 		}
@@ -135,7 +135,7 @@ func (l *logFile) Write(p []byte) (int, error) {
 	if !l.lost && l.f == nil {
 		if err := l.open(); err != nil {
 			l.lost, l.lostSince, l.lostBytes = true, time.Now(), 0
-			fmt.Fprintf(l.fallback, "rota: the log goes to stderr until the file can be opened again: %v\n", err)
+			fmt.Fprintf(l.fallback, "rota: the log goes to stderr until the file can be opened again: %s\n", printable(err.Error()))
 		}
 	}
 	if l.lost {

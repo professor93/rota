@@ -278,3 +278,8 @@ func printable(s string) string {
 	b.WriteString(s[done:])
 	return b.String()
 }
+
+// oneLine is printable with the newline a space as well: a name, a path or
+// a reply from outside set in a line of rota's own, which it must not end
+// early. Only the value is cleaned, so the line's own ending is untouched.
+func oneLine(s string) string { return strings.ReplaceAll(printable(s), "\n", " ") }
