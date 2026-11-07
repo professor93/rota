@@ -80,6 +80,14 @@ func TestDialNowDoesNotWait(t *testing.T) {
 	if err == nil || err.Error() != want || time.Since(began) > time.Second {
 		t.Fatalf("DialNow to a silent daemon: %v after %s, want %q at once", err, time.Since(began), want)
 	}
+	// A daemon.pid that names no process this rota can check: the lock
+	// says a daemon runs, and nobody is named rather than pid 0.
+	if err := os.WriteFile(holdwire.DaemonPIDFile(dir), []byte(`{"pid":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = DialNow(dir); err == nil || err.Error() != "the rota daemon is not answering on "+holdwire.CtlSock(dir) {
+		t.Fatalf("DialNow to a daemon whose pid is unknown: %v", err)
+	}
 	release()
 	if _, err := DialNow(dir); !errors.Is(err, ErrNoDaemon) {
 		t.Fatalf("DialNow with no claim: %v", err)

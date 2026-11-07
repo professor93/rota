@@ -94,9 +94,22 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 	if conf != "" {
 		args = append(args, "--config", conf)
 	}
+	// The daemon runs in /, so every directory its environment names is
+	// named absolutely, as the store is: the person's own Claude Code
+	// directory too, which every claude account's home is made from.
+	env := termenv.Set(os.Environ(), "ROTA_HOME", home)
+	for _, name := range []string{"CLAUDE_CONFIG_DIR", "ROTA_CLAUDE_HOME"} {
+		if dir := os.Getenv(name); dir != "" && !filepath.IsAbs(dir) {
+			abs, err := filepath.Abs(dir)
+			if err != nil {
+				return err
+			}
+			env = termenv.Set(env, name, abs)
+		}
+	}
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = "/"
-	cmd.Env = termenv.Set(os.Environ(), "ROTA_HOME", home)
+	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("starting the rota daemon: %w", err)
@@ -132,6 +145,13 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 				return nil
 			}
 		case <-deadline.C:
+			// Another daemon answering, which this one is slow to lose the
+			// store to, is still one daemon running (P6). Asked without
+			// waiting, so the whole stays within daemonReady.
+			if d, ok := holdwire.RunningDaemon(terminals); ok && d.PID != 0 && d.PID != pid {
+				fmt.Fprintf(c.out, "rota daemon already running for %s%s\n", home, pidOf(d))
+				return nil
+			}
 			return fmt.Errorf("the rota daemon (pid %d) has not answered on %s within %s; rota serve status says when it does, and %s what it is doing",
 				pid, sock, daemonReady, logPath)
 		}
@@ -267,7 +287,7 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 		if err := holdwire.RecordHTTP(terminals, port.addr); err != nil {
 			log.Warn("daemon.pid could not say where else this daemon serves", "err", err)
 		}
-		for _, note := range serveNotes(&opts, listener) {
+		for _, note := range serveNotes(&opts, listener, true) {
 			log.Info(note)
 		}
 	}

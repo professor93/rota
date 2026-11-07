@@ -127,27 +127,36 @@ func TestStopIsRefusedInsideAHeldSession(t *testing.T) {
 	}
 }
 
-// A daemon runs in /, so a root named relatively would be a folder under /
-// rather than the one meant. Daemon mode refuses it by its key, whether it
-// is started in the background or by a supervisor, and nothing serves.
-func TestTheDaemonRefusesARelativeRoot(t *testing.T) {
+// A daemon runs in /, so a path in its file named relatively would be one
+// under / rather than the one meant. Daemon mode refuses each by its key,
+// whether it is started in the background or by a supervisor, and nothing
+// serves.
+func TestTheDaemonRefusesARelativePath(t *testing.T) {
 	r := newDaemonRig(t)
-	if err := os.WriteFile(filepath.Join(r.home, "server.toml"), []byte("[runs]\nroots = [\"work\"]\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	// The log quotes the reason, and the quotes inside it are escaped.
-	refused := func(said string) bool {
-		said = strings.ReplaceAll(said, `\"`, `"`)
-		return strings.Contains(said, `runs.roots: "work" is relative`) && strings.Contains(said, "absolute in daemon mode")
-	}
-	if out, errb, code := r.rota("serve", "start"); code != 1 || out != "" || !refused(errb) {
-		t.Fatalf("serve start with a relative root: exit %d %q %q", code, out, errb)
-	}
-	if out, errb, code := r.rota("serve", "start", "--foreground"); code != 1 || out != "" || errb != "" || !refused(r.log()) {
-		t.Fatalf("serve start --foreground with a relative root: exit %d %q %q\nlog:\n%s", code, out, errb, r.log())
-	}
-	if _, ok := holdwire.RunningDaemon(r.terminals); ok {
-		t.Fatal("a daemon serves with a relative root")
+	for _, c := range []struct{ key, file string }{
+		{`runs.roots: "work"`, "[runs]\nroots = [\"work\"]\n"},
+		{`tls.cert: "cert.pem"`, "[tls]\ncert = \"cert.pem\"\nkey = \"/abs/key.pem\"\n"},
+		{`tls.key: "key.pem"`, "[tls]\ncert = \"/abs/cert.pem\"\nkey = \"key.pem\"\n"},
+		{`auth.token_file: "token"`, "[auth]\ntoken_file = \"token\"\n"},
+		{`store.dir: "store"`, "[store]\ndir = \"store\"\n"},
+	} {
+		if err := os.WriteFile(filepath.Join(r.home, "server.toml"), []byte(c.file), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		// The log quotes the reason, and the quotes inside it are escaped.
+		refused := func(said string) bool {
+			said = strings.ReplaceAll(said, `\"`, `"`)
+			return strings.Contains(said, c.key+" is relative") && strings.Contains(said, "absolute in daemon mode")
+		}
+		if out, errb, code := r.rota("serve", "start"); code != 1 || out != "" || !refused(errb) {
+			t.Fatalf("serve start with %s: exit %d %q %q", c.key, code, out, errb)
+		}
+		if out, errb, code := r.rota("serve", "start", "--foreground"); code != 1 || out != "" || errb != "" || !refused(r.log()) {
+			t.Fatalf("serve start --foreground with %s: exit %d %q %q\nlog:\n%s", c.key, code, out, errb, r.log())
+		}
+		if _, ok := holdwire.RunningDaemon(r.terminals); ok {
+			t.Fatalf("a daemon serves with %s", c.key)
+		}
 	}
 }
 
@@ -240,4 +249,62 @@ func TestHoldersFollowAnUpgrade(t *testing.T) {
 	if c := hold(); c.Path != link {
 		t.Fatalf("with nothing left a holder is %s, want %s", c.Path, link)
 	}
+}
+
+// invokedAs is the path rota was started by, with its link kept: as typed,
+// or found on PATH. An argv[0] that is not this very binary — one a parent
+// made up, or a name PATH does not find — is not believed, and the
+// executable's own path is used.
+func TestInvokedAsKeepsTheLinkItWasStartedBy(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	was := os.Args[0]
+	t.Cleanup(func() { os.Args[0] = was })
+	bin := t.TempDir()
+	link := filepath.Join(bin, "rota-under-test")
+	if err := os.Symlink(self, link); err != nil {
+		t.Fatal(err)
+	}
+	other := filepath.Join(bin, "not-rota")
+	if err := os.WriteFile(other, []byte("not this binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin)
+	for _, c := range []struct{ arg0, want string }{
+		{link, link},                          // typed as a path
+		{"rota-under-test", link},             // found on PATH
+		{other, self},                         // a path, but to another file
+		{"not-rota", self},                    // found on PATH, but another file
+		{"nowhere-on-path", self},             // not found at all
+		{filepath.Join(bin, "missing"), self}, // a path to nothing
+	} {
+		os.Args[0] = c.arg0
+		if got, err := invokedAs(); err != nil || got != c.want {
+			t.Errorf("argv[0] %q: invokedAs is %q (%v), want %q", c.arg0, got, err, c.want)
+		}
+	}
+}
+
+// A daemon runs in /, so start hands it the person's Claude Code directory
+// by absolute path, as it does the store, when the environment names it
+// relatively: a session's CLI is then told the directory meant, not one
+// under /.
+func TestStartNamesTheClaudeDirectoryAbsolutely(t *testing.T) {
+	r := newDaemonRig(t)
+	parent := t.TempDir()
+	if err := os.Mkdir(filepath.Join(parent, "person-claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := r.cmd("serve", "start")
+	cmd.Dir = parent
+	cmd.Env = append(cmd.Env, "CLAUDE_CONFIG_DIR=person-claude", "PWD="+parent)
+	r.startWith(cmd)
+	p := r.attach(r.newSession("where"))
+	p.waitOut("ready 100x30")
+	p.send(0x2, []byte("env ROTA_CLAUDE_HOME\r"))
+	// The fake ends a line in CR LF, and the terminal turns its LF into
+	// another CR LF: the CR right after the path says the path ends there.
+	p.waitOut("env ROTA_CLAUDE_HOME=" + filepath.Join(parent, "person-claude") + "\r")
 }
