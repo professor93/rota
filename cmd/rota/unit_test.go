@@ -3,10 +3,46 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// standInSupervisor is every test's systemctl and launchctl: it runs
+// nothing. In a rota this binary runs as, it writes each call as a line to
+// the file ROTA_UNIT_RECORD names; anywhere else it refuses.
+func standInSupervisor(name string, args ...string) error {
+	if path := os.Getenv("ROTA_UNIT_RECORD"); path != "" {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		_, err = fmt.Fprintln(f, strings.Join(append([]string{name}, args...), " "))
+		return err
+	}
+	return fmt.Errorf("a test ran %s %s; recordUnits(t) watches the supervisor instead", name, strings.Join(args, " "))
+}
+
+// recordUnits has the supervisor answer with answer and writes down each
+// call, as its words joined by spaces, until the test ends.
+func recordUnits(t *testing.T, answer func(call string) error) *[]string {
+	t.Helper()
+	var calls []string
+	old := unitRun
+	t.Cleanup(func() { unitRun = old })
+	unitRun = func(name string, args ...string) error {
+		call := strings.Join(append([]string{name}, args...), " ")
+		calls = append(calls, call)
+		if answer != nil {
+			return answer(call)
+		}
+		return nil
+	}
+	return &calls
+}
 
 func TestTheUnitKeepsSessions(t *testing.T) {
 	env := []string{"HOME=/h", "PATH=/usr/bin:/bin"}
@@ -87,13 +123,22 @@ func TestAnotherStoreGetsAnotherUnit(t *testing.T) {
 	}
 	h := strings.TrimSuffix(strings.TrimPrefix(s, "rota-"), ".service")
 	sum := sha256.Sum256([]byte(other))
-	if h != hex.EncodeToString(sum[:])[:8] {
-		t.Fatalf("suffix %q is not hex(sha256(store))[:8]", h)
+	if want := hex.EncodeToString(sum[:])[:8]; h != want {
+		t.Fatalf("suffix %q is not hex(sha256(store))[:8], %q", h, want)
 	}
 	if l != "com.github.professor93.rota-"+h {
 		t.Fatalf("label %q does not share hash %q", l, h)
 	}
 	if s2, _ := unitName(filepath.Join(home, "other2")); s2 == s {
 		t.Fatal("two stores share a unit")
+	}
+	// A store named relatively is hashed by its absolute path: the same
+	// store from wherever it is named, and ~/.rota the default from home.
+	t.Chdir(home)
+	if s2, l2 := unitName("elsewhere"); s2 != s || l2 != l {
+		t.Fatalf("relative store: %s %s, want %s %s", s2, l2, s, l)
+	}
+	if s2, _ := unitName(".rota"); s2 != "rota.service" {
+		t.Fatalf("relative default store: %s", s2)
 	}
 }

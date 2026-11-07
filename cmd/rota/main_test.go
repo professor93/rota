@@ -35,6 +35,10 @@ func TestMain(m *testing.M) {
 	// And no provider call a test did not stand in for reaches the real one:
 	// every endpoint of every provider, whatever account a test makes.
 	offline()
+	// Nor is any system's supervisor: no systemctl or launchctl runs from
+	// here, nor from the rota this binary runs as, whose calls a test reads
+	// from the file ROTA_UNIT_RECORD names.
+	unitRun = standInSupervisor
 	// One test needs a real rota, in a process of its own, at a real
 	// terminal: sharing is about what happens between a window somebody is
 	// sitting at and the CLI under it, and nothing run inside `go test`
@@ -66,6 +70,9 @@ func TestMain(m *testing.M) {
 	os.Unsetenv("ROTA_ACCOUNT_ID")
 	os.Setenv("HOME", person)
 	os.Setenv("USERPROFILE", person)
+	// A unit is written under XDG_CONFIG_HOME when it is set: without it,
+	// under the HOME just made.
+	os.Unsetenv("XDG_CONFIG_HOME")
 	dir, err := os.MkdirTemp("", "rota-claude")
 	if err != nil {
 		panic(err)

@@ -70,6 +70,7 @@ Usage:
                                 that file; rota serve -h describes the three
   rota serve start|stop|status  this store's daemon, which keeps sessions
                                 running with no terminal open; see serve -h
+  rota serve install|uninstall  run that daemon under systemd or launchd
   rota version                  which rota this is
 
 The id is optional: leave it out and rota takes the first account in the
@@ -2179,8 +2180,9 @@ var serveGrace = 10 * time.Second
 func (c *cli) serve(args []string) (err error) {
 	// Some of serve's words are not a server at all: two print a block to
 	// paste into its file, one asks a server already running for a link,
-	// two are processes rota starts for itself, and three start, stop and
-	// ask after the store's daemon. They live under serve because that is
+	// two are processes rota starts for itself, three start, stop and ask
+	// after the store's daemon, and two hand it to the system's supervisor
+	// and take it back. They live under serve because that is
 	// what they are about, and they are matched before the flags because
 	// none of them is an address.
 	if len(args) > 0 {
@@ -2201,6 +2203,10 @@ func (c *cli) serve(args []string) (err error) {
 			return c.serveStop(args[1:])
 		case "status":
 			return c.serveStatus(args[1:])
+		case "install":
+			return c.serveInstall(args[1:])
+		case "uninstall":
+			return c.serveUninstall(args[1:])
 		}
 	}
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
