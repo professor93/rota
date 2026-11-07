@@ -13,6 +13,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -37,9 +39,14 @@ const (
 	dialPoll = 50 * time.Millisecond
 )
 
-// requestWait bounds one request. The daemon answers from memory and from
-// the store's records; nothing a client asks for here waits on a CLI.
-const requestWait = 30 * time.Second
+// requestWait bounds one request that the daemon answers from memory and
+// from the store's records. holderWait bounds the two that wait on a
+// holder: a create, which the daemon gives 30 seconds to answer, and a
+// send, which it gives 35 to type.
+const (
+	requestWait = 30 * time.Second
+	holderWait  = time.Minute
+)
 
 // maxBody bounds what is read of one answer: a listing of a few hundred
 // sessions is well under it.
@@ -62,6 +69,24 @@ func Dial(terminals string) (*Client, error) { return dial(terminals, dialWait) 
 // its own, such as a start waiting for the daemon it started. A held lock
 // whose socket does not accept at once is the daemon not answering, at once.
 func DialNow(terminals string) (*Client, error) { return dial(terminals, 0) }
+
+// Ensure is Dial, starting a daemon first where none runs: start is called
+// only when the lock is free, and the daemon it started is then dialled as
+// any other is. A held lock whose socket does not answer is Dial's error,
+// and start is never called: a daemon that is slow to answer is a daemon,
+// and starting another beside it would make two. started says start was
+// called and worked, whatever the dial after it said.
+func Ensure(terminals string, start func() error) (c *Client, started bool, err error) {
+	c, err = Dial(terminals)
+	if !errors.Is(err, ErrNoDaemon) {
+		return c, false, err
+	}
+	if err := start(); err != nil {
+		return nil, false, err
+	}
+	c, err = Dial(terminals)
+	return c, true, err
+}
 
 func dial(terminals string, wait time.Duration) (*Client, error) {
 	sock := holdwire.CtlSock(terminals)
@@ -91,7 +116,6 @@ func dial(terminals string, wait time.Duration) (*Client, error) {
 
 func newClient(sock string) *Client {
 	return &Client{sock: sock, http: &http.Client{
-		Timeout: requestWait,
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -107,7 +131,7 @@ func (c *Client) Health() error {
 	var doc struct {
 		OK bool `json:"ok"`
 	}
-	if err := c.do(http.MethodGet, "/v1/health", &doc); err != nil {
+	if err := c.do(http.MethodGet, "/v1/health", nil, &doc); err != nil {
 		return err
 	}
 	if !doc.OK {
@@ -120,15 +144,25 @@ func (c *Client) Health() error {
 // and still listed. Ended is when it stopped, and nil while it runs; Exit is
 // how its CLI ended, -1 for one that was interrupted, and nil while it runs.
 // Account, AccountLabel and Provider are empty for a session that is not an
-// account's CLI.
+// account's CLI. A command's --json writes it under the names its tags give.
 type Session struct {
-	ID, Name, Label, Kind, State, Status, Provider, AccountLabel, Cwd, Conversation string
-
-	Account, PID          int
-	Attachable, Resumable bool
-	Started               time.Time
-	Ended                 *time.Time
-	Exit                  *int
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	Label        string     `json:"label"`
+	Kind         string     `json:"kind"`
+	State        string     `json:"state"`
+	Status       string     `json:"status"`
+	Provider     string     `json:"provider"`
+	Account      int        `json:"account"`
+	AccountLabel string     `json:"account_label"`
+	Cwd          string     `json:"cwd"`
+	Conversation string     `json:"conversation"`
+	PID          int        `json:"pid"`
+	Attachable   bool       `json:"attachable"`
+	Resumable    bool       `json:"resumable"`
+	Started      time.Time  `json:"started"`
+	Ended        *time.Time `json:"ended_at"`
+	Exit         *int       `json:"exit"`
 }
 
 // session is a description document as the daemon writes it: ended a bool,
@@ -181,7 +215,7 @@ func (c *Client) List() ([]Session, error) {
 	var doc struct {
 		Terminals []session `json:"terminals"`
 	}
-	if err := c.do(http.MethodGet, "/v1/terminals", &doc); err != nil {
+	if err := c.do(http.MethodGet, "/v1/terminals", nil, &doc); err != nil {
 		return nil, err
 	}
 	out := make([]Session, 0, len(doc.Terminals))
@@ -191,27 +225,169 @@ func (c *Client) List() ([]Session, error) {
 	return out, nil
 }
 
+// Get is one session, running or stopped, by its whole id.
+func (c *Client) Get(id string) (Session, error) {
+	var doc session
+	if err := c.do(http.MethodGet, "/v1/terminals/"+url.PathEscape(id), nil, &doc); err != nil {
+		return Session{}, err
+	}
+	return doc.session(), nil
+}
+
+// Resolve finds the one session a person means by what they typed: its
+// whole id first, running or stopped; then an id that what they typed
+// begins, at least four characters of it; then a live session whose label
+// or name it is. More than one session at either of the last two is an
+// error that names their ids, so the person can choose.
+func (c *Client) Resolve(nameOrID string) (Session, error) {
+	all, err := c.List()
+	if err != nil {
+		return Session{}, err
+	}
+	for _, s := range all {
+		if s.ID == nameOrID {
+			return s, nil
+		}
+	}
+	var begun, named []Session
+	for _, s := range all {
+		if len(nameOrID) >= 4 && strings.HasPrefix(s.ID, nameOrID) {
+			begun = append(begun, s)
+		}
+		if s.State == "live" && nameOrID != "" && (s.Label == nameOrID || s.Name == nameOrID) {
+			named = append(named, s)
+		}
+	}
+	switch {
+	case len(begun) == 1:
+		return begun[0], nil
+	case len(begun) > 1:
+		return Session{}, fmt.Errorf("%q begins the ids of %d sessions, %s; give more of the id", nameOrID, len(begun), ids(begun))
+	case len(named) == 1:
+		return named[0], nil
+	case len(named) > 1:
+		return Session{}, fmt.Errorf("%d live sessions are called %q, %s; name one by its id", len(named), nameOrID, ids(named))
+	}
+	return Session{}, fmt.Errorf("no session is %q: it is not an id, the start of one, or the name of a live session", nameOrID)
+}
+
+// ids is the sessions' ids, in order, for a sentence.
+func ids(sessions []Session) string {
+	out := make([]string, 0, len(sessions))
+	for _, s := range sessions {
+		out = append(out, s.ID)
+	}
+	slices.Sort(out)
+	return strings.Join(out, " and ")
+}
+
+// Create is a session to start. Account 0 is the rotation's choice, made by
+// the daemon. Args go to the CLI after its own name. Cwd, Cols and Rows left
+// out are the daemon's defaults, and Label names the session.
+//
+// Env, when set, is the environment the session starts from in place of the
+// daemon's: the caller's own, from which the holder keeps whatever describes
+// another terminal. RemoteControl starts it with Claude Code's Remote
+// Control on, named RemoteControlName when that is set, for whichever
+// account the daemon chooses: the daemon turns the account's setting on, as
+// `rota run --remote-control` does, and adds Claude Code's flag. The daemon
+// takes both only over its control socket.
+type Create struct {
+	Account    int
+	Args       []string
+	Cwd        string
+	Cols, Rows uint16
+	Label      string
+	Env        []string
+
+	RemoteControl     bool
+	RemoteControlName string
+}
+
+// createDoc is a Create as the daemon reads it: remote_control is true, or
+// the name to give the session.
+type createDoc struct {
+	Account       int      `json:"account,omitempty"`
+	Args          []string `json:"args,omitempty"`
+	Cwd           string   `json:"cwd,omitempty"`
+	Cols          uint16   `json:"cols,omitempty"`
+	Rows          uint16   `json:"rows,omitempty"`
+	Label         string   `json:"label,omitempty"`
+	Env           []string `json:"env,omitempty"`
+	RemoteControl any      `json:"remote_control,omitempty"`
+}
+
+// Create starts a session and says what it is, once its holder is running
+// the CLI.
+func (c *Client) Create(r Create) (Session, error) {
+	in := createDoc{Account: r.Account, Args: r.Args, Cwd: r.Cwd, Cols: r.Cols, Rows: r.Rows, Label: r.Label, Env: r.Env}
+	switch {
+	case r.RemoteControlName != "":
+		in.RemoteControl = r.RemoteControlName
+	case r.RemoteControl:
+		in.RemoteControl = true
+	}
+	var doc session
+	if err := c.do(http.MethodPost, "/v1/terminals", in, &doc); err != nil {
+		return Session{}, err
+	}
+	return doc.session(), nil
+}
+
+// SendReq is a message to type into a held session: the text, then Enter.
+// Force types it even while the CLI waits on its person, where Enter may
+// approve something.
+type SendReq struct {
+	Text  string `json:"text"`
+	Force bool   `json:"force"`
+}
+
+// Send types a message into a held session once it is ready for one. A
+// refusal is a *Refusal whose Reason says why: waiting, keyboard, ended,
+// not_held or timeout.
+func (c *Client) Send(id string, r SendReq) error {
+	return c.do(http.MethodPost, "/v1/terminals/"+url.PathEscape(id)+"/send", r, nil)
+}
+
 // Stop ends a session: its CLI is hung up, and killed if it is still there
 // a few seconds later. It returns once the daemon has begun that, not once
 // the session has ended.
 func (c *Client) Stop(id string) error {
-	return c.do(http.MethodDelete, "/v1/terminals/"+url.PathEscape(id), nil)
+	return c.do(http.MethodDelete, "/v1/terminals/"+url.PathEscape(id), nil, nil)
 }
 
-// refusal is the daemon saying no, in its own words.
-type refusal struct {
-	status int
-	msg    string
+// Refusal is the daemon saying no, in its own words: the status it answered
+// with, the reason a program can act on where it gave one, and the sentence
+// for a person, which is its Error.
+type Refusal struct {
+	Status          int
+	Reason, Message string
 }
 
-func (r *refusal) Error() string { return r.msg }
+func (r *Refusal) Error() string { return r.Message }
 
-// do makes one request and decodes the answer into out, which may be nil.
-// An answer that is not a success is the daemon's own message.
-func (c *Client) do(method, path string, out any) error {
-	req, err := http.NewRequest(method, "http://rota"+path, nil)
+// do makes one request, with in as its JSON body when it is not nil, and
+// decodes the answer into out, which may be nil. An answer that is not a
+// success is a *Refusal. A request with a body is a create or a send, which
+// wait on a holder, so it is given holderWait rather than requestWait.
+func (c *Client) do(method, path string, in, out any) error {
+	var body io.Reader
+	wait := requestWait
+	if in != nil {
+		raw, err := json.Marshal(in)
+		if err != nil {
+			return err
+		}
+		body, wait = bytes.NewReader(raw), holderWait
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), wait)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, method, "http://rota"+path, body)
 	if err != nil {
 		return err
+	}
+	if in != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -224,12 +400,13 @@ func (c *Client) do(method, path string, out any) error {
 	}
 	if resp.StatusCode/100 != 2 {
 		var e struct {
-			Error string `json:"error"`
+			Error  string `json:"error"`
+			Reason string `json:"reason"`
 		}
 		if json.Unmarshal(raw, &e) != nil || strings.TrimSpace(e.Error) == "" {
 			e.Error = fmt.Sprintf("the rota daemon answered %s to %s %s", resp.Status, method, path)
 		}
-		return &refusal{status: resp.StatusCode, msg: e.Error}
+		return &Refusal{Status: resp.StatusCode, Reason: e.Reason, Message: e.Error}
 	}
 	if out == nil {
 		return nil

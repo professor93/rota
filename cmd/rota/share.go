@@ -82,15 +82,18 @@ const shareMaxPath = 100
 /* ------------------------------------------------------- what was asked for --- */
 
 // shareAsk is what --share asked for: whether at all, whether the page may
-// type, and what to call the terminal.
+// type, and what to call the terminal. detach is --detach, which asks for a
+// terminal the daemon holds instead, and is lifted out here for the same
+// reasons; --label names that one too.
 type shareAsk struct {
-	on    bool
-	mode  string
-	label string
+	on     bool
+	mode   string
+	label  string
+	detach bool
 }
 
-// takeShareFlags lifts --share and --label out of what was typed, and hands
-// back the rest untouched.
+// takeShareFlags lifts --share, --detach and --label out of what was typed,
+// and hands back the rest untouched.
 //
 // It is done here rather than in a flag set because the arguments around it
 // are not rota's: `rota run 2 -- --share` is a CLI's own flag and must
@@ -119,6 +122,15 @@ func takeShareFlags(args []string) ([]string, shareAsk, error) {
 			default:
 				return nil, ask, usageErr("%s", shareBadMode)
 			}
+			continue
+		case "detach":
+			if !strings.HasPrefix(name, "-") {
+				break
+			}
+			if hasValue {
+				return nil, ask, usageErr("--detach takes no value")
+			}
+			ask.detach = true
 			continue
 		case "label":
 			if !strings.HasPrefix(name, "-") {
