@@ -344,7 +344,7 @@ Held sessions run on Linux and macOS:
 | `--config <path>` | the file to read the rest of this from (default `<store dir>/server.toml`) |
 | `rota serve stop` | stop the daemon; every session it holds goes on running, for the next daemon to take up. Refused, with or without `--all`, inside a held session |
 | `--all` | end every session as well, after asking `stop the rota daemon and end N sessions? [y/N]`; with no daemon running, end the sessions its holders still hold |
-| `--yes` | with `--all`, end them without asking; off a terminal `--all` needs it |
+| `--yes` | with `--all`, end them without asking; off a terminal `--all` needs it, and without `--all` it is a usage error |
 | `rota serve status` | whether a daemon runs, its pid, version, control socket and port, and how many sessions are running and stopped; `--json` for the same as a document. Exits `0` when a daemon runs and `3` when none does |
 | `rota serve hold` | internal: one held session's process, started by the daemon with its request on standard input; refuses a terminal |
 
@@ -771,9 +771,12 @@ the two differ like this:
 
 **Starting.** `rota serve start` runs `rota serve start --foreground` in a
 session of its own, in `/`, with its standard streams on `/dev/null` and
-`ROTA_HOME` set to the store's absolute path, so a store named relatively
-is still the one meant. It reads the configuration first, as the daemon
-will, so a file the daemon would refuse is refused at the terminal. Then it
+`ROTA_HOME` set to the store's absolute path, and `CLAUDE_CONFIG_DIR` and
+`ROTA_CLAUDE_HOME` made absolute when they name a directory relatively, so a
+store or a Claude Code directory named relatively is still the one meant. It reads the configuration first, as the daemon
+will, so a configuration the daemon would refuse is refused at the terminal;
+a certificate or token file it names is opened by the daemon alone, and one
+it cannot open is in the log lines a failed start quotes. Then it
 waits up to ten seconds for the daemon to answer on its control socket and
 says
 
@@ -793,9 +796,13 @@ running on its store, as one restarted would.
 A daemon serves the store it is started for, which is the one `serve stop`
 and `serve status` look at, so a `server.toml` whose `[store] dir` names
 another store is refused; start it with `ROTA_HOME` set to that one instead.
-A daemon runs in `/`, so a relative `[runs] roots` entry would name a folder
-under `/`: in daemon mode one is refused, *runs.roots: "work" is relative; a
-daemon runs in /, so every root must be absolute in daemon mode*.
+A daemon runs in `/`, so a path its file names relatively would be one
+under `/`: in daemon mode a relative `runs.roots`, `tls.cert`, `tls.key`,
+`auth.token_file` or `store.dir` is refused by its key, *runs.roots: "work"
+is relative; a daemon runs in /, so every path in its file must be absolute
+in daemon mode* (`log_file` is refused relative everywhere). The warnings it
+logs for a port name those keys, `runs.roots` and `runs.allow_dangerous`,
+where foreground serve names its flags.
 
 The holders it starts are `rota serve hold` from the path rota was started
 by — links kept as typed, found on `PATH` as the shell found it — resolved

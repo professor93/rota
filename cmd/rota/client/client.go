@@ -77,7 +77,13 @@ func dial(terminals string, wait time.Duration) (*Client, error) {
 			return newClient(sock), nil
 		}
 		if !time.Now().Before(deadline) {
-			return nil, fmt.Errorf("the rota daemon (pid %d) is not answering on %s", d.PID, sock)
+			// A daemon.pid that names no process this rota can check names
+			// nobody, rather than pid 0.
+			who := "the rota daemon"
+			if d.PID != 0 {
+				who = fmt.Sprintf("the rota daemon (pid %d)", d.PID)
+			}
+			return nil, fmt.Errorf("%s is not answering on %s", who, sock)
 		}
 		time.Sleep(dialPoll)
 	}

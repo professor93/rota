@@ -2359,7 +2359,7 @@ func (c *cli) serve(args []string) (err error) {
 		// agents this server starts are local processes with a shell.
 		say("warning: --token is visible to every process on this machine; put it in ROTA_TOKEN instead")
 	}
-	for _, note := range serveNotes(&opts, listener) {
+	for _, note := range serveNotes(&opts, listener, false) {
 		say(note)
 	}
 	server := newHTTPServer(listener.Addr, srv.Handler(), logger)
@@ -2403,11 +2403,18 @@ func (c *cli) serve(args []string) (err error) {
 // starts listening on a port: every warning about who can reach it and what
 // they may do, and every group of routes that is off. Foreground serve says
 // these on stderr, after the --token warning only it can give; a daemon
-// that opens a port puts them in its log.
-func serveNotes(opts *api.Options, listener api.Listener) []string {
+// that opens a port puts them in its log, naming the file's keys where
+// foreground serve names its flags, since a daemon has no such flags.
+func serveNotes(opts *api.Options, listener api.Listener, daemon bool) []string {
+	named := func(flag, key string) string {
+		if daemon {
+			return key
+		}
+		return flag
+	}
 	var out []string
 	if len(opts.Roots) == 0 {
-		out = append(out, "warning: no --root given, so a caller may name any directory on this machine")
+		out = append(out, "warning: no "+named("--root given", "runs.roots set")+", so a caller may name any directory on this machine")
 	}
 	loopback := strings.HasPrefix(listener.Addr, "127.0.0.1") || strings.HasPrefix(listener.Addr, "localhost")
 	if listener.Cert == "" && !loopback {
@@ -2420,10 +2427,11 @@ func serveNotes(opts *api.Options, listener api.Listener) []string {
 		}
 	}
 	if opts.AllowDangerous {
-		out = append(out, "warning: --allow-dangerous is on; callers may bypass every permission check")
+		out = append(out, "warning: "+named("--allow-dangerous", "runs.allow_dangerous")+" is on; callers may bypass every permission check")
 	}
 	if opts.AllowRawFlags {
-		out = append(out, "warning: --allow-raw-flags is on; a caller can pass any vendor flag, which undoes --root and --allow-dangerous")
+		out = append(out, "warning: "+named("--allow-raw-flags", "runs.allow_raw_flags")+" is on; a caller can pass any vendor flag, which undoes "+
+			named("--root", "runs.roots")+" and "+named("--allow-dangerous", "runs.allow_dangerous"))
 	}
 	if !opts.Routes.Playground {
 		out = append(out, "routes: the playground and the version at / are off")
