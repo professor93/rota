@@ -194,6 +194,27 @@ func TestTheDaemonClaimIsExclusive(t *testing.T) {
 	}
 }
 
+// A server says whether it holds the daemon claim, and on which store: for
+// its own terminals directory while it runs, for no other directory, and
+// for none once it has stopped. A server without HoldCommand holds none.
+func TestHoldsDaemonIsTheServersOwnClaim(t *testing.T) {
+	p := withHeld(t, nil)
+	if !p.api.HoldsDaemon(p.terminals()) {
+		t.Fatal("a daemon does not say it holds its own store")
+	}
+	if p.api.HoldsDaemon(t.TempDir()) {
+		t.Fatal("a daemon says it holds another directory")
+	}
+	p.api.Stop()
+	if p.api.HoldsDaemon(p.terminals()) {
+		t.Fatal("a daemon that has stopped still says it holds its store")
+	}
+	plain := withTerminals(t)
+	if plain.api.HoldsDaemon(plain.terminals()) {
+		t.Fatal("a server without HoldCommand says it holds the daemon claim")
+	}
+}
+
 // Natural by default: a server without HoldCommand runs its terminals itself
 // as it always did, claims nothing, and describes nothing new.
 func TestWithoutHoldCommandNothingChanges(t *testing.T) {

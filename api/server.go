@@ -22,6 +22,7 @@ import (
 	"os/exec"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
@@ -263,6 +264,9 @@ type Server struct {
 	// otherwise.
 	terminals string
 	unclaim   func()
+	// claimed is the daemon claim being held: set by New with unclaim, and
+	// cleared by Stop just before it lets go (HoldsDaemon).
+	claimed atomic.Bool
 	// Who may ask for what: the users and tokens the configuration named,
 	// checked once here, and the two tables of live credentials a page
 	// hands out. All of it is read-only after New but the two tables, which
@@ -401,8 +405,8 @@ func checkUsers(in []User) ([]user, error) {
 		if seen[u.Name] {
 			return nil, fmt.Errorf("api: %s: there is already a user called %q", at, u.Name)
 		}
-		if u.Name == localName {
-			return nil, fmt.Errorf("api: %w", reservedUser(at))
+		if err := ReservedName(u.Name); err != nil {
+			return nil, fmt.Errorf("api: %s: %w", at, err)
 		}
 		seen[u.Name] = true
 		role, err := parseRole(string(u.Role))
@@ -428,6 +432,9 @@ func checkTokens(in []TokenPrincipal) ([]token, error) {
 		}
 		if seen[t.Name] {
 			return nil, fmt.Errorf("api: %s: there is already a token called %q", at, t.Name)
+		}
+		if err := ReservedName(t.Name); err != nil {
+			return nil, fmt.Errorf("api: %s: %w", at, err)
 		}
 		seen[t.Name] = true
 		role, err := parseRole(string(t.Role))
@@ -524,6 +531,7 @@ func (s *Server) Stop() {
 		}
 	}
 	if s.unclaim != nil {
+		s.claimed.Store(false)
 		s.unclaim()
 	}
 }

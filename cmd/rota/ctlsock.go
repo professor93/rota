@@ -10,8 +10,9 @@ import (
 // daemon's API for this machine's own user. It serves every route there is,
 // the terminals and their send included, to one fixed principal, local, and
 // it reads no credential at all. Its authorization is the socket's own
-// permissions — 0600, in a directory that is 0700 — so whoever can connect is
-// the user the daemon runs as, and nobody else can.
+// permissions — 0600, in a directory that is 0700 — and the kernel's word on
+// who connected: a connection from any user but the daemon's is closed before
+// it is served.
 //
 // One kind of caller is that user and still may only watch: a process
 // running inside a held session, which is the agent in it or something the

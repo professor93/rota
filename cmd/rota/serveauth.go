@@ -103,6 +103,11 @@ func (c *cli) servePasswd(args []string) error {
 		return err
 	}
 	name := rest[0]
+	// Before the password is asked for: a block the server would refuse is
+	// not worth typing one for.
+	if err := api.ReservedName(name); err != nil {
+		return usageErr("%v", err)
+	}
 	pw, err := c.askPassword()
 	if err != nil {
 		return err
@@ -188,6 +193,9 @@ func (c *cli) serveToken(args []string) error {
 	}
 	if err := checkRole(*role); err != nil {
 		return err
+	}
+	if err := api.ReservedName(rest[0]); err != nil {
+		return usageErr("%v", err)
 	}
 	raw := make([]byte, 32)
 	if _, err := rand.Read(raw); err != nil {

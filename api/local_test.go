@@ -182,23 +182,34 @@ func TestLocalWatchCannotChange(t *testing.T) {
 
 // The name local is the control socket's own principal, and the person it
 // types as when nothing else is said. A user called local would be that
-// person too, and its log lines would read as the socket's, so no user may
-// have that name — in the file, and in Options for whoever builds a server
-// without one.
-func TestNoUserMayBeCalledLocal(t *testing.T) {
-	want := `[[users]] "local": the name "local" is reserved for the control socket's own principal; give this user another`
-	body := "[[users]]\nname = \"local\"\nrole = \"control\"\npassword = \"" + goodHash() + "\"\n"
-	if _, err := LoadConfig(write(t, body)); err == nil || !strings.HasSuffix(err.Error(), ": "+want) {
-		t.Fatalf("a user called local in the file answers %v, want %q", err, want)
+// person too, and a token called local would read as the socket wherever a
+// name is shown — who holds a keyboard, and every audit line — so neither may
+// have that name: in the file, and in Options for whoever builds a server
+// without one. ReservedName is the one sentence for all of them.
+func TestNoUserOrTokenMayBeCalledLocal(t *testing.T) {
+	const want = `the name "local" is reserved for the control socket's own principal; choose another`
+	if err := ReservedName("local"); err == nil || err.Error() != want {
+		t.Fatalf("ReservedName(local) is %v, want %q", err, want)
+	}
+	if err := ReservedName("alice"); err != nil {
+		t.Fatalf("ReservedName(alice) is %v", err)
+	}
+	user := "[[users]]\nname = \"local\"\nrole = \"control\"\npassword = \"" + goodHash() + "\"\n"
+	token := "[[tokens]]\nname = \"local\"\nrole = \"watch\"\nsha256 = \"" + strings.Repeat("ab", 32) + "\"\n"
+	for _, c := range []struct{ table, body string }{{"users", user}, {"tokens", token}} {
+		at := `[[` + c.table + `]] "local": `
+		if _, err := LoadConfig(write(t, c.body)); err == nil || !strings.HasSuffix(err.Error(), ": "+at+want) {
+			t.Errorf("a %s entry called local in the file answers %v, want %q", c.table, err, at+want)
+		}
 	}
 	_, err := New(Options{Token: "x", Dir: t.TempDir(), RefreshEvery: -1,
 		Users: []User{{Name: "local", Role: RoleWatch, Password: goodHash()}}})
-	if err == nil || err.Error() != "api: "+want {
-		t.Fatalf("a user called local in Options answers %v, want %q", err, "api: "+want)
+	if want := `api: [[users]] "local": ` + want; err == nil || err.Error() != want {
+		t.Errorf("a user called local in Options answers %v, want %q", err, want)
 	}
-	// A token is never a person, and may be called anything.
-	body = "[[tokens]]\nname = \"local\"\nrole = \"watch\"\nsha256 = \"" + strings.Repeat("ab", 32) + "\"\n"
-	if _, err := LoadConfig(write(t, body)); err != nil {
-		t.Fatalf("a token called local is refused: %v", err)
+	_, err = New(Options{Token: "x", Dir: t.TempDir(), RefreshEvery: -1,
+		Tokens: []TokenPrincipal{{Name: "local", Role: RoleWatch, SHA256: strings.Repeat("ab", 32)}}})
+	if want := `api: [[tokens]] "local": ` + want; err == nil || err.Error() != want {
+		t.Errorf("a token called local in Options answers %v, want %q", err, want)
 	}
 }
