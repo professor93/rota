@@ -123,7 +123,11 @@ func (s *Store) Run(ctx context.Context, a *rota.Account, spec rota.Spec, lim *r
 		return nil, err
 	}
 	defer release()
-	return rota.Run(ctx, a, s.Home(a), cmd, spec, lim, events)
+	res, err := rota.Run(ctx, a, s.Home(a), cmd, spec, lim, events)
+	if until, ok := s.settleCredit(a, res); ok {
+		a.NoCreditUntil = until
+	}
+	return res, err
 }
 
 // Start is Run for a run that stays open: the CLI keeps its standard input
@@ -149,10 +153,66 @@ func (s *Store) Start(ctx context.Context, a *rota.Account, spec rota.Spec, lim 
 	}
 	handed = true
 	go func() {
-		<-sess.Done()
+		// The account in hand is the caller's while the session runs, so
+		// what the session's end says about its credit goes to the store
+		// alone; the next run reads it from there.
+		res, _ := sess.Wait()
+		_, _ = s.settleCredit(a, res)
 		release()
 	}()
 	return sess, nil
+}
+
+// CreditPause is how long an account on an API key counts as out of credit
+// once a run on it ended with the API refusing it for want of credit (see
+// rota.Result.OutOfCredit): the rotation passes it by until then. An hour,
+// because the credit is back only when somebody buys more, which nothing
+// here can see, and a key tried again too soon fails a run that another
+// account would have answered. A run on it by id that is answered, or the
+// key pasted again, ends it sooner. A variable, like lib's ExpiryBuffer: how
+// long a deployment waits is its own call.
+var CreditPause = time.Hour
+
+// settleCredit writes down what a run that has ended says about its key's
+// credit: out of it, for CreditPause, or back, when an account thought to be
+// out of it was answered. It returns the value written and whether one was.
+//
+// Only a key is judged, and only once its run is over, never in the middle of
+// one. The store's lock went when the run began, so this takes it again for
+// the one write, on a store of its own, and changes nothing else; a run that
+// has nothing to say about credit — every run on a login, and almost every
+// run on a key — takes no lock and writes nothing.
+func (s *Store) settleCredit(a *rota.Account, res *rota.Result) (int64, bool) {
+	if !a.APIKey() || res == nil {
+		return 0, false
+	}
+	var until int64
+	switch {
+	case res.OutOfCredit():
+		until = rota.Now().Add(CreditPause).UnixMilli()
+	case a.NoCreditUntil != 0 && !res.IsError && res.ExitCode == 0:
+		until = 0
+	default:
+		return 0, false
+	}
+	fresh, err := NewStore(s.backend)
+	if err != nil {
+		s.say(fmt.Sprintf("%s: could not record what its run said about its credit: %v", a, err))
+		return 0, false
+	}
+	defer fresh.Close()
+	// The same account, not merely the same id: ids are never reused, but a
+	// store an application keeps may be anything.
+	b := fresh.Find(a.ID)
+	if b == nil || b.UUID != a.UUID || !b.APIKey() {
+		return 0, false
+	}
+	b.NoCreditUntil = until
+	if err := fresh.Save(); err != nil {
+		s.say(fmt.Sprintf("%s: could not record what its run said about its credit: %v", a, err))
+		return 0, false
+	}
+	return until, true
 }
 
 // ready does everything that has to happen before an account's CLI starts,

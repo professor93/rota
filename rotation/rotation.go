@@ -35,8 +35,14 @@ import (
 const DefaultThreshold = 100
 
 // ErrNone means a request named no account and none could be picked — the
-// rotation is empty, or everything in it is spent or needs re-auth.
+// rotation is empty, or everything in it is spent, out of credit or needs
+// re-auth.
 var ErrNone = errors.New("no account available in the rotation")
+
+// errExhausted is ErrNone for a rotation with accounts in it and none of them
+// available.
+var errExhausted = fmt.Errorf("%w: every account in the rotation is spent or needs re-auth, or is an API key "+
+	"out of credit; run one by id, raise its threshold, or add an account", ErrNone)
 
 // Cutoff is the usage percentage at which this account stops being picked.
 // An unset or nonsensical threshold means all of it.
@@ -55,7 +61,14 @@ func Spent(a *rota.Account) bool { return a.Percent() >= float64(Cutoff(a)) }
 func InQueue(a *rota.Account) bool { return a.Order >= 1 }
 
 // Available reports whether the rotation may pick this account right now.
-func Available(a *rota.Account) bool { return InQueue(a) && !a.Dead && !Spent(a) }
+//
+// An account on an API key has no usage to read and so is never spent; what
+// takes it out instead is a run that found its credit gone, for as long as
+// the store said that verdict stands (rota.Account.OutOfCredit). It is never
+// taken out in the middle of a run: only a run that has ended says so.
+func Available(a *rota.Account) bool {
+	return InQueue(a) && !a.Dead && !Spent(a) && !a.OutOfCredit()
+}
 
 // orderKey sorts accounts the way both the rotation and every listing want
 // them: the queue in its own order, then whatever was left out of it, and
@@ -109,8 +122,7 @@ func Pick(accounts []*rota.Account) (*rota.Account, error) {
 			return a, nil
 		}
 	}
-	return nil, fmt.Errorf("%w: every account in the rotation is spent or needs re-auth; "+
-		"run one by id, raise its threshold, or add an account", ErrNone)
+	return nil, errExhausted
 }
 
 // Next is the place at the end of the queue.
@@ -178,8 +190,7 @@ func pickIdle(st *store.Store) (*rota.Account, error) {
 		return nil, fmt.Errorf("%w: every account that could answer is already running; "+
 			"these providers keep their own credential file and cannot run twice at once, so wait or add an account", ErrNone)
 	}
-	return nil, fmt.Errorf("%w: every account in the rotation is spent or needs re-auth; "+
-		"run one by id, raise its threshold, or add an account", ErrNone)
+	return nil, errExhausted
 }
 
 // Backfill puts every account of a store written before rotation existed

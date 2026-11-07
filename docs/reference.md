@@ -603,7 +603,7 @@ see *Who is asking, and what they may do*.
 | `POST` | `/v1/session` | open | `{"name":"…","password":"…"}` → the same, and the session cookie |
 | `DELETE` | `/v1/session` | open | end this session |
 | `GET` | `/v1/schema` | watch | every provider, its models, efforts, defaults and fields |
-| `GET` | `/v1/accounts` | watch | accounts in rotation order, with usage, status, order, threshold, `long_until`, `login_until`, `remote_control` and when limits were read (`?refresh=1`); `default` names the one a bare run would use |
+| `GET` | `/v1/accounts` | watch | accounts in rotation order, with usage, status, order, threshold, `long_until`, `login_until`, `no_credit_until`, `remote_control` and when limits were read (`?refresh=1`); `default` names the one a bare run would use |
 | `GET` | `/v1/accounts/{id}/schema` | watch | the models *that* account may actually use |
 | `POST` | `/v1/run` | control | run a prompt on whichever account the rotation picks |
 | `POST` | `/v1/accounts/{id}/run` | control | run a prompt on that account |
@@ -2719,7 +2719,9 @@ Chinese, Japanese, Korean and most emoji, a flag or a family of several
 characters among them, so a name in them lines up too.
 
 A spent unscoped window shows as `limited`; a dead credential as `re-auth
-needed`. Model-scoped windows (a separate weekly Fable budget, say) are shown
+needed`; an API key a run found out of credit as `out of credit` with how long
+the rotation still passes it by, `limited` in JSON (see *An account on an API
+key*). Model-scoped windows (a separate weekly Fable budget, say) are shown
 but never count as spent, because nobody knows which model a session will
 use.
 
@@ -2859,6 +2861,23 @@ the queue like any other account. In the queue it is unmetered — no usage is
 ever read for it, so it is never spent — and USAGE says `api key` rather than a
 percentage nobody measured.
 
+**When its credit runs out**, the API refuses every request with `Your credit
+balance is too low to access the Anthropic API`, before any work and without
+charging, and Claude Code ends the run on it: `rota run` prints Claude Code's
+`Credit balance is too low` and exits as it did, and the server answers `502`
+with it, as for any failed run. rota writes down what that run said once it
+has ended, never in the middle of one: for an hour the account is **out of
+credit**, and the rotation passes it by, as it passes by a spent window.
+`rota list` shows `out of credit (59m)` under STATUS and a note saying what
+ends it; JSON says `"status":"limited"` with `no_credit_until`. It still runs
+by id. The hour is over early when a run on it is answered — buy credit in the
+Console, under Billing, then `rota 7 "..."` — or when the key is pasted again
+with `rota login --key`. After the hour it is tried again like any account,
+and a run still refused starts another hour. Only a run rota reads the end of
+counts: a question, `--input`, and both over HTTP. A run handed to the CLI's
+own terminal — `rota run 7` with no prompt, `-i`, `--`, `--share`, the web
+terminal — ends where rota cannot see it, and says nothing about the credit.
+
 It runs like any claude account, in its own home, with your settings and
 conversations as the `--sessions` setting says, its own daemon, hermetic and
 headless runs included — on the environment route, with the key in
@@ -2941,7 +2960,13 @@ five seconds, or the context's own deadline when that is sooner) and named by
 a fingerprint of the key; only the API's `401`/`403` is an error, and any other
 failure to ask comes back as `unverified` beside the token. `NewAccount` makes
 it an account whose `APIKey()` is true, which `Usage` never asks about and
-which `Stage` launches with `ANTHROPIC_API_KEY` alone. A `claude setup-token`
+which `Stage` launches with `ANTHROPIC_API_KEY` alone. `Result.OutOfCredit()`
+says a run on it ended because its credit is gone, and `Account.NoCreditUntil`
+is where an application keeps until when that verdict stands:
+`Account.OutOfCredit()` reads it, `Status()` is `limited` meanwhile, and a key
+pasted again clears it. `rotation.Available` passes such an account by, and
+`store.Run` and `store.Start` set it for `store.CreditPause`, an hour, when
+the run ends that way, and clear it when a run on it is answered. A `claude setup-token`
 token (`"setup-token"`) comes back as the one `BeginLong` would have obtained,
 good for a year from now, for `Account.ApplyLong` on whichever account the
 caller knows it belongs to. `PasteLong(provider, s)` takes that token alone and

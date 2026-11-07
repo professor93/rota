@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/store"
@@ -93,6 +94,36 @@ func TestPickReportsWhenTheRotationIsEmptyOrExhausted(t *testing.T) {
 	}
 	if _, err := Pick([]*rota.Account{acct(1, 1, 100), acct(2, 2, 100)}); !errors.Is(err, ErrNone) {
 		t.Fatalf("everything spent: %v", err)
+	}
+}
+
+// An API key a run found out of credit is passed by for as long as that
+// verdict stands, and picked again once it is over; by id it still runs.
+func TestPickPassesByAKeyOutOfCredit(t *testing.T) {
+	broke := acct(1, 1, -1)
+	broke.Credential = "apikey"
+	broke.NoCreditUntil = time.Now().Add(time.Hour).UnixMilli()
+	list := []*rota.Account{broke, acct(2, 2, 10)}
+	if got, err := Pick(list); err != nil || got.ID != 2 {
+		t.Fatalf("got %v, %v", got, err)
+	}
+	if Available(broke) {
+		t.Fatal("an account out of credit is not available")
+	}
+	_, err := Pick([]*rota.Account{broke})
+	if !errors.Is(err, ErrNone) || !strings.Contains(err.Error(), "spent or needs re-auth") ||
+		!strings.Contains(err.Error(), "out of credit") {
+		t.Fatalf("the refusal names credit too: %v", err)
+	}
+	s := openTemp(t)
+	s.Accounts = []*rota.Account{broke}
+	if got, err := Choose(context.Background(), s, 1); err != nil || got != broke {
+		t.Fatalf("by id it runs: %v %v", got, err)
+	}
+
+	broke.NoCreditUntil = time.Now().Add(-time.Second).UnixMilli()
+	if got, err := Pick(list); err != nil || got.ID != 1 {
+		t.Fatalf("once the verdict is over it is first again: %v, %v", got, err)
 	}
 }
 

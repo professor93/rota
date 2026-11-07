@@ -4,9 +4,11 @@ package rota
 type Status string
 
 const (
-	StatusOK      Status = "ok"
-	StatusLimited Status = "limited" // an unscoped window is spent and has not reset
-	StatusReauth  Status = "reauth"  // the credential is dead; only a login helps
+	StatusOK Status = "ok"
+	// StatusLimited: an unscoped window is spent and has not reset, or the
+	// account's API key is out of credit (OutOfCredit).
+	StatusLimited Status = "limited"
+	StatusReauth  Status = "reauth" // the credential is dead; only a login helps
 )
 
 // Status reports the account's health from what is already known; it does
@@ -15,7 +17,7 @@ func (a *Account) Status() Status {
 	switch {
 	case a.Dead:
 		return StatusReauth
-	case a.Quota.blocked():
+	case a.Quota.blocked(), a.OutOfCredit():
 		return StatusLimited
 	}
 	return StatusOK
