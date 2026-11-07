@@ -291,6 +291,34 @@ const screen = () => fakes[fakes.length - 1];
   third.feed({ type: 'hello', id: 't-live', kind: 'account', cols: 100, rows: 30, offset: 9000,
     holder: null, you: { name: 'driver', role: 'control', conn: 'c-3' }, viewers: [] });
 
+  // 13b. a held session's viewer that fell behind is repainted: the screen
+  // after a repaint frame is drawn and is not output, the offset goes on
+  // from the repaint's, and a gap mid-stream moves it to the gap's end. A
+  // 1013 after that comes back from exactly there.
+  third.feedBytes('abc');
+  assert(tp.termOffset === 9003, 'output moves the offset on: ' + tp.termOffset);
+  third.feed({ type: 'repaint', offset: 20000, cols: 100, rows: 30 });
+  third.feedBytes('SCREEN');
+  assert(tp.termOffset === 20000, "a repaint's screen stands for its offset and is not output: " + tp.termOffset);
+  assert(screen().text().endsWith('SCREEN'), 'and it is drawn: ' + JSON.stringify(screen().text().slice(-20)));
+  third.feedBytes('def');
+  assert(tp.termOffset === 20003, 'output after it adds up from there: ' + tp.termOffset);
+  third.feed({ type: 'gap', from: 20003, to: 20100, bytes: 97 });
+  assert(tp.termOffset === 20100, "a gap mid-stream moves the offset to its end: " + tp.termOffset);
+  const before13b = sockets.length;
+  third.close(1013);
+  assert(sockets.length === before13b + 1, 'a held session closing with 1013 is reattached to at once');
+  const fourth = lastSock();
+  assert(fourth.url === 'ws://127.0.0.1:8787/v1/terminals/t-live/ws?since=20100',
+    'from the offset this page was actually shown: ' + fourth.url);
+  fourth.open();
+  fourth.feed({ type: 'hello', id: 't-live', kind: 'account', cols: 100, rows: 30, offset: 30000, repaint: true,
+    holder: null, you: { name: 'driver', role: 'control', conn: 'c-3b' }, viewers: [] });
+  fourth.feedBytes('SCREEN');
+  assert(tp.termOffset === 30000, "a hello's screen is not output either: " + tp.termOffset);
+  fourth.feedBytes('gh');
+  assert(tp.termOffset === 30002, 'and what follows it is: ' + tp.termOffset);
+
   // 14. the login inside the terminal, and the hour at which it is a warning.
   assert(/lapses in \d+m/.test(info()), 'the panel says when the login inside lapses: ' + info());
   assert(findAll(nodes['#tinfo'], e => e.classList && e.classList.contains('warn')).length === 1,
@@ -303,8 +331,8 @@ const screen = () => fakes[fakes.length - 1];
 
   // 15. choosing another terminal says goodbye to this one, cleanly, once.
   await tp.termSelect('t-done');
-  assert(JSON.stringify(third.closes) === '[1000]',
-    'leaving a terminal says goodbye once: ' + JSON.stringify(third.closes));
+  assert(JSON.stringify(fourth.closes) === '[1000]',
+    'leaving a terminal says goodbye once: ' + JSON.stringify(fourth.closes));
   assert(screen() !== fakes[0] && fakes.some(f => f.disposed), 'and the emulator goes with it');
 
   // 16. the CLI ending shows the code and stops all of it.

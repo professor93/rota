@@ -37,6 +37,8 @@ import (
 //	FAKE_HOLDER_SCREEN=none       answer a ScreenAsk with no screen
 //	FAKE_HOLDER_SCREEN=empty      a screen with nothing to paint
 //	FAKE_HOLDER_SCREEN_AT=<n>     a screen standing for offset n
+//	FAKE_HOLDER_SCREEN_BEHIND=<n> a screen standing for n bytes before the
+//	                              end, as an emulator that is behind
 //	FAKE_HOLDER_SCREEN_AHEAD=<t>  print t, answer for the end, send t after
 //	FAKE_HOLDER_REFUSE=<text>     refuse keystrokes holding that text
 //	FAKE_HOLDER_DROP_AT=<n>       drop the link once, after count's line n
@@ -52,11 +54,14 @@ import (
 //	FAKE_HOLDER_MAJOR=<n>         speak protocol n alone, and record it
 //	FAKE_HOLDER_VERSION=<v>       the rota version meta.json names
 //	FAKE_HOLDER_CONVERSATION_CWD  the folder the conversation is in
-//	FAKE_HOLDER_RECORD=<path>     write down each input, resize and send there
+//	FAKE_HOLDER_RECORD=<path>     write down each input, resize, send and
+//	                              screen asked for there
 //	FAKE_HOLDER_SEND=waiting      answer a send that the session waits on its
 //	                              person, unless it is forced
 //	FAKE_HOLDER_SEND=exit         take a send, answer nothing, and exit 0
 //	                              200 ms later
+//	FAKE_HOLDER_SEND_AFTER=<path> type a send only once path exists, as a
+//	                              session that is busy for a while
 //
 // The conversation and its folder are written into meta.json as well, as a
 // real holder keeps them there for a session that has stopped.
@@ -364,6 +369,19 @@ func (f *fake) sent(conn *share.Conn, msg *holdwire.SendMsg) {
 			return
 		}
 	}
+	if path := os.Getenv("FAKE_HOLDER_SEND_AFTER"); path != "" {
+		go func() {
+			for {
+				if _, err := os.Stat(path); err == nil {
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			f.typed([]byte(msg.Text + "\r"))
+			_ = conn.SendJSON(holdwire.Sent, holdwire.SentMsg{Seq: msg.Seq})
+		}()
+		return
+	}
 	f.typed([]byte(msg.Text + "\r"))
 	_ = conn.SendJSON(holdwire.Sent, holdwire.SentMsg{Seq: msg.Seq})
 }
@@ -382,6 +400,7 @@ func (f *fake) record(format string, args ...any) {
 
 // screen answers a ScreenAsk the way the environment says.
 func (f *fake) screen(conn *share.Conn, seq uint64) {
+	f.record("screen")
 	head := holdwire.ScreenHead{Seq: seq, OK: os.Getenv("FAKE_HOLDER_SCREEN") != "none"}
 	repaint := []byte("SCREEN")
 	if os.Getenv("FAKE_HOLDER_SCREEN") == "empty" {
@@ -392,6 +411,9 @@ func (f *fake) screen(conn *share.Conn, seq uint64) {
 	head.Offset = f.ring.End()
 	if at, err := strconv.ParseInt(os.Getenv("FAKE_HOLDER_SCREEN_AT"), 10, 64); err == nil {
 		head.Offset = at
+	}
+	if n, err := strconv.ParseInt(os.Getenv("FAKE_HOLDER_SCREEN_BEHIND"), 10, 64); err == nil {
+		head.Offset = max(f.ring.Oldest(), f.ring.End()-n)
 	}
 	// Ahead: bytes the screen already shows, sent down the link only after
 	// the screen has gone, and late enough that the viewer is attached.

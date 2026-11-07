@@ -13,6 +13,11 @@ import (
 // the holder waits until the CLI is ready for one, types it, and presses
 // Enter. This is the daemon's half — the frame out, and the one answer back
 // to whoever asked — and POST /v1/terminals/{id}/send is its door.
+//
+// A send is let in under the keyboard's rule, and the holder may wait up to
+// heldSendWaitMS before it types. Until it is answered it holds the session
+// for its person: nobody else types into it meanwhile (sendingFor), so the
+// rule it was let in under is the rule it is typed under.
 
 var (
 	// heldSendWait is how long a send waits for its holder's answer. The
@@ -30,16 +35,25 @@ const (
 	sentGone     = "gone"     // whoever asked went away
 )
 
-// sending is one send waiting for its answer, and the link it went down.
+// sending is one send waiting for its answer, the link it went down, and
+// who sent it: person, as personOf has it, and the name to say. until is
+// when it stops holding the session whether or not it was answered.
 type sending struct {
 	answer chan holdwire.SentMsg
 	conn   *share.Conn
+	person string
+	name   string
+	until  time.Time
 }
 
 // sendText asks the holder to type text and Enter once the session is
 // ready, and waits for its answer. The CLI ending answers it at once, as
 // ended, and so does the link going.
-func (h *heldTerm) sendText(ctx context.Context, text string, force bool) holdwire.SentMsg {
+//
+// One whose asker went away is still waiting in the holder, which types it
+// when the session is ready: it goes on holding the session until it is
+// answered, or for heldSendWait.
+func (h *heldTerm) sendText(ctx context.Context, person, name, text string, force bool) holdwire.SentMsg {
 	h.mu.Lock()
 	conn := h.conn
 	switch {
@@ -59,27 +73,48 @@ func (h *heldTerm) sendText(ctx context.Context, text string, force bool) holdwi
 	if h.sends == nil {
 		h.sends = map[uint64]*sending{}
 	}
-	h.sends[seq] = &sending{answer: ch, conn: conn}
+	h.sends[seq] = &sending{answer: ch, conn: conn, person: person, name: name, until: time.Now().Add(heldSendWait)}
 	h.mu.Unlock()
-	defer func() {
+	forget := func() {
 		h.mu.Lock()
 		delete(h.sends, seq)
 		h.mu.Unlock()
-	}()
+	}
 	msg := holdwire.SendMsg{Seq: seq, Text: text, Force: force, WaitMS: heldSendWaitMS}
 	if conn.SendJSON(holdwire.Send, msg) != nil {
+		forget()
 		return holdwire.SentMsg{Code: sentUnlinked, Message: errHeldAway.Error()}
 	}
 	t := time.NewTimer(heldSendWait)
 	defer t.Stop()
 	select {
 	case m := <-ch:
-		return m
+		return m // whoever answered it has let it go
 	case <-t.C:
+		forget()
 		return holdwire.SentMsg{Code: holdwire.SentTimeout}
 	case <-ctx.Done():
 		return holdwire.SentMsg{Code: sentGone}
 	}
+}
+
+// sendingFor is who sent a send that is waiting to be typed, when it is not
+// person's: "" is nobody's, so a send by a token holds the session against
+// everyone. ok is false when no other send is waiting. A send past its
+// until is let go of on the way.
+func (h *heldTerm) sendingFor(person string) (name string, ok bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	now := time.Now()
+	for seq, x := range h.sends {
+		switch {
+		case now.After(x.until):
+			delete(h.sends, seq)
+		case x.person == "" || x.person != person:
+			return x.name, true
+		}
+	}
+	return "", false
 }
 
 // sent hands the holder's answer to the send waiting for it, if one still

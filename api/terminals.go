@@ -136,9 +136,10 @@ const heldSendMax = 256 << 10
 // sendTerminal types a message into a held session the way a person would:
 // its holder waits until the CLI is ready for one, types it, and presses
 // Enter. It is typing, so it goes under the keyboard's rule: the keyboard
-// free, or held by the sender's own person. A session waiting on its person
-// for a permission or a question refuses it unless it is forced, because
-// Enter there may approve something.
+// free, or held by the sender's own person, and until it is answered nobody
+// else types into the session (heldTerm.sendingFor). A session waiting on its
+// person for a permission or a question refuses it unless it is forced,
+// because Enter there may approve something.
 //
 // The answer is 200 once the text is in, or the refusal with a reason a
 // program can act on: 409 waiting, keyboard (naming the holder), ended or
@@ -184,11 +185,12 @@ func (s *Server) sendTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := who(r)
-	if holder, ok := ts.mayType(s.personOf(p)); !ok {
+	person := s.personOf(p)
+	if holder, ok := ts.mayType(person); !ok {
 		sendRefused(w, http.StatusConflict, "keyboard", holder+" holds the keyboard of this session", holder)
 		return
 	}
-	answer := h.sendText(r.Context(), req.Text, req.Force)
+	answer := h.sendText(r.Context(), person, p.Name, req.Text, req.Force)
 	word := answer.Code
 	if word == holdwire.SentOK {
 		word = "typed"

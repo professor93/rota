@@ -5,9 +5,12 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -118,6 +121,19 @@ func TestSendTypesUnderTheKeyboardRules(t *testing.T) {
 	if resp, _ := p.as(p.alice, "POST", "/v1/terminals/"+id+"/send", map[string]any{"txt": "x"}); resp.StatusCode != 400 {
 		t.Fatalf("a send with a misspelled field answered %d", resp.StatusCode)
 	}
+	// Enter alone may approve something, so a send with nothing to type is
+	// no send; and a send is a message, not a file.
+	if code, doc := p.send(p.alice, id, map[string]any{"text": ""}); code != 400 {
+		t.Fatalf("a send with no text answered %d %v", code, doc)
+	}
+	if code, doc := p.send(p.alice, id, map[string]any{"text": strings.Repeat("a", heldSendMax)}); code != 413 {
+		t.Fatalf("a send over %d bytes answered %d %v", heldSendMax, code, doc)
+	}
+	for _, line := range recorded(rec) {
+		if strings.HasPrefix(line, `send "" `) || strings.HasPrefix(line, `send "aaa`) {
+			t.Fatalf("a refused send reached the holder: %.40q", line)
+		}
+	}
 	if resp, _ := p.as(p.watch, "POST", "/v1/terminals/"+id+"/send", map[string]any{"text": "x"}); resp.StatusCode != 403 {
 		t.Fatalf("a watcher's send answered %d", resp.StatusCode)
 	}
@@ -136,11 +152,62 @@ func TestSendAnswersEndedWhenTheCLIExits(t *testing.T) {
 		t.Fatalf("a send the CLI ended under answered %d %v", code, doc)
 	}
 	// The fake exits 200 ms after it takes the send.
-	if took > 1500*time.Millisecond {
+	if took > time.Second {
 		t.Fatalf("the send was answered %v after it was made, not as the CLI ended", took)
 	}
 	p.waitEnded(id)
 	if code, doc := p.send(p.alice, id, map[string]any{"text": "after"}); code != 409 || doc["reason"] != "ended" {
 		t.Fatalf("a send to an ended session answered %d %v", code, doc)
+	}
+}
+
+// A send is let in under the keyboard's rule and may wait in the holder
+// before it is typed. Until it is in, it holds the session for its person:
+// somebody who takes the free keyboard meanwhile is refused typing, rather
+// than having half a line typed in front of the send and submitted by its
+// Enter, and types as ever once the send is in.
+func TestASendIsNotTypedOverWhileItWaits(t *testing.T) {
+	dir := t.TempDir()
+	rec, busy := filepath.Join(dir, "record"), filepath.Join(dir, "ready")
+	p := withHeld(t, []string{"FAKE_HOLDER_RECORD=" + rec, "FAKE_HOLDER_SEND_AFTER=" + busy}, withPersons)
+	id := p.start(nil)["id"].(string)
+
+	body, _ := json.Marshal(map[string]any{"text": "from alice"})
+	req, _ := http.NewRequest("POST", p.srv.URL+"/v1/terminals/"+id+"/send", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", p.srv.URL)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: p.signIn("alice")})
+	answered := make(chan int, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			answered <- 0
+			return
+		}
+		resp.Body.Close()
+		answered <- resp.StatusCode
+	}()
+	waitRecorded(t, rec, `send "from alice" force=false wait=30000`)
+
+	bob := p.attachAs(id, p.signIn("bob"), "")
+	if holder := bob.waitType("hello")["holder"]; holder != "bob" {
+		t.Fatalf("bob attaching to a free keyboard did not take it: %v", holder)
+	}
+	bob.typeIn("half a line")
+	if msg := bob.waitType("error")["message"]; msg != fmt.Sprintf(sendFirst, "alice") {
+		t.Fatalf("typing while another person's send waits is refused with %q", msg)
+	}
+
+	if err := os.WriteFile(busy, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := <-answered; code != 200 {
+		t.Fatalf("the send answered %d", code)
+	}
+	bob.waitOut("got:from alice")
+	bob.typeIn("x\r")
+	bob.waitOut("got:x")
+	if got := typedInto(rec); got != "x\r" {
+		t.Fatalf("the holder was given %q to type besides the send, want %q", got, "x\r")
 	}
 }

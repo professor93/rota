@@ -626,7 +626,7 @@ see *Who is asking, and what they may do*.
 | `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up |
 | `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended; a running held session the daemon is not linked to is hung up by signal, once however often it is asked, and only while its pid is still the holder its record names: `409` when it is not, or when its record names no process this rota can check |
 | `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame. A held session the daemon is not linked to answers `409`, saying why |
-| `POST` | `/v1/terminals/{id}/send` | control | `{"text":"…","force":false}` — type a message into a held session the way a person would, once it is ready for one: the text, then Enter. It is typing, so the keyboard must be free or held by the sender's own person. `200 {"ok":true}` once typed; `409` with `reason` `waiting` (the CLI waits on its person, where Enter may approve something; `"force":true` types anyway), `keyboard` (with `holder`), `ended`, or `not_held` (a terminal that is not a held session, or one the daemon is not linked to); `504` with `reason` `timeout` when it never became ready in 30 seconds |
+| `POST` | `/v1/terminals/{id}/send` | control | `{"text":"…","force":false}` — type a message into a held session the way a person would, once it is ready for one: the text, then Enter. It is typing, so the keyboard must be free or held by the sender's own person, and until it is typed nobody else types into the session. `200 {"ok":true}` once typed; `409` with `reason` `waiting` (the CLI waits on its person, where Enter may approve something; `"force":true` types anyway), `keyboard` (with `holder`), `ended`, or `not_held` (a terminal that is not a held session, or one the daemon is not linked to); `504` with `reason` `timeout` when it never became ready in 30 seconds |
 | `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
 | `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"status":"long","long_until":"..."}`. Neither comes back or is logged |
@@ -1479,7 +1479,7 @@ Anything a non-holder sends inward — bytes, or a resize — is answered with
 `{"type":"error","message":"you are not holding the keyboard"}` and changes
 nothing at all.
 
-A **held session** keeps those rules and adds four, which a terminal the
+A **held session** keeps those rules and adds five, which a terminal the
 server runs itself does not have:
 
 - **The keyboard follows the person.** One person attached from several
@@ -1502,8 +1502,14 @@ server runs itself does not have:
   device queries it sees replayed, which the holder answered when the CLI
   asked — so a watcher's terminal answering is not a watcher typing, and a
   frame that held nothing else does nothing at all.
-- **Falling behind repaints.** A viewer that cannot keep up is never closed
-  with `1013`; see *Falling behind* below.
+- **A send is not typed over.** While a `send` waits to be typed, it holds
+  the session for its person: anybody else's typing is refused, as
+  `a send from <name> is waiting to be typed into this session; type once
+  it is in`, so no half-typed line goes in ahead of it and is submitted by
+  its Enter. A send whose asker went away still holds it until its holder
+  answers, for at most 35 seconds.
+- **Falling behind repaints.** A viewer that cannot keep up with the output
+  is not closed with `1013`; see *Falling behind* below.
 
 #### The routes
 
@@ -1602,7 +1608,7 @@ Out:
 | `claim_request{by,id}` | somebody is asking the holder for it |
 | `resized{cols,rows}` | the terminal is a different size now |
 | `viewers{list}` | who is attached: name, role and since — never an address |
-| `gap{from,to,bytes}` | bytes you will never be sent: `since` was older than the scrollback (`from` to `to`, before any output), or, mid-stream, `bytes` of output that never reached this server — a shared terminal's queue that overflowed, or a held session's holder that printed past what its link carried; the offsets go on from `to` |
+| `gap{from,to,bytes}` | bytes you will never be sent: `since` was older than the scrollback (`from` to `to`, before any output), or, mid-stream, `bytes` of output that never reached this server — a shared terminal's queue that overflowed, or a held session's holder that printed past what its link carried; the offsets go on from `to`. A held session's viewer that is behind is not sent a mid-stream one, since its repaint goes on from past it; one repainted without a screen is sent one after the reset, for the scrollback it is not replayed |
 | `exit{code}` | the CLI ended |
 | `error{message}` | a frame that was read and will not be acted on |
 | `pong` | the answer to `ping` |
@@ -1632,13 +1638,19 @@ next binary frame then starts at its `to`.
 **Falling behind.** Each connection has a bounded queue and the terminal
 never waits for one: a reader that stops reading is closed with `1013` and
 reattaches with `since`. One slow watcher cannot stall the CLI or anybody
-else watching it. A held session's viewer is not closed: the output it fell
-behind on is thrown away, and once it has caught up with what was queued it
-is sent `repaint{offset,cols,rows}`, the screen as it is now as the next
-binary frame, and the output after `offset`. Documents still arrive, and
-the ones that came while it was behind arrive after the repaint. A holder
-with no screen to give is replayed from the oldest byte kept, after a reset,
-as an attach without a screen is.
+else watching it. A held session's viewer is not closed for its output:
+the output it fell behind on is thrown away, and once it has caught up
+with what was queued it is sent `repaint{offset,cols,rows}`, the screen as
+it is now as the next binary frame, and the output after `offset`. The
+screen is asked for twice; a holder with none to give gets the viewer a
+reset (`ESC c`) as that frame, a `gap` for the scrollback before the last
+64 KiB, and those 64 KiB. What a held session's viewer is replayed — on
+attaching, or after a repaint — comes in frames of at most 64 KiB, each
+with its own write deadline, and one viewer is repainted at most four
+times a second. Documents still arrive, and the ones that came while it
+was behind arrive after the repaint; a viewer owed more documents than it
+has room for (64 waiting to be written, or 1024 waiting for its repaint) is
+closed with `1013` after all, since a repaint does not say them again.
 
 ```js
 const ws = new WebSocket(`wss://host/v1/terminals/${id}/ws`);
@@ -1701,11 +1713,14 @@ says so once.
 every binary frame's length to `hello.offset`, so it always knows the offset
 it has actually been shown, and it reattaches with `?since=` that number —
 never with what the server last said. A first attach says nothing, which
-replays the whole scrollback. Close code `1013` is "you fell behind", and it
-goes back at once; anything else waits 1, 2, 4, 8 and then 15 seconds. A
-`gap` frame is written into the terminal itself as a dim line, *… N bytes
-were not kept …*, because a terminal that looked continuous when it was not
-is worse than a visible hole. An `exit` stops all of it. There is never a
+replays the whole scrollback. On a held session the screen after a `repaint`
+frame, or after a `hello` with `repaint`, is not output: the offset is the
+one that frame said, and only what follows the screen adds to it. A
+mid-stream `gap` moves the offset to its `to`. Close code `1013` is "you
+fell behind", and it goes back at once; anything else waits 1, 2, 4, 8 and
+then 15 seconds. A `gap` frame is written into the terminal itself as a dim
+line, *… N bytes were not kept …*, because a terminal that looked continuous
+when it was not is worse than a visible hole. An `exit` stops all of it. There is never a
 second socket for one terminal, and leaving the page or choosing another
 terminal closes the one there is with a clean `1000`.
 
