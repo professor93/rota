@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"encoding/json/jsontext"
 	"fmt"
 	"net/http"
@@ -299,5 +300,75 @@ func TestListAsksNothingForAnAccountWithoutAToken(t *testing.T) {
 	}
 	if !strings.Contains(out, `"warnings"`) || !strings.Contains(out, "no access token") {
 		t.Fatalf("json warns the same way:\n%s", out)
+	}
+}
+
+// A usage endpoint that answers 429 with a Retry-After is left alone until
+// then by every listing after it, forced or not, each saying why its reading
+// is old; the listing itself goes on and succeeds, the account still in the
+// rotation, and --json says when usage is asked again.
+func TestListLeavesARateLimitedUsageEndpointAloneAndSaysSo(t *testing.T) {
+	var (
+		mu    sync.Mutex
+		asked int
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked++
+		mu.Unlock()
+		w.Header().Set("Retry-After", "600")
+		w.WriteHeader(http.StatusTooManyRequests)
+		fmt.Fprint(w, `{"error":{"type":"rate_limit_error","message":"Rate limited"}}`)
+	}))
+	t.Cleanup(srv.Close)
+	old := rota.ClaudeEndpoints.Usage
+	rota.ClaudeEndpoints.Usage = srv.URL
+	t.Cleanup(func() { rota.ClaudeEndpoints.Usage = old })
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	checked := time.Now().Add(-20 * time.Minute).UnixMilli()
+	writeStore(t, home, fmt.Sprintf(`{"ordered":true,"nextId":2,"accounts":[
+		{"id":1,"provider":"claude","email":"a@x","order":1,"token":{"accessToken":"t1"},
+		 "quota":{"windows":[{"name":"5h","percent":30,"primary":true}]},"quotaAt":%d}]}`, checked))
+	count := func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return asked
+	}
+
+	for i, args := range [][]string{{"list"}, {"list", "--refresh"}, {"list"}} {
+		out, errOut, code := call(t, args...)
+		if code != 0 || count() != 1 {
+			t.Fatalf("%v: exit %d, asked %d\n%s%s", args, code, count(), out, errOut)
+		}
+		if !strings.Contains(out, "5h 30%") || !strings.Contains(out, "20m ago") || !strings.Contains(out, "uses claude/a@x") {
+			t.Fatalf("%v: the old reading, its age, and the account still first in line:\n%s", args, out)
+		}
+		if !strings.Contains(errOut, "claude/a@x: usage is not asked again until") || !strings.Contains(errOut, "asked rota to wait (http 429)") ||
+			!strings.Contains(errOut, "the reading shown was taken at") || strings.Contains(errOut, "rate_limit_error") {
+			t.Fatalf("%v (%d): one line saying why, without the provider's body: %q", args, i, errOut)
+		}
+	}
+
+	out, _, code := call(t, "--json", "list")
+	if code != 0 || count() != 1 {
+		t.Fatalf("exit %d, asked %d: %s", code, count(), out)
+	}
+	var doc struct {
+		Accounts []struct {
+			UsageWaitUntil string `json:"usage_wait_until"`
+			CheckedAgo     string `json:"checkedAgo"`
+		} `json:"accounts"`
+		Warnings []string `json:"warnings"`
+	}
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatal(err)
+	}
+	until, err := time.Parse(time.RFC3339, doc.Accounts[0].UsageWaitUntil)
+	if err != nil || time.Until(until) < 9*time.Minute || time.Until(until) > 10*time.Minute {
+		t.Fatalf("usage_wait_until is about ten minutes off: %q %v", doc.Accounts[0].UsageWaitUntil, err)
+	}
+	if doc.Accounts[0].CheckedAgo != "20m ago" || len(doc.Warnings) != 1 || !strings.Contains(doc.Warnings[0], "asked rota to wait") {
+		t.Fatalf("%+v", doc)
 	}
 }

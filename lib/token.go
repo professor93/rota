@@ -61,6 +61,23 @@ type Quota struct {
 	Extra *ExtraUsage `json:"extra,omitzero"`
 }
 
+// QuotaWait is a usage endpoint turning a reading away for now — rate-limited,
+// or failing on its side — and when it may be asked again.
+type QuotaWait struct {
+	// Until is unix ms: nothing asks before then.
+	Until int64 `json:"until"`
+	// Status is the reply that set it: 429, or the 5xx the endpoint failed
+	// with.
+	Status int `json:"status,omitzero"`
+	// Count is how many times in a row the endpoint has turned a reading
+	// away, for a caller that waits longer each time it is not told how
+	// long.
+	Count int `json:"count,omitzero"`
+}
+
+// Waiting reports whether the wait has yet to run out.
+func (w QuotaWait) Waiting() bool { return w.Until > nowMS() }
+
 // ExtraUsage is pay-per-use spend beyond the plan's included quota.
 type ExtraUsage struct {
 	Used     float64 `json:"used"`

@@ -136,9 +136,10 @@ func TestFinishLoginReauthUpdatesInPlace(t *testing.T) {
 	old := s.add("t-re")
 	old.UUID, old.Dead, old.Staged = "u1", true, "abcd"
 	old.Quota = &rota.Quota{}
+	old.QuotaWait = rota.QuotaWait{Until: nowMS() + 60_000, Status: 429, Count: 1}
 	l, _ := s.BeginLogin(context.Background(), "t-re")
 	a, added, err := s.FinishLogin(context.Background(), l.ID, "NEW")
-	if err != nil || added || a != old || a.Token.Access != "NEW" || a.Dead || a.Quota != nil ||
+	if err != nil || added || a != old || a.Token.Access != "NEW" || a.Dead || a.Quota != nil || a.QuotaWait != (rota.QuotaWait{}) ||
 		a.Staged != stagedNoneForTest || a.Email != "e@x" || len(s.Accounts) != 1 {
 		t.Fatalf("a=%+v added=%v err=%v", a, added, err)
 	}

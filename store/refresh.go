@@ -32,10 +32,25 @@ import (
 // A store whose lock was released — a run has started since it was opened —
 // rotates nothing at all: no refresh, no claim, nothing written into a home.
 // It reads homes into memory and reads usage with tokens that have not
-// expired, and keeps the readings in memory, because a refresh token it
-// rotated there could never be saved, and the one it replaced would already
-// be spent.
+// expired, because a refresh token it rotated there could never be saved, and
+// the one it replaced would already be spent. What it reads, and any wait a
+// provider asks for, it writes into the store under the lock taken again for
+// that one write, and nothing else (keepReadings).
+//
+// A usage endpoint that turns a reading away — 429, or a failure on its
+// side — is left alone for as long as it says, or for a backoff when it does
+// not (QuotaWait), by this store and every other opened on the same
+// directory, forced or not. The account keeps its last reading and its place:
+// a refusal is never a dead account, nor a reason to refuse a run. Each
+// reading not taken for it is one error saying so.
 func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Account) []error {
+	return s.refresh(ctx, force, true, accounts)
+}
+
+// refresh is Refresh; sayWaits says whether an account left alone for a wait it
+// already knew is said, which a sweep repeating itself every few minutes does
+// not want. The refusal that starts a wait is said either way.
+func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*rota.Account) []error {
 	if len(accounts) == 0 {
 		accounts = s.Accounts
 	}
@@ -47,6 +62,7 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		said    []string
 		renewed []*claudeHome
 		held    []func()
+		read    []*rota.Account
 	)
 	// The claims taken for a refresh are let go when this returns, however
 	// it returns: a worker that panics must not leave an account claimed.
@@ -78,11 +94,20 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		}
 	}
 	reading := func(a *rota.Account, q *rota.Quota, err error) {
-		if err != nil {
+		if err != nil && !turnedAway(a, err) {
 			report(true, fmt.Errorf("%s: quota: %w", a, err))
 			return
 		}
-		a.Quota, a.QuotaAt = q, rota.NowMS()
+		if err == nil {
+			a.Quota, a.QuotaAt, a.QuotaWait = q, rota.NowMS(), rota.QuotaWait{}
+		}
+		mu.Lock()
+		read = append(read, a)
+		mu.Unlock()
+		if err != nil {
+			report(true, waitNote(a, err))
+			return
+		}
 		report(true, nil)
 	}
 	// Before any worker starts, because a rescue saves the store, and a save
@@ -97,8 +122,16 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 		if a.Dead || a.APIKey() || !rota.Metered(a.Provider) {
 			continue
 		}
-		stale := force || a.QuotaAt == 0 || time.Since(time.UnixMilli(a.QuotaAt)) > QuotaTTL
+		stale := force || a.QuotaAt == 0 || rota.Now().Sub(time.UnixMilli(a.QuotaAt)) > QuotaTTL
 		if !stale {
+			continue
+		}
+		if a.QuotaWait.Waiting() {
+			// Before anything else, a refresh included: a token is refreshed
+			// here only to read with it.
+			if sayWaits {
+				report(false, waitNote(a, nil))
+			}
 			continue
 		}
 		switch {
@@ -184,7 +217,13 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 	for _, msg := range said {
 		s.say(msg)
 	}
-	if !dirty || s.released {
+	if s.released {
+		if err := s.keepReadings(read); err != nil {
+			errs = append(errs, fmt.Errorf("usage readings could not be kept: %w", err))
+		}
+		return errs
+	}
+	if !dirty {
 		return errs
 	}
 	if err := s.Save(); err != nil {
@@ -319,3 +358,105 @@ func (b accountState) differs(a *rota.Account) bool {
 // SDK: lib itself never caches a reading — this store does, so the caching
 // policy is this package's to own.
 const QuotaTTL = 5 * time.Minute
+
+// QuotaWaitMax is the longest a usage endpoint is left alone after it turned
+// a reading away, whatever it said: a Retry-After of a day, or a year, from
+// a provider having a bad day must not leave every listing on an old number
+// until then. Asked again after an hour, it can say so again.
+const QuotaWaitMax = time.Hour
+
+// quotaBackoff is the wait after a refusal that says nothing of how long:
+// a minute, twice that for each refusal in a row before it, up to
+// QuotaWaitMax.
+const quotaBackoff = time.Minute
+
+// turnedAway reports whether err is the usage endpoint turning a reading away
+// for now — rate-limited, or failing on its side — and, when it is, records
+// on a when it may be asked again: when it said, or after the backoff.
+func turnedAway(a *rota.Account, err error) bool {
+	var he *rota.HTTPError
+	if !errors.As(err, &he) || he.Status != http.StatusTooManyRequests && he.Status < 500 {
+		return false
+	}
+	now := rota.Now()
+	count := a.QuotaWait.Count + 1
+	wait := quotaBackoff << min(count-1, 12)
+	if he.RetryAfter.After(now) {
+		wait = he.RetryAfter.Sub(now)
+	}
+	wait = min(wait, QuotaWaitMax)
+	a.QuotaWait = rota.QuotaWait{Until: now.Add(wait).UnixMilli(), Status: he.Status, Count: count}
+	return true
+}
+
+// waitNote is what is said of a reading not taken for an account's wait:
+// until when, why, and how old the reading it keeps is. cause is the refusal
+// that started the wait, when this is it, kept for errors.As.
+func waitNote(a *rota.Account, cause error) error {
+	w := a.QuotaWait
+	why := fmt.Sprintf("the provider asked rota to wait (http %d)", w.Status)
+	if w.Status != http.StatusTooManyRequests {
+		why = fmt.Sprintf("the provider is failing (http %d)", w.Status)
+	}
+	kept := "there is no reading yet"
+	if a.QuotaAt > 0 {
+		kept = "the reading shown was taken at " + clock(time.UnixMilli(a.QuotaAt))
+	}
+	return &waitError{
+		msg:   fmt.Sprintf("%s: usage is not asked again until %s: %s; %s", a, clock(time.UnixMilli(w.Until)), why, kept),
+		cause: cause,
+	}
+}
+
+// clock is a moment as a person near it reads one: the time of day for
+// today, and the date too for any other day.
+func clock(t time.Time) string {
+	now := rota.Now()
+	if y, m, d := t.Date(); y == now.Year() && m == now.Month() && d == now.Day() {
+		return t.Format("15:04:05")
+	}
+	return t.Format("2006-01-02 15:04:05")
+}
+
+type waitError struct {
+	msg   string
+	cause error
+}
+
+func (e *waitError) Error() string { return e.msg }
+func (e *waitError) Unwrap() error { return e.cause }
+
+// keepReadings writes what a store without its lock read — each account's
+// reading, or the wait its provider asked for — into the store on disk,
+// under the lock taken again for this one write. Nothing else of any account
+// is touched: a token this store holds may be older than the one on disk.
+// The newer reading wins; a wait on disk that has not run out gives way only
+// to a longer one, because the refusal behind it may be newer than this
+// reading.
+func (s *Store) keepReadings(read []*rota.Account) error {
+	if len(read) == 0 {
+		return nil
+	}
+	disk, err := NewStore(s.backend)
+	if err != nil {
+		return err
+	}
+	defer disk.Close()
+	changed := false
+	for _, a := range read {
+		d := disk.Find(a.ID)
+		if d == nil || d.Provider != a.Provider {
+			continue // removed, or its id given to another, since
+		}
+		if a.QuotaAt > d.QuotaAt {
+			d.Quota, d.QuotaAt, changed = a.Quota, a.QuotaAt, true
+		}
+		if a.QuotaWait != d.QuotaWait && (a.QuotaWait.Until > d.QuotaWait.Until || !d.QuotaWait.Waiting()) {
+			d.QuotaWait, changed = a.QuotaWait, true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return disk.Save()
+}

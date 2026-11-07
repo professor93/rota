@@ -103,6 +103,11 @@ type Account struct {
 	Long    *LongToken `json:"long,omitempty"`
 	Quota   *Quota     `json:"quota,omitempty"`
 	QuotaAt int64      `json:"quotaAt,omitzero"` // unix ms of last quota fetch
+	// QuotaWait is the usage endpoint asking to be left alone for a while.
+	// Like Order and Threshold it is carried, not interpreted: Usage asks
+	// whenever it is called, and an application that keeps readings — the
+	// store rota ships is one — decides what a refusal costs and keeps to it.
+	QuotaWait QuotaWait `json:"quotaWait,omitzero"`
 }
 
 // LongToken is a credential that outlives the run it was made for: the

@@ -356,8 +356,9 @@ which is deliberate: spreading work evenly across accounts arrives at all of
 them being half-spent at once, and the reason to hold several is to have one
 that is still whole.
 
-Usage is read from the cached quota, refreshed if older than five minutes,
-and only for the accounts the queue actually looks at. A provider that
+Usage is read from the cached quota, refreshed if older than five minutes
+and the provider has not asked rota to wait (see *Quota*), and only for the
+accounts the queue actually looks at. A provider that
 publishes no usage endpoint reports nothing, so it is treated as unspent
 rather than dropped — otherwise an unmetered account could never be picked.
 `rota list` marks the account a bare `rota run` would use.
@@ -457,7 +458,7 @@ the flag.
 
 A running server keeps itself current: every two minutes it rotates any
 access token close to expiring and re-reads the usage whose cached value has
-aged past five minutes. A request should never be the thing that discovers
+aged past five minutes, unless the provider has asked rota to wait. A request should never be the thing that discovers
 its credential expired, and the rotation decides from stored numbers — a
 stale one sends work to an account that is already spent. Nothing there is
 fatal: a provider that cannot be reached leaves its account exactly as it
@@ -603,7 +604,7 @@ see *Who is asking, and what they may do*.
 | `POST` | `/v1/session` | open | `{"name":"…","password":"…"}` → the same, and the session cookie |
 | `DELETE` | `/v1/session` | open | end this session |
 | `GET` | `/v1/schema` | watch | every provider, its models, efforts, defaults and fields |
-| `GET` | `/v1/accounts` | watch | accounts in rotation order, with usage, status, order, threshold, `long_until`, `login_until`, `remote_control` and when limits were read (`?refresh=1`); `default` names the one a bare run would use |
+| `GET` | `/v1/accounts` | watch | accounts in rotation order, with usage, status, order, threshold, `long_until`, `login_until`, `remote_control` and when limits were read (`?refresh=1`), and `usage_wait_until` while the provider has asked rota to wait; `default` names the one a bare run would use |
 | `GET` | `/v1/accounts/{id}/schema` | watch | the models *that* account may actually use |
 | `POST` | `/v1/run` | control | run a prompt on whichever account the rotation picks |
 | `POST` | `/v1/accounts/{id}/run` | control | run a prompt on that account |
@@ -1258,7 +1259,9 @@ rota run 1 "..." --with ask --with blocks   # the same
 - **`timing`**: `at` on every streamed event, milliseconds since `init`,
   and `timing` with `first_text_ms`, `first_tool_ms`, `total_ms`.
 - **`quota`**: the account's usage windows after the run — one usage call,
-  claude only; the store's reading is refreshed by it.
+  claude only; the store's reading is refreshed by it. While the provider has
+  asked rota to wait, nothing is asked: the stored reading comes back, and a
+  line on stderr (the server's log) says why.
 - **`tools`**: a tally of tool calls by name, and `blocked` for the refused.
 - **`stats`**: `events`, `by_type`, `fragments`, `bytes` read, `truncated`.
 - **`argv`**: the command line rota ran, and `env_set` and `env_dropped`,
@@ -2412,7 +2415,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
   the home has been read again — a sibling may have refreshed first, and its
   login, confirmed, is taken. A store whose lock a run has released — the
   reading `--with quota` takes after a run — rotates nothing at all, and does
-  not so much as try an account's claim.
+  not so much as try an account's claim. The reading, or the wait the provider
+  asked for, it writes into the store under the lock taken again for that one
+  write, and nothing else of the account.
 - **Stranded.** Claude Code's daemon refreshes the login itself, and now and
   then the refresh fails, on a plain `~/.claude` as much as in a home of
   rota's. When the access token has run out by then, the daemon writes
@@ -2684,7 +2689,8 @@ Only claude publishes a usage endpoint, and only for a login: a claude
 account on an API key has none, is never asked about, and shows `api key`
 under USAGE. Readings are cached for **five
 minutes** and refreshed on the first request past that age; `list -r` and
-`?refresh=1` force one. Both listings say when each account's limits were
+`?refresh=1` force one, unless the provider has asked rota to wait (*When the
+provider asks rota to wait*, below). Both listings say when each account's limits were
 last read, and distinguish *not read yet* from *this provider has no limits
 to read*:
 
@@ -2722,6 +2728,32 @@ A spent unscoped window shows as `limited`; a dead credential as `re-auth
 needed`. Model-scoped windows (a separate weekly Fable budget, say) are shown
 but never count as spent, because nobody knows which model a session will
 use.
+
+### When the provider asks rota to wait
+
+A usage endpoint that turns a reading away — `429`, or a `5xx` failure of
+its own — is left alone until it may be asked again: for as long as its
+`Retry-After` says, in seconds or as a date, and without one for a minute,
+twice that for each refusal in a row, never more than an hour whatever it
+says. The wait is kept in the store beside the reading, so every rota
+process honours it: `rota list`, `list -r`, `?refresh=1`, a bare `rota run`
+choosing an account, `--with quota` after a run, and the server's sweep.
+The next reading that succeeds ends it, and so does logging the account in
+again.
+
+Meanwhile the account keeps its last reading, and nothing else changes: a
+refusal is never `re-auth needed`, never takes the account out of the
+rotation, and never stops a run. Each reading that would have been taken
+says why it was not, in one line on stderr (in `warnings` under `--json`),
+with the reading's time — CHECKED shows its age:
+
+```
+warning: claude/you@example.com: usage is not asked again until 14:32:10: the provider asked rota to wait (http 429); the reading shown was taken at 14:02:10
+```
+
+`--json` and `GET /v1/accounts` carry `usage_wait_until` (RFC 3339) while a
+wait runs. The server's sweep says the refusal once, in its log, and not
+again for every sweep the wait spans.
 
 ## Token lifetimes
 
@@ -3014,7 +3046,8 @@ a.Percent()                           // the fullest window covering the account
 ```
 
 `Account.Order` and `Account.Threshold` stay in lib, carried and not
-interpreted: a store has to persist them, and what an order of 0 or an unset
+interpreted (and so does `Account.QuotaWait`, a usage endpoint's request to
+be left alone, which `rota/store` keeps to): a store has to persist them, and what an order of 0 or an unset
 threshold means is decided in `rotation`. `Account.Percent` stays too — the
 fullest window covering an account is a reading of the provider's own quota,
 not a rule about it.
@@ -3036,6 +3069,12 @@ request, and `End` for the last event of a stream.
 
 Every refusal carries a sentinel a program can match, so a transport maps
 conditions rather than sentences. The message stays free to be reworded:
+
+A provider's failing reply is an `*rota.HTTPError`, for `errors.As`: its
+`Status`, its `Body`, and `RetryAfter`, the moment its `Retry-After` header
+named, in seconds or as a date, or the zero time when it named none. lib
+waits for nothing and remembers nothing; what a refusal costs is the
+caller's to decide.
 
 ```go
 switch {
@@ -3065,7 +3104,7 @@ defer s.Close()
 
 l, _ := s.BeginLogin(ctx, "codex")            // parks the login for another process
 a, added, _ := s.FinishLogin(ctx, l.ID, code)
-errs := s.Refresh(ctx, false)                 // quota for metered providers, cached
+errs := s.Refresh(ctx, false)                 // quota for metered providers, cached; a provider's wait kept
 res, _ := s.Run(ctx, a, rota.Spec{Prompt: "hi"}, nil, os.Stdout)
 ```
 
