@@ -138,7 +138,7 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 	if err != nil {
 		return nil, err
 	}
-	plan, err := s.planTerminal(r, kind, req)
+	plan, err := s.planTerminal(r, kind, req, cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -232,9 +232,10 @@ type termPlan struct {
 
 // planTerminal builds that, which for an account means the whole of the CLI
 // handover: the token refreshed or the long-lived one used, the credential
-// staged, the account's own Claude world mirrored. It is st.Prepare because
-// there is exactly one right order for those steps and one copy of it.
-func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest) (*termPlan, error) {
+// staged, the account's own Claude world mirrored. It is st.PrepareIn, for
+// cwd, the directory the terminal starts in, because there is exactly one
+// right order for those steps and one copy of it.
+func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest, cwd string) (*termPlan, error) {
 	if kind == termKindShell {
 		return s.planShell(req)
 	}
@@ -254,7 +255,9 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest) (*
 	if err := st.Launchable(r.Context(), a); err != nil {
 		return nil, err
 	}
-	path, env, release, err := st.Prepare(r.Context(), a)
+	// Prepared for the directory the terminal starts in, whose project
+	// settings its Claude Code reads, rather than for the server's own.
+	path, env, release, err := st.PrepareIn(r.Context(), a, cwd)
 	if err != nil {
 		return nil, err
 	}

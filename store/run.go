@@ -30,7 +30,19 @@ import (
 // with the CLI calls KeepClaimsAcrossExec immediately before, so the claim
 // outlives the replacing; and a caller that does not go through with either
 // calls release.
+//
+// The CLI is taken to start where this process is, which is where the
+// handover starts it; one started anywhere else is prepared with PrepareIn.
 func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env []string, release func(), err error) {
+	return s.PrepareIn(ctx, a, "")
+}
+
+// PrepareIn is Prepare for a CLI that starts in dir, "" being this process's
+// own directory. The directory is part of what the CLI is launched with:
+// Claude Code reads the settings files of the project there, and those are
+// among the files a launch warns about (see sayRiskySettings), so a
+// terminal started somewhere else is warned about its own directory's.
+func (s *Store) PrepareIn(ctx context.Context, a *rota.Account, dir string) (path string, env []string, release func(), err error) {
 	cmd, release, err := s.prepare(ctx, a, true)
 	if err != nil {
 		return "", nil, nil, err
@@ -42,8 +54,10 @@ func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env 
 		return "", nil, nil, fmt.Errorf("%s not found in PATH: %w", cmd.Bin, err)
 	}
 	env = rota.Environ(HostEnv(), cmd)
-	// The CLI starts where this process is: the handover replaces it there.
-	cwd, _ := os.Getwd()
+	cwd, aerr := filepath.Abs(dir)
+	if aerr != nil {
+		cwd = ""
+	}
 	s.sayRiskySettings(a, env, cwd, nil, false)
 	handed = true
 	return path, env, release, nil
