@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"encoding/json/jsontext"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -116,6 +117,44 @@ func (s *Store) RemoteControlNow(a *rota.Account) error {
 		return nil
 	}
 	return fmt.Errorf("%w: %s", rota.ErrBusy, remoteControlWaits(a))
+}
+
+// ReadyRemoteControl readies an account for a session with Claude Code's
+// Remote Control on, the one way for every caller that starts one: `rota run
+// --remote-control`, and a daemon asked for one. The setting is turned on
+// and saved first, because it is what gives the account the .claude.json
+// Remote Control reads its identity from, and once said it stays said, even
+// for a session then refused; turnedOn says it was off until now, so the
+// caller can say so. Then the session is refused, with the reason, wherever
+// its Remote Control could not work: an account that is not Claude Code's
+// (rota.ErrInvalidRequest), one that cannot have it or does not run on a
+// login of its own (CheckRemoteControl's verdict, or rota.ErrUnsupported),
+// and one whose home still runs Claude Code from before the setting was on
+// (rota.ErrBusy), where Remote Control would act as whoever that Claude
+// Code's .claude.json names.
+func (s *Store) ReadyRemoteControl(a *rota.Account) (turnedOn bool, err error) {
+	if rota.Flavor(a.Provider) != "claude" {
+		return false, rota.Invalid("Remote Control is Claude Code's, and %s is a %s account", a, a.Provider)
+	}
+	if !a.RemoteControl {
+		on := *a
+		on.RemoteControl = true
+		if err := s.CheckRemoteControl(&on); err != nil {
+			return false, err
+		}
+		a.RemoteControl = true
+		if err := s.Save(); err != nil {
+			a.RemoteControl = false
+			return false, err
+		}
+		turnedOn = true
+	}
+	if err := s.RemoteControlNow(a); errors.Is(err, rota.ErrBusy) {
+		return turnedOn, fmt.Errorf("%w; until then Remote Control would act as the wrong account, so this session is not started", err)
+	} else if err != nil {
+		return turnedOn, err
+	}
+	return turnedOn, nil
 }
 
 // CheckRemoteControl refuses Remote Control for an account told a

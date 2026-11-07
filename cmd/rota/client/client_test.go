@@ -260,7 +260,8 @@ func TestEnsureNeverStartsASecondDaemon(t *testing.T) {
 	}
 	called := 0
 	start := func() error { called++; return nil }
-	c, started, err := Ensure(dir, start)
+	// Dial's own wait, five seconds, is TestDialNeverTrustsAFailedConnect's.
+	c, started, err := ensure(dir, 0, start)
 	want := fmt.Sprintf("the rota daemon (pid %d) is not answering on %s", os.Getpid(), holdwire.CtlSock(dir))
 	if c != nil || started || err == nil || err.Error() != want || called != 0 {
 		t.Fatalf("Ensure with the lock held and nothing answering: %v %v %v, start called %d times; want %q and no start",

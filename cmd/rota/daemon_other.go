@@ -10,6 +10,8 @@ import "github.com/professor93/rota/internal/holdwire"
 
 func (c *cli) startDaemon(bool, string) error { return holdwire.ErrPlatform }
 
+func (c *cli) spawnDaemon(bool, string) (*daemonStart, error) { return nil, holdwire.ErrPlatform }
+
 func (c *cli) runDaemon(bool, string) error { return holdwire.ErrPlatform }
 
 func (c *cli) stopDaemon(bool, bool) error { return holdwire.ErrPlatform }

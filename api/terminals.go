@@ -98,6 +98,7 @@ const (
 	noTermFor    = "a terminal needs a pseudo-terminal, and this machine has none"
 	termStopping = "this server is stopping; start the terminal again once it is back"
 	envLocal     = "env is taken only over the control socket"
+	envEmpty     = "env is empty, which would start the session with no PATH; leave it out for the daemon's own"
 	remoteLocal  = "remote_control is taken only over the control socket"
 	remoteShell  = "remote_control is Claude Code's, and a shell runs no account"
 )
@@ -162,6 +163,10 @@ func (s *Server) createTerminal(w http.ResponseWriter, r *http.Request) {
 			fail(w, http.StatusForbidden, remoteLocal)
 			return
 		}
+	}
+	if req.Env != nil && len(req.Env) == 0 {
+		fail(w, http.StatusBadRequest, envEmpty)
+		return
 	}
 	ts, err := s.startTerminal(r, &req)
 	if err != nil {
@@ -556,35 +561,26 @@ func (s *Server) chooseTerminal(r *http.Request, kind string, id int) (*store.St
 
 // argsFor is what the account's CLI is handed: the request's arguments, and
 // where it asked for Remote Control, Claude Code's flag last, so nothing
-// before it is read as its name. Remote Control is readied first as `rota
-// run --remote-control` readies it: the account's setting is turned on and
-// saved, since it is what gives the account the .claude.json Remote Control
-// reads its identity from, and a session whose Remote Control could not
-// work is refused, saying why.
+// before it is read as its name. The account is readied first by the
+// store's one rule for it, the one `rota run --remote-control` follows
+// (store.ReadyRemoteControl): its setting turned on and saved, and a session
+// whose Remote Control could not work refused, saying why.
 func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req *termRequest) ([]string, error) {
 	args := slices.Clone(req.Args)
 	rc := req.RemoteControl
 	if !rc.on {
 		return args, nil
 	}
-	if rota.Flavor(a.Provider) != "claude" {
-		return nil, refuse(http.StatusBadRequest, fmt.Sprintf("remote_control is Claude Code's, and %s is a %s account", a, a.Provider))
-	}
-	if !a.RemoteControl {
-		on := *a
-		on.RemoteControl = true
-		if err := st.CheckRemoteControl(&on); err != nil {
-			return nil, err
-		}
-		a.RemoteControl = true
-		if err := st.Save(); err != nil {
-			return nil, err
-		}
+	turnedOn, err := st.ReadyRemoteControl(a)
+	if turnedOn {
 		s.log.Info("remote control turned on", "account", a.ID, "by", who(r).Name)
 	}
-	if err := st.RemoteControlNow(a); errors.Is(err, rota.ErrBusy) {
-		return nil, fmt.Errorf("%w; until then Remote Control would act as the wrong account, so this session is not started", err)
-	} else if err != nil {
+	if errors.Is(err, rota.ErrUnsupported) {
+		// About the account, not this server: said as it is, where a 502 of
+		// its own would be hidden as an internal error.
+		return nil, refuse(http.StatusBadGateway, err.Error())
+	}
+	if err != nil {
 		return nil, err
 	}
 	args = append(args, "--remote-control")

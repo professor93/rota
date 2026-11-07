@@ -77,14 +77,20 @@ func DialNow(terminals string) (*Client, error) { return dial(terminals, 0) }
 // and starting another beside it would make two. started says start was
 // called and worked, whatever the dial after it said.
 func Ensure(terminals string, start func() error) (c *Client, started bool, err error) {
-	c, err = Dial(terminals)
+	return ensure(terminals, dialWait, start)
+}
+
+// ensure is Ensure with Dial's wait for a silent socket given, so a test of
+// it need not spend five seconds on every run.
+func ensure(terminals string, wait time.Duration, start func() error) (c *Client, started bool, err error) {
+	c, err = dial(terminals, wait)
 	if !errors.Is(err, ErrNoDaemon) {
 		return c, false, err
 	}
 	if err := start(); err != nil {
 		return nil, false, err
 	}
-	c, err = Dial(terminals)
+	c, err = dial(terminals, wait)
 	return c, true, err
 }
 
@@ -238,7 +244,10 @@ func (c *Client) Get(id string) (Session, error) {
 // whole id first, running or stopped; then an id that what they typed
 // begins, at least four characters of it; then a live session whose label
 // or name it is. More than one session at either of the last two is an
-// error that names their ids, so the person can choose.
+// error that names their ids, so the person can choose. So a label that
+// could begin an id — beef, or cafe1 — is read as an id first: a session
+// whose id it begins is the one found, and two such are an error even when
+// a live session has that very label, which is then named by its id.
 func (c *Client) Resolve(nameOrID string) (Session, error) {
 	all, err := c.List()
 	if err != nil {

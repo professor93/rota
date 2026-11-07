@@ -305,3 +305,81 @@ func TestWithRemoteControlOnTheAccountsOwnFileIsNotReported(t *testing.T) {
 		}
 	}
 }
+
+// ReadyRemoteControl is the one place a session with Remote Control is
+// readied, for the command line and the daemon alike. Another provider's
+// account is refused and left as it was. A claude account has the setting
+// turned on and saved, said once; a home still running Claude Code from
+// before is refused with the wrong-account guard, the setting kept for the
+// next quiet launch; and an account on a token, which Remote Control
+// refuses, says why. A chosen configuration directory is refused before
+// anything is saved.
+func TestReadyRemoteControl(t *testing.T) {
+	personWorld(t)
+	dir := t.TempDir()
+	until := time.Now().Add(time.Hour).UnixMilli()
+	login := `"token":{"accessToken":"tok","refreshToken":"r","expiresAt":` + itoa(int(until)) + `}`
+	writeAccounts(t, dir, `{"accounts":[
+		{"id":1,"provider":"codex","email":"c@x","token":{"accessToken":"x"}},
+		{"id":2,"provider":"claude","uuid":"c2",`+login+`},
+		{"id":3,"provider":"claude","uuid":"c3","token":{"accessToken":"tok"}},
+		{"id":4,"provider":"claude","uuid":"c4","configDir":"`+filepath.ToSlash(t.TempDir())+`",`+login+`}],"nextId":5}`)
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	saved := func(id int) bool {
+		t.Helper()
+		raw, err := os.ReadFile(filepath.Join(dir, "accounts.json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var doc struct {
+			Accounts []struct {
+				ID            int  `json:"id"`
+				RemoteControl bool `json:"remoteControl"`
+			} `json:"accounts"`
+		}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range doc.Accounts {
+			if a.ID == id {
+				return a.RemoteControl
+			}
+		}
+		return false
+	}
+
+	on, err := s.ReadyRemoteControl(s.Find(1))
+	if on || !errors.Is(err, rota.ErrInvalidRequest) || err.Error() != "Remote Control is Claude Code's, and codex/c@x is a codex account" || saved(1) {
+		t.Fatalf("another provider's account: %v %v, saved %v", on, err, saved(1))
+	}
+	on, err = s.ReadyRemoteControl(s.Find(4))
+	if on || !errors.Is(err, rota.ErrInvalidRequest) || saved(4) || s.Find(4).RemoteControl {
+		t.Fatalf("an account with a chosen directory: %v %v, saved %v", on, err, saved(4))
+	}
+	if runtime.GOOS == "windows" {
+		return // Windows keeps claude on a token, where Remote Control never works
+	}
+
+	a := s.Find(2)
+	if _, err := s.command(a, true); err != nil {
+		t.Fatal(err)
+	}
+	alive(t, s.ownHome(a), "sessions/1.json", os.Getpid())
+	on, err = s.ReadyRemoteControl(a)
+	if !on || !errors.Is(err, rota.ErrBusy) || !strings.Contains(err.Error(), "until then Remote Control would act as the wrong account") || !saved(2) {
+		t.Fatalf("a home still running Claude Code: %v %v, saved %v", on, err, saved(2))
+	}
+	os.Remove(filepath.Join(s.ownHome(a), "sessions", "1.json"))
+	if on, err := s.ReadyRemoteControl(a); on || err != nil {
+		t.Fatalf("once it is quiet, already on: %v %v", on, err)
+	}
+
+	on, err = s.ReadyRemoteControl(s.Find(3))
+	if !on || !errors.Is(err, rota.ErrUnsupported) || !strings.Contains(err.Error(), "own stored login") || !saved(3) {
+		t.Fatalf("an account on a token: %v %v, saved %v", on, err, saved(3))
+	}
+}
