@@ -95,9 +95,9 @@ func (c *cli) detach(id int, rest []string, ask shareAsk, remote remoteAsk) erro
 	switch {
 	case spawned == nil:
 	case spawned.started != nil:
-		fmt.Fprintf(c.err, "rota: started the rota daemon for %s (control socket only; rota serve stop ends it)\n", spawned.home)
+		fmt.Fprintf(c.err, "rota: started the rota daemon for %s (control socket only; rota serve stop ends it)\n", oneLine(spawned.home))
 	default:
-		fmt.Fprintf(c.err, "rota: a rota daemon is already running for %s%s\n", spawned.home, pidOf(spawned.running))
+		fmt.Fprintf(c.err, "rota: a rota daemon is already running for %s%s\n", oneLine(spawned.home), pidOf(spawned.running))
 	}
 	if err != nil {
 		return err
@@ -107,8 +107,8 @@ func (c *cli) detach(id int, rest []string, ask shareAsk, remote remoteAsk) erro
 		return err
 	}
 	if off[s.Account] {
-		fmt.Fprintf(c.err, "rota: remote control is on for %s/%s from now on; `rota set %d --remote-control off` turns it off\n",
-			s.Provider, s.AccountLabel, s.Account)
+		fmt.Fprintf(c.err, "rota: remote control is on for %s from now on; `rota set %d --remote-control off` turns it off\n",
+			heldAccount(&s), s.Account)
 	}
 	if c.json {
 		return c.emit(s)
@@ -119,9 +119,24 @@ func (c *cli) detach(id int, rest []string, ask shareAsk, remote remoteAsk) erro
 	if bin == "" {
 		bin = s.Provider
 	}
-	fmt.Fprintf(c.err, "rota: %s/%s via %s — held as session %s (%s); rota send %s \"...\" types into it, rota list --sessions lists it\n",
-		s.Provider, s.AccountLabel, bin, s.Name, s.ID, shellWord(s.Name))
+	fmt.Fprintf(c.err, "rota: %s via %s — held as session %s (%s); rota send %s \"...\" types into it, rota list --sessions lists it\n",
+		heldAccount(&s), heldCell(bin), heldCell(s.Name), heldCell(s.ID), sendWord(&s))
 	return nil
+}
+
+// heldAccount is the account a held session runs, as nameOf names one:
+// provider/label on one line, cleaned as heldCell cleans a value.
+func heldAccount(s *rotaclient.Session) string { return heldCell(s.Provider + "/" + s.AccountLabel) }
+
+// sendWord is what to type after rota send to reach s: its name, quoted for
+// a shell where it needs it, or its id when the name has a character
+// heldCell would print as something else, since the name as printed would
+// then match nothing.
+func sendWord(s *rotaclient.Session) string {
+	if s.Name == "" || heldCell(s.Name) != s.Name {
+		return heldCell(s.ID)
+	}
+	return shellWord(s.Name)
 }
 
 // detachArgs is what --detach hands the CLI: what follows --, or what is

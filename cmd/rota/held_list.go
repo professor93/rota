@@ -17,8 +17,12 @@ import (
 // heldCell is a value about a held session as this command prints it: a
 // name, a label, a folder, read from a record or said by the daemon. Each
 // one passes through here, so the rule for printing what somebody else
-// wrote is applied in one place.
-func heldCell(s string) string { return s }
+// wrote is applied in one place, and it is the rule an account's name is
+// printed by (see nameOf): a control character is a space, and so is a
+// newline, so an escape in a session's name never reaches the terminal as a
+// command and a name never ends its row or its sentence early. A JSON
+// field carries the value as it is.
+func heldCell(s string) string { return oneLine(s) }
 
 // heldSessions is every held session the store's records in terminals
 // describe, newest first, each as `rota run --detach --json` describes one,
