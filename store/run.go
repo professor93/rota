@@ -108,6 +108,12 @@ func (s *Store) mayLaunch(a *rota.Account) error {
 // What this call does persist is what it changed itself, before the CLI
 // started: a token it refreshed, and whatever staging adopted.
 //
+// One thing is written after the CLI has ended: on an account on an API key,
+// what the run said about its credit (CreditPause), and only when it said
+// something. That write takes the store's lock again, on the backend this
+// store was opened on, so Run then waits for whoever holds it: a caller must
+// not hold another store open on the same backend while it waits for Run.
+//
 // Cancelling ctx stops the CLI; lim caps what the spec may ask for, and may
 // be nil.
 //
@@ -140,6 +146,10 @@ func (s *Store) Run(ctx context.Context, a *rota.Account, spec rota.Spec, lim *r
 // the goroutine that waits for the session is what lets the account go. A
 // caller that never closes the session therefore keeps the account claimed,
 // which is exactly what it is: a run in flight.
+//
+// That goroutine also writes what the session's end said about an API key's
+// credit, as Run does, which is why a program about to exit calls Wait first:
+// an exit would cut it short.
 func (s *Store) Start(ctx context.Context, a *rota.Account, spec rota.Spec, lim *rota.Limits, events io.Writer) (*rota.Session, error) {
 	cmd, release, err := s.ready(ctx, a, !spec.Hermetic)
 	if err != nil {
@@ -152,7 +162,9 @@ func (s *Store) Start(ctx context.Context, a *rota.Account, spec rota.Spec, lim 
 		return nil, err
 	}
 	handed = true
+	s.ended.Add(1)
 	go func() {
+		defer s.ended.Done()
 		// The account in hand is the caller's while the session runs, so
 		// what the session's end says about its credit goes to the store
 		// alone; the next run reads it from there.
@@ -162,6 +174,13 @@ func (s *Store) Start(ctx context.Context, a *rota.Account, spec rota.Spec, lim 
 	}()
 	return sess, nil
 }
+
+// Wait returns once every session Start began on this store has ended and
+// what its end owes is done: the account let go, and what it said about an
+// API key's credit written down. A program that is about to exit calls it
+// after its sessions, because a goroutine does that work and an exit would
+// cut it short; one that goes on running need not.
+func (s *Store) Wait() { s.ended.Wait() }
 
 // CreditPause is how long an account on an API key counts as out of credit
 // once a run on it ended with the API refusing it for want of credit (see
@@ -190,7 +209,7 @@ func (s *Store) settleCredit(a *rota.Account, res *rota.Result) (int64, bool) {
 	switch {
 	case res.OutOfCredit():
 		until = rota.Now().Add(CreditPause).UnixMilli()
-	case a.NoCreditUntil != 0 && !res.IsError && res.ExitCode == 0:
+	case a.NoCreditUntil != 0 && answered(res):
 		until = 0
 	default:
 		return 0, false
@@ -207,12 +226,35 @@ func (s *Store) settleCredit(a *rota.Account, res *rota.Result) (int64, bool) {
 	if b == nil || b.UUID != a.UUID || !b.APIKey() {
 		return 0, false
 	}
+	// An answer clears only the verdict this run started under, never a newer
+	// one another process wrote while it ran: that is a later refusal, and
+	// the key is out of credit again.
+	if until == 0 && b.NoCreditUntil > a.NoCreditUntil {
+		return 0, false
+	}
 	b.NoCreditUntil = until
 	if err := fresh.Save(); err != nil {
 		s.say(fmt.Sprintf("%s: could not record what its run said about its credit: %v", a, err))
 		return 0, false
 	}
 	return until, true
+}
+
+// answered reports whether a run reached the API and was answered, which is
+// what says a key has credit again: the run succeeded, and the API charged for
+// it or wrote something. A run that never left the machine — a command Claude
+// Code answers by itself — says nothing about credit.
+func answered(res *rota.Result) bool {
+	if res.IsError || res.ExitCode != 0 {
+		return false
+	}
+	if res.CostUSD > 0 {
+		return true
+	}
+	var usage struct {
+		Output int64 `json:"output_tokens"`
+	}
+	return len(res.Usage) > 0 && rota.UnmarshalLenient(res.Usage, &usage) == nil && usage.Output > 0
 }
 
 // ready does everything that has to happen before an account's CLI starts,

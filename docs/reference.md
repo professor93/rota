@@ -2864,14 +2864,16 @@ percentage nobody measured.
 **When its credit runs out**, the API refuses every request with `Your credit
 balance is too low to access the Anthropic API`, before any work and without
 charging, and Claude Code ends the run on it: `rota run` prints Claude Code's
-`Credit balance is too low` and exits as it did, and the server answers `502`
-with it, as for any failed run. rota writes down what that run said once it
+`Credit balance is too low` and exits as it did, and the server answers as for
+any failed run — `502` for a buffered one, an error at the end of a streamed
+one. Only Claude Code's own verdict counts, its error result saying exactly
+that, never an answer that quotes it. rota writes down what that run said once it
 has ended, never in the middle of one: for an hour the account is **out of
 credit**, and the rotation passes it by, as it passes by a spent window.
 `rota list` shows `out of credit (59m)` under STATUS and a note saying what
 ends it; JSON says `"status":"limited"` with `no_credit_until`. It still runs
-by id. The hour is over early when a run on it is answered — buy credit in the
-Console, under Billing, then `rota 7 "..."` — or when the key is pasted again
+by id. The hour is over early when a run on it is answered by the API — buy
+credit in the Console, under Billing, then `rota 7 "..."` — or when the key is pasted again
 with `rota login --key`. After the hour it is tried again like any account,
 and a run still refused starts another hour. Only a run rota reads the end of
 counts: a question, `--input`, and both over HTTP. A run handed to the CLI's
@@ -2966,7 +2968,10 @@ is where an application keeps until when that verdict stands:
 `Account.OutOfCredit()` reads it, `Status()` is `limited` meanwhile, and a key
 pasted again clears it. `rotation.Available` passes such an account by, and
 `store.Run` and `store.Start` set it for `store.CreditPause`, an hour, when
-the run ends that way, and clear it when a run on it is answered. A `claude setup-token`
+the run ends that way, and clear it when a run on it is answered, after the
+CLI has ended and under the store's lock, taken again. A session's end is
+written by a goroutine, so a program about to exit calls `Store.Wait` after
+its last session. A `claude setup-token`
 token (`"setup-token"`) comes back as the one `BeginLong` would have obtained,
 good for a year from now, for `Account.ApplyLong` on whichever account the
 caller knows it belongs to. `PasteLong(provider, s)` takes that token alone and

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,7 +18,8 @@ import (
 const creditRefusal = `{"type":"result","subtype":"success","is_error":true,"api_error_status":400,` +
 	`"num_turns":1,"result":"Credit balance is too low","session_id":"s-credit","total_cost_usd":0}`
 
-const answered = `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"hello","session_id":"s-ok"}`
+const answer = `{"type":"result","subtype":"success","is_error":false,"num_turns":1,"result":"hello","session_id":"s-ok",` +
+	`"total_cost_usd":0.0123,"usage":{"input_tokens":12,"output_tokens":3}}`
 
 // creditStore is a store with a key account first in the rotation and a login
 // account behind it, and a claude on PATH that answers with lines.
@@ -27,13 +29,13 @@ func creditStore(t *testing.T, lines ...string) (dir string, s *Store) {
 	writeAccounts(t, dir, `{"accounts":[`+
 		`{"id":1,"provider":"claude","uuid":"apikey-test","credential":"apikey","order":1,"token":{"accessToken":"`+testKey+`"}},`+
 		`{"id":2,"provider":"claude","uuid":"c2","order":2,"token":{"accessToken":"tok"}}],"nextId":3,"ordered":true}`)
-	answer(t, lines...)
+	claudeSays(t, lines...)
 	return dir, openDir(t, dir)
 }
 
-// answer puts a claude on PATH that prints these lines and exits 1 when the
-// first is an error, as Claude Code does.
-func answer(t *testing.T, lines ...string) {
+// claudeSays puts a claude on PATH that prints these lines and exits 1 when
+// the first is an error, as Claude Code does.
+func claudeSays(t *testing.T, lines ...string) {
 	t.Helper()
 	bin := t.TempDir()
 	spec := fakecli.Lines(lines...)
@@ -82,7 +84,7 @@ func TestARunOutOfCreditPausesItsKey(t *testing.T) {
 		t.Fatalf("the store keeps it for CreditPause: %v until %v", got.OutOfCredit(), until)
 	}
 
-	answer(t, answered)
+	claudeSays(t, answer)
 	s = openDir(t, dir)
 	a = s.Find(1)
 	if _, err := s.Run(context.Background(), a, rota.Spec{Prompt: "hi"}, nil, nil); err != nil {
@@ -108,7 +110,7 @@ func TestOnlyAKeyIsPausedForCredit(t *testing.T) {
 		t.Fatal("a login is never paused for credit")
 	}
 
-	answer(t, answered)
+	claudeSays(t, answer)
 	s = openDir(t, dir)
 	key := s.Find(1)
 	if _, err := s.Run(context.Background(), key, rota.Spec{Prompt: "hi"}, nil, nil); err != nil {
@@ -136,18 +138,98 @@ func TestASessionOutOfCreditPausesItsKeyWhenItEnds(t *testing.T) {
 		t.Fatalf("the session ended on the refusal: %+v", res)
 	}
 	// The verdict is written by whatever waits for the session to let the
-	// account go, which is a goroutine waking rather than a value returned.
-	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
-		raw, err := os.ReadFile(filepath.Join(dir, "accounts.json"))
-		if err == nil && strings.Contains(string(raw), "noCreditUntil") {
-			break
+	// account go, a goroutine rather than a value returned; Wait is how a
+	// caller knows it is done.
+	s.Wait()
+	if got := stored(t, dir, 1); !got.OutOfCredit() {
+		t.Fatalf("a session that ended out of credit pauses its key: %d", got.NoCreditUntil)
+	}
+}
+
+// An answer the CLI called a success is never a refusal, whatever it says and
+// however the run then ended: not when the CLI exits 1 after it, and not when
+// rota stops the run for a limit.
+func TestAnAnswerQuotingTheRefusalPausesNothing(t *testing.T) {
+	quoted := `{"type":"result","subtype":"success","is_error":false,"num_turns":1,` +
+		`"result":"Your app shows \"Credit balance is too low\" because the org has no prepaid credit.","session_id":"s-ok"}`
+	for name, c := range map[string]struct {
+		lines []string
+		exit  int
+		spec  rota.Spec
+		lim   *rota.Limits
+	}{
+		"exit 1": {lines: []string{quoted}, exit: 1, spec: rota.Spec{Prompt: "why"}},
+		"over the events cap": {
+			lines: []string{
+				`{"type":"system","subtype":"init","session_id":"s-ok"}`,
+				`{"type":"assistant","message":{"content":[{"type":"text","text":"x"}]}}`,
+				quoted,
+			},
+			spec: rota.Spec{Prompt: "why", Stream: true, IncludeEvents: true},
+			lim:  &rota.Limits{MaxEvents: 1},
+		},
+	} {
+		dir, s := creditStore(t, answer)
+		bin := t.TempDir()
+		spec := fakecli.Lines(c.lines...)
+		spec.Exit = c.exit
+		fakecli.Install(t, bin, "claude", spec)
+		t.Setenv("PATH", bin)
+		a := s.Find(1)
+		res, err := s.Run(context.Background(), a, c.spec, c.lim, nil)
+		if err != nil || !res.IsError {
+			t.Fatalf("%s: a failed run all the same: %v %+v", name, err, res)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("a session that ended out of credit must pause its key")
+		if res.OutOfCredit() || a.OutOfCredit() || stored(t, dir, 1).NoCreditUntil != 0 {
+			t.Fatalf("%s: a funded key was paused", name)
 		}
 	}
-	if got := stored(t, dir, 1); !got.OutOfCredit() {
-		t.Fatalf("paused: %d", got.NoCreditUntil)
+}
+
+// An answer clears only the verdict its run started under. A refusal another
+// process wrote while the run went on is newer, and stands; and a run that
+// never reached the API says nothing about credit at all.
+func TestAnAnswerClearsOnlyTheVerdictItStartedUnder(t *testing.T) {
+	dir := t.TempDir()
+	expired := time.Now().Add(-time.Minute).UnixMilli()
+	writeAccounts(t, dir, fmt.Sprintf(`{"accounts":[{"id":1,"provider":"claude","uuid":"apikey-test","credential":"apikey",`+
+		`"order":1,"noCreditUntil":%d,"token":{"accessToken":"`+testKey+`"}}],"nextId":2,"ordered":true}`, expired))
+	bin := t.TempDir()
+	ready := filepath.Join(t.TempDir(), "ready")
+	fakecli.Install(t, bin, "claude", fakecli.Spec{Stdout: []string{answer}, Ready: ready, Sleep: "2s"})
+	t.Setenv("PATH", bin)
+
+	s := openDir(t, dir)
+	a := s.Find(1)
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.Run(context.Background(), a, rota.Spec{Prompt: "hi"}, nil, nil)
+		done <- err
+	}()
+	fakecli.WaitReady(t, ready)
+	other := openDir(t, dir)
+	newer := time.Now().Add(CreditPause).UnixMilli()
+	other.Find(1).NoCreditUntil = newer
+	if err := other.Save(); err != nil {
+		t.Fatal(err)
+	}
+	other.Close()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := stored(t, dir, 1).NoCreditUntil; got != newer {
+		t.Fatalf("the newer refusal stands: %d, want %d", got, newer)
+	}
+
+	// Answered without the API: no cost, nothing written.
+	claudeSays(t, `{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"","session_id":"s-local"}`)
+	s = openDir(t, dir)
+	a = s.Find(1)
+	if _, err := s.Run(context.Background(), a, rota.Spec{Prompt: "hi"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if !a.OutOfCredit() || stored(t, dir, 1).NoCreditUntil != newer {
+		t.Fatal("a run the API never answered clears nothing")
 	}
 }
 
@@ -159,7 +241,7 @@ func TestPastingTheKeyAgainEndsThePause(t *testing.T) {
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
-	answer(t, creditRefusal)
+	claudeSays(t, creditRefusal)
 	if _, err := s.Run(context.Background(), a, rota.Spec{Prompt: "hi"}, nil, nil); err != nil || !a.OutOfCredit() {
 		t.Fatalf("paused: %v", err)
 	}

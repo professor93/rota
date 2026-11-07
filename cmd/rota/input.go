@@ -95,6 +95,10 @@ func (c *cli) session(s *store.Store, a *rota.Account, spec rota.Spec, reach *se
 	}()
 	res, err := sess.Wait()
 	<-told
+	// What the session's end owes the store — what it said about an API
+	// key's credit — is written by a goroutine, and this process exits soon
+	// after returning: it is waited for here rather than cut short.
+	s.Wait()
 	return res, err
 }
 

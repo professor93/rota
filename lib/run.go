@@ -251,6 +251,12 @@ type Result struct {
 	Argv       []string `json:"argv,omitempty"`
 	EnvSet     []string `json:"env_set,omitempty"`
 	EnvDropped []string `json:"env_dropped,omitempty"`
+
+	// cliError is the is_error of the CLI's own result event, and nothing
+	// else. IsError is also set when the CLI exits non-zero or rota stops the
+	// run for a limit, over an answer the CLI itself called a success; what
+	// the CLI said about how the run ended is read here (OutOfCredit).
+	cliError bool
 }
 
 // Flavored is implemented by a provider that names the CLI vocabulary it
@@ -1953,7 +1959,7 @@ func absorb(doc json.RawMessage, keep bool, cp caps, res *Result) {
 	}
 	switch e.Type {
 	case "result": // Claude Code
-		res.Result, res.Structured, res.IsError = e.Result, e.Structured, e.IsError
+		res.Result, res.Structured, res.IsError, res.cliError = e.Result, e.Structured, e.IsError, e.IsError
 		res.Subtype, res.NumTurns, res.CostUSD, res.Usage = e.Subtype, e.NumTurns, e.CostUSD, e.Usage
 	case "item.completed": // Codex
 		if e.Item != nil && e.Item.Type == "agent_message" {
