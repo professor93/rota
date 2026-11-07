@@ -76,25 +76,70 @@ func ClaudeCredentialVars() []string {
 }
 
 // claudeCompeting are the variables that would authenticate Claude Code
-// some other way, send its credential somewhere else, or move its
-// credential store: every route drops them, so a shell profile cannot
-// quietly bill another account or read another account's login. A stray
-// ANTHROPIC_BASE_URL alone would send an OAuth token to a third party,
-// CLAUDE_SECURESTORAGE_CONFIG_DIR would point the store at somebody else's,
-// and CLAUDE_CODE_SIMPLE would not read the store at all. CLAUDECODE says a
-// process runs inside Claude Code, which a run on an account does not by being
-// started from one. They are exact names, as code.claude.com/docs/en/env-vars
-// documents them, and never prefixes.
+// some other way, send its requests or its credential somewhere else, change
+// which login, organization or configuration it uses, or tell it that it
+// runs inside another Claude Code: every route drops them, so a shell
+// profile, a host or an outer session cannot quietly bill another account or
+// read another account's login. A stray ANTHROPIC_BASE_URL alone would send
+// an OAuth token to a third party, CLAUDE_CODE_OAUTH_CLIENT_ID would have
+// Claude Code refresh the login under a client that is refused, and
+// CLAUDE_CODE_CHILD_SESSION would leave an interactive run out of --resume,
+// --continue, the prompt history and the agents list.
+//
+// They are exact names, never prefixes. Each is one Claude Code reads only
+// to sign in to, or reach, something other than the account's own login —
+// as code.claude.com/docs/en/env-vars documents them, and as Claude Code's
+// own lists of its credentials, endpoints and provider switches name them —
+// so dropping one costs a run on an account nothing. The cloud vendors' own
+// variables (AWS_PROFILE, GOOGLE_CLOUD_PROJECT and their like) stay: Claude
+// Code reads them only once a switch below selects the cloud, and other
+// programs the run starts read them too. CLAUDE_CONFIG_DIR stays as well;
+// a route that points Claude Code somewhere sets it, and one that does not
+// leaves the person's own.
 var claudeCompeting = []string{
-	"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_PROFILE",
-	"ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL",
-	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-	"CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+	// A credential of another kind.
+	"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AWS_API_KEY",
+	"ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
 	"CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
+	"CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR", "CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR",
 	"CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "CLAUDE_CODE_OAUTH_SCOPES",
 	"CLAUDE_CODE_SUBSCRIPTION_TYPE", "CLAUDE_CODE_RATE_LIMIT_TIER",
-	"CLAUDE_CODE_SIMPLE", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
-	"ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID", "CLAUDECODE",
+	"CLAUDE_CODE_SESSIONS_OAUTH_TOKEN", "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_SESSION_INGRESS_TOKEN_FILE",
+	"CLAUDE_BRIDGE_OAUTH_TOKEN", "CLAUDE_TRUSTED_DEVICE_TOKEN",
+	// Anthropic profiles and workload identity federation, which outrank the
+	// login.
+	"ANTHROPIC_PROFILE", "ANTHROPIC_CONFIG_DIR", "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID",
+	"ANTHROPIC_SERVICE_ACCOUNT_ID", "ANTHROPIC_IDENTITY_TOKEN", "ANTHROPIC_IDENTITY_TOKEN_FILE",
+	"ANTHROPIC_WORKSPACE_ID", "CLAUDE_CODE_FEDERATION_CACHE_DIR",
+	// A host that signs Claude Code in, or refreshes its login for it.
+	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "CLAUDE_CODE_HOST_AUTH_ENV_VAR", "CLAUDE_CODE_HOST_CREDS_FILE",
+	"CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH", "CLAUDE_CODE_SDK_HAS_SESSIONS_OAUTH_REFRESH",
+	"CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH",
+	// The OAuth client, where its login is kept, and whose login it is.
+	"CLAUDE_CODE_OAUTH_CLIENT_ID", "CLAUDE_CODE_CUSTOM_OAUTH_URL", "CLAUDE_SECURESTORAGE_CONFIG_DIR",
+	"CLAUDE_CODE_SIMPLE", "CLAUDE_CODE_ACCOUNT_UUID", "CLAUDE_CODE_USER_EMAIL", "CLAUDE_CODE_ORGANIZATION_UUID",
+	"CLAUDE_CODE_ACCOUNT_TAGGED_ID",
+	// Another provider.
+	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_USE_MANTLE",
+	"CLAUDE_CODE_USE_ANTHROPIC_AWS", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_USE_GATEWAY",
+	"ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_AWS_WORKSPACE_ID",
+	"ANTHROPIC_GOOGLE_CLOUD_PROJECT", "ANTHROPIC_GOOGLE_CLOUD_LOCATION", "ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID",
+	"CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+	"CLAUDE_CODE_SKIP_MANTLE_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH",
+	// Another endpoint.
+	"ANTHROPIC_BASE_URL", "ANTHROPIC_BEDROCK_BASE_URL", "ANTHROPIC_VERTEX_BASE_URL", "ANTHROPIC_FOUNDRY_BASE_URL",
+	"ANTHROPIC_AWS_BASE_URL", "ANTHROPIC_GOOGLE_CLOUD_BASE_URL", "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
+	"_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL", "ANTHROPIC_UNIX_SOCKET", "ANTHROPIC_CUSTOM_HEADERS",
+	"CLAUDE_CODE_API_BASE_URL", "CLAUDE_CODE_HTTP_PROXY", "CLAUDE_CODE_HTTPS_PROXY",
+	"CLAUDE_BRIDGE_BASE_URL", "CLAUDE_BRIDGE_SESSION_INGRESS_URL", "CLAUDE_REMOTE_TOOLS_BRIDGE_URL",
+	"CLAUDE_CODE_ARTIFACTS_API_BASE_URL", "CLAUDE_CODE_ARTIFACTS_API_TOKEN", "CLAUDE_CODE_ARTIFACT_ASSET_BASE_URL",
+	"CLAUDE_CODE_ARTIFACT_LIVE_BASE_URL", "CLAUDE_CODE_ARTIFACT_SYNC_BASE_URL", "CLAUDE_CODE_ARTIFACT_VIEWER_BASE_URL",
+	"CLAUDE_CODE_MEMORY_API_BASE_URL", "CLAUDE_CODE_MEMORY_API_TOKEN", "CLAUDE_CODE_GB_BASE_URL", "VOICE_STREAM_BASE_URL",
+	// The marks of a process another Claude Code started: a run on an account
+	// is not one by being started from one.
+	"CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
+	"CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SPAWNED_BY_SERVER", "CLAUDE_CODE_REMOTE", "CLAUDE_CODE_REMOTE_SESSION_ID",
+	"CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE", "CLAUDE_CODE_ENVIRONMENT_KIND", "CLAUDE_CODE_CONTAINER_ID",
 }
 
 // storedLoginPlatform is whether this platform takes the stored route at

@@ -2005,20 +2005,92 @@ How each credential reaches its CLI:
 The child environment is made unambiguous: every variable rota sets, and
 every competing one that would outrank it, is removed before rota's own value
 is added. Runtimes disagree on which duplicate wins — libc and Node take the
-first, Python the last — so the child only ever sees one. For `claude`,
-`ANTHROPIC_BASE_URL` is dropped too: a stray one would send the OAuth token
-to whatever host it names — and with it every variable that would sign
-Claude Code in some other way or move its credential store
-(`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_PROFILE`, the Bedrock,
-Vertex, Foundry, Mantle and Claude Platform on AWS switches,
-`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`,
-`CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_OAUTH_SCOPES`,
-`CLAUDE_CODE_SUBSCRIPTION_TYPE`, `CLAUDE_CODE_RATE_LIMIT_TIER`,
-`CLAUDE_CODE_SIMPLE`, which reads no stored login at all,
-`CLAUDE_SECURESTORAGE_CONFIG_DIR`, `ANTHROPIC_FEDERATION_RULE_ID`,
-`ANTHROPIC_ORGANIZATION_ID` and `CLAUDECODE`), each by its exact name. A launch on
-the account's stored login drops `CLAUDE_CODE_OAUTH_TOKEN` as well, so no
-token reaches the child at all.
+first, Python the last — so the child only ever sees one.
+
+Every route also drops what would sign the CLI in some other way, send its
+requests or its credential somewhere else, change which login, organization
+or configuration it uses, or tell it that it runs inside another session of
+itself — a shell profile, a host application or an outer Claude Code may have
+exported any of them. Each goes by its exact name, never by a prefix. For
+`claude` these are the names Claude Code reads only to reach something other
+than the account's login, so dropping one costs a run nothing:
+
+- **another credential:** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `ANTHROPIC_AWS_API_KEY`, `ANTHROPIC_FOUNDRY_API_KEY`,
+  `ANTHROPIC_FOUNDRY_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`,
+  `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR`,
+  `CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR`,
+  `CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR`,
+  `CLAUDE_CODE_OAUTH_REFRESH_TOKEN`, `CLAUDE_CODE_OAUTH_SCOPES`,
+  `CLAUDE_CODE_SUBSCRIPTION_TYPE`, `CLAUDE_CODE_RATE_LIMIT_TIER`,
+  `CLAUDE_CODE_SESSIONS_OAUTH_TOKEN`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`,
+  `CLAUDE_SESSION_INGRESS_TOKEN_FILE`, `CLAUDE_BRIDGE_OAUTH_TOKEN`,
+  `CLAUDE_TRUSTED_DEVICE_TOKEN`;
+- **Anthropic profiles and workload identity federation**, which outrank the
+  login: `ANTHROPIC_PROFILE`, `ANTHROPIC_CONFIG_DIR`,
+  `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`,
+  `ANTHROPIC_SERVICE_ACCOUNT_ID`, `ANTHROPIC_IDENTITY_TOKEN`,
+  `ANTHROPIC_IDENTITY_TOKEN_FILE`, `ANTHROPIC_WORKSPACE_ID`,
+  `CLAUDE_CODE_FEDERATION_CACHE_DIR`;
+- **a host that signs Claude Code in or refreshes for it:**
+  `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`, `CLAUDE_CODE_HOST_AUTH_ENV_VAR`,
+  `CLAUDE_CODE_HOST_CREDS_FILE`, `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH`,
+  `CLAUDE_CODE_SDK_HAS_SESSIONS_OAUTH_REFRESH`,
+  `CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH`;
+- **the OAuth client, where its login is kept, and whose login it is:**
+  `CLAUDE_CODE_OAUTH_CLIENT_ID`, `CLAUDE_CODE_CUSTOM_OAUTH_URL`,
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR`, `CLAUDE_CODE_SIMPLE` (which reads no
+  stored login at all), `CLAUDE_CODE_ACCOUNT_UUID`, `CLAUDE_CODE_USER_EMAIL`,
+  `CLAUDE_CODE_ORGANIZATION_UUID`, `CLAUDE_CODE_ACCOUNT_TAGGED_ID`;
+- **another provider:** the Bedrock, Vertex, Foundry, Mantle, Claude Platform
+  on AWS, Claude Platform on Google Cloud and gateway switches
+  (`CLAUDE_CODE_USE_*`, each named), `ANTHROPIC_FOUNDRY_RESOURCE`,
+  `ANTHROPIC_VERTEX_PROJECT_ID`, `ANTHROPIC_AWS_WORKSPACE_ID`,
+  `ANTHROPIC_GOOGLE_CLOUD_PROJECT`, `ANTHROPIC_GOOGLE_CLOUD_LOCATION`,
+  `ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID`, and the six
+  `CLAUDE_CODE_SKIP_*_AUTH` switches;
+- **another endpoint:** `ANTHROPIC_BASE_URL` (a stray one would send the
+  OAuth token to whatever host it names), `ANTHROPIC_BEDROCK_BASE_URL`,
+  `ANTHROPIC_VERTEX_BASE_URL`, `ANTHROPIC_FOUNDRY_BASE_URL`,
+  `ANTHROPIC_AWS_BASE_URL`, `ANTHROPIC_GOOGLE_CLOUD_BASE_URL`,
+  `ANTHROPIC_BEDROCK_MANTLE_BASE_URL`,
+  `_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL`, `ANTHROPIC_UNIX_SOCKET`,
+  `ANTHROPIC_CUSTOM_HEADERS`, `CLAUDE_CODE_API_BASE_URL`,
+  `CLAUDE_CODE_HTTP_PROXY`, `CLAUDE_CODE_HTTPS_PROXY`,
+  `CLAUDE_BRIDGE_BASE_URL`, `CLAUDE_BRIDGE_SESSION_INGRESS_URL`,
+  `CLAUDE_REMOTE_TOOLS_BRIDGE_URL`, the artifacts and memory APIs' base URLs
+  and tokens (`CLAUDE_CODE_ARTIFACTS_API_*`, `CLAUDE_CODE_ARTIFACT_*_BASE_URL`,
+  `CLAUDE_CODE_MEMORY_API_*`, each named), `CLAUDE_CODE_GB_BASE_URL`,
+  `VOICE_STREAM_BASE_URL`;
+- **the marks of a process another Claude Code started:** `CLAUDECODE`,
+  `CLAUDE_CODE_CHILD_SESSION` (which would leave an interactive run out of
+  `--resume`, `--continue`, the prompt history and `claude agents`),
+  `CLAUDE_CODE_SESSION_ID`,
+  `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_ENTRYPOINT`,
+  `CLAUDE_CODE_SPAWNED_BY_SERVER`, `CLAUDE_CODE_REMOTE`,
+  `CLAUDE_CODE_REMOTE_SESSION_ID`, `CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE`,
+  `CLAUDE_CODE_ENVIRONMENT_KIND`, `CLAUDE_CODE_CONTAINER_ID`.
+
+A launch on the account's stored login drops `CLAUDE_CODE_OAUTH_TOKEN` as
+well, so no token reaches the child at all. The cloud vendors' own variables —
+`AWS_PROFILE`, `AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_CLOUD_PROJECT`,
+`CLOUD_ML_REGION` and their like — stay: Claude Code reads them only once a
+dropped switch has chosen the cloud, and other programs the run starts read
+them too. `CLAUDE_CONFIG_DIR` stays as well; a route that points Claude Code
+at a directory sets it, and one that does not leaves your own.
+
+For `codex`, the CLI signs in from the `auth.json` in its private
+`CODEX_HOME`, and these are dropped: `OPENAI_API_KEY`, `CODEX_API_KEY`,
+`CODEX_ACCESS_TOKEN`, `CODEX_CONNECTORS_TOKEN`, the workload identity
+variables `OPENAI_FEDERATION_RULE_ID`, `OPENAI_IDENTITY_TOKEN_FILE` and
+`OPENAI_WORKLOAD_IDENTITY_CONTEXT` (which replace the login altogether),
+`OPENAI_ORGANIZATION`, `OPENAI_PROJECT`, `CODEX_APP_SERVER_LOGIN_CLIENT_ID`,
+`CODEX_APP_SERVER_LOGIN_ISSUER`, `OPENAI_BASE_URL`,
+`CODEX_REFRESH_TOKEN_URL_OVERRIDE` (the account's refresh token would go
+there), `CODEX_REVOKE_TOKEN_URL_OVERRIDE`, `CODEX_AUTHAPI_BASE_URL`,
+`CODEX_AGENT_IDENTITY_AUTHAPI_BASE_URL`, `CODEX_AGENT_IDENTITY_JWKS_BASE_URL`,
+`CODEX_CA_CERTIFICATE`, `CODEX_INTERNAL_ORIGINATOR_OVERRIDE` and
+`CODEX_SANDBOX`.
 
 Every child is also told which account it is: `ROTA_PROVIDER` is the
 provider name, `ROTA_ACCOUNT_ID` the account's id as a decimal, and
