@@ -11,8 +11,9 @@ import (
 	"time"
 )
 
-// warmLimit is how long macOS may take to let a new fake run at all.
-const warmLimit = 30 * time.Second
+// warmLimit is how long macOS may take to let a new fake run at all. A test
+// of the limit itself shortens it.
+var warmLimit = 30 * time.Second
 
 // warm runs the fake at path once, doing nothing, and waits for it.
 //
@@ -34,7 +35,7 @@ func warm(path string) error {
 	cmd.Env = append(os.Environ(), "GORACE="+strings.TrimSpace(os.Getenv("GORACE")+" atexit_sleep_ms=0"))
 	if err := cmd.Run(); err != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("fake cli %s: macOS did not let it start within %v", path, warmLimit)
+			return fmt.Errorf("fake cli %s: a first run that does nothing had not ended after %v", path, warmLimit)
 		}
 		return fmt.Errorf("fake cli %s: a first run that does nothing failed: %w", path, err)
 	}

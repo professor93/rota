@@ -300,6 +300,7 @@ func TestARawLineIsWrittenAsItIsAndOnlyIfItIsAnObject(t *testing.T) {
 // CLI meant to take.
 func TestCancellingTheContextEndsTheSession(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	ready := filepath.Join(t.TempDir(), "ready")
 	s := startEcho(t, ctx, "t-session-cancel", fakecli.Spec{Sleep: "10s", Ready: ready}, Spec{Prompt: "slow"}, nil)
 	fakecli.WaitReady(t, ready)
