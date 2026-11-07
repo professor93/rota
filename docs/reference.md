@@ -1589,9 +1589,10 @@ server runs itself does not have:
   each connection at most once every 2 seconds as `a send from <name> is
   waiting to be typed into this session; type once it is in`, so no
   half-typed line goes in ahead of it and is submitted by its Enter. While a
-  send waits, only its sender's person may type; anyone at the keyboard may
-  still press Esc or Ctrl-C once, a single key in a frame of its own, which
-  stops the turn and leaves the send to be typed. A send whose asker went
+  send waits, only its sender's person may type, and nobody under a token's
+  send; anyone at the keyboard may still press Esc or Ctrl-C once, a single
+  key in a frame of its own, which stops the turn and leaves the send to be
+  typed. A send whose asker went
   away still holds it until its holder answers, for at most 35 seconds.
 - **Falling behind repaints.** A viewer that cannot keep up with the output
   is not closed with `1013`; see *Falling behind* below.
