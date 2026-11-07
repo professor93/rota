@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -21,7 +22,11 @@ const (
 )
 
 // unitRun runs a supervisor command (systemctl, launchctl). Tests replace it.
-var unitRun = func(name string, args ...string) error {
+var unitRun = runSupervisor
+
+// runSupervisor runs one supervisor command, and when it fails says what
+// the supervisor said, not only its exit status.
+func runSupervisor(name string, args ...string) error {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	if err != nil {
 		if m := strings.TrimSpace(string(out)); m != "" {
@@ -29,6 +34,42 @@ var unitRun = func(name string, args ...string) error {
 		}
 	}
 	return err
+}
+
+// serveInstall is `rota serve install`: this store's daemon as a systemd
+// user unit or a launchd agent, which starts it at login and keeps its
+// sessions through a restart.
+func (c *cli) serveInstall(args []string) error {
+	fs := flag.NewFlagSet("serve install", flag.ContinueOnError)
+	if ok, err := c.daemonFlags(fs, args); !ok {
+		return err
+	}
+	return c.installDaemon()
+}
+
+// serveUninstall is `rota serve uninstall`: the unit or agent taken away,
+// and the daemon it ran stopped; every session goes on.
+func (c *cli) serveUninstall(args []string) error {
+	fs := flag.NewFlagSet("serve uninstall", flag.ContinueOnError)
+	if ok, err := c.daemonFlags(fs, args); !ok {
+		return err
+	}
+	return c.uninstallDaemon()
+}
+
+// unitEnv is what of this environment a supervised daemon is given: PATH,
+// and CLAUDE_CONFIG_DIR when it is set, by absolute path, since a daemon
+// runs in /. Nothing else is, ROTA_TOKEN least of all; ROTA_HOME is the
+// store's, written by the renderers.
+func unitEnv() []string {
+	env := []string{"PATH=" + os.Getenv("PATH")}
+	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
+		if abs, err := filepath.Abs(d); err == nil {
+			d = abs
+		}
+		env = append(env, "CLAUDE_CONFIG_DIR="+d)
+	}
+	return env
 }
 
 // supervise runs one supervisor command written as a line, so its option

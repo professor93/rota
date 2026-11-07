@@ -37,6 +37,14 @@ It listens on <store>/terminals/ctl.sock, which only you can reach, and on a
 TCP port only where server.toml sets [server] listen and --ctl-only is not
 given. It logs to <store>/daemon.log, or to [server] log_file. stop --all ends
 every session too, and asks first; off a terminal it needs --yes.
+
+  rota serve install     make it a systemd user unit or a launchd agent
+  rota serve uninstall   take that away; its sessions go on
+
+An installed daemon starts at login and keeps its sessions through a
+restart. It is given PATH and CLAUDE_CONFIG_DIR as they are where install
+runs, and not ROTA_TOKEN, so a port it opens wants auth.token_file or
+[[users]] in server.toml. Run install again to take up a new PATH or binary.
 `
 
 // daemonReady is how long serve start waits for the daemon it started to
@@ -125,7 +133,7 @@ func (c *cli) serveStatus(args []string) error {
 }
 
 // daemonFlags parses one daemon verb's flags. Asked for help, it prints what
-// the three verbs do and this one's flags, and says not to go on; none of
+// the daemon's verbs do and this one's flags, and says not to go on; none of
 // them takes an argument.
 func (c *cli) daemonFlags(fs *flag.FlagSet, args []string) (ok bool, err error) {
 	fs.SetOutput(io.Discard)
