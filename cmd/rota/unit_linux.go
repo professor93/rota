@@ -4,7 +4,10 @@ package main
 
 import (
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
 )
 
@@ -29,9 +32,12 @@ func unitFile(store string) (string, error) {
 	return filepath.Join(dir, name), nil
 }
 
-// writeUnit writes the unit and has systemd enable and start it. It does not
-// look for a daemon started by hand; the command wiring does.
-func writeUnit(exe, store string, env []string) (string, error) {
+// writeUnit writes the unit and has systemd enable and start it. again says
+// the unit was there before: enable --now leaves a unit that runs as it was
+// started, so a rewritten one is restarted to take up what changed. It does
+// not look for a daemon started by hand; the command does. The path is
+// returned once the file is written, with any error the supervisor gave.
+func writeUnit(exe, store string, env []string, again bool) (string, error) {
 	path, err := unitFile(store)
 	if err != nil {
 		return "", err
@@ -46,7 +52,13 @@ func writeUnit(exe, store string, env []string) (string, error) {
 	if err := supervise("systemctl --user daemon-reload"); err != nil {
 		return path, err
 	}
-	return path, supervise("systemctl --user enable --now " + name)
+	if !again {
+		return path, supervise("systemctl --user enable --now " + name)
+	}
+	if err := supervise("systemctl --user enable " + name); err != nil {
+		return path, err
+	}
+	return path, supervise("systemctl --user restart " + name)
 }
 
 // removeUnit stops and disables the unit and deletes its file. Sessions keep
@@ -63,4 +75,25 @@ func removeUnit(store string) error {
 		rerr = nil
 	}
 	return errors.Join(serr, rerr, supervise("systemctl --user daemon-reload"))
+}
+
+// lingerDir is where systemd records the users whose units start at boot
+// and outlive their logins. A variable so a test can point it elsewhere.
+var lingerDir = "/var/lib/systemd/linger"
+
+// lingerHint is what to run so that this user's units start at boot and
+// outlive the login, or nothing when systemd records that already, or when
+// who this user is cannot be told.
+func lingerHint() string {
+	name := os.Getenv("USER")
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		name = u.Username
+	}
+	if name == "" {
+		return ""
+	}
+	if _, err := os.Stat(filepath.Join(lingerDir, name)); !errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	return fmt.Sprintf("run %q so the daemon starts at boot and outlives your login", "loginctl enable-linger "+name)
 }

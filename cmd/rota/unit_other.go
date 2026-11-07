@@ -2,10 +2,11 @@
 
 package main
 
-import "errors"
+import "github.com/professor93/rota/internal/holdwire"
 
-var errNoUnit = errors.New("held sessions and the rota daemon run on linux and macOS")
+// There is no daemon here to supervise: install and uninstall refuse in the
+// sentence every held-session command uses.
 
-func unitFile(string) (string, error)                   { return "", errNoUnit }
-func writeUnit(_, _ string, _ []string) (string, error) { return "", errNoUnit }
-func removeUnit(string) error                           { return errNoUnit }
+func (c *cli) installDaemon() error { return holdwire.ErrPlatform }
+
+func (c *cli) uninstallDaemon() error { return holdwire.ErrPlatform }
