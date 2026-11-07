@@ -100,53 +100,67 @@ func (s *Store) sayRunSettings(a *rota.Account, cmd *rota.Command, spec rota.Spe
 // the run gets a fresh configuration directory with no settings in it.
 //
 // The warning says two things apart. A credential or a host is a risk to
-// the account and is said as one. A proxy or a certificate is what a person
-// on a corporate network sets on purpose — Claude Code's own docs put them
-// in settings — so it is said as what it is: rota drops them too, and the
-// person should know they are back, without being told the login is leaving.
+// the account and is said as one. A proxy or a certificate in the person's
+// own settings or the organisation's managed ones is what a corporate
+// network sets on purpose — Claude Code's own docs put them there — so it is
+// said as what it is: rota drops them too, and the person should know they
+// are back, without being told the login is leaving. In a project's files,
+// which come with whatever repository is checked out, a proxy and a
+// certificate are how that repository could intercept the token, and they
+// are said as the risk with the rest.
 func (s *Store) sayRiskySettings(a *rota.Account, env []string, cwd string, sources []string, hermetic bool) {
 	if s.Warn == nil || rota.Flavor(a.Provider) != "claude" {
 		return
 	}
 	reads := func(source string) bool { return sources == nil || slices.Contains(sources, source) }
-	var files []string
+	// own marks the files that are the person's or the organisation's
+	// rather than a project's.
+	type file struct {
+		path string
+		own  bool
+	}
+	var files []file
 	if dir := configDirOf(env); dir != "" && reads(sourceUser) && !hermetic {
-		files = append(files, filepath.Join(dir, "settings.json"))
+		files = append(files, file{filepath.Join(dir, "settings.json"), true})
 	}
 	if cwd != "" && reads(sourceProject) {
-		files = append(files, filepath.Join(cwd, ".claude", "settings.json"))
+		files = append(files, file{filepath.Join(cwd, ".claude", "settings.json"), false})
 	}
 	if cwd != "" && reads(sourceLocal) {
 		// Claude Code keeps the local file at the repository's root when it
 		// starts below it, and beside the shared one otherwise; which of the
 		// two depends on rules of its own (ownership, the home directory,
 		// the platform), so both are read.
-		files = append(files, filepath.Join(cwd, ".claude", "settings.local.json"))
+		files = append(files, file{filepath.Join(cwd, ".claude", "settings.local.json"), false})
 		if root := repoRoot(cwd); root != "" {
-			files = append(files, filepath.Join(root, ".claude", "settings.local.json"))
+			files = append(files, file{filepath.Join(root, ".claude", "settings.local.json"), false})
 		}
 	}
-	files = append(files, managedSettingsFiles()...)
+	for _, m := range managedSettingsFiles() {
+		files = append(files, file{m, true})
+	}
 	network := map[string]bool{}
 	for _, k := range rota.NetworkRedirecting() {
 		network["env."+k] = true
 	}
 	var risks, routes []string
 	seen := map[string]bool{}
-	for _, f := range files {
+	for _, sf := range files {
 		// The file as it is, links resolved: through the mirror that is the
 		// person's own, which is the one to open. One that is not there is
-		// nothing to read.
-		f, err := filepath.EvalSymlinks(f)
+		// nothing to read. A file reached twice keeps its first source, and
+		// the person's own comes first.
+		f, err := filepath.EvalSymlinks(sf.path)
 		if err != nil || seen[f] {
 			continue
 		}
 		seen[f] = true
 		keys := riskyKeys(f)
-		if risk := slices.DeleteFunc(slices.Clone(keys), func(k string) bool { return network[k] }); len(risk) > 0 {
+		routing := func(k string) bool { return sf.own && network[k] }
+		if risk := slices.DeleteFunc(slices.Clone(keys), routing); len(risk) > 0 {
 			risks = append(risks, f+" sets "+strings.Join(risk, ", "))
 		}
-		if route := slices.DeleteFunc(keys, func(k string) bool { return !network[k] }); len(route) > 0 {
+		if route := slices.DeleteFunc(keys, func(k string) bool { return !routing(k) }); len(route) > 0 {
 			routes = append(routes, f+" sets "+strings.Join(route, ", "))
 		}
 	}
