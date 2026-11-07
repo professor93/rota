@@ -2691,11 +2691,12 @@ login as ever, and the CLI refreshes a token that is due when it starts. An
 `auth.json` that already holds the login rota would write is left as it is,
 so what Codex adds to the file stays and a rotation the daemon has just
 written is never written over. Once the daemon is gone the login is rota's to
-refresh again, and a refresh in a server's maintenance goes into the home at
-once, as a run's does, so a daemon started there later reads the token that is
-still good. A token read back from the home is recorded as the one the home
-holds, the same as one rota wrote, so a file rota has since refreshed past is
-never taken for a newer rotation and read back over the good token.
+refresh again, and a refresh in a server's maintenance is saved at once and
+then goes into the home, as a run's does, so a daemon started there later
+reads the token that is still good. A token read back from the home, or the
+store's own token found there, is recorded as the one the home holds, the same
+as one rota wrote, so a file rota has since refreshed past is never taken for
+a newer rotation and read back over the good token.
 
 ## Quota
 

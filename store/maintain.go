@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	rota "github.com/professor93/rota/lib"
@@ -59,11 +60,14 @@ func (s *Store) Maintain(ctx context.Context) []error {
 		//
 		// What adoption read back is saved, not only what a refresh changed:
 		// while a daemon Codex left in the home refreshes the login (see
-		// codexDaemon), adoption is how the store keeps up with it. What rota
-		// refreshes goes into a codex home at once, as a launch's refresh
-		// does, so a daemon started there again reads the token that is still
-		// good rather than the one just spent; should the save below fail, the
-		// home's copy is read back by the next adoption.
+		// codexDaemon), adoption is how the store keeps up with it. A token
+		// rota refreshes is saved at once, as a launch's is: the one it
+		// replaced is spent, so nothing after the refresh — another account's
+		// network call, a process that ends — may stand between the new one
+		// and the store. It then goes into a codex home, as a launch's does,
+		// so a daemon started there again reads the token that is still good
+		// rather than the one just spent. The home holds a spent token by
+		// then, so that write loses nothing even if the save failed.
 		//
 		// Adopting, asking after the daemon, refreshing and that write happen
 		// under one claim, so nothing the CLI does between them goes unseen.
@@ -80,8 +84,13 @@ func (s *Store) Maintain(ctx context.Context) []error {
 			if did, err = rota.Refresh(ctx, a); err != nil || !did || a.Dead {
 				return
 			}
+			if serr := s.Save(); serr != nil {
+				err = fmt.Errorf("refreshed token could not be saved: %w", serr)
+			}
 			if rota.Flavor(a.Provider) == "codex" {
-				_, err = rota.Stage(a, home)
+				if _, serr := rota.Stage(a, home); serr != nil {
+					err = errors.Join(err, serr)
+				}
 			}
 		}) {
 			continue

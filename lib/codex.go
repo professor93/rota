@@ -247,6 +247,15 @@ func adoptCodex(a *Account, doc codexAuth) {
 	if tok.AccountID != "" && a.Extra["account_id"] != "" && tok.AccountID != a.Extra["account_id"] {
 		return
 	}
+	// A file holding the store's own refresh token is known to be the
+	// store's, whatever the record of rota's last write says: nothing, in a
+	// store from before rota kept one, or an older write, after a run whose
+	// last save failed. Recorded, so that a refresh rota makes next leaves a
+	// file that lags behind it rather than one read back as a rotation.
+	if tok.RefreshToken != "" && tok.RefreshToken == a.Token.Refresh {
+		a.Staged = fingerprint(tok.RefreshToken)
+		return
+	}
 	if !a.cliRotated(tok.RefreshToken) {
 		return
 	}

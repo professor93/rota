@@ -219,3 +219,27 @@ func TestACodexRotationIsReadBackOnce(t *testing.T) {
 		t.Fatalf("a file holding a token rota has refreshed past is not read back again: %v %+v", err, a.Token)
 	}
 }
+
+// A file holding exactly the store's refresh token is the store's own,
+// whatever rota's record of its last write says — nothing, as in a store
+// from before it kept one, or an older write. Reading it records that, so a
+// refresh rota then makes in the store alone leaves a file known to lag
+// behind it, never one taken for a newer rotation and read back.
+func TestACodexFileHoldingTheStoreTokenIsRecordedAsTheHomes(t *testing.T) {
+	for _, staged := range []string{"", fingerprint("r0"), stagedNone} {
+		home := t.TempDir()
+		if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte(
+			`{"auth_mode":"chatgpt","tokens":{"id_token":"i","access_token":"a1","refresh_token":"r1","account_id":"acct"}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		a := &Account{ID: 1, Provider: "codex", Staged: staged,
+			Token: Token{Access: "a1", Refresh: "r1"}, Extra: map[string]string{"id_token": "i", "account_id": "acct"}}
+		if err := Adopt(a, home); err != nil || !a.StagedCurrent() {
+			t.Fatalf("staged %q: the home is known to hold the store's token: %v %q", staged, err, a.Staged)
+		}
+		a.Token = Token{Access: "a2", Refresh: "r2"} // rota refreshed r1 in the store alone
+		if err := Adopt(a, home); err != nil || a.Token.Refresh != "r2" {
+			t.Fatalf("staged %q: the spent token is not read back: %v %+v", staged, err, a.Token)
+		}
+	}
+}
