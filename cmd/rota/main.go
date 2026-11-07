@@ -2380,18 +2380,8 @@ func (c *cli) serve(args []string) (err error) {
 	if !opts.Routes.API {
 		say("routes: the API is off, so this server answers nothing")
 	}
-	server := &nethttp.Server{
-		Addr:    listener.Addr,
-		Handler: srv.Handler(),
-		// A slow client must not be able to hold a connection open for
-		// ever. There is no write deadline: a streamed run legitimately
-		// takes as long as the run does, and the run has its own timeout.
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       5 * time.Minute,
-		IdleTimeout:       2 * time.Minute,
-		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
-		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
-	}
+	server := httpServer(srv.Handler(), logger)
+	server.Addr, server.TLSConfig = listener.Addr, &tls.Config{MinVersion: tls.VersionTLS12}
 
 	// Shut down on the first signal and wait for work in flight; a second
 	// signal stops waiting, for whoever is in a hurry.
@@ -2425,6 +2415,21 @@ func (c *cli) serve(args []string) (err error) {
 			return fmt.Errorf("shutting down: %w", err)
 		}
 		return nil
+	}
+}
+
+// httpServer is an HTTP server with serve's limits, for every listener the
+// API is served on: the port, and the daemon's control socket. A slow client
+// must not be able to hold a connection open for ever. There is no write
+// deadline: a streamed run legitimately takes as long as the run does, and
+// the run has its own timeout.
+func httpServer(h nethttp.Handler, log *slog.Logger) *nethttp.Server {
+	return &nethttp.Server{
+		Handler:           h,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
 }
 
