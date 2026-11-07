@@ -341,11 +341,8 @@ func makeConversationState(dir string) error {
 //   - `statsig`, `mcp-needs-auth-cache.json` and `telemetry` are caches and
 //     spools kept per login: its feature flags, which MCP servers still want
 //     it to sign in, what it is waiting to report;
-//   - `policy-limits.json` and `remote-settings.json`, and every name that
-//     is one of them followed by a dot — the signature, the stamp, when they
-//     were last synced — are the policy and the settings the login's
-//     organisation set, cached; shared, one organisation's would apply under
-//     another account;
+//   - every name in perLogin, and every name that is one of them followed by
+//     a dot: state Claude Code keeps for the login it runs as, see there;
 //   - any name ending in `.lock` is a lock Claude Code takes for this
 //     directory's own processes;
 //   - `.claude.json` is dealt with on its own, `.claude.json.own` and
@@ -357,8 +354,7 @@ func makeConversationState(dir string) error {
 // is, the account's own while the account keeps its own file.
 func sharedWithClaude(name string) bool {
 	switch {
-	case strings.HasPrefix(name, "daemon"), strings.HasSuffix(name, ".lock"),
-		orgPolicyFile(name, "policy-limits.json"), orgPolicyFile(name, "remote-settings.json"):
+	case strings.HasPrefix(name, "daemon"), strings.HasSuffix(name, ".lock"), perLoginFile(name):
 		return false
 	}
 	switch name {
@@ -370,10 +366,35 @@ func sharedWithClaude(name string) bool {
 	return true
 }
 
-// orgPolicyFile reports whether name is base itself or base followed by a dot
-// and anything: the file Claude Code caches an organisation's policy or
-// remote settings in, and the files it keeps beside it.
-func orgPolicyFile(name, base string) bool {
-	rest, ok := strings.CutPrefix(name, base)
-	return ok && (rest == "" || rest[0] == '.')
+// perLogin are the entries Claude Code keeps for the login it runs as, each
+// with whatever it writes beside one under the same name and a dot — a
+// signature, a stamp, when it was last synced, a temporary file on its way to
+// replacing it, an epoch. Shared, one login's would be read under another:
+//   - `policy-limits.json` and `remote-settings.json` are the policy and the
+//     settings the login's organisation set, cached;
+//   - `remote-settings-helper-consent` is the attestation saved with those
+//     remote settings and removed with them, which they are judged by;
+//   - `remote-settings-consent.json` is what the login agreed to of its
+//     organisation's remote settings, one record for each organisation,
+//     naming the account: two accounts of one organisation would keep
+//     replacing each other's, and each be asked again;
+//   - `mcp-discovery-cache` is what remote MCP servers offered, filed under
+//     names made from the signed-in account;
+//   - `hfi-auth.json` and `.session_ingress_token` are credentials: an older
+//     auth file Claude Code still clears away, and the token a self-hosted
+//     runner gives one session, written with its epoch after the name.
+var perLogin = []string{
+	"policy-limits.json", "remote-settings.json", "remote-settings-helper-consent",
+	"remote-settings-consent.json", "mcp-discovery-cache", "hfi-auth.json", ".session_ingress_token",
+}
+
+// perLoginFile reports whether name is one of perLogin, or one of them
+// followed by a dot and anything.
+func perLoginFile(name string) bool {
+	for _, base := range perLogin {
+		if rest, ok := strings.CutPrefix(name, base); ok && (rest == "" || rest[0] == '.') {
+			return true
+		}
+	}
+	return false
 }
