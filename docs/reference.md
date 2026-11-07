@@ -883,9 +883,12 @@ The store `~/.rota` has the unit `rota.service` and the label
 has a unit of its own. The unit runs `rota serve start --foreground` from the
 path rota was started by, links kept as typed, so a package manager's link
 that an upgrade moves on — Homebrew's `/opt/homebrew/bin/rota` — is followed
-at the next start. It is given `ROTA_HOME`, the store's absolute path, and
-`PATH` and `CLAUDE_CONFIG_DIR` (the last only when it is set) as they are
-where `install` runs; nothing else of that environment. A supervisor does
+at the next start. It is given `ROTA_HOME`, the store's absolute path, `PATH` as
+it is where `install` runs, and the person's own Claude Code directory as
+`CLAUDE_CONFIG_DIR`, by absolute path, only when a variable names one:
+`ROTA_CLAUDE_HOME` where it is set — inside a CLI rota launched, whose
+`CLAUDE_CONFIG_DIR` is the account's — and `CLAUDE_CONFIG_DIR` elsewhere.
+Nothing else of that environment is. A supervisor does
 not pass `ROTA_TOKEN`, so a daemon that opens a TCP port wants
 `auth.token_file` or `[[users]]` in `server.toml`; the control socket needs
 no token. The systemd unit has `KillMode=process` and the launchd agent

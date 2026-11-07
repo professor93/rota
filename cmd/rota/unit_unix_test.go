@@ -184,7 +184,12 @@ func newUnitRig(t *testing.T) *unitRig {
 // platform's renderer, from the rig's environment.
 func (r *unitRig) unitText(t *testing.T, exe string) string {
 	t.Helper()
-	env := []string{"PATH=" + os.Getenv("PATH"), "CLAUDE_CONFIG_DIR=" + os.Getenv("CLAUDE_CONFIG_DIR")}
+	return r.textWith(exe, []string{"PATH=" + os.Getenv("PATH"), "CLAUDE_CONFIG_DIR=" + os.Getenv("CLAUDE_CONFIG_DIR")})
+}
+
+// textWith is the unit or plist for exe and env, by this platform's
+// renderer.
+func (r *unitRig) textWith(exe string, env []string) string {
 	if runtime.GOOS == "darwin" {
 		_, label := unitName(r.store)
 		return launchdPlist(label, exe, r.store, env)
@@ -456,6 +461,45 @@ func TestTheUnitRunsTheRotaThatWasTyped(t *testing.T) {
 	}
 	if got := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n"); !slices.Equal(got, r.want.install) {
 		t.Fatalf("asked %q, want %q", got, r.want.install)
+	}
+}
+
+// Inside a CLI rota launched, CLAUDE_CONFIG_DIR is the account's mirror and
+// ROTA_CLAUDE_HOME the person's own directory, which is what the unit
+// carries, by absolute path; set but empty, the person's is the default,
+// and the unit names none.
+func TestTheUnitCarriesThePersonsClaudeDirectory(t *testing.T) {
+	r := newUnitRig(t)
+	exe, err := invokedAs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirror, cwd := t.TempDir(), t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", mirror)
+	t.Chdir(cwd)
+	for _, c := range []struct{ home, want string }{
+		{filepath.Join(cwd, "real"), filepath.Join(cwd, "real")},
+		{"real", filepath.Join(cwd, "real")},
+		{"", ""},
+	} {
+		t.Setenv("ROTA_CLAUDE_HOME", c.home)
+		if _, errb, code := call(t, "serve", "install"); code != 0 {
+			t.Fatalf("install with ROTA_CLAUDE_HOME=%q: exit %d %q", c.home, code, errb)
+		}
+		raw, err := os.ReadFile(r.want.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		env := []string{"PATH=" + os.Getenv("PATH")}
+		if c.want != "" {
+			env = append(env, "CLAUDE_CONFIG_DIR="+c.want)
+		}
+		if got, want := string(raw), r.textWith(exe, env); got != want {
+			t.Fatalf("ROTA_CLAUDE_HOME=%q: unit:\n%s\nwant:\n%s", c.home, got, want)
+		}
+		if strings.Contains(string(raw), mirror) {
+			t.Fatalf("ROTA_CLAUDE_HOME=%q: the account's mirror reached the unit", c.home)
+		}
 	}
 }
 
