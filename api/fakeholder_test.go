@@ -69,7 +69,8 @@ import (
 // Typed lines are its commands: "exit N" ends it with code N, "count N"
 // prints N numbered lines, "flood N" prints N lines of a kilobyte as fast as
 // it can and then "flood done", and anything else is answered "got:<line>". A send is
-// typed as its text and Enter.
+// typed as its text and Enter. Ctrl-C throws away the line so far and
+// prints "^C".
 func fakeHolder() {
 	// However a test fails, no fake outlives it by much.
 	time.AfterFunc(2*time.Minute, func() { os.Exit(3) })
@@ -440,18 +441,22 @@ func (f *fake) screen(conn *share.Conn, seq uint64) {
 // reading.
 var floodLine = strings.Repeat(".", 1000)
 
-// typed takes keystrokes a line at a time.
+// typed takes keystrokes a line at a time. A Ctrl-C throws away the line
+// typed so far and prints ^C, as a CLI's prompt does.
 func (f *fake) typed(p []byte) {
 	f.mu.Lock()
-	f.line = append(f.line, p...)
-	var lines []string
-	for {
-		i := bytes.IndexAny(f.line, "\r\n")
-		if i < 0 {
-			break
+	var lines []string // each line typed, and "\x03" for each interrupt
+	for _, b := range p {
+		switch b {
+		case '\r', '\n':
+			lines = append(lines, string(f.line))
+			f.line = f.line[:0]
+		case 0x03:
+			lines = append(lines, "\x03")
+			f.line = f.line[:0]
+		default:
+			f.line = append(f.line, b)
 		}
-		lines = append(lines, string(f.line[:i]))
-		f.line = f.line[i+1:]
 	}
 	f.mu.Unlock()
 	for _, l := range lines {
@@ -463,6 +468,8 @@ func (f *fake) command(line string) {
 	word, arg, _ := strings.Cut(line, " ")
 	n, _ := strconv.Atoi(arg)
 	switch word {
+	case "\x03":
+		f.print([]byte("^C\r\n"))
 	case "":
 	case "exit":
 		go f.exit(n)
