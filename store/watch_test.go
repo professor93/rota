@@ -111,7 +111,17 @@ func eventually(t *testing.T, what string, ok func() bool) {
 	}
 }
 
-// watchHeld reports whether a watcher holds the home's watch lock.
+// watches waits for the watcher to say it watches home, which it says once it
+// holds the home's lock. Probing the lock instead would race the watcher for
+// it, and a watcher that finds it taken goes at once, as a second one should.
+func (w *aWatcher) watches(t *testing.T, home string) {
+	t.Helper()
+	eventually(t, "it watches", func() bool { return strings.Contains(w.said(), "watching "+home) })
+}
+
+// watchHeld reports whether a watcher holds the home's watch lock. It takes
+// the lock to find out, so it asks only once a watcher watches or has gone:
+// see watches.
 func watchHeld(t *testing.T, home string) bool {
 	t.Helper()
 	f, ok, err := tryLockFile(filepath.Join(home, watchLock))
@@ -297,7 +307,7 @@ func TestAWatcherGoesWithTheAccountOrItsStoredLogin(t *testing.T) {
 			open, home := watchedStore(t, c.prep)
 			w := startWatch(t, open)
 			if c.then != nil {
-				eventually(t, "it watches", func() bool { return watchHeld(t, home) })
+				w.watches(t, home)
 				c.then(t, open)
 			}
 			if !w.ended(5 * time.Second) {
@@ -323,7 +333,7 @@ func TestASecondWatcherOfOneHomeGoesAtOnce(t *testing.T) {
 		alive(t, s.Home(a), "sessions/1.json", os.Getpid())
 	})
 	first := startWatch(t, open)
-	eventually(t, "the first watches", func() bool { return watchHeld(t, home) })
+	first.watches(t, home)
 	second := startWatch(t, open)
 	if !second.ended(5 * time.Second) {
 		t.Fatal("the second goes")
@@ -381,7 +391,7 @@ func TestAWatcherStopsAtOnceEvenWhileTheStoreIsHeld(t *testing.T) {
 		alive(t, s.Home(a), "sessions/1.json", os.Getpid())
 	})
 	w := startWatch(t, open)
-	eventually(t, "it watches", func() bool { return watchHeld(t, home) })
+	w.watches(t, home)
 	s, err := open()
 	if err != nil {
 		t.Fatal(err)
