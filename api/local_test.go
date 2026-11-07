@@ -218,8 +218,8 @@ func TestNoUserOrTokenMayBeCalledLocal(t *testing.T) {
 // turned on for it, are this machine's own user's to hand a daemon (P30,
 // P14): over the control socket, as local. A bearer token, or a user even
 // through LocalHandler, is refused before anything starts, an empty env
-// included. Over the socket both are read, and remote_control is true,
-// false or a name.
+// included. Over the socket both are read, remote_control is true, false or
+// a name, and an empty env is refused.
 func TestEnvIsTakenOnlyOverTheControlSocket(t *testing.T) {
 	s, err := New(Options{Token: "x", Dir: t.TempDir(), RefreshEvery: -1, Routes: &Routes{API: true, WebSocket: true, Terminal: true}})
 	if err != nil {
@@ -255,5 +255,10 @@ func TestEnvIsTakenOnlyOverTheControlSocket(t *testing.T) {
 		if code, answer := ask(local, "POST", "/v1/terminals", body); code != http.StatusBadRequest {
 			t.Errorf("local sending %s answers %d %s, want 400", body, code, answer)
 		}
+	}
+	// An empty env would start the session with nothing, not even a PATH.
+	const empty = "env is empty, which would start the session with no PATH; leave it out for the daemon's own"
+	if code, answer := ask(local, "POST", "/v1/terminals", `{"account":1,"env":[]}`); code != http.StatusBadRequest || errorOf(answer) != empty {
+		t.Errorf("local sending an empty env answers %d %s, want 400 %q", code, answer, empty)
 	}
 }

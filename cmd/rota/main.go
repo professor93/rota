@@ -56,6 +56,8 @@ Usage:
                                 this machine show it on its terminal page
   rota run [id] --remote-control[=name]   open Claude Code with its own
                                 Remote Control on, as this account
+  rota run [id] --detach        hand the CLI to a session the daemon holds,
+                                which runs on with no terminal open
   rota send <run> "..."         send another message into a run started with --input
   rota set <id> [flags]         where an account sits and what it reads:
                                 --order, --threshold, --cwd, --config,

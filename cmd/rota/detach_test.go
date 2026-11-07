@@ -28,6 +28,7 @@ func TestDetachRefusesAPromptAndPrint(t *testing.T) {
 		{[]string{"run", "1", "--detach", "-p", "hi"}, prompt},
 		{[]string{"run", "1", "--detach", "--", "-p", "hi"}, prompt},
 		{[]string{"run", "1", "--detach", "-i", "--print", "hi"}, prompt},
+		{[]string{"run", "1", "--detach", "fix", "--", "-i"}, prompt},
 		{[]string{"run", "--detach", "--remote-control", "fix it"}, prompt},
 		{[]string{"run", "1", "--detach", "--share"}, share},
 		{[]string{"run", "--share=watch", "--detach", "-i"}, share},

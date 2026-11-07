@@ -41,41 +41,64 @@ func stopAllWait() time.Duration { return holderKillAfter() + time.Second }
 
 /* ---------------------------------------------------------------- start --- */
 
-// startDaemon is `rota serve start`: the daemon in a session of its own,
-// in /, on the store this command names, written down by absolute path,
-// with nothing of this terminal's. It is ready once it answers on its
-// control socket as the process this started. A start that finds a daemon
-// already there, before it starts one or by losing the claim to one, says
-// which and is content: there is one daemon, which is what was asked for.
+// startDaemon is `rota serve start`: spawnDaemon, said. A daemon already
+// there, before this start began or by winning the store from this start's
+// own, is named, and the command is content: there is one daemon, which is
+// what was asked for.
 func (c *cli) startDaemon(ctlOnly bool, conf string) error {
-	home, terminals, err := daemonStore()
+	r, err := c.spawnDaemon(ctlOnly, conf)
 	if err != nil {
 		return err
 	}
+	if r.running != nil {
+		fmt.Fprintf(c.out, "rota daemon already running for %s%s\n", r.home, pidOf(r.running))
+		return nil
+	}
+	line := fmt.Sprintf("rota daemon started for %s (pid %d); control socket %s", r.home, r.started.PID, r.sock)
+	if r.started.HTTP != "" {
+		line += "; http on " + r.started.HTTP
+	}
+	fmt.Fprintln(c.out, line)
+	return nil
+}
+
+// spawnDaemon starts the daemon in a session of its own, in /, on the store
+// this command names, written down by absolute path, with nothing of this
+// terminal's, and waits until it answers on its control socket as the
+// process this started. It says which daemon serves the store then: the one
+// it started, or one found already running — before anything started, or
+// having won the store from the one this started, which then stops.
+func (c *cli) spawnDaemon(ctlOnly bool, conf string) (*daemonStart, error) {
+	home, terminals, err := daemonStore()
+	if err != nil {
+		return nil, err
+	}
 	sock := holdwire.CtlSock(terminals)
 	if err := holdwire.SockFits(sock); err != nil {
-		return err
+		return nil, err
+	}
+	already := func(d *holdwire.Daemon) (*daemonStart, error) {
+		return &daemonStart{home: home, sock: sock, running: d}, nil
 	}
 	if d, ok := daemonOf(terminals); ok {
-		fmt.Fprintf(c.out, "rota daemon already running for %s%s\n", home, pidOf(d))
-		return nil
+		return already(d)
 	}
 	// Read here as the daemon will read it, so a file it would refuse is
 	// refused at this terminal rather than in a log; the daemon runs in /,
 	// so a file named relatively is named absolutely.
 	if conf != "" {
 		if conf, err = filepath.Abs(conf); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	cfg, _, _, err := daemonConfig(conf, home)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	logPath := daemonLog(home, cfg)
 	lf, err := openLogFile(logPath, c.err)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	lf.Close()
 	var from int64
@@ -85,7 +108,7 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 
 	exe, err := invokedAs()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	args := []string{"serve", "start", "--foreground"}
 	if ctlOnly {
@@ -97,22 +120,16 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 	// The daemon runs in /, so every directory its environment names is
 	// named absolutely, as the store is: the person's own Claude Code
 	// directory too, which every claude account's home is made from.
-	env := termenv.Set(os.Environ(), "ROTA_HOME", home)
-	for _, name := range []string{"CLAUDE_CONFIG_DIR", "ROTA_CLAUDE_HOME"} {
-		if dir := os.Getenv(name); dir != "" && !filepath.IsAbs(dir) {
-			abs, err := filepath.Abs(dir)
-			if err != nil {
-				return err
-			}
-			env = termenv.Set(env, name, abs)
-		}
+	env, err := absoluteDirs(termenv.Set(os.Environ(), "ROTA_HOME", home))
+	if err != nil {
+		return nil, err
 	}
 	cmd := exec.Command(exe, args...)
 	cmd.Dir = "/"
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("starting the rota daemon: %w", err)
+		return nil, fmt.Errorf("starting the rota daemon: %w", err)
 	}
 	exited := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(exited) }()
@@ -128,31 +145,24 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 		select {
 		case <-exited:
 			if d, ok := daemonOf(terminals); ok {
-				fmt.Fprintf(c.out, "rota daemon already running for %s%s\n", home, pidOf(d))
-				return nil
+				return already(d)
 			}
 			if lines := logTail(logPath, from, 5); len(lines) > 0 {
-				return fmt.Errorf("the rota daemon did not start; the end of %s:\n  %s", logPath, strings.Join(lines, "\n  "))
+				return nil, fmt.Errorf("the rota daemon did not start; the end of %s:\n  %s", logPath, strings.Join(lines, "\n  "))
 			}
-			return fmt.Errorf("the rota daemon did not start, and wrote nothing to %s", logPath)
+			return nil, fmt.Errorf("the rota daemon did not start, and wrote nothing to %s", logPath)
 		case d := <-tried:
 			if d != nil && d.PID == pid {
-				line := fmt.Sprintf("rota daemon started for %s (pid %d); control socket %s", home, pid, sock)
-				if d.HTTP != "" {
-					line += "; http on " + d.HTTP
-				}
-				fmt.Fprintln(c.out, line)
-				return nil
+				return &daemonStart{home: home, sock: sock, started: d}, nil
 			}
 		case <-deadline.C:
 			// Another daemon answering, which this one is slow to lose the
 			// store to, is still one daemon running (P6). Asked without
 			// waiting, so the whole stays within daemonReady.
 			if d, ok := holdwire.RunningDaemon(terminals); ok && d.PID != 0 && d.PID != pid {
-				fmt.Fprintf(c.out, "rota daemon already running for %s%s\n", home, pidOf(d))
-				return nil
+				return already(d)
 			}
-			return fmt.Errorf("the rota daemon (pid %d) has not answered on %s within %s; rota serve status says when it does, and %s what it is doing",
+			return nil, fmt.Errorf("the rota daemon (pid %d) has not answered on %s within %s; rota serve status says when it does, and %s what it is doing",
 				pid, sock, daemonReady, logPath)
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -172,15 +182,6 @@ func daemonAnswering(terminals string) *holdwire.Daemon {
 		return d
 	}
 	return nil
-}
-
-// pidOf is " (pid N)" for a daemon whose record names it, and nothing for
-// one whose does not.
-func pidOf(d *holdwire.Daemon) string {
-	if d.PID == 0 {
-		return ""
-	}
-	return fmt.Sprintf(" (pid %d)", d.PID)
 }
 
 // daemonOf is the daemon serving the store, if one is. One that has taken

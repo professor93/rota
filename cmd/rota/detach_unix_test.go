@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	rotaclient "github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/internal/holdwire"
 )
 
@@ -51,9 +53,13 @@ func TestDetachHandsTheCLIToAHolder(t *testing.T) {
 	t.Cleanup(func() { os.RemoveAll(dir) })
 	cmd := r.cmd("run", "1", "--detach", "--label", "refactor")
 	cmd.Dir = dir
-	id, m, _ := r.detach(cmd)
+	id, m, errb := r.detach(cmd)
 	if m[1] != "claude/a@x" || m[2] != "claude" || m[3] != "refactor" || m[5] != "refactor" {
 		t.Fatalf("the line names %q via %q, session %q, send to %q", m[1], m[2], m[3], m[5])
+	}
+	// The daemon was there first: nothing is said of starting one.
+	if errb != m[0] {
+		t.Fatalf("stderr is %q; with a daemon running it is the session's line alone", errb)
 	}
 	s := r.session(id)
 	want, _ := filepath.EvalSymlinks(dir)
@@ -98,6 +104,87 @@ func TestDetachStartsADaemonAndSaysSo(t *testing.T) {
 		c.Close()
 		t.Fatalf("something listens on %s, which --detach's daemon must not open", addr)
 	}
+}
+
+// The race Review Focus 3 names: no daemon when --detach looks, and by the
+// time its own start runs, a serve start's daemon — one serving a port —
+// holds the store. --detach names that daemon, and never says it started
+// one on its control socket alone. Nothing outside can arrange the moment
+// between Ensure's look and its start, so this --detach runs in this
+// process with ensureDaemon standing in, which starts the other daemon
+// there.
+func TestDetachThatLosesTheRaceNamesTheDaemonThatServes(t *testing.T) {
+	r := newDaemonRig(t)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	if err := os.WriteFile(filepath.Join(r.home, "server.toml"), []byte("[server]\nlisten = \""+addr+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Whatever this process starts is rota, and finds the fake claude.
+	t.Setenv("ROTA_AS_RUN", "1")
+	for _, e := range r.env {
+		if path, ok := strings.CutPrefix(e, "PATH="); ok {
+			t.Setenv("PATH", path)
+		}
+	}
+	was := ensureDaemon
+	t.Cleanup(func() { ensureDaemon = was })
+	var pid int
+	ensureDaemon = func(terminals string, start func() error) (*rotaclient.Client, bool, error) {
+		if _, err := rotaclient.Dial(terminals); !errors.Is(err, rotaclient.ErrNoDaemon) {
+			t.Errorf("a daemon answered before the race: %v", err)
+		}
+		var http string
+		if pid, http = r.start(); http == "" {
+			t.Errorf("the daemon that won serves no port")
+		}
+		if err := start(); err != nil {
+			return nil, false, err
+		}
+		c, err := rotaclient.Dial(terminals)
+		return c, true, err
+	}
+	out, errb, code := call(t, "run", "1", "--detach")
+	lines := strings.SplitAfter(errb, "\n")
+	said := fmt.Sprintf("rota: a rota daemon is already running for %s (pid %d)\n", r.home, pid)
+	if code != 0 || out != "" || len(lines) != 3 || lines[0] != said || !detachedLine.MatchString(lines[1]) {
+		t.Fatalf("run --detach that lost the race: exit %d %q\nstderr %q\nwant it to begin %q", code, out, errb, said)
+	}
+	if d, ok := holdwire.RunningDaemon(r.terminals); !ok || d.PID != pid {
+		t.Fatalf("the daemon serving is %+v, not the one that won (pid %d)", d, pid)
+	}
+}
+
+// What the daemon refuses when it readies the account it chose for Remote
+// Control, it refuses in the words the command line uses for an account it
+// was named: another provider's account, and one on a token, which Remote
+// Control refuses and whose reason is said rather than hidden.
+func TestDetachRemoteControlRefusals(t *testing.T) {
+	t.Run("another provider", func(t *testing.T) {
+		r := newDaemonRig(t)
+		writeStore(t, r.home, `{"ordered":true,"nextId":2,"accounts":[
+			{"id":1,"provider":"codex","email":"c@x","order":1,"token":{"accessToken":"x"},"extra":{"id_token":"h.p.s"}}]}`)
+		r.start()
+		want := "error: Remote Control is Claude Code's, and codex/c@x is a codex account\n"
+		for args, code := range map[string]int{"run --detach --remote-control": 1, "run 1 --detach --remote-control": 2} {
+			out, errb, got := r.rota(strings.Fields(args)...)
+			if got != code || out != "" || !strings.HasPrefix(errb, want) {
+				t.Errorf("rota %s: exit %d %q %q; want %d and %q", args, got, out, errb, code, want)
+			}
+		}
+	})
+	t.Run("a token", func(t *testing.T) {
+		r := newDaemonRig(t)
+		r.start()
+		out, errb, code := r.rota("run", "--detach", "--remote-control")
+		if code != 1 || out != "" || !strings.Contains(errb, "Remote Control needs claude/a@x's own stored login") {
+			t.Fatalf("exit %d %q %q; want the reason, not an internal error", code, out, errb)
+		}
+	})
 }
 
 // The session starts from the environment of the command that asked for
