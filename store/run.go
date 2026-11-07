@@ -59,7 +59,7 @@ func (s *Store) PrepareIn(ctx context.Context, a *rota.Account, dir string) (pat
 		cwd = ""
 	}
 	s.sayRiskySettings(a, env, cwd, nil, false)
-	s.sayFederationProfile(a, env)
+	s.sayFederationProfile(a, env, cwd)
 	handed = true
 	return path, env, release, nil
 }

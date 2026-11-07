@@ -84,58 +84,66 @@ func TestAnActiveFederationProfileIsNamedOnceByALaunchOnTheAccountsLogin(t *test
 	}
 }
 
-// The directory is found as Claude Code finds it: ANTHROPIC_CONFIG_DIR, then
-// anthropic in XDG_CONFIG_HOME, then .config/anthropic in the home, each value
-// trimmed and a blank one passed over. The profile is the one active_config
-// names, trimmed as JavaScript trims, a byte-order mark included, and the one
-// called default when nothing is named.
+// The directory is found as Claude Code finds it, in the environment the
+// launch hands it: ANTHROPIC_CONFIG_DIR, then anthropic in XDG_CONFIG_HOME,
+// then .config/anthropic in the home, each value trimmed and a blank one
+// passed over, and the first of two values taken, as Node takes it. A
+// relative one is the CLI's, so it is read from the directory the CLI starts
+// in, and from nowhere when that is not known. The profile is the one
+// active_config names, trimmed as JavaScript trims, a byte-order mark
+// included, and the one called default when nothing is named. The
+// environment here is written out, so what a launch drops from the person's
+// does not decide the answer.
 func TestTheActiveProfileIsFoundWhereClaudeCodeFindsIt(t *testing.T) {
+	home, xdg, named, cwd := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	inHome := profileIn(t, filepath.Join(home, ".config", "anthropic"), "", "default", federation)
+	inXDG := profileIn(t, filepath.Join(xdg, "anthropic"), "", "default", federation)
+	inNamed := profileIn(t, named, "ci", "ci", federation)
+	trimmed := filepath.Join(t.TempDir(), "anthropic")
+	profileIn(t, trimmed, "", "default", `{"authentication":{"type":"user_oauth"}}`)
+	inTrimmed := profileIn(t, trimmed, "\uFEFF\u00a0 prod \r\n", "prod", federation)
+	inCwd := profileIn(t, filepath.Join(cwd, "cfg", "anthropic"), "", "default", federation)
+
+	for _, c := range []struct {
+		name string
+		env  []string
+		cwd  string
+		want string
+	}{
+		{"ANTHROPIC_CONFIG_DIR first", []string{"HOME=" + home, "XDG_CONFIG_HOME=" + xdg, "ANTHROPIC_CONFIG_DIR= " + named + "\n"}, "", inNamed},
+		{"then XDG_CONFIG_HOME", []string{"HOME=" + home, "XDG_CONFIG_HOME=" + xdg, "ANTHROPIC_CONFIG_DIR=  "}, "", inXDG},
+		{"then the home, default when nothing is named", []string{"HOME=" + home, "XDG_CONFIG_HOME="}, "", inHome},
+		{"the first of two values", []string{"XDG_CONFIG_HOME=" + xdg, "HOME=" + home, "XDG_CONFIG_HOME=" + named}, "", inXDG},
+		{"a name trimmed as JavaScript trims", []string{"XDG_CONFIG_HOME=" + filepath.Dir(trimmed)}, "", inTrimmed},
+		{"a relative directory, from where the CLI starts", []string{"HOME=" + home, "XDG_CONFIG_HOME=cfg"}, cwd, inCwd},
+		{"a relative directory, and no start known", []string{"HOME=" + home, "XDG_CONFIG_HOME=cfg"}, "", ""},
+		{"a credential in the environment", []string{"HOME=" + home, "CLAUDE_CODE_OAUTH_TOKEN=t"}, "", ""},
+		{"no directory at all", []string{"HOME= ", "XDG_CONFIG_HOME=\t"}, cwd, ""},
+	} {
+		if got := federationProfile(c.env, c.cwd); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// A run is warned about the profile of the directory its CLI reads, which
+// for a relative XDG_CONFIG_HOME is under the directory the run starts in,
+// not under rota's own.
+func TestARunIsWarnedAboutTheProfileWhereItsCLIStarts(t *testing.T) {
 	storedRouteHere(t)
 	noManaged(t)
 	claudeWorld(t)
-	t.Chdir(t.TempDir())
-	onPath(t, "claude")
+	personHome(t)
+	t.Setenv("XDG_CONFIG_HOME", "cfg")
+	here, there := t.TempDir(), t.TempDir()
+	profileIn(t, filepath.Join(here, "cfg", "anthropic"), "", "default", `{"authentication":{"type":"user_oauth"}}`)
+	file := profileIn(t, filepath.Join(there, "cfg", "anthropic"), "", "default", federation)
+	t.Chdir(here)
 	s := openTemp(t)
 	a := livingClaude(s, "u1")
-
-	t.Run("ANTHROPIC_CONFIG_DIR first", func(t *testing.T) {
-		dir := personHome(t)
-		profileIn(t, dir, "", "default", federation)
-		xdg := t.TempDir()
-		profileIn(t, filepath.Join(xdg, "anthropic"), "", "default", federation)
-		t.Setenv("XDG_CONFIG_HOME", xdg)
-		named := t.TempDir()
-		file := profileIn(t, named, "ci", "ci", federation)
-		t.Setenv("ANTHROPIC_CONFIG_DIR", " "+named+"\n")
-		if said := prepared(t, s, a); len(said) != 1 || said[0] != overridden(a, file) {
-			t.Fatalf("the directory the variable names, and only it: %q", said)
-		}
-	})
-	t.Run("then XDG_CONFIG_HOME", func(t *testing.T) {
-		dir := personHome(t)
-		profileIn(t, dir, "", "default", federation)
-		xdg := t.TempDir()
-		file := profileIn(t, filepath.Join(xdg, "anthropic"), "", "default", federation)
-		t.Setenv("XDG_CONFIG_HOME", xdg)
-		t.Setenv("ANTHROPIC_CONFIG_DIR", "  ")
-		if said := prepared(t, s, a); len(said) != 1 || said[0] != overridden(a, file) {
-			t.Fatalf("anthropic in XDG_CONFIG_HOME, and only it: %q", said)
-		}
-	})
-	t.Run("then the home, default when nothing is named", func(t *testing.T) {
-		file := profileIn(t, personHome(t), "", "default", federation)
-		if said := prepared(t, s, a); len(said) != 1 || said[0] != overridden(a, file) {
-			t.Fatalf("the default profile in the home's: %q", said)
-		}
-	})
-	t.Run("a name trimmed as JavaScript trims", func(t *testing.T) {
-		dir := personHome(t)
-		profileIn(t, dir, "", "default", `{"authentication":{"type":"user_oauth"}}`)
-		file := profileIn(t, dir, "\uFEFF\u00a0 prod \r\n", "prod", federation)
-		if said := prepared(t, s, a); len(said) != 1 || said[0] != overridden(a, file) {
-			t.Fatalf("the profile active_config names: %q", said)
-		}
-	})
+	if said := ran(t, s, a, rota.Spec{Cwd: there}); len(said) != 1 || said[0] != overridden(a, file) {
+		t.Fatalf("the profile under the run's own directory: %q", said)
+	}
 }
 
 // Only a profile Claude Code would sign in with is a warning: its JSON has

@@ -2177,16 +2177,17 @@ a, dir)` is the same launch for a CLI started in `dir`.
 
 One more sign-in outranks the account's login without being a variable or
 a setting: the active profile of the Anthropic configuration directory Claude
-Code shares with the `ant` CLI and the Anthropic SDKs. The directory is
-`ANTHROPIC_CONFIG_DIR`, else `anthropic` in `XDG_CONFIG_HOME`, else
-`.config/anthropic` in `HOME`, as the launch's environment gives them; the
-profile is `configs/<name>.json` in it, `<name>` being what `active_config`
-there says, or `default`. When that file's `authentication.type` is
-`oidc_federation` — workload identity federation — Claude Code signs in with
-it ahead of the login in its credential store, so ahead of the login rota keeps
-in every account's home. rota changes nothing and stops nothing for it, and a
-launch on the account's login prints one warning naming the file, never
-anything in it:
+Code shares with the `ant` CLI and the Anthropic SDKs. The warning follows the
+directory the launch's Claude Code will read, from the environment rota hands
+it: `ANTHROPIC_CONFIG_DIR`, else `anthropic` in `XDG_CONFIG_HOME`, else
+`.config/anthropic` in `HOME` — a variable the launch drops counts for nothing,
+and a relative one is read from the directory the CLI starts in. The profile
+is `configs/<name>.json` there, `<name>` being what `active_config` says, or
+`default`. When its `authentication.type` is `oidc_federation` — workload
+identity federation — Claude Code signs in with it ahead of the login in its
+credential store, so ahead of the login rota keeps in every account's home.
+rota changes nothing and stops nothing for it; a launch on the account's login
+prints one warning naming the file, never anything in it:
 
 ```
 warning: claude/you@example.com: /home/you/.config/anthropic/configs/ci.json
@@ -2199,13 +2200,9 @@ away, to turn it off
 A launch with `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` in its
 environment (the table above says when) signs in with that, which Claude Code
 ranks above the profile, and is not warned; nor is a `user_oauth` profile,
-which gives way to a stored login. `ANTHROPIC_PROFILE` and the federation
-variables, which would choose a profile or stand in for one, are already
-dropped by every launch. The files are read as Claude Code reads them:
-`active_config` trimmed as JavaScript trims, and the profile parsed as
-`JSON.parse` parses it, every name in its exact case. A file that is not a
-regular one, or is over 256 KiB, is not read. `rota serve` writes the warning
-to its log.
+which gives way to a stored login. The files are read as Claude Code reads
+them, up to 256 KiB. A settings file's `env` that names another directory or
+profile is not followed. `rota serve` writes the warning to its log.
 
 Every child is also told which account it is: `ROTA_PROVIDER` is the
 provider name, `ROTA_ACCOUNT_ID` the account's id as a decimal, and
