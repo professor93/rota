@@ -107,7 +107,7 @@ func (c *cli) loginKey(provider string, long bool, rest []string, label string) 
 		return c.emit(doc)
 	}
 	if unverified != nil {
-		fmt.Fprintf(c.err, "warning: %v\n", unverified)
+		warn(c.err, "%v", unverified)
 	}
 	fmt.Fprintf(c.out, "%s %s account %d (%s): it runs on an API key, and every run on it is paid for from that key's credit.\n",
 		verb, a.Provider, a.ID, a.Label())
