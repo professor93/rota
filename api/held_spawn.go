@@ -216,24 +216,7 @@ func (s *Server) heldRefusal(r *holdwire.Ready, account int) error {
 	}
 	msg := r.Error
 	if r.Kind == holdwire.KindBusy && account != 0 {
-		if rec := holdwire.Holding(s.terminals, account); rec != nil {
-			msg += " — held by session " + recordName(rec) + " (" + rec.ID + ")"
-		}
+		msg += holdwire.HeldBy(s.terminals, account)
 	}
 	return refuse(code, msg)
-}
-
-// recordName is what a session on disk is called, by the same rule as a
-// live one as far as its record goes.
-func recordName(r *holdwire.Record) string {
-	switch m := r.Meta; {
-	case m == nil:
-	case m.Name != "":
-		return m.Name
-	case m.ConversationName != "":
-		return m.ConversationName
-	case m.Cwd != "":
-		return filepath.Base(m.Cwd)
-	}
-	return r.ID
 }
