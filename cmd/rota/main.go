@@ -637,6 +637,9 @@ func (c *cli) list(args []string) error {
 			if len(rep.Notes) > 0 {
 				doc["notes"] = rep.Notes
 			}
+			if held := heldSessions(s); len(held) > 0 {
+				doc["held"] = held
+			}
 		}
 		return c.emit(doc)
 	}
@@ -651,6 +654,7 @@ func (c *cli) list(args []string) error {
 		c.sayLongNotes(shown, width)
 		if withSessions {
 			c.showSessions(sessions.Scan(s, recent), width)
+			c.showHeld(heldSessions(s))
 		}
 		for _, e := range errs {
 			warn(c.err, "%v", e)
@@ -693,6 +697,7 @@ func (c *cli) list(args []string) error {
 	c.sayLongNotes(shown, width)
 	if withSessions {
 		c.showSessions(sessions.Scan(s, recent), width)
+		c.showHeld(heldSessions(s))
 	}
 	for _, e := range errs {
 		warn(c.err, "%v", e)
@@ -1127,7 +1132,7 @@ var execProcess = execCLI
 // terminal become its own and there is no rota left. With --share rota stays
 // as the parent, because something does want it — a server on this machine,
 // so that the terminal can also be watched from the page.
-func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) error {
+func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) (err error) {
 	if ask.on {
 		// Before the account is prepared rather than after: a refusal is
 		// worth having before a token has been refreshed and a credential
@@ -1145,6 +1150,9 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 	if err != nil {
 		return err
 	}
+	// An account another run has is named with the held session that has
+	// it, when that is what does.
+	defer func() { err = heldBusy(s, a, err) }()
 	more, err := c.remoteControl(s, a, remote)
 	if err != nil {
 		return err
@@ -1459,6 +1467,7 @@ func (c *cli) answer(id int, args []string) error {
 	} else {
 		res, err = s.Run(context.Background(), a, spec, nil, watch)
 	}
+	err = heldBusy(s, a, err)
 	_ = started.End()
 	// What the readings are read from, beyond the result: the stream's
 	// tally, the account, and a fresh quota reading when one was asked for.
