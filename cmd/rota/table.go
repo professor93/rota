@@ -90,11 +90,20 @@ func termWidth(out io.Writer) int {
 	return 0
 }
 
+// warn says one warning on out, a line of its own, as say says it off a
+// terminal. Every warning a command prints goes through here, since what
+// one reports, an account's label, a provider's reply, a path, comes from
+// outside the program; rota serve's start-up warnings, its own words, go
+// through its log's say.
+func warn(out io.Writer, format string, args ...any) {
+	say(out, 0, "warning: "+fmt.Sprintf(format, args...)+"\n")
+}
+
 // say prints text, each line of it wrapped at its spaces to width when
 // width is a terminal's, a command in backticks kept whole (see wrapLine).
 // Without one, it is printed as it is. Either way a control character in
 // it, which an address, a reason or a provider's error may carry, is a
-// space (see printable): a note is wrapped by its count of runes, and an
+// space (see printable): a note is wrapped by the columns it takes, and an
 // escape would recolour or retitle the terminal it is said on.
 func say(out io.Writer, width int, text string) {
 	text = printable(text)
@@ -119,11 +128,11 @@ const (
 )
 
 // add puts a row under the table's header, each control character in its
-// cells a space (see printable): a cell is measured by its runes, and a tab
-// or an escape in an address, a status or a reason would move the cursor
-// where no count can follow, or be taken by the terminal as a command
-// rather than drawn. A newline is kept, since it is what parts a cell's
-// lines.
+// cells a space (see printable): a cell is measured by the columns it
+// takes, and a tab or an escape in an address, a status or a reason would
+// move the cursor where no count can follow, or be taken by the terminal
+// as a command rather than drawn. A newline is kept, since it is what
+// parts a cell's lines.
 func (g *grid) add(cells ...string) {
 	row := make([]string, len(cells))
 	for i, c := range cells {

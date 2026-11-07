@@ -221,7 +221,9 @@ func (c *cli) report(err error) int {
 	if c.json {
 		_ = c.emit(map[string]string{"error": unsecret(err.Error())})
 	} else {
-		fmt.Fprintln(c.err, "error:", unsecret(err.Error()))
+		// Through say, as every warning is: the error may carry a
+		// provider's reply or an account's label. JSON carries it as it is.
+		say(c.err, 0, "error: "+unsecret(err.Error())+"\n")
 		if hint := remediation(err); hint != "" {
 			fmt.Fprintln(c.err, "try:", hint)
 		}
@@ -646,7 +648,7 @@ func (c *cli) list(args []string) error {
 			c.showSessions(sessions.Scan(s, recent), width)
 		}
 		for _, e := range errs {
-			say(c.err, 0, fmt.Sprintf("warning: %v\n", e))
+			warn(c.err, "%v", e)
 		}
 		return nil
 	}
@@ -684,7 +686,7 @@ func (c *cli) list(args []string) error {
 		c.showSessions(sessions.Scan(s, recent), width)
 	}
 	for _, e := range errs {
-		say(c.err, 0, fmt.Sprintf("warning: %v\n", e))
+		warn(c.err, "%v", e)
 	}
 	return nil
 }
@@ -1156,7 +1158,7 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 		Account: a.ID, Label: a.Label(), Provider: a.Provider, Dir: cwd,
 	})
 	if rerr != nil {
-		fmt.Fprintf(c.err, "warning: could not record this run: %v\n", rerr)
+		warn(c.err, "could not record this run: %v", rerr)
 	}
 	if ask.on {
 		if ask.label == "" {
@@ -1376,7 +1378,7 @@ func (c *cli) answer(id int, args []string) error {
 	})
 	if rerr != nil {
 		// Not being able to record a run is no reason not to make it.
-		fmt.Fprintf(c.err, "warning: could not record this run: %v\n", rerr)
+		warn(c.err, "could not record this run: %v", rerr)
 	}
 
 	// The events are read whether or not they are printed. Printing them is
@@ -1432,7 +1434,7 @@ func (c *cli) answer(id int, args []string) error {
 	src := message.Sources{Tally: tally, Account: a, Threshold: rotation.Cutoff(a)}
 	if with.Quota {
 		for _, e := range s.Refresh(context.Background(), true, a) {
-			fmt.Fprintf(c.err, "warning: %v\n", e)
+			warn(c.err, "%v", e)
 		}
 		src.Quota = a.Quota
 	}
@@ -1658,7 +1660,7 @@ func (c *cli) set(args []string) error {
 	// Said at once rather than at the next launch: the person who just
 	// changed it is the one who wants to know it has not taken effect.
 	if err := s.RemoteControlNow(a); err != nil {
-		fmt.Fprintf(c.err, "warning: %v\n", err)
+		warn(c.err, "%v", err)
 	}
 	if given["order"] && !c.json {
 		// A move changes the neighbours too, so the answer is the queue, not
@@ -2032,7 +2034,7 @@ func (c *cli) openStore() (*store.Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.Warn = func(msg string) { fmt.Fprintf(c.err, "warning: %s\n", msg) }
+	s.Warn = func(msg string) { warn(c.err, "%s", msg) }
 	rotation.Backfill(s)
 	return s, nil
 }
@@ -2292,9 +2294,11 @@ func (c *cli) serve(args []string) (err error) {
 	// line is dated, as slog's are, so a restart in a log that is appended
 	// to can be told from the one before it. Everything that went wrong
 	// before this point is refused on stderr, there being no log yet to put
-	// it in.
+	// it in. Either way a control character in a plain line, which the error
+	// it ends with may carry from a path or a reply, is a space (see
+	// printable).
 	var out io.Writer = c.err
-	say := func(line string) { fmt.Fprintln(c.err, line) }
+	say := func(line string) { fmt.Fprintln(c.err, printable(line)) }
 	if path := cfg.Server.LogFile; path != "" {
 		// Not err: the deferred write below must see what serve returns.
 		lf, openErr := openLogFile(path, c.err)
@@ -2306,7 +2310,7 @@ func (c *cli) serve(args []string) (err error) {
 		say = func(line string) {
 			// The blank line before "shutting down" is for a terminal
 			// that has just echoed ^C, and a file has none.
-			fmt.Fprintf(lf, "%s %s\n", time.Now().Format(time.RFC3339), strings.TrimLeft(line, "\n"))
+			fmt.Fprintf(lf, "%s %s\n", time.Now().Format(time.RFC3339), strings.TrimLeft(printable(line), "\n"))
 		}
 		// A server that will not start, or stops on its own, is never
 		// silent: the reason goes into the log here, and report prints it

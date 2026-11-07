@@ -428,16 +428,10 @@ func TestPlainIsTabwriterForNarrowCharacters(t *testing.T) {
 }
 
 // A control character in a cell — a tab, a carriage return, an escape, a
-// DEL, a byte that is not UTF-8 — is drawn as a space, so a directory with
-// a tab in it lines up like any other; the newline still parts a cell's
-// lines, and U+FFFD that was written as such is kept.
+// DEL, a byte that is not UTF-8 — is drawn as a space (see printable, and
+// TestPrintableMakesEveryControlCharacterASpace), so a directory with a tab
+// in it lines up like any other.
 func TestPlainDrawsAControlCharacterAsASpace(t *testing.T) {
-	if got, want := printable("a\tb\r\x1b\x7f\xff\u0085\v\fc\nd\ufffd"), "a b       c\nd\ufffd"; got != want {
-		t.Fatalf("printable = %q, want %q", got, want)
-	}
-	if s := "/Users/someone/项目 🚀\nx"; printable(s) != s {
-		t.Fatalf("printable changed %q", s)
-	}
 	dirty := [][]string{
 		{"●", "claude", "#1 a@x", "/a\tb/c\x1b[31md", "1h ago, session af7fda4d"},
 		{"●", "GoLand", "-", "/x\ry\x7fz\xffw", "pid 1"},

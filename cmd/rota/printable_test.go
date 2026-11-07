@@ -6,6 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -32,9 +38,11 @@ func controls(s string) string {
 }
 
 // Every control character but the newline is a space: the C0 set with the
-// tab and the escape in it, DEL, the C1 set, and a byte that is not UTF-8.
-// Everything else is kept as it was, the newline that parts a cell's lines,
-// wide characters and joined pictures included.
+// tab and the escape in it, DEL, the C1 set, and every byte that is not
+// UTF-8, one space a byte, a sequence cut short or an encoded surrogate
+// included. Everything else is kept as it was: the newline that parts a
+// cell's lines, wide characters, joined pictures, and a U+FFFD that was
+// written as such.
 func TestPrintableMakesEveryControlCharacterASpace(t *testing.T) {
 	for r := rune(0); r <= 0x9f; r++ {
 		if r == '\n' || r > 0x1f && r < 0x7f {
@@ -50,16 +58,20 @@ func TestPrintableMakesEveryControlCharacterASpace(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct{ in, want string }{
+		{"a\tb\r\x1b\x7f\xff\u0085\v\fc\nd\ufffd", "a b       c\nd\ufffd"},
 		{"tab\there@x.com", "tab here@x.com"},
 		{"\x1b[31mred\x1b[0m", " [31mred [0m"},
 		{"\x1b]0;title\x07", " ]0;title "},
 		{"line\r\nnext", "line \nnext"},
+		{"a" + "中"[:2] + "b", "a  b"}, // cut short
+		{"a\xed\xa0\x80b", "a   b"},   // U+D800, encoded
+		{"a\xc0\xafb", "a  b"},        // "/", overlong
 	} {
 		if got := printable(tc.in); got != tc.want {
 			t.Fatalf("printable(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
-	for _, s := range []string{"", "a@x", "one\ntwo", "/Users/someone/项目 🚀", "👨‍👩‍👧 ❤️", "�"} {
+	for _, s := range []string{"", "a@x", "one\ntwo", "/Users/someone/项目 🚀\nx", "👨\u200d👩\u200d👧 ❤\ufe0f", "\ufffd"} {
 		if got := printable(s); got != s {
 			t.Fatalf("printable changed %q to %q", s, got)
 		}
@@ -120,7 +132,7 @@ func TestSayDrawsAControlCharacterAsASpace(t *testing.T) {
 		t.Fatalf("the blank line before and the newline after stay: %q", got)
 	}
 	for _, line := range strings.Split(got, "\n") {
-		if utf8.RuneCountInString(line) > 30 {
+		if screenWidth(line) > 30 {
 			t.Fatalf("a line wider than the terminal: %q", line)
 		}
 	}
@@ -143,7 +155,7 @@ func TestSayInDrawsAControlCharacterAndANewlineAsASpace(t *testing.T) {
 		t.Fatalf("on a terminal the line has %s in it: %q", c, got)
 	}
 	for _, l := range strings.Split(strings.TrimSuffix(got, "\n"), "\n") {
-		if !strings.HasPrefix(l, "  ") || utf8.RuneCountInString(l) > 24 {
+		if !strings.HasPrefix(l, "  ") || screenWidth(l) > 24 {
 			t.Fatalf("every line two spaces in and within the terminal: %q in %q", l, got)
 		}
 	}
@@ -189,6 +201,9 @@ func TestListDrawsControlCharactersFromTheStoreAsSpaces(t *testing.T) {
 			t.Fatalf("%v: %d %q %q", args, code, out, errOut)
 		}
 		check(strings.Join(args, " "), out, 1000)
+		if c := controls(errOut); c != "" {
+			t.Fatalf("%v: stderr has %s in it: %q", args, c, errOut)
+		}
 		if !strings.Contains(out, "│ tab here@x.com ") || !strings.Contains(out, "│ red [31m@x.com [0m ") {
 			t.Fatalf("%v: both addresses, a space for each control character:\n%s", args, out)
 		}
@@ -212,6 +227,9 @@ func TestListDrawsControlCharactersFromTheStoreAsSpaces(t *testing.T) {
 			t.Fatal(err)
 		}
 		check(fmt.Sprintf("list %v at 60 columns", args), out.String(), 60)
+		if c := controls(errb.String()); c != "" {
+			t.Fatalf("list %v at 60 columns: stderr has %s in it: %q", args, c, errb.String())
+		}
 	}
 
 	out, _, code := call(t, "--json", "list")
@@ -259,5 +277,101 @@ func TestListWarnsWithAProvidersErrorAsSpaces(t *testing.T) {
 	}
 	if !strings.Contains(errOut, "warning: t-esc-meter/a@x: quota: the server said  [2J ]0;owned  no\n") {
 		t.Fatalf("the provider's error, its control characters spaces: %q", errOut)
+	}
+}
+
+// A store's own warning names the account and may carry what a provider
+// said, so it is said with its control characters as spaces: here the one
+// a rescue of a home Claude Code blanked makes, under rota list --short.
+func TestStoreWarningsSayAControlCharacterAsASpace(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps no login in a home")
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"access_token": "A-new", "refresh_token": "R-new", "expires_in": 3600})
+	}))
+	t.Cleanup(srv.Close)
+	old := rota.ClaudeEndpoints.Token
+	rota.ClaudeEndpoints.Token = srv.URL
+	t.Cleanup(func() { rota.ClaudeEndpoints.Token = old })
+
+	dir := t.TempDir()
+	t.Setenv("ROTA_HOME", dir)
+	a := &rota.Account{ID: 1, Provider: "claude", Email: "a\x1b]0;owned\x07@x"}
+	a.Token = rota.Token{Access: "A", Refresh: "R", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
+	a.StagedWritten()
+	raw, err := json.Marshal(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeStore(t, dir, fmt.Sprintf(`{"ordered":true,"nextId":2,"accounts":[%s]}`, raw))
+	home := filepath.Join(dir, "homes", "claude-1")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	blanked := `{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}`
+	if err := os.WriteFile(filepath.Join(home, ".credentials.json"), []byte(blanked), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, stderr, code := call(t, "list", "--short")
+	if code != 0 || !strings.Contains(stderr, "warning: claude/a ]0;owned @x: ") || !strings.Contains(stderr, "refreshed it") {
+		t.Fatalf("the rescue is said, the label's escape a space: %d %q", code, stderr)
+	}
+	if c := controls(stderr); c != "" {
+		t.Fatalf("the warning has %s in it: %q", c, stderr)
+	}
+}
+
+// The error a command ends with may carry a provider's reply or an
+// account's label, so it is said with its control characters as spaces.
+// --json carries it as it is.
+func TestTheErrorACommandEndsWithSaysAControlCharacterAsASpace(t *testing.T) {
+	cause := errors.New("claude/a\x1b]0;owned\x07@x: the server said \x1b[2J no")
+	var out, errb bytes.Buffer
+	c := &cli{out: &out, err: &errb, in: strings.NewReader("")}
+	if code := c.report(cause); code != 1 {
+		t.Fatalf("exit %d", code)
+	}
+	if got, want := errb.String(), "error: claude/a ]0;owned @x: the server said  [2J no\n"; got != want || out.Len() != 0 {
+		t.Fatalf("stderr %q, want %q; stdout %q", got, want, out.String())
+	}
+
+	out.Reset()
+	errb.Reset()
+	c.json = true
+	c.report(cause)
+	var doc struct{ Error string }
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil || doc.Error != cause.Error() || errb.Len() != 0 {
+		t.Fatalf("json carries the error as it is: %v %q %q", err, out.String(), errb.String())
+	}
+}
+
+// rota serve's error, in its log file as on stderr, says a path from its
+// configuration with its control characters as spaces.
+func TestServeSaysItsErrorWithAControlCharacterAsASpace(t *testing.T) {
+	refusing(t) // a store, a token, and a server that does not wait for ever
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	dir := t.TempDir()
+	cert := filepath.Join(dir, "no\x1b]0;owned\x07such", "cert.pem")
+	path := filepath.Join(dir, "rota.log")
+	out, errb, code := call(t, "serve", addr, "--refresh-every=0", "--log-file", path, "--tls-cert", cert, "--tls-key", cert)
+	if code == 0 || out != "" || !strings.HasPrefix(errb, "error: ") || !strings.Contains(errb, "no ]0;owned such") {
+		t.Fatalf("exit %d, stdout %q, stderr %q", code, out, errb)
+	}
+	if c := controls(errb); c != "" {
+		t.Fatalf("stderr has %s in it: %q", c, errb)
+	}
+	logged := readFile(t, path)
+	if !strings.Contains(logged, "error: ") || !strings.Contains(logged, "no ]0;owned such") {
+		t.Fatalf("the log says why it stopped:\n%s", logged)
+	}
+	if c := controls(logged); c != "" {
+		t.Fatalf("the log has %s in it: %q", c, logged)
 	}
 }
