@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -136,10 +137,11 @@ const heldSendMax = 256 << 10
 // sendTerminal types a message into a held session the way a person would:
 // its holder waits until the CLI is ready for one, types it, and presses
 // Enter. It is typing, so it goes under the keyboard's rule: the keyboard
-// free, or held by the sender's own person, and until it is answered nobody
-// else types into the session (heldTerm.sendingFor). A session waiting on its
-// person for a permission or a question refuses it unless it is forced,
-// because Enter there may approve something.
+// free, or held by the sender's own person, and from the moment it is let in
+// until it is answered nobody else types into the session but Esc and Ctrl-C
+// (heldTerm.sendingFor). A session waiting on its person for a permission or
+// a question refuses it unless it is forced, because Enter there may approve
+// something.
 //
 // The answer is 200 once the text is in, or the refusal with a reason a
 // program can act on: 409 waiting, keyboard (naming the holder), ended or
@@ -186,11 +188,16 @@ func (s *Server) sendTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	p := who(r)
 	person := s.personOf(p)
-	if holder, ok := ts.mayType(person); !ok {
+	x, answer := ts.letSendIn(h, person, p.Name)
+	if answer.Code == sentKeyboard {
+		holder := answer.Message
 		sendRefused(w, http.StatusConflict, "keyboard", holder+" holds the keyboard of this session", holder)
 		return
 	}
-	answer := h.sendText(r.Context(), person, p.Name, req.Text, req.Force)
+	if x != nil {
+		heldSendLetIn()
+		answer = h.sendText(r.Context(), x, req.Text, req.Force)
+	}
 	word := answer.Code
 	if word == holdwire.SentOK {
 		word = "typed"
@@ -671,7 +678,7 @@ func (s *Server) onTerm(ts *termSession, tc *termConn, f inFrame) error {
 			tc.fail(watchOnly)
 			return nil
 		}
-		if err := ts.typeInto(tc, data); err != nil {
+		if err := ts.typeInto(tc, data); err != nil && !errors.Is(err, errSendTold) {
 			tc.fail(err.Error())
 		}
 		return nil
