@@ -2,7 +2,10 @@
 
 package proc
 
-import "testing"
+import (
+	"testing"
+	"unsafe"
+)
 
 // macOS names each boot with a UUID of its own. The boot time is no name
 // for it: setting the clock moves kern.boottime, and a moved clock is not a
@@ -21,5 +24,17 @@ func TestBootIDIsThisBootsUUID(t *testing.T) {
 		if dash && c != '-' || !dash && !hex {
 			t.Fatalf("boot id %q is not a UUID", id)
 		}
+	}
+}
+
+// PeerUID reads a struct xucred whole, so its layout here must be the
+// kernel's: four bytes of version, four of uid, a short and its padding, and
+// sixteen groups.
+func TestXucredIsTheKernelsSize(t *testing.T) {
+	if n := unsafe.Sizeof(xucred{}); n != 76 {
+		t.Fatalf("xucred is %d bytes, want 76", n)
+	}
+	if off := unsafe.Offsetof(xucred{}.uid); off != 4 {
+		t.Fatalf("xucred's uid is at %d, want 4", off)
 	}
 }

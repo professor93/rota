@@ -299,9 +299,91 @@ func TestAStaleCtlSockIsReplaced(t *testing.T) {
 	}
 }
 
+// The socket's permissions are its owner's alone, and so is every
+// connection it keeps: one from any other user is closed at the door, before
+// a byte of HTTP is read. Here the owner is made somebody else, so this
+// test's own connection is the stranger's.
+func TestCtlSockRefusesAnotherUser(t *testing.T) {
+	srv, terminals := ctlDaemon(t)
+	owner := ctlOwner
+	ctlOwner = func() int { return os.Geteuid() + 1 }
+	t.Cleanup(func() { ctlOwner = owner })
+	stop, err := listenCtl(srv, terminals, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	resp, err := ctlClient(holdwire.CtlSock(terminals)).Get("http://rota/v1/health")
+	if err == nil {
+		resp.Body.Close()
+		t.Fatalf("a connection from another user was answered %d", resp.StatusCode)
+	}
+}
+
+// The directory around the socket is its owner's alone too: one somebody
+// opened to the group or to others is closed again before the socket is
+// made in it.
+func TestCtlSockTightensAnOpenDirectory(t *testing.T) {
+	srv, terminals := ctlDaemon(t)
+	if err := os.Chmod(terminals, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stop, err := listenCtl(srv, terminals, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	fi, err := os.Stat(terminals)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		t.Fatalf("the terminals directory is %v after listening, want 0700", fi.Mode().Perm())
+	}
+}
+
+// A caller the daemon cannot place only watches, and a store whose records
+// cannot be read is one where nobody can be placed: here the directory has
+// gone between the connection and its first request.
+func TestAStoreItCannotReadOnlyWatches(t *testing.T) {
+	srv, terminals := ctlDaemon(t)
+	stop, err := listenCtl(srv, terminals, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	conn, err := net.Dial("unix", holdwire.CtlSock(terminals))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	away := terminals + ".away"
+	if err := os.Rename(terminals, away); err != nil {
+		t.Fatal(err)
+	}
+	// Put back before the socket stops and the daemon lets go, which run
+	// after this.
+	t.Cleanup(func() { _ = os.Rename(away, terminals) })
+	_ = conn.SetDeadline(time.Now().Add(20 * time.Second))
+	if _, err := fmt.Fprint(conn, "GET /v1/session HTTP/1.1\r\nHost: rota\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := nethttp.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var who map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&who)
+	if resp.StatusCode != 200 || who["role"] != "watch" {
+		t.Fatalf("with the records unreadable the caller is %d %v, want watch", resp.StatusCode, who)
+	}
+}
+
 // Only the daemon listens at ctl.sock, and only the daemon removes what is
 // there: a server without the store's daemon claim is refused, and the file
-// is left as it was — it may be a live daemon's.
+// is left as it was — it may be a live daemon's. The claim is the server's
+// own, as it says, and not this process's or another store's.
 func TestCtlSockIsTheDaemonsAlone(t *testing.T) {
 	home, terminals := ctlStore(t)
 	srv, err := api.New(api.Options{Token: "x", Dir: home, RefreshEvery: -1})
@@ -321,5 +403,30 @@ func TestCtlSockIsTheDaemonsAlone(t *testing.T) {
 	}
 	if raw, _ := os.ReadFile(sock); string(raw) != "a live daemon's" {
 		t.Fatalf("the refused listen touched ctl.sock: %q", raw)
+	}
+
+	// This process holding the claim is not the server holding it.
+	release, err := holdwire.ClaimDaemon(terminals, wire.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stop, err := listenCtl(srv, terminals, quietLog()); err == nil {
+		stop()
+		t.Fatal("a server without the claim listened because its process held it")
+	}
+	release()
+	if raw, _ := os.ReadFile(sock); string(raw) != "a live daemon's" {
+		t.Fatalf("the refused listen touched ctl.sock: %q", raw)
+	}
+
+	// A daemon is the daemon of its own store, not of another one's.
+	daemon, own := ctlDaemon(t)
+	other := filepath.Join(filepath.Dir(own), "elsewhere")
+	if err := os.Mkdir(other, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if stop, err := listenCtl(daemon, other, quietLog()); err == nil {
+		stop()
+		t.Fatal("a daemon listened at another store's control socket")
 	}
 }
