@@ -212,6 +212,9 @@ rota serve --print-config     # what it would serve with, and where each value c
 rota serve passwd alice --role control  # a [[users]] block to paste into that file
 rota serve token ci --role watch        # a second bearer token, and its [[tokens]] block
 rota serve invite --ttl 10m   # ask a running server for a single-use watcher's link
+rota serve start              # this store's daemon, whose held sessions outlive every terminal
+rota serve status             # whether it runs, where, and how many sessions it holds
+rota serve stop               # stop it; its sessions go on running (--all ends them too)
 rota version                  # which rota this is
 ```
 
@@ -335,6 +338,14 @@ Held sessions run on Linux and macOS:
 
 | | |
 |---|---|
+| `rota serve start` | start this store's daemon in the background and say its pid and control socket, and its port if it opens one; a daemon already running is named and left alone, and the command exits `0` either way — see *[The daemon](#the-daemon)* |
+| `--foreground` | be the daemon in this process instead, as a supervisor runs it: it logs to its file and says nothing on stderr |
+| `--ctl-only` | serve the control socket alone, whatever `server.toml` says about a port |
+| `--config <path>` | the file to read the rest of this from (default `<store dir>/server.toml`) |
+| `rota serve stop` | stop the daemon; every session it holds goes on running, for the next daemon to take up |
+| `--all` | end every session as well, after asking `stop the rota daemon and end N sessions? [y/N]`; with no daemon running, end the sessions its holders still hold |
+| `--yes` | with `--all`, end them without asking; off a terminal `--all` needs it |
+| `rota serve status` | whether a daemon runs, its pid, version, control socket and port, and how many sessions are running and stopped; `--json` for the same as a document. Exits `0` when a daemon runs and `3` when none does |
 | `rota serve hold` | internal: one held session's process, started by the daemon with its request on standard input; refuses a terminal |
 
 The whole `[routes]` and `[terminal]` groups — the terminal page among them —
@@ -733,6 +744,109 @@ other.
 Nothing new is logged for having a file, and none of the lines holds a
 token or a password.
 
+### The daemon
+
+```sh
+rota serve start              # in the background, for the store ROTA_HOME names
+rota serve start --ctl-only   # ...on its control socket alone
+rota serve status             # exits 0 with a daemon, 3 without
+rota serve stop               # the daemon goes; its sessions stay
+rota serve stop --all --yes   # the sessions go too
+```
+
+A store can have one daemon: a server that holds its sessions in processes
+of their own, which outlive it, and that this machine's commands reach over
+its control socket. `rota serve` in the foreground is unchanged by it, and
+the two differ like this:
+
+| | `rota serve` (foreground) | the daemon |
+|---|---|---|
+| Started by | a person, as always | `rota serve start`, or a supervisor running `rota serve start --foreground` |
+| Runs | with its flags and defaults, unchanged | `rota serve start --foreground`, with the file's settings and no flags but `--ctl-only` and `--config` |
+| Sessions | terminals in its own process; stopping it ends them | held sessions, one holder process each, which outlive it |
+| TCP | `127.0.0.1:8787` by default, with a token | only where `server.toml` sets `[server] listen`, and never with `--ctl-only` |
+| `ctl.sock` | no | always |
+| Token | `--token`, `ROTA_TOKEN` or the file, and it will not start without one | `ROTA_TOKEN` or the file's, or else 32 random bytes held in memory and never written |
+| Logs | stderr, or `log_file` | `<store>/daemon.log`, or `log_file`; never stderr |
+
+**Starting.** `rota serve start` runs `rota serve start --foreground` in a
+session of its own, in `/`, with its standard streams on `/dev/null` and
+`ROTA_HOME` set to the store's absolute path, so a store named relatively
+is still the one meant. It reads the configuration first, as the daemon
+will, so a file the daemon would refuse is refused at the terminal. Then it
+waits up to ten seconds for the daemon to answer on its control socket and
+says
+
+```
+rota daemon started for /home/me/.rota (pid 4242); control socket /home/me/.rota/terminals/ctl.sock; http on 127.0.0.1:8787
+```
+
+the last part only with a port. A daemon that stops before it answers is
+said with the last five lines it wrote to its log, and the exit is `1`. A
+daemon already running is `rota daemon already running for <store> (pid N)`
+and exit `0`, whether it was found before anything started or won the store
+from this start's own daemon, which then stops, saying in the log that
+*another rota daemon serves* the store: two starts at once make one daemon,
+and both exit `0`. Once started, a daemon takes up every session still
+running on its store, as one restarted would.
+
+A daemon serves the store it is started for, which is the one `serve stop`
+and `serve status` look at, so a `server.toml` whose `[store] dir` names
+another store is refused; start it with `ROTA_HOME` set to that one instead.
+The holders it starts are `rota serve hold` from the path this binary had
+when it started, links resolved, so a rota replaced in place starts new
+holders from the new binary.
+
+**While it runs** it logs to `<store>/daemon.log`, or to `[server] log_file`,
+rotated as *[A log file instead of the
+terminal](#a-log-file-instead-of-the-terminal)* says, with every line
+carrying its `pid`. A port it opens is bound, and its certificate read,
+before it says it has started, and the warnings foreground serve prints for
+a port go into the log. `daemon.pid` names it, and the port it serves on,
+for `serve status` to read. A hangup does not stop it.
+
+**Stopping.** `rota serve stop` sends the daemon SIGTERM — only while its pid
+is still the process `daemon.pid` names — and waits up to fifteen seconds for
+it to let go of the store. Within ten seconds the daemon closes its port and
+its control socket, giving what they are serving all but the last second to
+finish; then it ends every WebSocket either of them handed over, each told
+`1001` *the server is stopping*, lets go of every session, still running,
+and lets go of the store last; the last second is for those goodbyes to go
+out. It says `rota daemon stopped; N sessions keep running`. With no daemon
+it says `no rota daemon is running for <store>` and exits `0`.
+
+`rota serve stop --all` ends the sessions as well. At a terminal it asks
+first; anything but `y` or `yes` stops nothing and exits `1`, and off a
+terminal it is a usage error without `--yes`. Each running session is asked
+to end over the control socket — a hangup, and a kill five seconds later for
+a holder still there — and waited for until its lock is free, which its
+holder lets go of only once its CLI has gone; then the daemon is stopped:
+`rota daemon stopped; N sessions ended`. With no daemon running, each
+holder still running is hung up directly, by the same rule, and killed if
+its lock is still held five seconds later. A session that would not end is
+named, with why, and the exit is `1`.
+
+**Status.** `rota serve status` reads `daemon.pid` for the daemon and asks
+it for its sessions, or with no daemon reads their records. A daemon that
+holds the store and does not answer within five seconds is said as that,
+and is an error, never *no daemon*. With `--json`:
+
+```json
+{
+  "running": true,
+  "pid": 4242,
+  "version": "1.4.0",
+  "started": "2026-11-07T10:00:00Z",
+  "store": "/home/me/.rota",
+  "ctl": "/home/me/.rota/terminals/ctl.sock",
+  "http": null,
+  "sessions": {"live": 2, "stopped": 1}
+}
+```
+
+`http` is the address of its port, or `null`; with no daemon, `running` is
+`false`, `pid` is `0`, `version` is empty and `started` is `null`.
+
 ### Who is asking, and what they may do
 
 Every request is made by a **principal**: a name to put in the log, a role
@@ -945,7 +1059,9 @@ removes whatever a daemon that crashed left at the path before it listens; a
 server without the claim is refused and leaves the file alone, since it may
 be a live daemon's. A path longer than a hundred bytes is refused by name,
 since a unix socket's address cannot hold it. Stopping the daemon removes
-the socket. It runs on linux and macOS, as the daemon does.
+the socket — before it lets go of the claim, and only while the file at the
+path is still that socket, so a daemon that took the store over is never
+left without its own. It runs on linux and macOS, as the daemon does.
 
 #### What is written down
 

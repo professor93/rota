@@ -68,6 +68,8 @@ Usage:
                                 came from; prints nothing secret
   rota serve passwd|token|invite   a person, a token or a watcher's link for
                                 that file; rota serve -h describes the three
+  rota serve start|stop|status  this store's daemon, which keeps sessions
+                                running with no terminal open; see serve -h
   rota version                  which rota this is
 
 The id is optional: leave it out and rota takes the first account in the
@@ -1997,6 +1999,7 @@ or ask a running server for a link:
   rota serve token  <name> [--role control|watch]   a token and its [[tokens]] block
   rota serve invite [--ttl 10m]                     a single-use watcher's link
 
+` + daemonUsage + `
 Flags:
 `
 
@@ -2175,10 +2178,11 @@ var serveGrace = 10 * time.Second
 // account runner anyone can reach is not something to start by accident.
 func (c *cli) serve(args []string) (err error) {
 	// Some of serve's words are not a server at all: two print a block to
-	// paste into its file, one asks a server already running for a link, and
-	// two are processes rota starts for itself. They live under serve because
-	// that is what they are about, and they are matched before the flags
-	// because none of them is an address.
+	// paste into its file, one asks a server already running for a link,
+	// two are processes rota starts for itself, and three start, stop and
+	// ask after the store's daemon. They live under serve because that is
+	// what they are about, and they are matched before the flags because
+	// none of them is an address.
 	if len(args) > 0 {
 		switch args[0] {
 		case "passwd":
@@ -2191,6 +2195,12 @@ func (c *cli) serve(args []string) (err error) {
 			return c.serveWatch(args[1:])
 		case "hold":
 			return c.serveHold(args[1:])
+		case "start":
+			return c.serveStart(args[1:])
+		case "stop":
+			return c.serveStop(args[1:])
+		case "status":
+			return c.serveStatus(args[1:])
 		}
 	}
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
@@ -2349,39 +2359,10 @@ func (c *cli) serve(args []string) (err error) {
 		// agents this server starts are local processes with a shell.
 		say("warning: --token is visible to every process on this machine; put it in ROTA_TOKEN instead")
 	}
-	if len(opts.Roots) == 0 {
-		say("warning: no --root given, so a caller may name any directory on this machine")
+	for _, note := range serveNotes(&opts, listener) {
+		say(note)
 	}
-	loopback := strings.HasPrefix(listener.Addr, "127.0.0.1") || strings.HasPrefix(listener.Addr, "localhost")
-	if listener.Cert == "" && !loopback {
-		say("warning: no TLS off the loopback address; the bearer token travels in clear text")
-		if len(opts.Users) > 0 {
-			// A password is worse than a token in the clear: it is typed
-			// again elsewhere, and it is the one credential rota cannot
-			// replace for whoever chose it.
-			say("warning: [[users]] are configured without TLS; every password typed on the page travels in clear text too")
-		}
-	}
-	if opts.AllowDangerous {
-		say("warning: --allow-dangerous is on; callers may bypass every permission check")
-	}
-	if opts.AllowRawFlags {
-		say("warning: --allow-raw-flags is on; a caller can pass any vendor flag, which undoes --root and --allow-dangerous")
-	}
-	if !opts.Routes.Playground {
-		say("routes: the playground and the version at / are off")
-	}
-	if !opts.Routes.WebSocket {
-		say("routes: the WebSocket routes are off; a run that stays open is reached over the API instead")
-	}
-	if !opts.Routes.Health {
-		say("routes: /v1/health is off; nothing here answers without a credential")
-	}
-	if !opts.Routes.API {
-		say("routes: the API is off, so this server answers nothing")
-	}
-	server := httpServer(srv.Handler(), logger)
-	server.Addr, server.TLSConfig = listener.Addr, &tls.Config{MinVersion: tls.VersionTLS12}
+	server := newHTTPServer(listener.Addr, srv.Handler(), logger)
 
 	// Shut down on the first signal and wait for work in flight; a second
 	// signal stops waiting, for whoever is in a hurry.
@@ -2418,14 +2399,58 @@ func (c *cli) serve(args []string) (err error) {
 	}
 }
 
-// httpServer is an HTTP server with serve's limits, for every listener the
-// API is served on: the port, and the daemon's control socket. A slow client
-// must not be able to hold a connection open for ever. There is no write
-// deadline: a streamed run legitimately takes as long as the run does, and
-// the run has its own timeout.
-func httpServer(h nethttp.Handler, log *slog.Logger) *nethttp.Server {
+// serveNotes is what a server says about how it was configured, once, as it
+// starts listening on a port: every warning about who can reach it and what
+// they may do, and every group of routes that is off. Foreground serve says
+// these on stderr, after the --token warning only it can give; a daemon
+// that opens a port puts them in its log.
+func serveNotes(opts *api.Options, listener api.Listener) []string {
+	var out []string
+	if len(opts.Roots) == 0 {
+		out = append(out, "warning: no --root given, so a caller may name any directory on this machine")
+	}
+	loopback := strings.HasPrefix(listener.Addr, "127.0.0.1") || strings.HasPrefix(listener.Addr, "localhost")
+	if listener.Cert == "" && !loopback {
+		out = append(out, "warning: no TLS off the loopback address; the bearer token travels in clear text")
+		if len(opts.Users) > 0 {
+			// A password is worse than a token in the clear: it is typed
+			// again elsewhere, and it is the one credential rota cannot
+			// replace for whoever chose it.
+			out = append(out, "warning: [[users]] are configured without TLS; every password typed on the page travels in clear text too")
+		}
+	}
+	if opts.AllowDangerous {
+		out = append(out, "warning: --allow-dangerous is on; callers may bypass every permission check")
+	}
+	if opts.AllowRawFlags {
+		out = append(out, "warning: --allow-raw-flags is on; a caller can pass any vendor flag, which undoes --root and --allow-dangerous")
+	}
+	if !opts.Routes.Playground {
+		out = append(out, "routes: the playground and the version at / are off")
+	}
+	if !opts.Routes.WebSocket {
+		out = append(out, "routes: the WebSocket routes are off; a run that stays open is reached over the API instead")
+	}
+	if !opts.Routes.Health {
+		out = append(out, "routes: /v1/health is off; nothing here answers without a credential")
+	}
+	if !opts.Routes.API {
+		out = append(out, "routes: the API is off, so this server answers nothing")
+	}
+	return out
+}
+
+// newHTTPServer is an HTTP server with serve's limits, for every listener
+// the API is served on: foreground serve's port, a daemon's port and its
+// control socket. A slow client must not be able to hold a connection open
+// for ever. There is no write deadline: a streamed run legitimately takes as
+// long as the run does, and the run has its own timeout. The TLS floor
+// matters only where it is served with TLS, which a unix socket never is.
+func newHTTPServer(addr string, h nethttp.Handler, log *slog.Logger) *nethttp.Server {
 	return &nethttp.Server{
+		Addr:              addr,
 		Handler:           h,
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       5 * time.Minute,
 		IdleTimeout:       2 * time.Minute,

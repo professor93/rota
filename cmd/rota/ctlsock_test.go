@@ -430,3 +430,34 @@ func TestCtlSockIsTheDaemonsAlone(t *testing.T) {
 		t.Fatal("a daemon listened at another store's control socket")
 	}
 }
+
+// Stopping takes the socket's file only while it is still this socket. A
+// successor's, put at the path once this daemon has let go of the store, is
+// left there and still answers: Go's listener would otherwise unlink the
+// path on Close whoever's socket it now is.
+func TestCtlStopLeavesASocketThatIsNotItsOwn(t *testing.T) {
+	srv, terminals := ctlDaemon(t)
+	stop, err := listenCtl(srv, terminals, quietLog())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(stop)
+	sock := holdwire.CtlSock(terminals)
+	if err := os.Remove(sock); err != nil {
+		t.Fatal(err)
+	}
+	next, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { next.Close() })
+	stop()
+	if _, err := os.Lstat(sock); err != nil {
+		t.Fatalf("stopping removed the successor's socket: %v", err)
+	}
+	c, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("the successor's socket no longer answers: %v", err)
+	}
+	c.Close()
+}

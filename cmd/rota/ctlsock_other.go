@@ -11,6 +11,6 @@ import (
 
 // listenCtl has nothing to listen for here: the daemon and its held sessions
 // run on linux and macOS, and so does the socket that reaches them.
-func listenCtl(*api.Server, string, *slog.Logger) (func(), error) {
+func listenCtl(*api.Server, string, *slog.Logger, ...*inFlight) (func(), error) {
 	return nil, holdwire.ErrPlatform
 }
