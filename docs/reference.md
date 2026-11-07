@@ -2048,9 +2048,13 @@ host or another credential be used in its place:
 /home/you/.claude/settings.json sets env.ANTHROPIC_BASE_URL
 ```
 
-A proxy or certificates are what a corporate network sets on purpose, and
-Claude Code's own docs put them in settings, so those are said as what they
-are, after anything else the same launch has to say:
+A proxy or certificates in your own settings or the machine's managed ones
+are what a corporate network sets on purpose, and Claude Code's own docs put
+them there, so those are said as what they are, after anything else the same
+launch has to say. In a project's `.claude/settings.json` or
+`.claude/settings.local.json`, which come with whatever repository is checked
+out, a proxy and a certificate are how that repository could intercept the
+token, so there they are named with the risk above:
 
 ```
 warning: claude/you@example.com: Claude Code will use the proxy or the

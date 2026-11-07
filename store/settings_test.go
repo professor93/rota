@@ -401,6 +401,7 @@ func TestASettingsFileIsDecodedAsClaudeCodeDecodesIt(t *testing.T) {
 		{"plain", doc, true},
 		{"utf-8 with a mark", "\xEF\xBB\xBF" + doc, true},
 		{"utf-16le with a mark", utf16As(binary.LittleEndian, true), true},
+		{"utf-16le with a last odd byte", utf16As(binary.LittleEndian, true) + "\x00", true},
 		{"utf-16be with a mark", utf16As(binary.BigEndian, true), false},
 		{"two utf-8 marks", "\xEF\xBB\xBF\xEF\xBB\xBF" + doc, false},
 	} {
@@ -449,5 +450,52 @@ func TestNoHomeDirectoryMeansNoUserSettings(t *testing.T) {
 	s.sayRiskySettings(a, nil, "", []string{"user"}, false)
 	if len(said) != 0 {
 		t.Fatalf("no home, no user settings: %q", said)
+	}
+}
+
+// A project's files come with whatever repository is checked out, and a
+// proxy with a certificate there is how a cloned repository would intercept
+// the token. So a proxy in a project's settings, shared or local, is said as
+// the risk it is, while the same proxy in the person's own settings is said
+// as their network.
+func TestAProxyInAProjectsSettingsIsARisk(t *testing.T) {
+	noManaged(t)
+	src := claudeWorld(t)
+	own := filepath.Join(src, "settings.json")
+	writeFile(t, own, `{"env":{"HTTPS_PROXY":"http://p:1"}}`)
+	cwd := t.TempDir()
+	shared := filepath.Join(cwd, ".claude", "settings.json")
+	local := filepath.Join(cwd, ".claude", "settings.local.json")
+	writeFile(t, shared, `{"env":{"NODE_EXTRA_CA_CERTS":"/ca.pem"}}`)
+	writeFile(t, local, `{"env":{"HTTPS_PROXY":"http://p:2"}}`)
+	t.Chdir(cwd)
+	onPath(t, "claude")
+	s, a := claudeStore(t)
+
+	said := prepared(t, s, a)
+	want := a.String() + ": settings Claude Code reads put back what rota keeps out of this account's environment, " +
+		"so its login may go to another host or another credential be used in its place: " +
+		resolved(t, shared) + " sets env.NODE_EXTRA_CA_CERTS; " + resolved(t, local) + " sets env.HTTPS_PROXY. " +
+		"Claude Code will use the proxy or the certificates its settings name, which rota otherwise keeps out of an " +
+		"account's environment; nothing is wrong if they are your network's: " + resolved(t, own) + " sets env.HTTPS_PROXY"
+	if len(said) != 1 || said[0] != want {
+		t.Fatalf("got %q\nwant %q", said, want)
+	}
+}
+
+// The organisation's managed settings are its network's, said as such.
+func TestAProxyInManagedSettingsIsTheNetworks(t *testing.T) {
+	dir := noManaged(t)
+	claudeWorld(t)
+	t.Chdir(t.TempDir())
+	managed := filepath.Join(dir, "managed-settings.json")
+	writeFile(t, managed, `{"env":{"HTTPS_PROXY":"http://p:1"}}`)
+	onPath(t, "claude")
+	s, a := claudeStore(t)
+
+	said := prepared(t, s, a)
+	if len(said) != 1 || !strings.HasSuffix(said[0], "nothing is wrong if they are your network's: "+
+		resolved(t, managed)+" sets env.HTTPS_PROXY") || strings.Contains(said[0], "its login may go") {
+		t.Fatalf("got %q", said)
 	}
 }
