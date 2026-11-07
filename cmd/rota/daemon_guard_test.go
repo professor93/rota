@@ -43,16 +43,14 @@ func init() {
 	os.Exit(0)
 }
 
-// rota serve stop, with --all or without, is refused inside a held session
-// — run by the agent in one, or anything it started — as ctl.sock lets such
-// a caller only watch: a guard against ending the daemon, or every session,
-// from inside one by mistake. Once the session is over, the same process
-// may.
-func TestStopIsRefusedInsideAHeldSession(t *testing.T) {
-	r := newDaemonRig(t)
-	daemon, _ := r.start()
+// sessionProbe starts the session probe in a session of its own, with env,
+// and returns its pid, which leads that session, and a way to ask it one
+// command line: the exit status and what it said. It is stopped when the
+// test ends.
+func sessionProbe(t *testing.T, env []string) (pid int, ask func(line string) (int, string)) {
+	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=^$")
-	cmd.Env = append(r.env, "ROTA_SESSION_PROBE=1")
+	cmd.Env = slices.Concat(env, []string{"ROTA_SESSION_PROBE=1"})
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	in, err := cmd.StdinPipe()
 	if err != nil {
@@ -67,7 +65,7 @@ func TestStopIsRefusedInsideAHeldSession(t *testing.T) {
 	}
 	t.Cleanup(func() { in.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() })
 	answers := bufio.NewScanner(out)
-	ask := func(line string) (int, string) {
+	return cmd.Process.Pid, func(line string) (int, string) {
 		t.Helper()
 		fmt.Fprintln(in, line)
 		if !answers.Scan() {
@@ -84,6 +82,17 @@ func TestStopIsRefusedInsideAHeldSession(t *testing.T) {
 		}
 		return n, s
 	}
+}
+
+// rota serve stop, with --all or without, is refused inside a held session
+// — run by the agent in one, or anything it started — as ctl.sock lets such
+// a caller only watch: a guard against ending the daemon, or every session,
+// from inside one by mistake. Once the session is over, the same process
+// may.
+func TestStopIsRefusedInsideAHeldSession(t *testing.T) {
+	r := newDaemonRig(t)
+	daemon, _ := r.start()
+	probe, ask := sessionProbe(t, r.env)
 
 	// A session whose holder, and then whose CLI, leads the probe's session.
 	const id = "00000000000000d1"
@@ -108,8 +117,8 @@ func TestStopIsRefusedInsideAHeldSession(t *testing.T) {
 		holder, child int
 		line          string
 	}{
-		{cmd.Process.Pid, 0, "serve stop"},
-		{0, cmd.Process.Pid, "serve stop --all --yes"},
+		{probe, 0, "serve stop"},
+		{0, probe, "serve stop --all --yes"},
 	} {
 		record(c.holder, c.child)
 		code, said := ask(c.line)
