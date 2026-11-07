@@ -192,22 +192,25 @@ func (p codexProvider) Plan(ctx context.Context, a *Account, home string) (*Comm
 
 // codexCompeting are the variables that would have codex sign in some other
 // way than the auth.json in its home, send its requests or its tokens
-// somewhere else, bill another organization, or believe it runs inside
-// another codex: exact names, as codex's own source reads them. The account's
-// refresh token goes wherever CODEX_REFRESH_TOKEN_URL_OVERRIDE says, and the
-// workload identity variables replace the login altogether.
+// somewhere else, or say it is another client: exact names, as codex's own
+// source reads them. The account's refresh token goes wherever
+// CODEX_REFRESH_TOKEN_URL_OVERRIDE says, and the workload identity variables
+// replace the login altogether. OPENAI_ORGANIZATION and OPENAI_PROJECT stay:
+// they are headers, not a credential, and a ChatGPT login picks its account by
+// its own token. So does CODEX_SANDBOX, which codex sets only inside its macOS
+// sandbox, which a child inherits too; it only stops codex looking for a proxy.
 var codexCompeting = []string{
 	// A credential of another kind.
 	"OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN", "CODEX_CONNECTORS_TOKEN",
 	"OPENAI_FEDERATION_RULE_ID", "OPENAI_IDENTITY_TOKEN_FILE", "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
-	// Whom a request bills, and the client a login is refreshed under.
-	"OPENAI_ORGANIZATION", "OPENAI_PROJECT", "CODEX_APP_SERVER_LOGIN_CLIENT_ID", "CODEX_APP_SERVER_LOGIN_ISSUER",
+	// The client a login is refreshed under.
+	"CODEX_APP_SERVER_LOGIN_CLIENT_ID", "CODEX_APP_SERVER_LOGIN_ISSUER",
 	// Another endpoint, or another certificate to trust on the way.
 	"OPENAI_BASE_URL", "CODEX_REFRESH_TOKEN_URL_OVERRIDE", "CODEX_REVOKE_TOKEN_URL_OVERRIDE",
 	"CODEX_AUTHAPI_BASE_URL", "CODEX_AGENT_IDENTITY_AUTHAPI_BASE_URL", "CODEX_AGENT_IDENTITY_JWKS_BASE_URL",
 	"CODEX_CA_CERTIFICATE",
-	// The marks of a process another codex started.
-	"CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "CODEX_SANDBOX",
+	// Which client codex tells the service it is.
+	"CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
 }
 
 // adoptCodex pulls a token the CLI rotated back into the account. A file
