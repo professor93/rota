@@ -31,11 +31,18 @@ func TestARunEndsWhenItsDeadlineDoesEvenIfAHelperKeepsThePipes(t *testing.T) {
 	// The helper leaves the CLI's process group, so killing the group does
 	// not reach it, and keeps the inherited stdout and stderr for 30s.
 	script := "#!/bin/sh\n" +
+		"[ \"$1\" = warm ] && exit 0\n" +
 		perl + " -e 'setpgrp(0,0); sleep 30' &\n" +
 		"echo $! > " + pidFile + "\n" +
 		`echo '{"type":"result","subtype":"success","is_error":false,"session_id":"s","result":"ok","num_turns":1}'` + "\n"
 	bin := filepath.Join(dir, "daemonising-cli")
 	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Run once, doing nothing, as fakecli runs every fake it installs: macOS
+	// looks at a new executable as it first starts, and a deadline that came
+	// while it looked would end the CLI before it had started its helper.
+	if err := exec.Command(bin, "warm").Run(); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
