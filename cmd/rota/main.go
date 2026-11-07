@@ -676,13 +676,13 @@ func (c *cli) list(args []string) error {
 	// UNTIL is the threshold, so say what it decides rather than leaving a
 	// column of percentages to be guessed at.
 	if pick, perr := rotation.Pick(shown); perr == nil {
-		say(c.out, width, fmt.Sprintf("\n`rota run` without an id uses %s, and moves on at %d%% usage.\n", pick, rotation.Cutoff(pick)))
+		say(c.out, width, fmt.Sprintf("\n`rota run` without an id uses %s, and moves on at %d%% usage.\n", nameOf(pick), rotation.Cutoff(pick)))
 	} else {
 		say(c.out, width, fmt.Sprintf("\n%v\n", perr))
 	}
 	for _, a := range shown {
 		if a.Quota != nil && a.Quota.Note != "" {
-			say(c.out, width, fmt.Sprintf("\n%s: %s\n", a, a.Quota.Note))
+			say(c.out, width, fmt.Sprintf("\n%s: %s\n", nameOf(a), a.Quota.Note))
 		}
 	}
 	c.sayLongNotes(shown, width)
@@ -749,10 +749,10 @@ func (c *cli) sayLeftOut(left []string, width int) {
 func (c *cli) sayLongNotes(shown []*rota.Account, width int) {
 	for _, a := range shown {
 		if note := wire.LongNote(a); note != "" {
-			say(c.out, width, fmt.Sprintf("\n%s: %s\n", a, note))
+			say(c.out, width, fmt.Sprintf("\n%s: %s\n", nameOf(a), note))
 		}
 		if note := wire.LoginNote(a); note != "" {
-			say(c.out, width, fmt.Sprintf("\n%s: %s\n", a, note))
+			say(c.out, width, fmt.Sprintf("\n%s: %s\n", nameOf(a), note))
 		}
 		// Here too, because --short has no STATUS to say it in.
 		if note := wire.CreditNote(a); note != "" {

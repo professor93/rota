@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/professor93/rota/internal/fakecli"
+	"github.com/professor93/rota/internal/share"
 	rota "github.com/professor93/rota/lib"
 )
 
@@ -493,6 +494,11 @@ func TestALineOfRotasOwnSaysWhatItCarriesAsOneCleanLine(t *testing.T) {
 			store(t, "")
 			return call(t, "remove", "1")
 		}, []string{"Removed claude account 1 (" + cleanLabel + ")."}},
+		{"the notes under rota list", func(t *testing.T) (string, string, int) {
+			store(t, fmt.Sprintf(`,"quotaAt":%d,"quota":{"windows":[{"name":"5h","percent":3,"primary":true}],"note":"extra usage on"}`,
+				time.Now().UnixMilli()))
+			return call(t, "list")
+		}, []string{"`rota run` without an id uses claude/" + cleanLabel + ", and moves on", "claude/" + cleanLabel + ": extra usage on"}},
 		{"a name under --sessions", func(t *testing.T) (string, string, int) {
 			store(t, "")
 			claude := t.TempDir()
@@ -529,5 +535,22 @@ func TestALineOfRotasOwnSaysWhatItCarriesAsOneCleanLine(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The line a shared run opens with says the server's terminal id and the
+// socket's path under the store with each control character in them, the
+// newline too, as a space, in each of the three things it can be.
+func TestTheOpeningLineSaysItsIDAndPathAsOneCleanLine(t *testing.T) {
+	long := "/" + strings.Repeat("d/", 60) + "\x1b[2J\t\n.sock"
+	for _, tc := range []struct{ id, path, want string }{
+		{"t\x1b]0;owned\x07\t9\nx", "/s.sock", "as terminal t ]0;owned  9 x\n"},
+		{"", "/s\x1b[2J\tq\nr.sock", "listening at /s [2J q r.sock; sharing"},
+		{"", long, strings.Repeat("d/", 60) + " [2J  .sock is too long"},
+	} {
+		got := shareOpening("claude/a@x", "claude", tc.id, tc.path, share.ModeControl)
+		if c := controls(got); c != "" || strings.Count(got, "\n") != 1 || !strings.HasSuffix(got, "\n") || !strings.Contains(got, tc.want) {
+			t.Fatalf("one clean line with %q in it: %q", tc.want, got)
+		}
 	}
 }
