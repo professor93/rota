@@ -272,8 +272,12 @@ func (s *Server) byToken(got string) *Principal {
 // the request is theirs to make at all, and whether their role covers it.
 //
 // local is the principal LocalHandler serves every request as, and nil on
-// Handler. With one, nothing on the request is read to find out who is
-// asking — no token, no cookie — and so nothing on it is a guess either.
+// Handler. With one, nothing on the request is read at all — no token, no
+// cookie, and no Origin, whatever the principal is — so nothing on it is a
+// guess either. The Origin rule is skipped because of where the guard was
+// installed, never because of who the principal says it is: what reaches
+// LocalHandler is the control socket or an SSH channel, which no browser can
+// open, and there is no cookie for a page to ride on.
 //
 // The block on guesses applies to guesses, never to a credential that is
 // right: an address is shared by everyone behind a proxy, and the loopback
@@ -292,7 +296,7 @@ func (s *Server) guard(pattern string, local *Principal, next http.HandlerFunc) 
 			s.refuseToken(w, r, guessed)
 			return
 		}
-		if !s.sameSite(w, r, p) {
+		if local == nil && !s.sameSite(w, r, p) {
 			return
 		}
 		if !p.Role.allows(need) {
@@ -324,11 +328,12 @@ func (s *Server) sameSite(w http.ResponseWriter, r *http.Request, p *Principal) 
 	return false
 }
 
-// originFree reports whether a principal is exempt from the Origin rule, on
-// a request and on a socket alike: it is one no browser can have attached to
-// a request by itself, so no page can have tricked it into one. A bearer
-// token is put on a request only by the code that meant to make it, and
-// local arrives over a socket no web page can open.
+// originFree reports whether a principal is exempt from the Origin rule on
+// Handler, on a request and on a socket alike: it is one no browser can have
+// attached to a request by itself, so no page can have tricked it into one.
+// A bearer token is put on a request only by the code that meant to make
+// it, and local arrives over a socket no web page can open. LocalHandler
+// never asks: it reads no Origin for anybody.
 func originFree(p *Principal) bool { return p.Via == "token" || p.Via == localName }
 
 // sameOrigin reports whether this request says it came from this server's

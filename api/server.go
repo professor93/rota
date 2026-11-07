@@ -629,8 +629,9 @@ func (s *Server) Handler() http.Handler {
 // to nobody else: whoever mounts it has already decided who is at the other
 // end, from something no request can forge. The control socket decides by
 // the socket's own permissions and the peer's process; an SSH server would
-// decide by the key. So no token, cookie or Origin is read here, a wrong
-// token is not a guess, and the role table alone says what p may do.
+// decide by the key. So no token, cookie or Origin is read here, whoever p
+// is, a wrong token is not a guess, and the role table alone says what p may
+// do.
 //
 // Beside those it answers /v1/health, and GET /v1/session with p, so a
 // client can ask whether it may change anything before it tries. Nothing a

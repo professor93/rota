@@ -897,7 +897,9 @@ machine's own user: what a command on this machine talks to.
 only the user the daemon runs as can connect, and that is its whole
 authorization. Nothing on a request is read to find out who is asking — no
 token, no cookie, no `Origin`, and no header ever names anybody — and a
-wrong token there is not a guess. Every request is the principal `local`,
+wrong token there is not a guess. The `Origin` rule is not applied there at
+all, whoever the principal is: it protects a cookie from a page, and no page
+can open a unix socket. Every request is the principal `local`,
 `"via":"local"`, and the role table decides what it may do, as for anyone.
 
 **What it serves.** Every route that takes a principal — the API, the
@@ -918,10 +920,9 @@ words, and it never holds a keyboard. The daemon tells by the caller's
 session, which the caller cannot say for itself: the kernel gives the pid at
 the other end of the socket, `getsid` the session that pid is in, and a
 session led by the holder or the CLI of any session whose lock is held is
-inside one. A caller the daemon cannot place is given `watch` as well. This
-keeps an agent from starting, typing into or ending sessions by mistake. It
-is not a wall: a process that leaves its session on purpose is no longer
-told apart, and as the same user it has other ways in.
+inside one. A caller the daemon cannot place is given `watch` as well. The
+watch-only rule is a guard against accidents, not a wall: a process that
+calls `setsid` leaves its session and escapes it.
 
 **At the keyboard** `local` is a person, as a user signed in on the page is
 (*[Roles, and the keyboard](#roles-and-the-keyboard)*): two clients of the
