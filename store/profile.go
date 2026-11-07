@@ -47,13 +47,13 @@ var ranksAboveProfile = []string{
 }
 
 // sayFederationProfile warns, once, when this launch of a's Claude Code, with
-// env for its environment, would sign in with an Anthropic profile instead of
-// the account's login.
-func (s *Store) sayFederationProfile(a *rota.Account, env []string) {
+// env for its environment and cwd for the directory it starts in, would sign
+// in with an Anthropic profile instead of the account's login.
+func (s *Store) sayFederationProfile(a *rota.Account, env []string, cwd string) {
 	if s.Warn == nil || rota.Flavor(a.Provider) != "claude" {
 		return
 	}
-	if file := federationProfile(env); file != "" {
+	if file := federationProfile(env, cwd); file != "" {
 		s.Warn(fmt.Sprintf("%s: %s is the active Anthropic profile and signs Claude Code in by workload identity "+
 			"federation, in place of this account's login and every other account's; activate another profile "+
 			"with `ant profile activate <name>`, or move the file away, to turn it off", a, file))
@@ -61,13 +61,16 @@ func (s *Store) sayFederationProfile(a *rota.Account, env []string) {
 }
 
 // federationProfile is the file of the oidc_federation profile a Claude Code
-// with this environment signs in with, or "" when it signs in some other way.
-// The profile is the one active_config names, the one called default when it
-// names none, in the configuration directory anthropicConfigDir finds. Its
-// JSON has "authentication": {"type": "oidc_federation"}, those names exactly,
-// as JSON.parse reads them, so a byte-order mark before it is no profile.
-// Claude Code 2.1.319 reads them so, and a file it cannot read is none.
-func federationProfile(env []string) string {
+// with this environment, started in cwd, signs in with, or "" when it signs in
+// some other way. The profile is the one active_config names, the one called
+// default when it names none, in the configuration directory
+// anthropicConfigDir finds — relative to cwd when the variable that names it
+// is relative, as the CLI resolves it there, and none at all when cwd is not
+// known. Its JSON has "authentication": {"type": "oidc_federation"}, those
+// names exactly, as JSON.parse reads them, so a byte-order mark before it is
+// no profile. Claude Code 2.1.319 reads them so, and a file it cannot read is
+// none.
+func federationProfile(env []string, cwd string) string {
 	for _, k := range ranksAboveProfile {
 		if envValue(env, k) != "" {
 			return ""
@@ -76,6 +79,12 @@ func federationProfile(env []string) string {
 	dir := anthropicConfigDir(env)
 	if dir == "" {
 		return ""
+	}
+	if !filepath.IsAbs(dir) {
+		if cwd == "" {
+			return ""
+		}
+		dir = filepath.Join(cwd, dir)
 	}
 	raw, _ := readSmallFile(filepath.Join(dir, "active_config"), maxProfileFile)
 	name := strings.TrimFunc(string(raw), jsSpace)
@@ -106,9 +115,10 @@ func profileType(raw []byte) string {
 // with this environment reads: ANTHROPIC_CONFIG_DIR, else anthropic in
 // XDG_CONFIG_HOME, else .config/anthropic in HOME, each value trimmed and a
 // blank one passed over; "" when there is none, which is no directory at all
-// rather than the one the launch starts in. Claude Code 2.1.319 finds it so
-// on every platform; the SDK's %APPDATA% on Windows is not where Claude Code
-// looks.
+// rather than the one the launch starts in. The environment is the child's,
+// so a variable the launch drops is not followed, as the CLI never sees it.
+// Claude Code 2.1.319 finds it so on every platform; the SDK's %APPDATA% on
+// Windows is not where Claude Code looks.
 func anthropicConfigDir(env []string) string {
 	if dir := strings.TrimFunc(envValue(env, "ANTHROPIC_CONFIG_DIR"), jsSpace); dir != "" {
 		return dir

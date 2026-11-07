@@ -91,7 +91,7 @@ func (s *Store) sayRunSettings(a *rota.Account, cmd *rota.Command, spec rota.Spe
 	}
 	env := rota.Environ(cmd.BaseEnv, cmd)
 	s.sayRiskySettings(a, env, cwd, spec.SettingSources, spec.Hermetic)
-	s.sayFederationProfile(a, env)
+	s.sayFederationProfile(a, env, cwd)
 }
 
 // sayRiskySettings warns, once, about every settings file this launch of a's
