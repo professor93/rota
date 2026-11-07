@@ -234,7 +234,7 @@ func (s *Server) sendTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	if rec != nil {
 		reason := "ended"
-		if rec.State == holdwire.StateLive || rec.State == holdwire.StateUnreadable {
+		if rec.Running() {
 			reason = "not_held"
 		}
 		sendRefused(w, http.StatusConflict, reason, recordRefusal(rec), "")

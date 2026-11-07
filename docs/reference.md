@@ -981,13 +981,15 @@ error: *— held by session api (0123456789abcdef)*.
 **Sending into a held session.** `rota send <session> "text"` types the text
 into a held session, and then Enter, the way a person would: as a paste
 where the CLI has bracketed paste on. The session is named by its id, the
-start of one four characters or longer, or the name of a running one; a
-run started with `--input` of that id is tried first, as it always was. It
-waits until the CLI is ready for a message — idle, by Claude Code's own
-record of the session, or quiet for a moment where there is none — for up
-to 30 seconds, and while it waits nobody else types into the session but
-one Esc or Ctrl-C. It prints nothing once the
-text is in, or `{"ok":true}` with `--json`. Every refusal exits 1:
+start of one four characters or longer, or the name of a running one —
+an id it begins before a name, and two of either an error that names their
+ids. A run started with `--input` of that id is tried first, as it always
+was; a target with a path in it is never a run's. It waits until the CLI
+is ready for a message — idle, by Claude Code's own record of the session,
+or quiet for a moment where there is none — for up to 30 seconds, and
+while it waits nobody else types into the session but one Esc or Ctrl-C.
+It prints nothing once the text is in, or `{"ok":true}` with `--json`.
+Every refusal exits 1:
 
 ```
 rota: session api is waiting for a permission or a question, and Enter there may approve a tool; --force sends anyway
@@ -997,13 +999,17 @@ rota: session api has ended
 rota: no run or session api; rota list --sessions shows what is running
 ```
 
-`--force` counts a CLI waiting on its person as ready, and types into it.
-`--interrupt`, `--steer` and `--close` are a usage error for a held session:
-*those are for a run started with --input*. Only reaching the session needs
-the daemon. With none running, a send that names a running held session
-says so — *session api is running, but no rota daemon serves
-/home/me/.rota to type into it; rota serve start starts one* — and one that
-names a stopped one says it has ended.
+With `--json` a refusal is `{"error":"…","reason":"…"}`, the reason the
+daemon's — `waiting`, `keyboard` (with `holder`), `timeout`, `ended` or
+`not_held` — so a script can tell a send to force or retry from one to give
+up on; anything else that fails is `{"error":"…"}`. `--force` counts a CLI
+waiting on its person as ready, and types into it. `--interrupt`, `--steer`
+and `--close` are a usage error for a held session: *those are for a run
+started with --input*. Only reaching the session needs the daemon. With
+none running, the store's records are matched by the same rule: a send
+that names a running held session says so — *session api is running, but
+no rota daemon serves /home/me/.rota to type into it; rota serve start
+starts one* — and one that names a stopped one says it has ended.
 
 ### Who is asking, and what they may do
 

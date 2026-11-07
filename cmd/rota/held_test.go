@@ -80,6 +80,11 @@ func TestSendRefusesAWaitingClaude(t *testing.T) {
 	if out, errb, code := r.rota("send", "asks", "no"); code != 1 || out != "" || !strings.Contains(errb, want) {
 		t.Fatalf("send to a waiting claude: exit %d %q %q; want %q", code, out, errb, want)
 	}
+	out, errb, code := r.rota("--json", "send", "asks", "no")
+	var doc map[string]any
+	if code != 1 || json.Unmarshal([]byte(out), &doc) != nil || doc["error"] != want || doc["reason"] != "waiting" || len(doc) != 2 {
+		t.Fatalf("send --json to a waiting claude: exit %d %q %q; want the sentence and reason waiting", code, out, errb)
+	}
 	if out, errb, code := r.rota("send", "asks", "yes", "--force"); code != 0 || out != "" || errb != "" {
 		t.Fatalf("send --force: exit %d %q %q\nlog:\n%s", code, out, errb, r.log())
 	}
@@ -145,6 +150,13 @@ func TestSendStillReachesARun(t *testing.T) {
 	if strings.Contains(p.printed(), "first") {
 		t.Fatalf("the run's message reached the held session too:\n%s", p.printed())
 	}
+
+	// Once that run has gone, its name is the session's again.
+	ln.Close()
+	if out, errb, code := r.rota("send", "nightly", "third"); code != 0 || out != "" || errb != "" {
+		t.Fatalf("send by name with the run gone: exit %d %q %q", code, out, errb)
+	}
+	p.waitOut("got:third")
 }
 
 // plantRecord writes a held session's record into terminals, as a holder
@@ -237,30 +249,78 @@ func TestListShowsHeldSessionsOnlyWhenThereAreSome(t *testing.T) {
 
 // With no daemon, a send to a held session says that is why, and a stopped
 // one says it has ended; a name that is nothing's says it is neither a run
-// nor a session.
+// nor a session. The records are matched as the daemon's listing is: an id
+// it begins before a running session's name, and two of either is an error
+// that names both. A target with a path in it is never a run's socket.
 func TestSendWithNoDaemonSaysSo(t *testing.T) {
 	shortHome(t)
 	terminals := terminalsOf(t)
+	now := time.Now()
 	plantRecord(t, terminals, holdwire.Meta{ID: "a1b2c3d4e5f60718", Name: "api", Kind: holdwire.KindAccount,
-		Account: 1, Provider: "claude", Started: time.Now()}, true)
+		Account: 1, Provider: "claude", Started: now}, true)
+	plantRecord(t, terminals, holdwire.Meta{ID: "a1b2ffffffffffff", Name: "cafe", Kind: holdwire.KindAccount,
+		Account: 1, Provider: "claude", Started: now}, true)
 	exit := 0
-	plantRecord(t, terminals, holdwire.Meta{ID: "0f0e0d0c0b0a0908", Name: "old", Kind: holdwire.KindAccount,
-		Account: 1, Provider: "claude", Started: time.Now().Add(-time.Hour), Exit: &exit, Ended: time.Now()}, false)
+	plantRecord(t, terminals, holdwire.Meta{ID: "cafe0d0c0b0a0908", Name: "old", Kind: holdwire.KindAccount,
+		Account: 1, Provider: "claude", Started: now.Add(-time.Hour), Exit: &exit, Ended: now}, false)
 
 	home := os.Getenv("ROTA_HOME")
 	for target, want := range map[string]string{
 		"api":              "session api is running, but no rota daemon serves " + home + " to type into it; rota serve start starts one",
-		"a1b2":             "session api is running, but no rota daemon serves " + home,
-		"0f0e0d0c0b0a0908": "session old has ended",
+		"a1b2c3":           "session api is running, but no rota daemon serves " + home,
+		"a1b2":             `"a1b2" begins the ids of 2 sessions, a1b2c3d4e5f60718 and a1b2ffffffffffff; give more of the id`,
+		"cafe":             "session old has ended",
+		"cafe0d0c0b0a0908": "session old has ended",
 		"old":              "no run or session old; rota list --sessions shows what is running",
 		"nobody":           "no run or session nobody; rota list --sessions shows what is running",
+		"../terminals/ctl": "no run or session ../terminals/ctl; rota list --sessions shows what is running",
 	} {
 		if out, errb, code := call(t, "send", target, "hi"); code != 1 || out != "" || !strings.Contains(errb, want) {
 			t.Errorf("send %s: exit %d %q %q; want %q", target, code, out, errb, want)
 		}
 	}
+	out, errb, code := call(t, "--json", "send", "cafe0d0c0b0a0908", "hi")
+	var doc map[string]any
+	if code != 1 || json.Unmarshal([]byte(out), &doc) != nil || doc["error"] != "session old has ended" || doc["reason"] != "ended" {
+		t.Errorf("send --json to a stopped session: exit %d %q %q; want the sentence and reason ended", code, out, errb)
+	}
 	if _, errb, code := call(t, "send", "api", "--close"); code != 2 || !strings.Contains(errb, "those are for a run started with --input") {
 		t.Errorf("send api --close with no daemon: exit %d %q; want a usage error", code, errb)
+	}
+
+	// A run listening is reached by its id, and never by a path that leads
+	// to its socket from somewhere else.
+	st, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs, err := st.RunDir()
+	st.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", filepath.Join(runs, "zz.sock"))
+	if err != nil {
+		t.Skipf("a run cannot be sent into here: %v", err)
+	}
+	t.Cleanup(func() { ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_, _ = bufio.NewReader(conn).ReadString('\n')
+			_, _ = conn.Write([]byte(`{"id":"m1"}` + "\n"))
+			conn.Close()
+		}
+	}()
+	if out, errb, code := call(t, "send", "zz", "hi"); code != 0 || out != "accepted m1\n" {
+		t.Fatalf("send zz: exit %d %q %q", code, out, errb)
+	}
+	if out, errb, code := call(t, "send", "../runs/zz", "hi"); code != 1 || out != "" ||
+		!strings.Contains(errb, "no run or session ../runs/zz;") {
+		t.Errorf("send ../runs/zz: exit %d %q %q; it is no run's id", code, out, errb)
 	}
 }
 
@@ -304,7 +364,9 @@ func TestABusyAccountNamesItsSession(t *testing.T) {
 	id, _, _ := r.detach(r.cmd("run", "2", "--detach", "--label", "cx"))
 
 	want := " — held by session cx (" + id + ")"
-	if out, errb, code := r.rota("run", "2", "--", "--version"); code != 1 || !strings.Contains(errb, want) {
-		t.Fatalf("run 2 while it is held: exit %d %q %q; want %q", code, out, errb, want)
+	for _, args := range [][]string{{"run", "2", "--", "--version"}, {"run", "2", "what is 2+2?"}} {
+		if out, errb, code := r.rota(args...); code != 1 || !strings.Contains(errb, want) {
+			t.Fatalf("rota %s while it is held: exit %d %q %q; want %q", strings.Join(args, " "), code, out, errb, want)
+		}
 	}
 }

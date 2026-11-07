@@ -75,7 +75,7 @@ var (
 	sinceGrace  = time.Second            // a new link's Since, when the CLI has just ended
 	stateEvery  = 250 * time.Millisecond // at most four States a second
 	quietFor    = 1500 * time.Millisecond
-	sendWait    = 30 * time.Second
+	sendWait    = holdwire.SendWait
 	enterAfter  = 100 * time.Millisecond
 )
 

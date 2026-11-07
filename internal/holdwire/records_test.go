@@ -283,3 +283,61 @@ func TestLockedNeverTakesTheLock(t *testing.T) {
 		t.Fatal("a released lock is held")
 	}
 }
+
+// A record names its session by the first of what the person called it, the
+// conversation's own name, its folder and its id; says whether it runs, how
+// it ended and whether Resume can take it up; and HeldBy names the newest
+// running session on an account in the words a busy refusal ends with.
+func TestARecordSaysWhatItIsCalledAndHowItStands(t *testing.T) {
+	for _, c := range []struct {
+		m    *Meta
+		want string
+	}{
+		{&Meta{Name: "api", ConversationName: "conv", Cwd: "/src/x"}, "api"},
+		{&Meta{ConversationName: "conv", Cwd: "/src/x"}, "conv"},
+		{&Meta{Cwd: "/src/x"}, "x"},
+		{&Meta{}, "0123456789abcdef"},
+		{nil, "0123456789abcdef"},
+	} {
+		r := Record{ID: "0123456789abcdef", Meta: c.m}
+		if got := r.Name(); got != c.want {
+			t.Errorf("%+v is called %q; want %q", c.m, got, c.want)
+		}
+	}
+
+	code := 3
+	for _, c := range []struct {
+		r                  Record
+		running, resumable bool
+		exit               int
+	}{
+		{Record{State: StateLive, Meta: &Meta{}}, true, false, -1},
+		{Record{State: StateUnreadable, Meta: &Meta{}}, true, false, -1},
+		{Record{State: StateEnded, Meta: &Meta{Exit: &code, Conversation: "c"}}, false, false, 3},
+		{Record{State: StateInterrupted, Meta: &Meta{Conversation: "c"}}, false, true, -1},
+		{Record{State: StateInterrupted, Meta: &Meta{}}, false, false, -1},
+		{Record{State: StateBroken}, false, false, -1},
+	} {
+		if c.r.Running() != c.running || c.r.Resumable() != c.resumable || c.r.ExitCode() != c.exit {
+			t.Errorf("%s: running %v, resumable %v, exit %d; want %v, %v, %d", c.r.State,
+				c.r.Running(), c.r.Resumable(), c.r.ExitCode(), c.running, c.resumable, c.exit)
+		}
+	}
+
+	terminals := t.TempDir()
+	now := time.Now().Truncate(time.Second)
+	older := record(t, terminals, "000000000000000a", &Meta{Kind: KindAccount, Account: 1, Protocol: Major, Name: "older",
+		Started: now.Add(-time.Hour)}, "")
+	lock(t, older)
+	newer := record(t, terminals, "000000000000000b", &Meta{Kind: KindAccount, Account: 1, Protocol: Major,
+		Cwd: "/src/api", Started: now}, "")
+	lock(t, newer)
+	record(t, terminals, "000000000000000c", &Meta{Kind: KindAccount, Account: 2, Protocol: Major, Name: "gone",
+		Started: now, Ended: now, Exit: &code}, "")
+	if got := HeldBy(terminals, 1); got != " — held by session api (000000000000000b)" {
+		t.Errorf("HeldBy(1) = %q", got)
+	}
+	if got := HeldBy(terminals, 2); got != "" {
+		t.Errorf("HeldBy(2), whose only session has ended, = %q", got)
+	}
+}

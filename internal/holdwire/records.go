@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"time"
@@ -248,11 +249,59 @@ func identity(dir, id string) *Meta {
 // this rota cannot speak to still holds its account, so it counts.
 func Holding(terminals string, account int) *Record {
 	for _, r := range Scan(terminals) {
-		if (r.State == StateLive || r.State == StateUnreadable) && r.Meta.Kind == KindAccount && r.Meta.Account == account {
+		if r.Running() && r.Meta.Kind == KindAccount && r.Meta.Account == account {
 			return &r
 		}
 	}
 	return nil
+}
+
+// HeldBy is what a busy account's refusal ends with when a held session is
+// what has the account: " — held by session <name> (<id>)", naming the
+// newest running one, and "" when none runs it. The daemon and the command
+// line both say it, in these words.
+func HeldBy(terminals string, account int) string {
+	r := Holding(terminals, account)
+	if r == nil {
+		return ""
+	}
+	return " — held by session " + r.Name() + " (" + r.ID + ")"
+}
+
+// Name is what a session is called by its record: what the person called
+// it, the name its CLI gave the conversation, its folder, and its id — the
+// rule the daemon names a session it holds by, as far as a record goes.
+func (r *Record) Name() string {
+	switch m := r.Meta; {
+	case m == nil:
+	case m.Name != "":
+		return m.Name
+	case m.ConversationName != "":
+		return m.ConversationName
+	case m.Cwd != "":
+		return filepath.Base(m.Cwd)
+	}
+	return r.ID
+}
+
+// Running reports whether a holder runs the session: a live one, or one
+// held by a rota this one cannot read, which runs all the same. Every other
+// state is stopped, or never started.
+func (r *Record) Running() bool { return r.State == StateLive || r.State == StateUnreadable }
+
+// ExitCode is how a stopped session's CLI ended: its exit, or -1 for one
+// that recorded none — interrupted, its holder gone first.
+func (r *Record) ExitCode() int {
+	if r.Meta != nil && r.Meta.Exit != nil {
+		return *r.Meta.Exit
+	}
+	return -1
+}
+
+// Resumable reports whether Resume can start the session again: it was
+// interrupted, on a conversation its record knows.
+func (r *Record) Resumable() bool {
+	return r.State == StateInterrupted && r.Meta != nil && r.Meta.Conversation != ""
 }
 
 // IsID says whether s is a session id: sixteen lower-case hex characters,
