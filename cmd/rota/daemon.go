@@ -31,7 +31,7 @@ takes up the ones a daemon before it left; linux and macOS only:
 
   rota serve start [--ctl-only] [--config FILE]   start it in the background
   rota serve stop [--all] [--yes]                 stop it; its sessions go on
-  rota serve status                               whether it runs; exits 3 if not
+  rota serve status                               whether it runs; 3 if not
 
 It listens on <store>/terminals/ctl.sock, which only you can reach, and on a
 TCP port only where server.toml sets [server] listen and --ctl-only is not
@@ -88,9 +88,9 @@ func (f *inFlight) wait(until time.Time) bool {
 // supervisor runs.
 func (c *cli) serveStart(args []string) error {
 	fs := flag.NewFlagSet("serve start", flag.ContinueOnError)
-	foreground := fs.Bool("foreground", false, "be the daemon in this process, as a supervisor runs it, instead of starting one in the background")
+	foreground := fs.Bool("foreground", false, "be the daemon in this process, as a supervisor runs it")
 	ctlOnly := fs.Bool("ctl-only", false, "serve the control socket alone, whatever server.toml says about a port")
-	conf := fs.String("config", "", "the file to read the rest of this from (default: <store dir>/server.toml)")
+	conf := fs.String("config", "", "read this file, not <store dir>/server.toml")
 	if ok, err := c.daemonFlags(fs, args); !ok {
 		return err
 	}
@@ -107,6 +107,9 @@ func (c *cli) serveStop(args []string) error {
 	yes := fs.Bool("yes", false, "with --all, end them without asking")
 	if ok, err := c.daemonFlags(fs, args); !ok {
 		return err
+	}
+	if *yes && !*all {
+		return usageErr("--yes goes with --all: it answers the question --all asks, and a plain stop asks none")
 	}
 	return c.stopDaemon(*all, *yes)
 }
@@ -168,12 +171,24 @@ func daemonConfig(conf, home string) (*api.Config, api.Options, api.Listener, er
 	if err != nil {
 		return nil, api.Options{}, api.Listener{}, err
 	}
-	// Serve makes a relative root absolute against where it runs, and a
-	// daemon runs in /: a folder under / instead of the one meant.
-	for _, root := range cfg.Runs.Roots {
-		if !filepath.IsAbs(root) {
-			return nil, api.Options{}, api.Listener{}, fmt.Errorf(
-				"runs.roots: %q is relative; a daemon runs in /, so every root must be absolute in daemon mode", root)
+	// Whatever reads a path the file names reads it from where it runs, and
+	// a daemon runs in /: a file or folder under / instead of the one meant.
+	// log_file is refused relative everywhere already, by Check.
+	for _, p := range []struct {
+		key   string
+		paths []string
+	}{
+		{"runs.roots", cfg.Runs.Roots},
+		{"tls.cert", []string{cfg.TLS.Cert}},
+		{"tls.key", []string{cfg.TLS.Key}},
+		{"auth.token_file", []string{cfg.Auth.TokenFile}},
+		{"store.dir", []string{cfg.Store.Dir}},
+	} {
+		for _, path := range p.paths {
+			if path != "" && !filepath.IsAbs(path) {
+				return nil, api.Options{}, api.Listener{}, fmt.Errorf(
+					"%s: %q is relative; a daemon runs in /, so every path in its file must be absolute in daemon mode", p.key, path)
+			}
 		}
 	}
 	opts, listener, err := cfg.Serve()
