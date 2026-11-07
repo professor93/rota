@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -167,26 +168,8 @@ func TestSendAnswersEndedWhenTheCLIExits(t *testing.T) {
 // than having half a line typed in front of the send and submitted by its
 // Enter, and types as ever once the send is in.
 func TestASendIsNotTypedOverWhileItWaits(t *testing.T) {
-	dir := t.TempDir()
-	rec, busy := filepath.Join(dir, "record"), filepath.Join(dir, "ready")
-	p := withHeld(t, []string{"FAKE_HOLDER_RECORD=" + rec, "FAKE_HOLDER_SEND_AFTER=" + busy}, withPersons)
-	id := p.start(nil)["id"].(string)
-
-	body, _ := json.Marshal(map[string]any{"text": "from alice"})
-	req, _ := http.NewRequest("POST", p.srv.URL+"/v1/terminals/"+id+"/send", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Origin", p.srv.URL)
-	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: p.signIn("alice")})
-	answered := make(chan int, 1)
-	go func() {
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			answered <- 0
-			return
-		}
-		resp.Body.Close()
-		answered <- resp.StatusCode
-	}()
+	p, id, rec, ready := heldBusy(t)
+	answered := p.sendLater(id, p.signIn("alice"), "", "from alice")
 	waitRecorded(t, rec, `send "from alice" force=false wait=30000`)
 
 	bob := p.attachAs(id, p.signIn("bob"), "")
@@ -198,16 +181,298 @@ func TestASendIsNotTypedOverWhileItWaits(t *testing.T) {
 		t.Fatalf("typing while another person's send waits is refused with %q", msg)
 	}
 
-	if err := os.WriteFile(busy, nil, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if code := <-answered; code != 200 {
-		t.Fatalf("the send answered %d", code)
-	}
+	becomeReady(t, ready)
+	answeredWith(t, answered, 200)
 	bob.waitOut("got:from alice")
 	bob.typeIn("x\r")
 	bob.waitOut("got:x")
 	if got := typedInto(rec); got != "x\r" {
 		t.Fatalf("the holder was given %q to type besides the send, want %q", got, "x\r")
 	}
+}
+
+/* ------------------------------------------------- stopping a turn meanwhile --- */
+
+// heldBusy is a held session, between alice and bob, whose holder types a
+// send only once ready exists, as a CLI busy with a turn for a while. rec is
+// everything the holder was given.
+func heldBusy(t *testing.T) (p *terms, id, rec, ready string) {
+	t.Helper()
+	dir := t.TempDir()
+	rec, ready = filepath.Join(dir, "record"), filepath.Join(dir, "ready")
+	p = withHeld(t, []string{"FAKE_HOLDER_RECORD=" + rec, "FAKE_HOLDER_SEND_AFTER=" + ready}, withPersons)
+	id = p.start(nil)["id"].(string)
+	return p, id, rec, ready
+}
+
+// becomeReady lets a busy holder type the sends waiting in it.
+func becomeReady(t *testing.T, ready string) {
+	t.Helper()
+	if err := os.WriteFile(ready, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// sendLater makes a send without waiting for its answer, whose status comes
+// on the channel: from the page by a person's session cookie when cookie is
+// set, else by the bearer token.
+func (p *terms) sendLater(id, cookie, token, text string) <-chan int {
+	body, _ := json.Marshal(map[string]any{"text": text})
+	req, _ := http.NewRequest("POST", p.srv.URL+"/v1/terminals/"+id+"/send", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if cookie != "" {
+		req.Header.Set("Origin", p.srv.URL)
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
+	} else {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	answered := make(chan int, 1)
+	go func() {
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			answered <- 0
+			return
+		}
+		resp.Body.Close()
+		answered <- resp.StatusCode
+	}()
+	return answered
+}
+
+// answeredWith waits for a send made with sendLater to be answered with want.
+func answeredWith(t *testing.T, answered <-chan int, want int) {
+	t.Helper()
+	select {
+	case code := <-answered:
+		if code != want {
+			t.Fatalf("the send answered %d, want %d", code, want)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the send was never answered")
+	}
+}
+
+// While a send waits, whoever holds the keyboard may still stop the turn: a
+// frame of nothing but Esc and Ctrl-C goes through. Anything else is still
+// refused — an arrow key or history recall begins with Esc but carries
+// more, and Ctrl-D may end the CLI — and going through is typing under the
+// keyboard's rules all the same: a connection that does not hold the
+// keyboard, one attached to watch, and a watcher type nothing.
+func TestEscAndCtrlCGoThroughAWaitingSend(t *testing.T) {
+	p, id, rec, ready := heldBusy(t)
+	answered := p.sendLater(id, p.signIn("alice"), "", "from alice")
+	waitRecorded(t, rec, `send "from alice" force=false wait=30000`)
+	bob := p.attachAs(id, p.signIn("bob"), "")
+	if holder := bob.waitType("hello")["holder"]; holder != "bob" {
+		t.Fatalf("bob attaching to a free keyboard did not take it: %v", holder)
+	}
+
+	bob.typeIn("\x1b[A")
+	if msg := bob.waitType("error")["message"]; msg != fmt.Sprintf(sendFirst, "alice") {
+		t.Fatalf("an arrow key while another person's send waits is refused with %q", msg)
+	}
+	bob.typeIn("\x04")
+	stops := []string{"\x1b", "\x03", "\x1b\x1b", "\x03\x03", "\x1b\x03"}
+	for _, key := range stops {
+		bob.typeIn(key)
+	}
+	waitRecorded(t, rec, `input "\x1b\x03"`)
+	want := strings.Join(stops, "")
+	if got := typedInto(rec); got != want {
+		t.Fatalf("the holder was given %q while the send waited, want the interrupts alone, %q", got, want)
+	}
+
+	for _, o := range []struct {
+		who  string
+		conn *term
+		want string
+	}{
+		{"a watcher", p.attach(id, p.watch, ""), watchOnly},
+		{"bob attached to watch", p.attachAs(id, p.signIn("bob"), "mode=watch"), notHolding},
+		{"a connection without the keyboard", p.attach(id, p.alice, ""), notHolding},
+	} {
+		o.conn.waitType("hello")
+		o.conn.typeIn("\x03")
+		if msg := o.conn.waitType("error")["message"]; msg != o.want {
+			t.Fatalf("Ctrl-C from %s while a send waits is answered %q, want %q", o.who, msg, o.want)
+		}
+	}
+	if got := typedInto(rec); got != want {
+		t.Fatalf("the holder was given %q, want only the holder's interrupts, %q", got, want)
+	}
+
+	becomeReady(t, ready)
+	answeredWith(t, answered, 200)
+}
+
+// An interrupt stops the turn, not the send: the send goes on waiting, still
+// holds the session, and is typed once the holder finds the CLI ready.
+func TestAnInterruptLeavesAWaitingSendToBeTyped(t *testing.T) {
+	p, id, rec, ready := heldBusy(t)
+	answered := p.sendLater(id, p.signIn("alice"), "", "from alice")
+	waitRecorded(t, rec, `send "from alice" force=false wait=30000`)
+	bob := p.attachAs(id, p.signIn("bob"), "")
+	if holder := bob.waitType("hello")["holder"]; holder != "bob" {
+		t.Fatalf("bob attaching to a free keyboard did not take it: %v", holder)
+	}
+
+	bob.typeIn("\x03")
+	bob.waitOut("^C")
+	bob.typeIn("after")
+	if msg := bob.waitType("error")["message"]; msg != fmt.Sprintf(sendFirst, "alice") {
+		t.Fatalf("after an interrupt, typing while the send waits is refused with %q", msg)
+	}
+	select {
+	case code := <-answered:
+		t.Fatalf("the interrupt answered the send, %d", code)
+	default:
+	}
+
+	becomeReady(t, ready)
+	answeredWith(t, answered, 200)
+	bob.waitOut("got:from alice")
+	bob.typeIn("x\r")
+	bob.waitOut("got:x")
+	if got := typedInto(rec); got != "\x03x\r" {
+		t.Fatalf("the holder was given %q besides the send, want %q", got, "\x03x\r")
+	}
+}
+
+// A send is let in and holds the session in one step. Somebody who takes
+// the free keyboard the moment after it is let in, before its frame has even
+// gone to the holder, finds the session held already, and the half-line
+// they type is refused rather than submitted by the send's Enter. A token's
+// send is let in the same way.
+func TestASendHoldsTheSessionFromTheMomentItIsLetIn(t *testing.T) {
+	for _, by := range []string{"person", "token"} {
+		t.Run(by, func(t *testing.T) {
+			letIn, goOn := make(chan struct{}, 1), make(chan struct{})
+			was := heldSendLetIn
+			heldSendLetIn = func() {
+				letIn <- struct{}{}
+				<-goOn
+			}
+			t.Cleanup(func() { heldSendLetIn = was })
+			p, id, rec, ready := heldBusy(t)
+			release := sync.OnceFunc(func() { close(goOn) })
+			t.Cleanup(release)
+
+			cookie := ""
+			if by == "person" {
+				cookie = p.signIn("alice")
+			}
+			answered := p.sendLater(id, cookie, p.alice, "from alice")
+			select {
+			case <-letIn:
+			case code := <-answered:
+				t.Fatalf("the send answered %d without being let in", code)
+			}
+			bob := p.attachAs(id, p.signIn("bob"), "")
+			if holder := bob.waitType("hello")["holder"]; holder != "bob" {
+				t.Fatalf("bob attaching to a free keyboard did not take it: %v", holder)
+			}
+			bob.typeIn("half a line")
+			bob.settled()
+			release()
+
+			waitRecorded(t, rec, `send "from alice" force=false wait=30000`)
+			if errs := bob.errors(); len(errs) != 1 || errs[0] != fmt.Sprintf(sendFirst, "alice") {
+				t.Fatalf("typing the moment a send was let in was answered %q, want the send named", errs)
+			}
+			becomeReady(t, ready)
+			answeredWith(t, answered, 200)
+			if got := typedInto(rec); got != "" {
+				t.Fatalf("the holder was given %q to type in front of the send", got)
+			}
+		})
+	}
+}
+
+// A connection typing while a send waits is told so once a hold, not once a
+// keystroke: a typist on a slow link who keeps typing is not sent a refusal
+// for every key until it is too far behind to be kept. Another connection
+// is told on its own, and a later send's hold is told anew.
+func TestAWaitingSendIsNamedOnceAConnection(t *testing.T) {
+	p, id, rec, ready := heldBusy(t)
+	alice := p.signIn("alice")
+	answered := p.sendLater(id, alice, "", "first")
+	waitRecorded(t, rec, `send "first" force=false wait=30000`)
+	bob := p.attachAs(id, p.signIn("bob"), "")
+	if holder := bob.waitType("hello")["holder"]; holder != "bob" {
+		t.Fatalf("bob attaching to a free keyboard did not take it: %v", holder)
+	}
+	named := fmt.Sprintf(sendFirst, "alice")
+
+	for range 100 {
+		bob.typeIn("x")
+	}
+	bob.settled()
+	if errs := bob.errors(); len(errs) != 1 || errs[0] != named {
+		t.Fatalf("100 frames refused under one send were answered with %d errors, want one naming the send", len(errs))
+	}
+	desk := p.attachAs(id, p.signIn("bob"), "")
+	desk.waitType("hello")
+	desk.typeIn("y")
+	desk.typeIn("y")
+	desk.settled()
+	if errs := desk.errors(); len(errs) != 1 || errs[0] != named {
+		t.Fatalf("another connection of bob's was answered %q, want the send named once", errs)
+	}
+
+	becomeReady(t, ready)
+	answeredWith(t, answered, 200)
+	if err := os.Remove(ready); err != nil {
+		t.Fatal(err)
+	}
+	// bob lets the keyboard go, so that alice's next send is let in, and
+	// takes it again while that one waits.
+	bob.say(map[string]any{"type": "release"})
+	bob.settled()
+	again := p.sendLater(id, alice, "", "second")
+	waitRecorded(t, rec, `send "second" force=false wait=30000`)
+	bob.say(map[string]any{"type": "claim"})
+	bob.waitDoc("the keyboard back", func(doc map[string]any) bool {
+		return doc["type"] == "keyboard" && doc["holder"] == "bob"
+	})
+	bob.typeIn("z")
+	bob.typeIn("z")
+	bob.settled()
+	if errs := bob.errors(); len(errs) != 2 || errs[1] != named {
+		t.Fatalf("a later send's hold was told %q, want it named once more", errs)
+	}
+	becomeReady(t, ready)
+	answeredWith(t, again, 200)
+	if got := typedInto(rec); got != "" {
+		t.Fatalf("the holder was given %q while sends waited", got)
+	}
+}
+
+// A token is never a person, so its send holds the session against everyone,
+// its own connections too, under the same rules: Esc and Ctrl-C from
+// whoever holds the keyboard go through, and the refusal is said once a
+// connection.
+func TestATokensSendHoldsTheSessionAgainstEveryoneButAnInterrupt(t *testing.T) {
+	p, id, rec, ready := heldBusy(t)
+	answered := p.sendLater(id, "", p.alice, "from a token")
+	waitRecorded(t, rec, `send "from a token" force=false wait=30000`)
+	own := p.attach(id, p.alice, "")
+	if holder := own.waitType("hello")["holder"]; holder != "alice" {
+		t.Fatalf("the token's own connection did not take the free keyboard: %v", holder)
+	}
+
+	own.typeIn("mine")
+	own.typeIn("more")
+	own.typeIn("\x03")
+	waitRecorded(t, rec, `input "\x03"`)
+	own.settled()
+	if errs := own.errors(); len(errs) != 1 || errs[0] != fmt.Sprintf(sendFirst, "alice") {
+		t.Fatalf("the token's own connection typing under its send was answered %q", errs)
+	}
+	if got := typedInto(rec); got != "\x03" {
+		t.Fatalf("the holder was given %q while the token's send waited, want Ctrl-C alone", got)
+	}
+
+	becomeReady(t, ready)
+	answeredWith(t, answered, 200)
+	own.waitOut("got:from a token")
 }

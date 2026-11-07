@@ -142,12 +142,18 @@ const (
 	// it, so a stray tap on a phone does not reflow the desk.
 	heldNoFit = "this session's size changes only when a viewer asks to fit it"
 	// sendFirst is somebody typing into a held session while another
-	// person's send waits there to be typed, naming who sent it.
+	// person's send waits there to be typed, naming who sent it. It is said
+	// once a send to each connection, and its keystrokes after are refused
+	// without a word (errSendTold).
 	sendFirst = "a send from %s is waiting to be typed into this session; type once it is in"
 )
 
 var (
-	errNotHolding  = errors.New(notHolding)
+	errNotHolding = errors.New(notHolding)
+	// errSendTold is a keystroke refused under a send the connection was
+	// told of already: nothing is typed and nothing more is said, so a
+	// typist on a slow link is not sent a refusal for every key.
+	errSendTold    = errors.New("refused under a waiting send this connection was told of")
 	errTermEnded   = errors.New("this terminal has ended")
 	errSharedWatch = errors.New(sharedWatch)
 	errSharedSize  = errors.New(sharedSize)
@@ -245,6 +251,10 @@ type termConn struct {
 	// the goroutine reading the connection.
 	replies *vtscan.ReplyFilter
 	noFit   bool
+	// toldSend is the waiting send this connection was last told of
+	// (sendFirst), so that it is told once a send. It belongs to the
+	// session's mu.
+	toldSend uint64
 	// catchUp is what a viewer that fell behind is sent instead of being
 	// closed with 1013. depth is how many frames of output it may fall
 	// behind by, and queued how many of them are in its queue. behind is it
@@ -767,13 +777,20 @@ func (ts *termSession) typeInto(tc *termConn, p []byte) error {
 		return errNotHolding
 	}
 	h, held := ts.back.(*heldTerm)
-	if held {
+	if held && !interrupts(p) {
 		// A send waiting to be typed was let in under the keyboard's rule,
 		// and holds the session for its person until it is in: somebody
 		// else's keystrokes would be typed into the middle of it, and its
-		// Enter would submit them.
-		if by, ok := h.sendingFor(tc.person); ok {
+		// Enter would submit them. Esc and Ctrl-C alone are let through,
+		// because a person must always be able to stop a turn, and the send
+		// goes on waiting.
+		if by, seq, ok := h.sendingFor(tc.person, tc.toldSend); ok {
+			told := seq == tc.toldSend
+			tc.toldSend = seq
 			ts.mu.Unlock()
+			if told {
+				return errSendTold
+			}
 			return fmt.Errorf(sendFirst, by)
 		}
 	}
@@ -787,6 +804,19 @@ func (ts *termSession) typeInto(tc *termConn, p []byte) error {
 		return h.typeFrom(tc, p)
 	}
 	return back.typeInto(p)
+}
+
+// interrupts reports whether a frame is nothing but Esc and Ctrl-C: somebody
+// stopping a turn, which a waiting send does not hold the session against.
+// An arrow key or history recall begins with Esc but carries more, and
+// Ctrl-D may end the CLI, so neither is one.
+func interrupts(p []byte) bool {
+	for _, b := range p {
+		if b != 0x1b && b != 0x03 {
+			return false
+		}
+	}
+	return len(p) > 0
 }
 
 // resizeTo is the other thing only the holder may do: the size is the
@@ -905,17 +935,26 @@ func (ts *termSession) move(tc *termConn) {
 	ts.audit("keyboard moved", "from", from, "to", tc.name)
 }
 
-// mayType reports whether a send from this person may type now: the
-// keyboard is free, or held by the same person on a connection or in its
-// grace. holder is who holds it otherwise. A person of "" is nobody's, and
-// types only while the keyboard is free.
-func (ts *termSession) mayType(person string) (holder string, ok bool) {
+// letSendIn lets a send by person in under the keyboard's rule, and holds
+// the session for them, in one step: the keyboard free, or held by the same
+// person on a connection or in its grace. A person of "" is nobody's, and is
+// let in only while the keyboard is free. Otherwise the answer is
+// sentKeyboard, naming who holds it, or the session's own when it cannot
+// take a send; either way nothing is held.
+//
+// The keyboard is looked at and the send held under the one lock, mu, so
+// that nobody can take a free keyboard between the two and type the
+// half-line the send's Enter would submit.
+func (ts *termSession) letSendIn(h *heldTerm, person, name string) (*sending, holdwire.SentMsg) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
-	if ts.free() || (person != "" && person == ts.holderPerson) {
-		return "", true
+	switch {
+	case ts.ended:
+		return nil, holdwire.SentMsg{Code: holdwire.SentEnded}
+	case !ts.free() && (person == "" || person != ts.holderPerson):
+		return nil, holdwire.SentMsg{Code: sentKeyboard, Message: ts.heldBy()}
 	}
-	return ts.heldBy(), false
+	return h.hold(person, name)
 }
 
 // take gives the keyboard to one connection and tells everyone. Called with
