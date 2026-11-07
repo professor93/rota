@@ -84,8 +84,9 @@ type Spec struct {
 	// helper leaves it: the pipes stay open after the CLI is gone, and a
 	// signal to the CLI's group does not reach it.
 	Detach string `json:"detach,omitempty"`
-	// Ready names a file the fake writes its pid to once Term, Spawn and
-	// Detach are in force, so a test can signal it without racing its start.
+	// Ready names a file the fake writes its pid to once Term, Spawn,
+	// Detach and Linger are in force, so a test can signal it without racing
+	// its start.
 	Ready string `json:"ready,omitempty"`
 	// Linger keeps a tty fake this long after its terminal hangs up or its
 	// input ends, taking no notice of the hang-up, as a CLI finishing its
@@ -154,6 +155,13 @@ func Link(path string) error {
 	}
 	return warm(path)
 }
+
+// Warm is the run Link makes, for a path a test made to this test binary
+// some other way — a symbolic link, say, that it then starts as rota: on
+// macOS the path is run once, doing nothing, and waited for, so the look
+// macOS takes at a new path is over before the test starts it for real.
+// Elsewhere it does nothing.
+func Warm(path string) error { return warm(path) }
 
 func copyTo(self, path string) error {
 	src, err := os.Open(self)

@@ -472,6 +472,9 @@ func TestATermToTheHolderHangsUpTheCLI(t *testing.T) {
 		t.Fatalf("%+v", h.ready)
 	}
 	child := h.meta().ChildPID
+	// The CLI is hung up only once it says it is ready: a signal that
+	// reaches a fake sooner can end it before it has run a line.
+	h.link().wait("ready")
 	if err := h.cmd.Process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}

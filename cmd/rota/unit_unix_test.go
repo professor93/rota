@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/professor93/rota/internal/fakecli"
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/wire"
 )
@@ -480,6 +481,10 @@ func TestTheUnitRunsTheRotaThatWasTyped(t *testing.T) {
 	}
 	link := filepath.Join(t.TempDir(), "rota")
 	if err := os.Symlink(self, link); err != nil {
+		t.Fatal(err)
+	}
+	// A new path, which macOS looks at before it lets anything run from it.
+	if err := fakecli.Warm(link); err != nil {
 		t.Fatal(err)
 	}
 	record := filepath.Join(t.TempDir(), "calls")
