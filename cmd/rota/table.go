@@ -81,8 +81,12 @@ func termWidth(out io.Writer) int {
 
 // say prints text, each line of it wrapped at its spaces to width when
 // width is a terminal's, a command in backticks kept whole (see wrapLine).
-// Without one, it is printed exactly as it is.
+// Without one, it is printed as it is. Either way a control character in
+// it, which an address, a reason or a provider's error may carry, is a
+// space (see printable): a note is wrapped by its count of runes, and an
+// escape would recolour or retitle the terminal it is said on.
 func say(out io.Writer, width int, text string) {
+	text = printable(text)
 	if width > 0 {
 		var lines []string
 		for line := range strings.SplitSeq(text, "\n") {
@@ -108,7 +112,19 @@ const (
 	cutHard   = 2
 )
 
-func (g *grid) add(cells ...string) { g.rows = append(g.rows, cells) }
+// add puts a row under the table's header, each control character in its
+// cells a space (see printable): a cell is measured by its runes, and a tab
+// or an escape in an address, a status or a reason would move the cursor
+// where no count can follow, or be taken by the terminal as a command
+// rather than drawn. A newline is kept, since it is what parts a cell's
+// lines.
+func (g *grid) add(cells ...string) {
+	row := make([]string, len(cells))
+	for i, c := range cells {
+		row[i] = printable(c)
+	}
+	g.rows = append(g.rows, row)
+}
 
 // widths is the widest line in each column, header included, in the
 // columns it takes on screen (see screenWidth).
