@@ -88,17 +88,14 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 	// Before any worker starts, because a rescue saves the store, and a save
 	// reads every account.
 	homes := s.lookIn(ctx, accounts, collect, report)
+	now := rota.Now()
 	for _, a := range accounts {
 		shared := rota.SharedHome(a.Provider)
 		h, kept := homes[a]
 		if kept && h == nil {
 			continue // its home could not be read, which is reported
 		}
-		if a.Dead || a.APIKey() || !rota.Metered(a.Provider) {
-			continue
-		}
-		stale := force || a.QuotaAt == 0 || time.Since(time.UnixMilli(a.QuotaAt)) > QuotaTTL
-		if !stale {
+		if !readsUsage(a) || (!force && !due(a, now)) {
 			continue
 		}
 		switch {
@@ -319,3 +316,76 @@ func (b accountState) differs(a *rota.Account) bool {
 // SDK: lib itself never caches a reading — this store does, so the caching
 // policy is this package's to own.
 const QuotaTTL = 5 * time.Minute
+
+// ResetGrace is how long after a window's reset time a reading taken before
+// it counts as out of date. A reading that predates a reset says nothing true
+// about its window afterwards — an account spent until five is whole again
+// at five — so it is read again then, however young it is. The grace is the
+// provider's moment to roll the window over: a reading taken the instant the
+// time passes could still say spent, and would then be kept for a whole
+// QuotaTTL.
+const ResetGrace = 5 * time.Second
+
+// readsUsage reports whether Refresh reads this account's usage at all.
+func readsUsage(a *rota.Account) bool {
+	return !a.Dead && !a.APIKey() && rota.Metered(a.Provider)
+}
+
+// due reports whether an account's reading is out of date at now: there is
+// none, it is older than QuotaTTL, or a window it reports has reset since it
+// was taken. This is the one place a look decides to read again. A "not
+// before" a provider asks for — a Retry-After — belongs here when there is
+// one, and then holds back every read, the one a reset makes due as much as
+// the one the cache does; NextReset would wait for it too.
+func due(a *rota.Account, now time.Time) bool {
+	if a.QuotaAt == 0 || now.Sub(time.UnixMilli(a.QuotaAt)) > QuotaTTL {
+		return true
+	}
+	r := pendingReset(a)
+	return !r.IsZero() && !now.Before(r.Add(ResetGrace))
+}
+
+// pendingReset is the soonest reset time, among the windows of an account's
+// reading, that the reading was taken before; zero when there is none. A
+// reset the provider reported as already past when it was read is no news
+// about the reading, which is what keeps a provider that is slow to roll a
+// window over from being asked again on every look.
+func pendingReset(a *rota.Account) time.Time {
+	if a.Quota == nil || a.QuotaAt == 0 {
+		return time.Time{}
+	}
+	at := time.UnixMilli(a.QuotaAt)
+	var first time.Time
+	for _, w := range a.Quota.Windows {
+		r := w.ResetsAt.Time
+		if r.After(at) && (first.IsZero() || r.Before(first)) {
+			first = r
+		}
+	}
+	return first
+}
+
+// NextReset is when the soonest window reset this store knows of puts a
+// reading out of date — ResetGrace after the reset itself — or zero when no
+// reading is waiting on one. It is for a process that keeps readings current
+// on its own, as rota serve does: it can look again then, rather than up to a
+// whole sweep later, and Refresh reads what is due. A reading already due is
+// left out, since any look reads it, and so is one Refresh would never read.
+func (s *Store) NextReset() time.Time {
+	now := rota.Now()
+	var next time.Time
+	for _, a := range s.Accounts {
+		if !readsUsage(a) {
+			continue
+		}
+		r := pendingReset(a)
+		if r.IsZero() {
+			continue
+		}
+		at := r.Add(ResetGrace)
+		if at.After(now) && (next.IsZero() || at.Before(next)) {
+			next = at
+		}
+	}
+	return next
+}

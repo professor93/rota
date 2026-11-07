@@ -374,24 +374,61 @@ func checkTokens(in []TokenPrincipal) ([]token, error) {
 // stops. The first sweep is one interval in, not at startup: a server that
 // has just been started is being started to serve, and the first request
 // refreshes what it needs anyway.
+//
+// A sweep also comes early, a moment after a usage window resets: until the
+// account is read again its reading still says spent, and the rotation
+// passes by an account that is whole. That is the one timer, moved — not one
+// per account — and the sweeps every interval go on as they were. Starting,
+// the keeper reads the store only to learn when the first reset is.
 func (s *Server) keepFresh(every time.Duration) {
 	defer close(s.keeperDone)
-	t := time.NewTicker(every)
+	sweep := time.Now().Add(every)
+	reset := s.nextReset()
+	t := time.NewTimer(untilNext(sweep, reset))
 	defer t.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
 		case <-t.C:
-			s.maintain()
 		}
+		if now := time.Now(); !sweep.After(now) {
+			// The sweep that was due, and any a slow one sat through.
+			sweep = sweep.Add((now.Sub(sweep)/every + 1) * every)
+		}
+		reset = s.maintain()
+		t.Reset(untilNext(sweep, reset))
 	}
 }
 
-// maintain is one sweep. It is deliberately unremarkable about failure: a
-// provider that is down leaves its account as it was, and the next sweep
-// tries again.
-func (s *Server) maintain() {
+// soonestReset keeps a sweep woken for a reset from following the last one
+// at once, whatever the clock it was reckoned by says.
+const soonestReset = time.Second
+
+// untilNext is how long the keeper sleeps: until the next sweep, or until a
+// window resets if that is sooner.
+func untilNext(sweep, reset time.Time) time.Duration {
+	wait := time.Until(sweep)
+	if reset.IsZero() {
+		return wait
+	}
+	return min(wait, max(time.Until(reset), soonestReset))
+}
+
+// nextReset is the store's NextReset, for a keeper that has not swept yet.
+func (s *Server) nextReset() time.Time {
+	st, err := s.openStore()
+	if err != nil {
+		return time.Time{}
+	}
+	defer st.Close()
+	return st.NextReset()
+}
+
+// maintain is one sweep, and returns when the next window resets (see
+// keepFresh). It is deliberately unremarkable about failure: a provider that
+// is down leaves its account as it was, and the next sweep tries again.
+func (s *Server) maintain() (reset time.Time) {
 	defer func() {
 		// A provider panicking on a timer would otherwise take the server
 		// down, and with it every run in flight.
@@ -402,7 +439,7 @@ func (s *Server) maintain() {
 	st, err := s.openStore()
 	if err != nil {
 		s.log.Warn("background refresh: the store could not be opened", "err", err)
-		return
+		return time.Time{}
 	}
 	defer st.Close()
 	errs := st.Maintain(s.ctx)
@@ -410,6 +447,7 @@ func (s *Server) maintain() {
 		s.log.Warn("background refresh", "err", e)
 	}
 	s.log.Debug("background refresh", "accounts", len(st.Accounts), "problems", len(errs))
+	return st.NextReset()
 }
 
 // Stop ends every run still in flight.
