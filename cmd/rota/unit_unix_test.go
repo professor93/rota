@@ -3,17 +3,23 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/wire"
 )
 
 // Every test here writes units into a temporary HOME and XDG_CONFIG_HOME
@@ -294,8 +300,6 @@ func TestUninstallSaysWhatTheSupervisorSaid(t *testing.T) {
 
 // A daemon that runs with no unit of this store's installed was started by
 // hand: install refuses, writes nothing and asks the supervisor nothing.
-// With the unit installed, the daemon is the unit's, and install rewrites
-// and restarts it.
 func TestInstallRefusesWhileAHandStartedDaemonRuns(t *testing.T) {
 	r := newUnitRig(t)
 	release, err := holdwire.ClaimDaemon(r.terminals, "test")
@@ -314,16 +318,143 @@ func TestInstallRefusesWhileAHandStartedDaemonRuns(t *testing.T) {
 	if _, err := os.Lstat(r.want.path); !os.IsNotExist(err) {
 		t.Fatalf("a unit was written: %v", err)
 	}
-	// The unit was installed before: the daemon running is its.
-	if _, err := writeUnit("/u/rota", r.store, nil, false); err != nil {
+}
+
+// With the unit installed, a daemon running — the unit's, or one started
+// by hand meanwhile — is stopped first, as serve stop stops one: SIGTERM,
+// and a wait for the store to be let go of. Only then is the supervisor
+// asked to restart the unit, whose daemon so never finds the store taken.
+// The claim here is the test's own, and so is the SIGTERM, which it takes
+// as the daemon would: by letting go.
+func TestReinstallStopsTheDaemonFirst(t *testing.T) {
+	r := newUnitRig(t)
+	if _, errb, code := call(t, "serve", "install"); code != 0 {
+		t.Fatalf("install: exit %d %q", code, errb)
+	}
+	release, err := holdwire.ClaimDaemon(r.terminals, "test")
+	if err != nil {
 		t.Fatal(err)
 	}
-	*r.calls = nil
-	if _, errb, code := call(t, "serve", "install"); code != 0 {
-		t.Fatalf("install over a unit: exit %d %q", code, errb)
+	defer release()
+	terms := make(chan os.Signal, 1)
+	signal.Notify(terms, syscall.SIGTERM)
+	defer signal.Stop(terms)
+	termed, done := make(chan struct{}), make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-terms:
+			close(termed)
+			release()
+		case <-done:
+		}
+	}()
+	asked, heldWhenAsked := 0, false
+	calls := recordUnits(t, func(string) error {
+		if asked++; asked == 1 {
+			heldWhenAsked = holdwire.Locked(holdwire.DaemonLock(r.terminals))
+		}
+		return nil
+	})
+	out, errb, code := call(t, "serve", "install")
+	if code != 0 || out != fmt.Sprintf("rota daemon reinstalled for %s and restarted: %s\n", r.store, r.want.path) {
+		t.Fatalf("install over a running daemon: exit %d %q %q", code, out, errb)
 	}
-	if !slices.Equal(*r.calls, r.want.reinstall) {
-		t.Fatalf("install over a unit asked %q, want %q", *r.calls, r.want.reinstall)
+	select {
+	case <-termed:
+	default:
+		t.Fatal("the daemon running was not sent SIGTERM")
+	}
+	if heldWhenAsked {
+		t.Fatal("the supervisor was asked while the daemon still held the store")
+	}
+	if !slices.Equal(*calls, r.want.reinstall) {
+		t.Fatalf("asked %q, want %q", *calls, r.want.reinstall)
+	}
+}
+
+// rota serve uninstall, like serve stop, is refused inside a held session:
+// it would end the daemon, and take away what starts it again, from inside
+// one by mistake. Once the session is over, the same process may. The
+// probe is this binary as a rota in a session of its own, which a held
+// session's record names as its holder.
+func TestUninstallIsRefusedInsideAHeldSession(t *testing.T) {
+	r := newUnitRig(t)
+	if _, errb, code := call(t, "serve", "install"); code != 0 {
+		t.Fatalf("install: exit %d %q", code, errb)
+	}
+	record := filepath.Join(t.TempDir(), "calls")
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	cmd.Env = append(os.Environ(), "ROTA_SESSION_PROBE=1", "ROTA_UNIT_RECORD="+record)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { in.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	answers := bufio.NewScanner(stdout)
+	ask := func(line string) (int, string) {
+		t.Helper()
+		fmt.Fprintln(in, line)
+		if !answers.Scan() {
+			t.Fatalf("the probe said nothing to %q: %v", line, answers.Err())
+		}
+		code, said, _ := strings.Cut(answers.Text(), " ")
+		n, cerr := strconv.Atoi(code)
+		s, qerr := strconv.Unquote(said)
+		if cerr != nil || qerr != nil {
+			t.Fatalf("the probe answered %q", answers.Text())
+		}
+		return n, s
+	}
+
+	const id = "00000000000000e1"
+	dir := holdwire.Dir(r.terminals, id)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	m := &holdwire.Meta{ID: id, Kind: holdwire.KindAccount, Account: 1, Provider: "claude",
+		HolderPID: cmd.Process.Pid, Protocol: holdwire.Major, Version: wire.Version, Started: time.Now()}
+	if err := holdwire.WriteMeta(dir, m); err != nil {
+		t.Fatal(err)
+	}
+	release, err := holdwire.Lock(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+
+	code, said := ask("serve uninstall")
+	if want := "rota serve uninstall is refused inside held session " + id + "; run it from outside the session"; code != 1 || !strings.Contains(said, want) {
+		t.Fatalf("uninstall inside a held session: exit %d %q, want %q", code, said, want)
+	}
+	if _, err := os.Stat(record); !os.IsNotExist(err) {
+		t.Fatalf("the supervisor was asked from inside a held session: %v", err)
+	}
+	if _, err := os.Lstat(r.want.path); err != nil {
+		t.Fatalf("the unit was taken away from inside a held session: %v", err)
+	}
+
+	release()
+	if code, said := ask("serve uninstall"); code != 0 || said != fmt.Sprintf("rota daemon uninstalled for %s; 0 sessions keep running\n", r.store) {
+		t.Fatalf("uninstall once the session was over: exit %d %q", code, said)
+	}
+	raw, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n"); !slices.Equal(got, r.want.uninstall) {
+		t.Fatalf("asked %q, want %q", got, r.want.uninstall)
+	}
+	if _, err := os.Lstat(r.want.path); !os.IsNotExist(err) {
+		t.Fatalf("unit still there: %v", err)
 	}
 }
 
