@@ -198,6 +198,7 @@ rota run                      # open the rotation's account in its own CLI
 rota run 2                    # open account 2's CLI, as it comes
 rota run 2 --share            # the same, watchable from this machine's terminal page
 rota run --share=watch --label api   # ...offered to be read and never typed into
+rota run 2 --detach --label api   # held by this store's daemon instead, with no terminal open
 rota set 2 --order 1          # put account 2 first in the queue (0 = out of it)
 rota set 2 --threshold 80     # move on to the next account at 80% usage
 rota set 2                    # what account 2 is set to
@@ -280,7 +281,8 @@ Anything after an account id is passed to the vendor CLI's own login
 | `--json` | the whole result: cost, usage, session id, exit status |
 | `-i`, `--interactive` | open the CLI as it comes instead of asking it anything |
 | `--share[=control\|watch]` | open the CLI here *and* offer this terminal to a rota server on this machine |
-| `--label <name>` | what to call that shared terminal in the listing |
+| `--detach` | hand the CLI to a session this store's daemon holds instead of to this terminal, and return; the CLI's arguments after `--` or `-i`, and no prompt — see *[The daemon](#the-daemon)* |
+| `--label <name>` | what to call that shared terminal, or that held session, in the listing |
 | `--remote-control[=name]` | open a claude account's Claude Code with its own Remote Control on, turning the account's setting on first — see *Remote Control* |
 | `--` | everything after it belongs to the vendor CLI, untouched |
 
@@ -646,7 +648,7 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/runs/{id}/ws` | watch | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
 | `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended`, `interrupted` or `broken`), `attachable`, `reachable`, `pid` (its holder), `name`, `title`, `conversation`, `conversation_cwd`, `resumable`, `ended_at` once it has stopped, `made_by` for a holder this rota cannot attach to (`unknown` when its record does not say), and `status` (`running`, `needs_you`, `quiet` or `stopped`). The daemon also lists the held sessions its store's records describe: the stopped ones, for `keep_stopped`, and the running ones it is not linked to |
 | `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard, and the same held fields, for a stopped held session too |
-| `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up |
+| `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up. Over the control socket alone, `"env":["NAME=value",…]` is the environment a held session starts from in place of the daemon's, which its holder keeps the variables that describe another terminal out of, and `"remote_control":true`, or the session's name, starts an account's CLI with Claude Code's Remote Control on for whichever account is chosen, turning its setting on first as `rota run --remote-control` does; from anybody else either is `403`: *env is taken only over the control socket*, or *remote_control is taken only over the control socket* |
 | `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended; a running held session the daemon is not linked to is hung up by signal, once however often it is asked, and only while its pid is still the holder its record names: `409` when it is not, or when its record names no process this rota can check |
 | `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame. A held session the daemon is not linked to answers `409`, saying why |
 | `POST` | `/v1/terminals/{id}/send` | control | `{"text":"…","force":false}` — type a message into a held session the way a person would, once it is ready for one: the text, then Enter. It is typing, so the keyboard must be free or held by the sender's own person, and until it is typed nobody else types into the session but one Esc or Ctrl-C. `200 {"ok":true}` once typed; `409` with `reason` `waiting` (the CLI waits on its person, where Enter may approve something; `"force":true` types anyway), `keyboard` (with `holder`), `ended`, or `not_held` (a terminal that is not a held session, or one the daemon is not linked to); `504` with `reason` `timeout` when it never became ready in 30 seconds |
@@ -945,6 +947,33 @@ inside held session <id>; run it from outside the session*, and the same
 for `uninstall`. On Windows both are refused, as every held-session command
 is.
 
+**Detaching a CLI.** `rota run [id] --detach` hands the account's CLI to a
+session the daemon holds rather than to the terminal it was typed at, and
+returns. The session starts in that folder, at the size of the terminal on
+standard input — 120×40 when it is not one — and from the command's own
+environment rather than the daemon's, less the variables that describe
+another terminal, and with a Claude Code directory it names relatively
+named absolutely, as for the daemon. The daemon chooses the account when none is named, as
+for any session it holds. The CLI's own arguments go after `--` or `-i`; a
+prompt, or `-p`/`--print` among those arguments, is a usage error, since a
+held session has nobody to answer, and so is `--share`. `--label` names the
+session. With no daemon running, one is started on its control socket
+alone, whatever `server.toml` says about a port, and said:
+
+```
+rota: started the rota daemon for /home/me/.rota (control socket only; rota serve stop ends it)
+rota: claude/me@example.com via claude — held as session api (0123456789abcdef); rota send api "..." types into it, rota list --sessions lists it
+```
+
+all on stderr. `--json` prints the session instead of the second line:
+`id`, `name`, `label`, `kind`, `state`, `status`, `provider`, `account`,
+`account_label`, `cwd`, `conversation`, `pid`, `attachable`, `resumable`,
+`started`, `ended_at` and `exit`. `--remote-control` with an account named
+readies it here, as a run that opens the CLI does; with none named the
+daemon readies whichever it chooses. A daemon that holds the store and
+does not answer within five seconds is an error, and no second daemon is
+started beside it.
+
 ### Who is asking, and what they may do
 
 Every request is made by a **principal**: a name to put in the log, a role
@@ -1119,7 +1148,8 @@ role table decides what it may do, as for anyone.
 
 **What it serves.** Every route that takes a principal — the API, the
 WebSockets, and the terminals with their `send` — whatever `[routes]` says:
-routes choose what a port opens, and this is not a port. Beside those it
+routes choose what a port opens, and this is not a port. A new terminal's
+`env` and `remote_control` are taken here alone. Beside those it
 answers `GET /v1/health`, and `GET /v1/session` with
 `{"name":"local","role":…,"via":"local"}`, so a client can ask whether it
 may change anything before it tries. There is no page, asset or invite

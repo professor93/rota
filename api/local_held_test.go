@@ -3,10 +3,14 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/professor93/rota/internal/holdwire"
 )
 
 // These are about the local principal at a held session's keyboard. local is
@@ -208,5 +212,27 @@ func TestLocalIsTheLocalUsersDevice(t *testing.T) {
 	bobs.typeIn("bob\r")
 	if msg := bobs.waitType("error")["message"]; msg != notHolding {
 		t.Fatalf("bob typing while local holds alice's keyboard is refused with %q, want %q", msg, notHolding)
+	}
+}
+
+// The environment local sends is handed to the holder as it came, for the
+// session to start from in place of the daemon's.
+func TestLocalsEnvReachesTheHolder(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "request.json")
+	p := withHeld(t, []string{"FAKE_HOLDER_LOG=" + log})
+	ctl := p.door(&localControl)
+	ctl.start(map[string]any{"account": 1, "env": []string{"FOO=bar", "PATH=/nowhere"}})
+	raw, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen struct {
+		Request holdwire.Request `json:"request"`
+	}
+	if err := json.Unmarshal(raw, &seen); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(seen.Request.Env, " ") != "FOO=bar PATH=/nowhere" {
+		t.Fatalf("the holder was handed env %q", seen.Request.Env)
 	}
 }
