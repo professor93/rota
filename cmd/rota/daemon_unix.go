@@ -387,20 +387,30 @@ func daemonPort(cfg *api.Config, ctlOnly bool, listener api.Listener, srv *api.S
 
 /* ----------------------------------------------------------------- stop --- */
 
+// refusedInsideHeldSession refuses command — `rota serve stop`, say — run
+// from inside a held session, where it is most likely the agent in one by
+// mistake: the same rule, and the same guard against accidents, as
+// ctl.sock's watch-only one. A process whose session cannot be told is
+// refused as inside.
+func refusedInsideHeldSession(command, terminals string) error {
+	switch id, err := heldSessionOf(os.Getpid(), terminals); {
+	case err != nil:
+		return fmt.Errorf("%s cannot tell whether it is inside a held session (%v), so it is refused; run it from outside the session", command, err)
+	case id != "":
+		return fmt.Errorf("%s is refused inside held session %s; run it from outside the session", command, id)
+	}
+	return nil
+}
+
 // stopDaemon is `rota serve stop`, and with --all `rota serve stop --all`.
-// Neither is run from inside a held session, where it is most likely the
-// agent in one by mistake: the same rule, and the same guard against
-// accidents, as ctl.sock's watch-only one.
+// Neither is run from inside a held session.
 func (c *cli) stopDaemon(all, yes bool) error {
 	home, terminals, err := daemonStore()
 	if err != nil {
 		return err
 	}
-	switch id, err := heldSessionOf(os.Getpid(), terminals); {
-	case err != nil:
-		return fmt.Errorf("rota serve stop cannot tell whether it is inside a held session (%v), so it is refused; run it from outside the session", err)
-	case id != "":
-		return fmt.Errorf("rota serve stop is refused inside held session %s; run it from outside the session", id)
+	if err := refusedInsideHeldSession("rota serve stop", terminals); err != nil {
+		return err
 	}
 	if all {
 		return c.stopAll(home, terminals, yes)

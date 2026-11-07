@@ -35,10 +35,6 @@ func TestMain(m *testing.M) {
 	// And no provider call a test did not stand in for reaches the real one:
 	// every endpoint of every provider, whatever account a test makes.
 	offline()
-	// Nor is any system's supervisor: no systemctl or launchctl runs from
-	// here, nor from the rota this binary runs as, whose calls a test reads
-	// from the file ROTA_UNIT_RECORD names.
-	unitRun = standInSupervisor
 	// One test needs a real rota, in a process of its own, at a real
 	// terminal: sharing is about what happens between a window somebody is
 	// sitting at and the CLI under it, and nothing run inside `go test`

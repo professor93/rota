@@ -348,8 +348,8 @@ Held sessions run on Linux and macOS:
 | `--all` | end every session as well, after asking `stop the rota daemon and end N sessions? [y/N]`; with no daemon running, end the sessions its holders still hold |
 | `--yes` | with `--all`, end them without asking; off a terminal `--all` needs it, and without `--all` it is a usage error |
 | `rota serve status` | whether a daemon runs, its pid, version, control socket and port, and how many sessions are running and stopped; `--json` for the same as a document. Exits `0` when a daemon runs and `3` when none does |
-| `rota serve install` | make the daemon a systemd user unit on Linux or a launchd agent on macOS, which starts it at login and keeps its sessions through a restart, and start it; refused while a daemon started by hand runs and no unit of this store's is installed. Run again, it rewrites the unit and restarts it. A supervisor does not pass `ROTA_TOKEN`, so a daemon's TCP port wants `auth.token_file` or `[[users]]` — see *Under a supervisor* in *[The daemon](#the-daemon)* |
-| `rota serve uninstall` | stop the daemon the unit runs and take the unit away; every session goes on running |
+| `rota serve install` | make the daemon a systemd user unit on Linux or a launchd agent on macOS, which starts it at login and keeps its sessions through a restart, and start it; refused while a daemon started by hand runs and no unit of this store's is installed. Run again, it stops any daemon running, as `serve stop` does, then rewrites the unit and restarts it. A supervisor does not pass `ROTA_TOKEN`, so a daemon's TCP port wants `auth.token_file` or `[[users]]` — see *Under a supervisor* in *[The daemon](#the-daemon)* |
+| `rota serve uninstall` | stop the daemon the unit runs and take the unit away; every session goes on running. Refused inside a held session, as `serve stop` is |
 | `rota serve hold` | internal: one held session's process, started by the daemon with its request on standard input; refuses a terminal |
 
 The whole `[routes]` and `[terminal]` groups — the terminal page among them —
@@ -908,7 +908,10 @@ logout.
 would refuse is refused before anything is written. While a daemon runs
 and no unit of this store's is installed, it refuses: *a rota daemon is
 running for <store> (pid N), started by hand; rota serve stop it, then
-install*. With the unit installed, it rewrites it and restarts it —
+install*. With the unit installed, it first stops any daemon running for
+the store — the unit's, or one started by hand meanwhile — as `rota serve
+stop` does, its sessions going on, so the daemon the unit starts never
+finds the store taken. Then it rewrites the unit and restarts it —
 `systemctl --user restart` after `daemon-reload` and `enable`, or the same
 bootout and bootstrap — and says `rota daemon reinstalled for <store> and
 restarted: <path>`; that is how a new `PATH` or binary is taken up. A
@@ -918,6 +921,9 @@ uninstall takes it away*.
 
 `rota serve uninstall` runs `systemctl --user disable --now` on the unit,
 deletes it and reloads, or runs `launchctl bootout` and deletes the agent.
+Like `rota serve stop`, it is refused inside a held session: *rota serve
+uninstall is refused inside held session <id>; run it from outside the
+session*.
 The file is deleted whatever the supervisor says, and what it said is the
 error. Every session goes on running, for the next daemon to take up: it
 says `rota daemon uninstalled for <store>; N sessions keep running`. With no
