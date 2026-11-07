@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	"github.com/professor93/rota/internal/vtscan"
 	rota "github.com/professor93/rota/lib"
@@ -155,6 +156,11 @@ type Registry struct {
 	Kind       string `json:"kind,omitempty"`
 	UpdatedAt  int64  `json:"updated_at,omitempty"`
 }
+
+// SendWait is how long a send waits for a held session to become ready
+// before it is answered SentTimeout: what the daemon tells the holder in
+// WaitMS, and what a holder told nothing waits.
+const SendWait = 30 * time.Second
 
 // SendMsg asks the holder to type Text and Enter once the session is ready
 // for it, waiting at most WaitMS. Force types it even while the CLI waits for

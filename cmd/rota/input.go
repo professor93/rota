@@ -394,19 +394,26 @@ func (c *cli) send(args []string) error {
 	if err != nil {
 		return err
 	}
-	path, err := sockPath(s, id)
-	terminals, terr := s.TerminalDir()
-	s.Close() // the run itself holds no store lock, and neither should this
-	if err != nil {
-		return err
+	// A run's id is one path element. Anything else names no run, and is
+	// never joined onto the runs directory, where it could reach a socket
+	// that is not a run's.
+	path := ""
+	if id == filepath.Base(id) {
+		if path, err = sockPath(s, id); err != nil {
+			s.Close()
+			return err
+		}
 	}
-	if _, err := os.Stat(path); err != nil {
+	if _, serr := os.Stat(path); path == "" || serr != nil {
 		// No such run: a held session, then, which is typed into.
-		if terr != nil {
-			return terr
+		terminals, err := s.TerminalDir()
+		s.Close() // the session's daemon holds no store lock, and neither should this
+		if err != nil {
+			return err
 		}
 		return c.sendHeld(terminals, id, text, *force, *interrupt || *steer || *shut)
 	}
+	s.Close() // the run itself holds no store lock, and neither should this
 	conn, err := net.Dial("unix", path)
 	if err != nil {
 		// A socket file with nothing behind it is what a killed run leaves;
@@ -477,7 +484,7 @@ func (c *cli) sendHeld(terminals, target, text string, force, runOnly bool) erro
 		return usageErr("%s", sendRunOnly)
 	}
 	if err := cl.Send(sess.ID, rotaclient.SendReq{Text: text, Force: force}); err != nil {
-		return c.sendFailed("%s", sendRefusal(heldCell(sess.Name), err))
+		return c.sendRefused(heldCell(sess.Name), err)
 	}
 	if c.json {
 		return c.emit(map[string]bool{"ok": true})
@@ -489,36 +496,41 @@ func (c *cli) sendHeld(terminals, target, text string, force, runOnly bool) erro
 const noRunOrSession = "no run or session %s; rota list --sessions shows what is running"
 
 // sendUnserved is a send with no daemon to reach the session through. The
-// records are read the way Resolve reads the daemon's listing: a whole id,
-// the start of one, or the name of one that is running. A running one is
-// said to want a daemon; a stopped one, which only an id finds, has ended.
+// store's records are matched as Resolve matches the daemon's listing. A
+// running session is said to want a daemon, and a stopped one, which only
+// an id finds, has ended.
 func (c *cli) sendUnserved(terminals, target string, runOnly bool) error {
-	var running, stopped *holdwire.Record
-	for _, r := range holdwire.Scan(terminals) {
-		if r.State == holdwire.StateBroken {
-			continue
-		}
-		live := r.State == holdwire.StateLive || r.State == holdwire.StateUnreadable
-		named := r.ID == target || len(target) >= 4 && strings.HasPrefix(r.ID, target) ||
-			live && target != "" && (heldName(&r) == target || r.Meta.Name == target)
-		switch {
-		case !named:
-		case live && running == nil:
-			running = &r
-		case !live && stopped == nil:
-			stopped = &r
-		}
-	}
+	sess, err := rotaclient.Match(heldSessions(terminals, nil), target)
 	switch {
-	case running == nil && stopped == nil:
+	case errors.Is(err, rotaclient.ErrNoSession):
 		return c.sendFailed(noRunOrSession, target)
+	case err != nil:
+		return c.sendFailed("%v", err)
 	case runOnly:
 		return usageErr("%s", sendRunOnly)
-	case running != nil:
-		return c.sendFailed("session %s is running, but no rota daemon serves %s to type into it; rota serve start starts one",
-			heldCell(heldName(running)), filepath.Dir(terminals))
+	case sess.Ended != nil:
+		return c.sendRefused(heldCell(sess.Name), &rotaclient.Refusal{Reason: "ended"})
 	}
-	return c.sendFailed("session %s has ended", heldCell(heldName(stopped)))
+	return c.sendFailed("session %s is running, but no rota daemon serves %s to type into it; rota serve start starts one",
+		heldCell(sess.Name), filepath.Dir(terminals))
+}
+
+// sendRefused is a send the session refused, said as sendRefusal says it,
+// exiting 1. With --json the refusal carries the daemon's reason beside the
+// sentence, and for the keyboard who holds it, so a program can tell a
+// session to retry from one to give up on without reading the sentence.
+func (c *cli) sendRefused(name string, err error) error {
+	msg := sendRefusal(name, err)
+	var no *rotaclient.Refusal
+	if !c.json || !errors.As(err, &no) || no.Reason == "" {
+		return c.sendFailed("%s", msg)
+	}
+	doc := map[string]string{"error": msg, "reason": no.Reason}
+	if no.Holder != "" {
+		doc["holder"] = no.Holder
+	}
+	_ = c.emit(doc)
+	return exitCode(1)
 }
 
 // sendRefusal is why a send into the held session called name was not
@@ -537,7 +549,7 @@ func sendRefusal(name string, err error) string {
 			return heldCell(no.Holder) + " holds the keyboard of " + name
 		}
 	case "timeout":
-		return "session " + name + " did not become ready within 30s; nothing was typed"
+		return fmt.Sprintf("session %s did not become ready within %s; nothing was typed", name, holdwire.SendWait)
 	case "ended":
 		return "session " + name + " has ended"
 	}

@@ -1797,8 +1797,7 @@ func (s *Server) liveTerminals() int {
 		all = append(all, ts)
 	}
 	for _, r := range records {
-		if (r.State == holdwire.StateLive || r.State == holdwire.StateUnreadable) &&
-			s.terms[r.ID] == nil && !s.pending[r.ID] {
+		if r.Running() && s.terms[r.ID] == nil && !s.pending[r.ID] {
 			n++
 		}
 	}

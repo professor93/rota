@@ -367,7 +367,7 @@ func (s *Server) describedFrom(r *holdwire.Record) bool {
 // which folder.
 func describeRecord(r *holdwire.Record, labels map[int]string) map[string]any {
 	doc := map[string]any{
-		"id": r.ID, "held": true, "name": recordName(r), "title": "",
+		"id": r.ID, "held": true, "name": r.Name(), "title": "",
 		"holder": nil, "viewers": []any{}, "recording": false,
 		"conversation": "", "conversation_cwd": "", "resumable": false,
 	}
@@ -382,8 +382,8 @@ func describeRecord(r *holdwire.Record, labels map[int]string) map[string]any {
 			doc["account"] = map[string]any{"id": m.Account, "label": labels[m.Account], "provider": m.Provider}
 		}
 	}
-	switch r.State {
-	case holdwire.StateLive, holdwire.StateUnreadable:
+	switch {
+	case r.Running():
 		doc["state"], doc["status"], doc["ended"] = heldLive, "running", false
 		doc["reachable"], doc["pid"] = false, m.HolderPID
 		doc["attachable"] = r.State == holdwire.StateLive
@@ -396,15 +396,11 @@ func describeRecord(r *holdwire.Record, labels map[int]string) map[string]any {
 	default:
 		doc["state"], doc["status"], doc["ended"] = string(r.State), "stopped", true
 		doc["attachable"], doc["reachable"] = false, false
-		exit := -1
-		if m != nil && m.Exit != nil {
-			exit = *m.Exit
-		}
-		doc["exit"] = exit
+		doc["exit"] = r.ExitCode()
 		if !r.Stopped.IsZero() {
 			doc["ended_at"] = r.Stopped.Format(time.RFC3339)
 		}
-		doc["resumable"] = r.State == holdwire.StateInterrupted && m.Conversation != ""
+		doc["resumable"] = r.Resumable()
 	}
 	return doc
 }
@@ -451,7 +447,7 @@ func recordRefusal(r *holdwire.Record) string {
 // pid is still the holder the record names. A stopped one has ended
 // already, and one a DELETE is stopping already is sent nothing more.
 func (s *Server) stopRecord(w http.ResponseWriter, r *http.Request, rec *holdwire.Record) {
-	if rec.State != holdwire.StateLive && rec.State != holdwire.StateUnreadable {
+	if !rec.Running() {
 		fail(w, http.StatusConflict, "terminal "+rec.ID+" has ended")
 		return
 	}

@@ -240,20 +240,26 @@ func (c *Client) Get(id string) (Session, error) {
 	return doc.session(), nil
 }
 
-// Resolve finds the one session a person means by what they typed: its
-// whole id first, running or stopped; then an id that what they typed
-// begins, at least four characters of it; then a live session whose label
-// or name it is. More than one session at either of the last two is an
-// error that names their ids, so the person can choose. So a label that
-// could begin an id — beef, or cafe1 — is read as an id first: a session
-// whose id it begins is the one found, and two such are an error even when
-// a live session has that very label, which is then named by its id. None
-// at all is an error that is ErrNoSession.
+// Resolve finds the one session a person means by what they typed, among
+// every session the daemon holds or lists, by Match's rule.
 func (c *Client) Resolve(nameOrID string) (Session, error) {
 	all, err := c.List()
 	if err != nil {
 		return Session{}, err
 	}
+	return Match(all, nameOrID)
+}
+
+// Match finds the one session among all that a person means by what they
+// typed: its whole id first, running or stopped; then an id that what they
+// typed begins, at least four characters of it; then a live session whose
+// label or name it is. More than one session at either of the last two is
+// an error that names their ids, so the person can choose. So a label that
+// could begin an id — beef, or cafe1 — is read as an id first: a session
+// whose id it begins is the one found, and two such are an error even when
+// a live session has that very label, which is then named by its id. None
+// at all is an error that is ErrNoSession.
+func Match(all []Session, nameOrID string) (Session, error) {
 	for _, s := range all {
 		if s.ID == nameOrID {
 			return s, nil

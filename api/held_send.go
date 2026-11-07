@@ -27,8 +27,8 @@ var (
 	// holder is told heldSendWaitMS, and this is a little longer, so that a
 	// session that never became ready is answered by the holder's own
 	// timeout rather than by this one.
-	heldSendWait   = 35 * time.Second
-	heldSendWaitMS = 30000
+	heldSendWait   = holdwire.SendWait + 5*time.Second
+	heldSendWaitMS = int(holdwire.SendWait / time.Millisecond)
 )
 
 // heldSendLetIn is called once a send has been let in, and holds its
