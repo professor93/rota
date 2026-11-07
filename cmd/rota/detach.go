@@ -2,16 +2,13 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 
 	rotaclient "github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/pty"
-	"github.com/professor93/rota/internal/termenv"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/store"
 )
@@ -29,6 +26,11 @@ const (
 	detachWithShare  = "--share and --detach are two different terminals; choose one"
 	detachWithPrompt = "--detach hands the CLI its terminal, so it takes no prompt or -p: give the CLI's arguments after --"
 )
+
+// ensureDaemon is rotaclient.Ensure, and a variable only so that a test can
+// lose the race for the store to another start, which nothing outside can
+// arrange between Ensure's look and its start.
+var ensureDaemon = rotaclient.Ensure
 
 // detachCols and detachRows are the size a session starts at when standard
 // input is no terminal to measure.
@@ -56,7 +58,7 @@ func (c *cli) detach(id int, rest []string, ask shareAsk, remote remoteAsk) erro
 	if !pty.Supported {
 		return holdwire.ErrPlatform
 	}
-	home, terminals, err := daemonStore()
+	_, terminals, err := daemonStore()
 	if err != nil {
 		return err
 	}
@@ -81,15 +83,21 @@ func (c *cli) detach(id int, rest []string, ask shareAsk, remote remoteAsk) erro
 		off = c.remoteControlOff()
 	}
 
-	cl, started, err := rotaclient.Ensure(terminals, func() error {
-		// serve start's own line is for a person who typed serve start;
-		// this command says it in its own words, on stderr.
-		quiet := *c
-		quiet.out = io.Discard
-		return quiet.startDaemon(true, "")
+	// What a start found is said in this command's own words, on stderr:
+	// a daemon it started, which is on its control socket alone, or the one
+	// another start got to first, which may be serving a port as well.
+	var spawned *daemonStart
+	cl, _, err := ensureDaemon(terminals, func() error {
+		var err error
+		spawned, err = c.spawnDaemon(true, "")
+		return err
 	})
-	if started {
-		fmt.Fprintf(c.err, "rota: started the rota daemon for %s (control socket only; rota serve stop ends it)\n", home)
+	switch {
+	case spawned == nil:
+	case spawned.started != nil:
+		fmt.Fprintf(c.err, "rota: started the rota daemon for %s (control socket only; rota serve stop ends it)\n", spawned.home)
+	default:
+		fmt.Fprintf(c.err, "rota: a rota daemon is already running for %s%s\n", spawned.home, pidOf(spawned.running))
 	}
 	if err != nil {
 		return err
@@ -133,10 +141,11 @@ func (c *cli) detachArgs(rest []string) ([]string, error) {
 		}
 		return false
 	})
-	rest = append(own, rest[end:]...)
+	rest, end = append(own, rest[end:]...), len(own)
+	// -i is rota's only where -- has not handed the rest to the CLI.
 	interactive := func(a string) bool { return a == "-i" || a == "--interactive" }
 	var args []string
-	switch i := slices.IndexFunc(rest, interactive); {
+	switch i := slices.IndexFunc(rest[:end], interactive); {
 	case len(rest) > 0 && rest[0] == "--":
 		args = rest[1:]
 	case i >= 0:
@@ -148,25 +157,6 @@ func (c *cli) detachArgs(rest []string) ([]string, error) {
 		return nil, usageErr("%s", detachWithPrompt)
 	}
 	return args, nil
-}
-
-// absoluteDirs is env with the Claude Code directories it names relatively
-// named absolutely, as serve start names them for its daemon: a holder runs
-// in /, where a relative one would be another directory.
-func absoluteDirs(env []string) ([]string, error) {
-	for _, name := range []string{"CLAUDE_CONFIG_DIR", "ROTA_CLAUDE_HOME"} {
-		for _, e := range env {
-			if dir, ok := strings.CutPrefix(e, name+"="); ok && dir != "" && !filepath.IsAbs(dir) {
-				abs, err := filepath.Abs(dir)
-				if err != nil {
-					return nil, err
-				}
-				env = termenv.Set(env, name, abs)
-				break
-			}
-		}
-	}
-	return env, nil
 }
 
 // detachSize is the size of the terminal standard input is, which is the

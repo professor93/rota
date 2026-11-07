@@ -17,6 +17,7 @@ import (
 
 	"github.com/professor93/rota/api"
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/termenv"
 	"github.com/professor93/rota/store"
 )
 
@@ -155,6 +156,43 @@ func (c *cli) daemonFlags(fs *flag.FlagSet, args []string) (ok bool, err error) 
 		return false, usageErr("rota %s takes no arguments, got %q", fs.Name(), fs.Arg(0))
 	}
 	return true, nil
+}
+
+// daemonStart is which daemon serves the store once a start is over: the
+// one it started, once that one answered as the process the start made, or
+// the one already running, found before anything started or having won the
+// store from the start's own daemon. Exactly one of the two is set.
+type daemonStart struct {
+	home, sock       string
+	started, running *holdwire.Daemon
+}
+
+// pidOf is " (pid N)" for a daemon whose record names it, and nothing for
+// one whose does not.
+func pidOf(d *holdwire.Daemon) string {
+	if d.PID == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (pid %d)", d.PID)
+}
+
+// absoluteDirs is env with the Claude Code directories it names relatively
+// named absolutely: a daemon, and each holder it starts, runs in /, where a
+// relative one would be another directory.
+func absoluteDirs(env []string) ([]string, error) {
+	for _, name := range []string{"CLAUDE_CONFIG_DIR", "ROTA_CLAUDE_HOME"} {
+		for _, e := range env {
+			if dir, ok := strings.CutPrefix(e, name+"="); ok && dir != "" && !filepath.IsAbs(dir) {
+				abs, err := filepath.Abs(dir)
+				if err != nil {
+					return nil, err
+				}
+				env = termenv.Set(env, name, abs)
+				break
+			}
+		}
+	}
+	return env, nil
 }
 
 // daemonStore is the store this command's daemon serves, by its absolute
