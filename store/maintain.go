@@ -81,6 +81,22 @@ func (s *Store) Maintain(ctx context.Context) []error {
 			if err = rota.Adopt(a, home); err != nil || s.heldByDaemon(a) {
 				return
 			}
+			// Before a codex login that is due is refreshed, the home holds
+			// it and the store says so on disk, as a launch would leave them.
+			// A token refreshed after that and saved nowhere but the home is
+			// then read back by the next adoption, whatever came before: the
+			// home of an account signed in and never run since, unstaged or
+			// holding the previous login's file, would not be. A store that
+			// cannot be saved spends no token this sweep.
+			if rota.Flavor(a.Provider) == "codex" && a.Expired() {
+				if _, err = rota.Stage(a, home); err != nil {
+					return
+				}
+				if serr := s.Save(); serr != nil {
+					err = fmt.Errorf("not refreshed, the store could not be saved: %w", serr)
+					return
+				}
+			}
 			if did, err = rota.Refresh(ctx, a); err != nil || !did || a.Dead {
 				return
 			}

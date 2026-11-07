@@ -343,3 +343,74 @@ func (w watchedSaves) Save(b []byte) error {
 	w.saved(b)
 	return w.memBackend.Save(b)
 }
+
+// A sweep that cannot save the store spends no refresh token. Before it
+// refreshes a codex login that is due, maintenance writes that login into the
+// home and saves the store; when the save fails it refreshes nothing until a
+// later sweep. Otherwise the new token could end up only in the home, and a
+// home the store records as holding an older login's file — an account
+// signed in and never run since — is never read back: the new token would
+// be lost, and the next sweep would present the spent one again.
+func TestASweepThatCannotSaveSpendsNoToken(t *testing.T) {
+	for _, c := range []struct {
+		what   string
+		file   string // the refresh token the home holds: "" none, "store" the store's own
+		staged string // what the store records of its write into the home; "keep" what staging recorded
+	}{
+		{"a home rota staged", "store", "keep"},
+		{"a home rota staged, record unknown", "store", ""},
+		{"signed in, never run, empty home", "", "-"},
+		{"signed in, never run, the previous login's file", "r-prev", "-"},
+	} {
+		e := codexRefreshes(t)
+		m := &memBackend{home: t.TempDir()}
+		s, err := NewStore(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := s.add("codex")
+		due := time.Now().Add(time.Minute)
+		a.Extra = map[string]string{"id_token": "i", "account_id": "acct"}
+		a.Token = rota.Token{Access: codexJWT(due), Refresh: "r-old", ExpiresAt: due.UnixMilli()}
+		if c.file != "" {
+			if c.file != "store" {
+				a.Token.Refresh = c.file
+			}
+			if _, err := rota.Stage(a, s.Home(a)); err != nil {
+				t.Fatal(err)
+			}
+			a.Token.Refresh = "r-old"
+		}
+		if c.staged != "keep" {
+			a.Staged = c.staged
+		}
+		if err := s.Save(); err != nil {
+			t.Fatal(err)
+		}
+
+		m.failOn = "save"
+		if errs := s.Maintain(context.Background()); len(errs) == 0 {
+			t.Fatalf("%s: a store that cannot be saved is reported", c.what)
+		}
+		if got := e.grants(); len(got) != 0 {
+			t.Fatalf("%s: a sweep that cannot save spends nothing: presented %v", c.what, got)
+		}
+		s.Close() // the server drops each sweep's store, as a process that ends does
+		m.failOn = ""
+
+		again, err := NewStore(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := again.Find(a.ID)
+		for sweep := range 2 {
+			if errs := again.Maintain(context.Background()); len(errs) != 0 {
+				t.Fatalf("%s, sweep %d after: %v (presented %v)", c.what, sweep, errs, e.grants())
+			}
+		}
+		again.Close()
+		if got := e.grants(); !slices.Equal(got, []string{"r-old"}) || b.Dead || b.Token.Refresh != "r-rota-1" {
+			t.Fatalf("%s: presented %v, dead=%v %q, token %q", c.what, got, b.Dead, b.DeadReason, b.Token.Refresh)
+		}
+	}
+}
