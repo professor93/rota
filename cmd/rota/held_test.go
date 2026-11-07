@@ -247,6 +247,54 @@ func TestListShowsHeldSessionsOnlyWhenThereAreSome(t *testing.T) {
 	}
 }
 
+// A held session's name, or its folder, with an escape, a bell or a newline
+// in it is drawn with each a space wherever rota prints it: in the listing,
+// and in what a send says. --json carries the name and the folder as they
+// are, and its sentence as it is printed.
+func TestAHeldSessionsDirtyNameIsDrawnCleaned(t *testing.T) {
+	shortHome(t)
+	terminals := terminalsOf(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	const name, cwd = "evil\x1b]0;owned\x07\nname", "/src/\x1b[2Jdir"
+	const live, old = "a1b2c3d4e5f60718", "0f0e0d0c0b0a0908"
+	plantRecord(t, terminals, holdwire.Meta{ID: live, Name: name, Kind: holdwire.KindAccount, Account: 1,
+		Provider: "claude", Cwd: cwd, Started: now, HolderPID: os.Getpid()}, true)
+	exit := 0
+	plantRecord(t, terminals, holdwire.Meta{ID: old, Name: name, Kind: holdwire.KindAccount, Account: 1,
+		Provider: "claude", Cwd: cwd, Started: now.Add(-time.Hour), Exit: &exit, Ended: now}, false)
+	const drawn = "evil ]0;owned  name"
+
+	out, errb, code := call(t, "list", "--short", "--sessions")
+	rows := regexp.MustCompile(`(?m)^Held sessions:\n  ● ` + regexp.QuoteMeta(drawn) + ` +#1 a@x +claude +running +/src/ \[2Jdir +a1b2c3d4\n  ○ ` +
+		regexp.QuoteMeta(drawn) + ` +#1 a@x +claude +ended +/src/ \[2Jdir +0f0e0d0c$`)
+	if code != 0 || strings.ContainsAny(out, "\x1b\x07") || !rows.MatchString(out) {
+		t.Fatalf("the listing: exit %d %q\n%q", code, errb, out)
+	}
+	out, errb, code = call(t, "--json", "list", "--short", "--sessions")
+	var got struct {
+		Held []rotaclient.Session `json:"held"`
+	}
+	if code != 0 || json.Unmarshal([]byte(out), &got) != nil || len(got.Held) != 2 ||
+		got.Held[0].Name != name || got.Held[0].Label != name || got.Held[0].Cwd != cwd {
+		t.Fatalf("--json: exit %d %q\n%s", code, errb, out)
+	}
+
+	for target, want := range map[string]string{
+		live: "rota: session " + drawn + " is running, but no rota daemon serves ",
+		old:  "rota: session " + drawn + " has ended\n",
+	} {
+		if out, errb, code := call(t, "send", target, "hi"); code != 1 || out != "" ||
+			strings.ContainsAny(errb, "\x1b\x07") || !strings.HasPrefix(errb, want) {
+			t.Errorf("send %s: exit %d %q %q; want it to begin %q", target, code, out, errb, want)
+		}
+	}
+	out, errb, code = call(t, "--json", "send", old, "hi")
+	var doc map[string]any
+	if code != 1 || json.Unmarshal([]byte(out), &doc) != nil || doc["error"] != "session "+drawn+" has ended" || doc["reason"] != "ended" {
+		t.Errorf("send --json to the stopped one: exit %d %q %q", code, out, errb)
+	}
+}
+
 // With no daemon, a send to a held session says that is why, and a stopped
 // one says it has ended; a name that is nothing's says it is neither a run
 // nor a session. The records are matched as the daemon's listing is: an id
@@ -335,6 +383,7 @@ func TestASendRefusalSaysWhy(t *testing.T) {
 		{&rotaclient.Refusal{Status: 409, Reason: "waiting", Message: daemon},
 			"session api is waiting for a permission or a question, and Enter there may approve a tool; --force sends anyway"},
 		{&rotaclient.Refusal{Status: 409, Reason: "keyboard", Message: daemon, Holder: "alice"}, "alice holds the keyboard of api"},
+		{&rotaclient.Refusal{Status: 409, Reason: "keyboard", Message: daemon, Holder: "al\x1b[2Jice"}, "al [2Jice holds the keyboard of api"},
 		{&rotaclient.Refusal{Status: 409, Reason: "keyboard", Message: daemon}, daemon},
 		{&rotaclient.Refusal{Status: 504, Reason: "timeout", Message: daemon}, "session api did not become ready within 30s; nothing was typed"},
 		{&rotaclient.Refusal{Status: 409, Reason: "ended", Message: daemon}, "session api has ended"},

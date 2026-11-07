@@ -75,6 +75,23 @@ func TestDetachHandsTheCLIToAHolder(t *testing.T) {
 	p.waitOut("got:x")
 }
 
+// A label with an escape in it is the session's name as it was given, and
+// the line --detach says draws each control character in it as a space,
+// as rota draws an account's name; the next thing to type names the
+// session by its id, since the name as drawn would match nothing.
+func TestDetachSaysADirtyLabelCleaned(t *testing.T) {
+	r := newDaemonRig(t)
+	r.start()
+	const label = "x\x1b]0;owned\x07y"
+	id, m, errb := r.detach(r.cmd("run", "1", "--detach", "--label", label))
+	if strings.ContainsAny(errb, "\x1b\x07") || m[3] != "x ]0;owned y" || m[5] != id {
+		t.Fatalf("stderr %q: the session is called %q and sent to as %q; want x ]0;owned y and its id %s", errb, m[3], m[5], id)
+	}
+	if s := r.session(id); s.Name != label || s.Label != label {
+		t.Fatalf("the daemon lists it as %q, %q; the name is kept as it was given", s.Name, s.Label)
+	}
+}
+
 // With no daemon running, --detach starts one on its control socket alone —
 // a port server.toml names is not opened — and says so on stderr before the
 // line about the session.

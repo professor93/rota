@@ -512,7 +512,7 @@ func (c *cli) sendUnserved(terminals, target string, runOnly bool) error {
 		return c.sendRefused(heldCell(sess.Name), &rotaclient.Refusal{Reason: "ended"})
 	}
 	return c.sendFailed("session %s is running, but no rota daemon serves %s to type into it; rota serve start starts one",
-		heldCell(sess.Name), filepath.Dir(terminals))
+		heldCell(sess.Name), oneLine(filepath.Dir(terminals)))
 }
 
 // sendRefused is a send the session refused, said as sendRefusal says it,

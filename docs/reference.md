@@ -970,7 +970,10 @@ rota: started the rota daemon for /home/me/.rota (control socket only; rota serv
 rota: claude/me@example.com via claude — held as session api (0123456789abcdef); rota send api "..." types into it, rota list --sessions lists it
 ```
 
-all on stderr. A daemon another start got to first, between this one's look
+all on stderr. A session whose name has a control character in it is shown
+with a space for each, as an account's name is, and `rota send` is shown
+its id instead, since the name as shown matches nothing. A daemon another
+start got to first, between this one's look
 and its start, is named instead of the first line — *rota: a rota daemon is
 already running for /home/me/.rota (pid 4242)* — since it may serve a port as
 well. `--json` prints the session instead of the line about it:
@@ -1762,10 +1765,13 @@ Held sessions:
   ○ old  #3 me@example.com   codex   interrupted  /home/me/src/old  4567ef01
 ```
 
-`--json` carries them as `"held"`, only when there are any, each as
-`rota run --detach --json` prints one, with `exit` and `ended_at` once it
-has stopped and `resumable` for one interrupted on a conversation that is
-known.
+A tab, a newline, an escape or any other control character in a name, a
+label or a folder is shown as a space, here and in every line `rota run
+--detach` and `rota send` say about a held session. `--json` carries them as
+`"held"`, only when there are any, each as `rota run --detach --json` prints
+one, with `exit` and `ended_at` once it has stopped and `resumable` for one
+interrupted on a conversation that is known; its fields keep a name as it
+was given.
 
 ### Where an account belongs
 
