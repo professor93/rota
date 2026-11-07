@@ -79,6 +79,39 @@ func TestRefreshVerdicts(t *testing.T) {
 	}
 }
 
+// An account holding a refresh token and no access token has nothing to run
+// on, whatever its expiry says, so it is due for a refresh, and the refresh
+// gives it one. An account holding neither, a token with no expiry, and a
+// delegated account are left alone, as ever.
+func TestARefreshTokenWithNoAccessTokenIsDueForARefresh(t *testing.T) {
+	p := &fakeProvider{name: "t-refresh-only", refreshTok: &Token{Access: "new", Refresh: "r2", ExpiresAt: nowMS() + 3_600_000}}
+	Register(fakeRefresher{p})
+	for _, tok := range []Token{{Refresh: "r1"}, {Refresh: "r1", ExpiresAt: nowMS() + 3_600_000}} {
+		a := &Account{ID: 1, Provider: "t-refresh-only", Token: tok}
+		if !a.Expired() {
+			t.Fatalf("a refresh token alone is due for a refresh: %+v", tok)
+		}
+		if changed, err := Refresh(context.Background(), a); !changed || err != nil || a.Token.Access != "new" ||
+			a.Token.Refresh != "r2" || a.Expired() {
+			t.Fatalf("refreshed: changed=%v err=%v %+v", changed, err, a.Token)
+		}
+	}
+	p.refreshTok = nil
+	p.refreshErr = errors.New("asked")
+	for _, a := range []*Account{
+		{ID: 1, Provider: "t-refresh-only"},
+		{ID: 1, Provider: "t-refresh-only", Token: Token{Access: "key"}},
+		{ID: 1, Provider: "t-refresh-only", Delegated: true, Token: Token{Refresh: "r1"}},
+	} {
+		if a.Expired() {
+			t.Fatalf("not due: %+v", a)
+		}
+		if changed, err := Refresh(context.Background(), a); changed || err != nil || a.Dead {
+			t.Fatalf("left alone: changed=%v err=%v dead=%v %+v", changed, err, a.Dead, a)
+		}
+	}
+}
+
 // A refused refresh is the only record of why a lineage ended, so the
 // server's own words are kept on the account until a login revives it.
 func TestADeadAccountKeepsTheRefusalUntilTheNextLogin(t *testing.T) {

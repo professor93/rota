@@ -2925,10 +2925,12 @@ rota refreshes a token within five minutes of expiry, and only while running
 a command — and a claude login kept in its home only while nothing of Claude
 Code's runs there, because then Claude Code refreshes it itself, unless that
 home is stranded or blanked; and a codex login only while no daemon of
-Codex's is alive in its home, for the same reason. A refresh is never retried
-within one look: if the reply was lost, the retry would reuse a rotated token
-and kill the lineage. Treat `re-auth needed` as normal rather than as a
-fault. The refusal that ended the lineage is kept: `rota
+Codex's is alive in its home, for the same reason. An account rota holds a
+refresh token for and no access token counts as expired, whatever its expiry
+says, and is refreshed by the same rules before anything uses it. A refresh is
+never retried within one look: if the reply was lost, the retry would reuse a
+rotated token and kill the lineage. Treat `re-auth needed` as normal rather
+than as a fault. The refusal that ended the lineage is kept: `rota
 list` shows it in parentheses after `re-auth needed` — `re-auth needed
 (invalid_grant: refresh token reused)` — and JSON carries it as `deadReason`.
 

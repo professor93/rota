@@ -197,9 +197,17 @@ var ExpiryBuffer = 5 * time.Minute
 
 // Expired reports whether the access token is past or within five minutes
 // of its expiry. A token with no expiry never expires.
+//
+// An account holding a refresh token and no access token is expired whatever
+// its expiry says: it has nothing to run on, and the refresh is what gives it
+// something. Without this its expiry, never set, would read as "never", and
+// no refresh would ever come.
 func (a *Account) Expired() bool {
 	if a.Delegated {
 		return false // the CLI owns the credential and its expiry
+	}
+	if a.Token.Access == "" && a.Token.Refresh != "" {
+		return true
 	}
 	return a.Token.ExpiresAt != 0 && nowMS()+ExpiryBuffer.Milliseconds() >= a.Token.ExpiresAt
 }
