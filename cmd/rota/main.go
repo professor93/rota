@@ -756,7 +756,7 @@ func (c *cli) sayLongNotes(shown []*rota.Account, width int) {
 		}
 		// Here too, because --short has no STATUS to say it in.
 		if note := wire.CreditNote(a); note != "" {
-			say(c.out, width, fmt.Sprintf("\n%s: %s\n", a, note))
+			say(c.out, width, fmt.Sprintf("\n%s: %s\n", nameOf(a), note))
 		}
 	}
 }

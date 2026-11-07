@@ -499,6 +499,10 @@ func TestALineOfRotasOwnSaysWhatItCarriesAsOneCleanLine(t *testing.T) {
 				time.Now().UnixMilli()))
 			return call(t, "list")
 		}, []string{"`rota run` without an id uses claude/" + cleanLabel + ", and moves on", "claude/" + cleanLabel + ": extra usage on"}},
+		{"the credit note under rota list --short", func(t *testing.T) (string, string, int) {
+			store(t, fmt.Sprintf(`,"credential":"apikey","noCreditUntil":%d`, time.Now().Add(time.Hour).UnixMilli()))
+			return call(t, "list", "--short")
+		}, []string{"claude/" + cleanLabel + ": a run on its API key was refused for want of credit"}},
 		{"a name under --sessions", func(t *testing.T) (string, string, int) {
 			store(t, "")
 			claude := t.TempDir()
