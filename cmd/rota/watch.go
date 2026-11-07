@@ -40,7 +40,7 @@ func (c *cli) watchLogin(s *store.Store, a *rota.Account) {
 		return
 	}
 	if err := startWatcher(a.ID); err != nil {
-		warn(c.err, "could not start the watcher that keeps %s's login alive while it runs: %v", a, err)
+		warn(c.err, "could not start the watcher that keeps %s's login alive while it runs: %v", nameOf(a), err)
 	}
 }
 
