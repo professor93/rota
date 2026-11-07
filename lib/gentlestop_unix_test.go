@@ -26,24 +26,6 @@ func graced(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { killGrace = old })
 }
 
-// readyPID waits for a fake to say it is up and returns its pid.
-func readyPID(t *testing.T, path string) int {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
-			pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			return pid
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("%s never came up", path)
-	return 0
-}
-
 // gone waits a moment for a process to have died. A killed orphan is reaped by
 // whoever adopted it, a little later than it dies, and where nothing reaps, as
 // under a test binary that is a container's first process, it stays a zombie.
@@ -91,7 +73,7 @@ func TestACancelledRunLetsItsCLIStopByItself(t *testing.T) {
 		res, err := fakeRun(ctx, bin)
 		done <- outcome{res, err}
 	}()
-	readyPID(t, ready)
+	fakecli.WaitReady(t, ready)
 	start := time.Now()
 	cancel()
 	o := <-done
@@ -135,7 +117,7 @@ func TestACancelledRunKillsACLIThatIgnoresTheAsking(t *testing.T) {
 		_, err := fakeRun(ctx, bin)
 		done <- err
 	}()
-	pid := readyPID(t, ready)
+	pid := fakecli.WaitReady(t, ready)
 	start := time.Now()
 	cancel()
 	select {
@@ -172,9 +154,9 @@ func TestAStopReachesTheHelpersInTheGroup(t *testing.T) {
 		_, err := fakeRun(ctx, bin)
 		done <- err
 	}()
-	readyPID(t, ready)
-	helper := readyPID(t, deafReady)
-	readyPID(t, politeReady)
+	fakecli.WaitReady(t, ready)
+	helper := fakecli.WaitReady(t, deafReady)
+	fakecli.WaitReady(t, politeReady)
 	cancel()
 	select {
 	case <-done:
@@ -209,8 +191,8 @@ func TestAStopEndsAsSoonAsTheGroupHasGone(t *testing.T) {
 		_, err := fakeRun(ctx, bin)
 		done <- err
 	}()
-	readyPID(t, ready)
-	pid := readyPID(t, helperReady)
+	fakecli.WaitReady(t, ready)
+	pid := fakecli.WaitReady(t, helperReady)
 	start := time.Now()
 	cancel()
 	<-done
@@ -261,7 +243,7 @@ func TestAStopAsksOnceAndCannotHoldUpWait(t *testing.T) {
 	if err := c.Start(); err != nil {
 		t.Fatal(err)
 	}
-	readyPID(t, ready)
+	fakecli.WaitReady(t, ready)
 	halt.stop()
 	armed := halt.kill
 	halt.stop()
@@ -307,7 +289,7 @@ func TestARunThatHitsABoundEndsEvenIfItsCLIIgnoresTheAsking(t *testing.T) {
 			Spec{Prompt: "p", flavorOverride: "claude"}, &Limits{MaxBufferedOutput: 1024}, &out)
 		done <- err
 	}()
-	pid := readyPID(t, ready)
+	pid := fakecli.WaitReady(t, ready)
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):

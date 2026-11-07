@@ -7,9 +7,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/professor93/rota/internal/fakecli"
 )
@@ -30,8 +30,8 @@ type stopCase struct {
 	spec      Spec
 	lim       *Limits
 	events    io.Writer
-	cancel    time.Duration // 0: never cancelled
-	err       error         // nil: none
+	cancel    bool  // cancelled once its CLI says it is up
+	err       error // nil: none
 	exit      int
 	isError   bool
 	truncated bool
@@ -40,7 +40,7 @@ type stopCase struct {
 func stopCases() []stopCase {
 	long := strings.Repeat("x", 4096)
 	return []stopCase{
-		{what: "cancelled", fake: fakecli.Spec{Sleep: "30s"}, cancel: 300 * time.Millisecond,
+		{what: "cancelled", fake: fakecli.Spec{Sleep: "30s"}, cancel: true,
 			err: context.Canceled, exit: -1},
 		{what: "timed out", fake: fakecli.Spec{Sleep: "30s"}, spec: Spec{TimeoutSeconds: 1},
 			err: context.DeadlineExceeded, exit: -1},
@@ -72,12 +72,14 @@ func checkStopCase(t *testing.T, res *Result, err error, c stopCase) {
 
 func runStopCase(t *testing.T, dir string, i int, c stopCase) (*Result, error) {
 	t.Helper()
-	bin := fakecli.Install(t, dir, "stop-case-"+string(rune('a'+i)), c.fake)
+	name := "stop-case-" + string(rune('a'+i))
+	ready := filepath.Join(dir, name+".ready")
+	if c.cancel {
+		c.fake.Ready = ready
+	}
+	bin := fakecli.Install(t, dir, name, c.fake)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	if c.cancel > 0 {
-		time.AfterFunc(c.cancel, cancel)
-	}
 	a := &Account{ID: 1, Provider: "claude"}
 	a.Token.Access = "tok"
 	spec := c.spec
@@ -86,7 +88,23 @@ func runStopCase(t *testing.T, dir string, i int, c stopCase) (*Result, error) {
 	if events == nil {
 		events = &bytes.Buffer{}
 	}
-	return Run(ctx, a, "", &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}}, spec, c.lim, events)
+	type outcome struct {
+		res *Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := Run(ctx, a, "", &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}}, spec, c.lim, events)
+		done <- outcome{res, err}
+	}()
+	if c.cancel {
+		// The case is a running CLI being stopped. Stopped any sooner, it
+		// can die of the signal before its own handler for it is in.
+		fakecli.WaitReady(t, ready)
+		cancel()
+	}
+	o := <-done
+	return o.res, o.err
 }
 
 // Every way a run ends before its CLI does gives what 1.3.0 gave, for a CLI that
@@ -116,7 +134,7 @@ func TestARunStoppedForALimitGivesWhatItAlwaysGaveWhateverItsCLIExitsWith(t *tes
 				continue // it ends by itself, and is pinned above
 			}
 			c.fake.Term, c.fake.Exit = "exit", exit
-			if c.cancel > 0 || c.spec.TimeoutSeconds > 0 {
+			if c.cancel || c.spec.TimeoutSeconds > 0 {
 				c.exit, c.isError = exit, false
 			}
 			t.Run(c.what, func(t *testing.T) {

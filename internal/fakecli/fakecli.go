@@ -123,7 +123,8 @@ func Install(t testing.TB, dir, name string, spec Spec) string {
 
 // Link makes path another name for this test binary: a hard link where the
 // filesystem allows, a copy otherwise. A symlink would need a privilege on
-// Windows that a test runner does not have.
+// Windows that a test runner does not have. On macOS the fake is then run
+// once, doing nothing, before Link returns: see warm.
 func Link(path string) error {
 	self, err := os.Executable()
 	if err != nil {
@@ -133,9 +134,15 @@ func Link(path string) error {
 		return err
 	}
 	_ = os.Remove(path)
-	if err := os.Link(self, path); err == nil {
-		return nil
+	if err := os.Link(self, path); err != nil {
+		if err := copyTo(self, path); err != nil {
+			return err
+		}
 	}
+	return warm(path)
+}
+
+func copyTo(self, path string) error {
 	src, err := os.Open(self)
 	if err != nil {
 		return err
@@ -152,12 +159,41 @@ func Link(path string) error {
 	return dst.Close()
 }
 
+// warmArg is the one argument a fake answers by exiting at once, whatever
+// it was installed to do.
+const warmArg = "-fakecli.warm"
+
+// WaitReady waits for a fake installed with Spec.Ready to say it is up, and
+// returns its pid. A test that stops a running fake waits for this first: a
+// signal that reaches a fake sooner can end it before it has run a line of
+// its own, a handler for that very signal included.
+func WaitReady(t testing.TB, path string) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if raw, err := os.ReadFile(path); err == nil && len(raw) > 0 {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return pid
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the fake cli never said it was up at %s", path)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func specPath(exe string) string { return exe + ".spec.json" }
 
 // Maybe plays the fake when this process is one — a spec sits beside the
 // executable — and never returns in that case. TestMain calls it first;
 // a real test binary has no spec and carries on.
 func Maybe() {
+	if len(os.Args) == 2 && os.Args[1] == warmArg {
+		os.Exit(0)
+	}
 	exe, err := os.Executable()
 	if err != nil {
 		return
@@ -199,7 +235,9 @@ func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) in
 		}
 	}
 	if spec.Ready != "" {
-		_ = os.WriteFile(spec.Ready, []byte(strconv.Itoa(os.Getpid())), 0o600)
+		// Written whole and then named, so WaitReady never reads half a pid.
+		_ = os.WriteFile(spec.Ready+".tmp", []byte(strconv.Itoa(os.Getpid())), 0o600)
+		_ = os.Rename(spec.Ready+".tmp", spec.Ready)
 	}
 	if spec.Tty {
 		return atty(spec, stdin, stdout)
