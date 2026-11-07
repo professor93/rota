@@ -26,16 +26,19 @@ const (
 // unitRun runs a supervisor command (systemctl, launchctl). Tests replace it.
 var unitRun = runSupervisor
 
-// runSupervisor runs one supervisor command, and when it fails says what
-// the supervisor said, not only its exit status.
+// runSupervisor runs one supervisor command, and when it fails names the
+// command and says what the supervisor said, not only its exit status: of
+// several that failed, each is told apart.
 func runSupervisor(name string, args ...string) error {
 	out, err := exec.Command(name, args...).CombinedOutput()
-	if err != nil {
-		if m := strings.TrimSpace(string(out)); m != "" {
-			return fmt.Errorf("%s: %w: %s", name, err, m)
-		}
+	if err == nil {
+		return nil
 	}
-	return err
+	cmd := strings.Join(append([]string{name}, args...), " ")
+	if m := strings.TrimSpace(string(out)); m != "" {
+		return fmt.Errorf("%s: %w: %s", cmd, err, m)
+	}
+	return fmt.Errorf("%s: %w", cmd, err)
 }
 
 // serveInstall is `rota serve install`: this store's daemon as a systemd
@@ -77,13 +80,6 @@ func unitEnv() []string {
 	return env
 }
 
-// supervise runs one supervisor command written as a line, so its option
-// words are not mistaken for flags of rota's own.
-func supervise(line string) error {
-	f := strings.Fields(line)
-	return unitRun(f[0], f[1:]...)
-}
-
 // unitName gives the systemd unit and the launchd label for a store: the
 // plain names for ~/.rota, and for any other store the same names with the
 // first 8 hex of sha256(absolute store) added, so two stores never collide.
@@ -117,18 +113,21 @@ func unitEscape(s string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "%", "%%", "\n", `\n`).Replace(s)
 }
 
-func unitWord(s string) string {
-	if s != "" && !strings.ContainsAny(s, " \t\n\"'\\%$;") {
+// unitProgram is the program ExecStart runs, quoted where it needs to be.
+// Its $ is left single: systemd expands variables in the arguments only,
+// and execs the program's path as written, so a $$ there would be two.
+func unitProgram(s string) string {
+	if s != "" && !strings.ContainsAny(s, " \t\n\"'\\%;") {
 		return s
 	}
-	return `"` + strings.ReplaceAll(unitEscape(s), "$", "$$") + `"`
+	return `"` + unitEscape(s) + `"`
 }
 
 func systemdUnit(exe, store string, env []string) string {
 	var b strings.Builder
 	b.WriteString("[Unit]\nDescription=rota daemon for " + strings.NewReplacer("%", "%%", "\n", " ").Replace(store) + "\n\n")
 	b.WriteString("[Service]\nType=simple\n")
-	b.WriteString("ExecStart=" + unitWord(exe) + " serve start --foreground\n")
+	b.WriteString("ExecStart=" + unitProgram(exe) + " serve start --foreground\n")
 	b.WriteString(`Environment="PATH=` + unitEscape(envValue(env, "PATH")) + "\"\n")
 	b.WriteString(`Environment="ROTA_HOME=` + unitEscape(store) + "\"\n")
 	if d := envValue(env, "CLAUDE_CONFIG_DIR"); d != "" {
@@ -156,7 +155,7 @@ func launchdPlist(label, exe, store string, env []string) string {
 `)
 	str("Label", label)
 	b.WriteString("\t<key>ProgramArguments</key>\n\t<array>\n")
-	for _, a := range append([]string{exe}, strings.Fields("serve start --foreground")...) {
+	for _, a := range []string{exe, "serve", "start", "--foreground"} {
 		b.WriteString("\t\t<string>" + xmlEsc(a) + "</string>\n")
 	}
 	b.WriteString("\t</array>\n\t<key>EnvironmentVariables</key>\n\t<dict>\n")
@@ -169,8 +168,10 @@ func launchdPlist(label, exe, store string, env []string) string {
 	b.WriteString("\t</dict>\n")
 	b.WriteString("\t<key>RunAtLoad</key>\n\t<true/>\n")
 	b.WriteString("\t<key>KeepAlive</key>\n\t<dict>\n\t\t<key>SuccessfulExit</key>\n\t\t<false/>\n\t</dict>\n")
+	// No ProcessType: launchd's default, Standard. Background would have
+	// the kernel throttle the daemon's CPU and I/O, and every held CLI's
+	// after it, which inherits it, unlike under a daemon started by hand.
 	b.WriteString("\t<key>AbandonProcessGroup</key>\n\t<true/>\n")
-	str("ProcessType", "Background")
 	str("StandardOutPath", "/dev/null")
 	str("StandardErrorPath", "/dev/null")
 	b.WriteString("</dict>\n</plist>\n")

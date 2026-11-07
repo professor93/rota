@@ -140,8 +140,8 @@ func TestRemovingAUnitDeletesItWhateverTheSupervisorSays(t *testing.T) {
 	}
 }
 
-// When a supervisor command fails, what it said is in the error, not only
-// its exit status.
+// When a supervisor command fails, the error names it and says what it
+// said, not only its exit status.
 func TestASupervisorsComplaintIsKept(t *testing.T) {
 	dir := t.TempDir()
 	if err := runSupervisor("ls", dir); err != nil {
@@ -149,7 +149,7 @@ func TestASupervisorsComplaintIsKept(t *testing.T) {
 	}
 	absent := filepath.Join(dir, "absent")
 	err := runSupervisor("ls", absent)
-	if err == nil || !strings.HasPrefix(err.Error(), "ls: exit status ") || !strings.Contains(err.Error(), absent) {
+	if err == nil || !strings.HasPrefix(err.Error(), "ls "+absent+": exit status ") || !strings.Contains(err.Error(), "No such file or directory") {
 		t.Fatalf("a command that fails: %v", err)
 	}
 }
@@ -334,24 +334,7 @@ func TestReinstallStopsTheDaemonFirst(t *testing.T) {
 	if _, errb, code := call(t, "serve", "install"); code != 0 {
 		t.Fatalf("install: exit %d %q", code, errb)
 	}
-	release, err := holdwire.ClaimDaemon(r.terminals, "test")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-	terms := make(chan os.Signal, 1)
-	signal.Notify(terms, syscall.SIGTERM)
-	defer signal.Stop(terms)
-	termed, done := make(chan struct{}), make(chan struct{})
-	defer close(done)
-	go func() {
-		select {
-		case <-terms:
-			close(termed)
-			release()
-		case <-done:
-		}
-	}()
+	termed := daemonByTheTest(t, r.terminals)
 	asked, heldWhenAsked := 0, false
 	calls := recordUnits(t, func(string) error {
 		if asked++; asked == 1 {
@@ -376,13 +359,64 @@ func TestReinstallStopsTheDaemonFirst(t *testing.T) {
 	}
 }
 
-// rota serve uninstall, like serve stop, is refused inside a held session:
-// it would end the daemon, and take away what starts it again, from inside
-// one by mistake. Once the session is over, the same process may. The
+// daemonByTheTest has the test hold the store's daemon claim, as a daemon
+// would, and take the SIGTERM a stop sends as a daemon does: by letting go.
+// The channel is closed once it has been sent one.
+func daemonByTheTest(t *testing.T, terminals string) <-chan struct{} {
+	t.Helper()
+	release, err := holdwire.ClaimDaemon(terminals, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	terms := make(chan os.Signal, 1)
+	signal.Notify(terms, syscall.SIGTERM)
+	termed, done := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() { close(done); signal.Stop(terms); release() })
+	go func() {
+		select {
+		case <-terms:
+			close(termed)
+			release()
+		case <-done:
+		}
+	}()
+	return termed
+}
+
+// A reinstall that stopped the daemon running and then could not have the
+// unit restarted says so: the daemon is stopped, its sessions keep running,
+// and serve start brings one back.
+func TestAFailedReinstallSaysTheDaemonStopped(t *testing.T) {
+	r := newUnitRig(t)
+	if _, errb, code := call(t, "serve", "install"); code != 0 {
+		t.Fatalf("install: exit %d %q", code, errb)
+	}
+	termed := daemonByTheTest(t, r.terminals)
+	recordUnits(t, func(string) error { return errors.New("Failed to connect to bus") })
+	_, errb, code := call(t, "serve", "install")
+	for _, want := range []string{
+		r.want.path + " is written, but Failed to connect to bus; rota serve uninstall takes it away",
+		"The rota daemon that was running is stopped, and its sessions keep running; rota serve start starts one again",
+	} {
+		if code != 1 || !strings.Contains(errb, want) {
+			t.Fatalf("a reinstall that fails: exit %d %q, want %q", code, errb, want)
+		}
+	}
+	select {
+	case <-termed:
+	default:
+		t.Fatal("the daemon running was not sent SIGTERM")
+	}
+}
+
+// rota serve install and uninstall, like serve stop, are refused inside a
+// held session: either may end the daemon, and uninstall take away what
+// starts it again, from inside one by mistake.
+// Once the session is over, the same process may. The
 // probe is this binary as a rota in a session of its own, which a held
 // session's record names as its holder: sessionProbe, which serve stop's
 // test drives too.
-func TestUninstallIsRefusedInsideAHeldSession(t *testing.T) {
+func TestInstallAndUninstallAreRefusedInsideAHeldSession(t *testing.T) {
 	r := newUnitRig(t)
 	if _, errb, code := call(t, "serve", "install"); code != 0 {
 		t.Fatalf("install: exit %d %q", code, errb)
@@ -406,9 +440,11 @@ func TestUninstallIsRefusedInsideAHeldSession(t *testing.T) {
 	}
 	t.Cleanup(release)
 
-	code, said := ask("serve uninstall")
-	if want := "rota serve uninstall is refused inside held session " + id + "; run it from outside the session"; code != 1 || !strings.Contains(said, want) {
-		t.Fatalf("uninstall inside a held session: exit %d %q, want %q", code, said, want)
+	for _, verb := range []string{"install", "uninstall"} {
+		code, said := ask("serve " + verb)
+		if want := "rota serve " + verb + " is refused inside held session " + id + "; run it from outside the session"; code != 1 || !strings.Contains(said, want) {
+			t.Fatalf("%s inside a held session: exit %d %q, want %q", verb, code, said, want)
+		}
 	}
 	if _, err := os.Stat(record); !os.IsNotExist(err) {
 		t.Fatalf("the supervisor was asked from inside a held session: %v", err)
