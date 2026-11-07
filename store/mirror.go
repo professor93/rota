@@ -378,14 +378,15 @@ func sharedWithClaude(name string) bool {
 //     organisation's remote settings, one record for each organisation,
 //     naming the account: two accounts of one organisation would keep
 //     replacing each other's, and each be asked again;
-//   - `mcp-discovery-cache` is what remote MCP servers offered, filed under
-//     names made from the signed-in account;
-//   - `hfi-auth.json` and `.session_ingress_token` are credentials: an older
-//     auth file Claude Code still clears away, and the token a self-hosted
-//     runner gives one session, written with its epoch after the name.
+//   - `.session_ingress_token` is the token a self-hosted runner gives one
+//     session, written with its epoch after the name.
+//
+// What Claude Code files under the account itself and seals with the key in
+// each home's own credential store, such as `mcp-discovery-cache`, is not
+// here: no home can read another's, so it stays shared like the rest.
 var perLogin = []string{
 	"policy-limits.json", "remote-settings.json", "remote-settings-helper-consent",
-	"remote-settings-consent.json", "mcp-discovery-cache", "hfi-auth.json", ".session_ingress_token",
+	"remote-settings-consent.json", ".session_ingress_token",
 }
 
 // perLoginFile reports whether name is one of perLogin, or one of them

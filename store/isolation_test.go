@@ -19,7 +19,7 @@ func personWorld(t *testing.T) string {
 	t.Helper()
 	src := t.TempDir()
 	for _, dir := range []string{"projects", "skills", "plugins", "daemon", "sessions", "jobs", "teams",
-		"backups", "telemetry", "statsig", "bridge-spawn", "todos", "file-history"} {
+		"backups", "telemetry", "statsig", "bridge-spawn", "todos", "file-history", "mcp-discovery-cache"} {
 		if err := os.Mkdir(filepath.Join(src, dir), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -27,7 +27,7 @@ func personWorld(t *testing.T) string {
 	for _, name := range []string{"settings.json", "CLAUDE.md", "history.jsonl", "daemon.lock", "daemon.log",
 		".credentials.json", "policy-limits.json", "policy-limits.json.signature.json", "remote-settings.json",
 		"remote-settings.json.synced-at", "remote-settings-consent.json", "remote-settings-helper-consent",
-		"mcp-needs-auth-cache.json", "mcp-discovery-cache", "hfi-auth.json", ".session_ingress_token.e1", "ide.lock"} {
+		"mcp-needs-auth-cache.json", "hfi-auth.json", ".session_ingress_token.e1", "ide.lock"} {
 		writeFile(t, filepath.Join(src, name), name)
 	}
 	writeFile(t, filepath.Join(src, ".claude.json"), `{
@@ -46,8 +46,7 @@ func personWorld(t *testing.T) string {
 var neverShared = []string{"sessions", "telemetry", "daemon", "daemon.lock", "daemon.log",
 	".credentials.json", "policy-limits.json", "policy-limits.json.signature.json", "remote-settings.json",
 	"remote-settings.json.synced-at", "remote-settings-consent.json", "remote-settings-helper-consent",
-	"statsig", "mcp-needs-auth-cache.json", "mcp-discovery-cache", "hfi-auth.json", ".session_ingress_token.e1",
-	"bridge-spawn", "ide.lock"}
+	"statsig", "mcp-needs-auth-cache.json", ".session_ingress_token.e1", "bridge-spawn", "ide.lock"}
 
 // sameThing reports whether two paths lead to the same file or directory.
 func sameThing(a, b string) bool {
@@ -328,14 +327,14 @@ func TestALinkForANameNoLongerSharedWaitsForAQuietHome(t *testing.T) {
 
 // loginState is every name Claude Code keeps one login's own state under, as
 // seen in its directory: the organisation's policy and remote settings with
-// their signatures, stamps and the consent recorded for them, the MCP
-// discovery cache named for the account, an auth file, and the session
-// token a runner hands a session, with the epoch it writes after the name.
+// their signatures, stamps and the consent recorded for them, and the
+// session token a runner hands a session, with the epoch it writes after
+// the name.
 var loginState = []string{
 	"policy-limits.json", "policy-limits.json.signature.json", "policy-limits.json.stamp.json",
 	"remote-settings.json", "remote-settings.json.synced-at", "remote-settings.json.signature.json",
 	"remote-settings-consent.json", "remote-settings-consent.json.tmp.0a1b2c3d", "remote-settings-helper-consent",
-	"mcp-discovery-cache", "hfi-auth.json", ".session_ingress_token", ".session_ingress_token.e3",
+	".session_ingress_token", ".session_ingress_token.e3",
 }
 
 // nearLoginState are names that only look like those, and are shared like any
@@ -343,8 +342,14 @@ var loginState = []string{
 var nearLoginState = []string{
 	"policy-limits.jsonx", "policy-limits-other.json", "remote-settings-other.json", "remote-settings.jsonl",
 	"remote-settings-consent", "remote-settings-consent.jsonl", "remote-settings-helper-consents",
-	"mcp-discovery-cache-old", "mcp-discovery", "hfi-auth.jsonl", "hfi-auth", ".session_ingress_tokens",
+	".session_ingress_tokens",
 }
+
+// sharedKeyed are entries Claude Code writes for a login that stay shared:
+// the MCP discovery cache, which it files under the account and seals with
+// the key in each home's own credential store, and an auth file nothing
+// reads or writes any more. A link to either is the person's, and stays.
+var sharedKeyed = []string{"mcp-discovery-cache", "hfi-auth.json"}
 
 // Which names are one login's own is decided by exact prefix: the name
 // itself, or the name followed by a dot and anything.
@@ -354,7 +359,7 @@ func TestPerLoginStateIsDecidedByExactPrefix(t *testing.T) {
 			t.Fatalf("%s is shared", name)
 		}
 	}
-	for _, name := range append(slices.Clone(nearLoginState), "settings.json", "skills", "remote-settings", "policy-limits", "cache", "state") {
+	for _, name := range append(append(slices.Clone(nearLoginState), sharedKeyed...), "settings.json", "skills", "remote-settings", "policy-limits", "cache", "state") {
 		if !sharedWithClaude(name) {
 			t.Fatalf("%s is not shared", name)
 		}
@@ -380,7 +385,7 @@ func TestAFreshMirrorLinksNoPerLoginState(t *testing.T) {
 			t.Fatalf("the person's %s is untouched", name)
 		}
 	}
-	for _, name := range append(slices.Clone(nearLoginState), "settings.json", "CLAUDE.md", "skills", "projects") {
+	for _, name := range append(append(slices.Clone(nearLoginState), sharedKeyed...), "settings.json", "CLAUDE.md", "skills", "projects") {
 		linksTo(t, filepath.Join(dst, name), filepath.Join(src, name))
 	}
 }
@@ -388,7 +393,8 @@ func TestAFreshMirrorLinksNoPerLoginState(t *testing.T) {
 // A home an older rota mirrored holds links for them. They go on the first
 // refresh that finds the home quiet, as every link for a name no longer
 // shared does, while a real file of that name Claude Code wrote in the home
-// stays exactly as it is, and the person's own files are never touched.
+// stays exactly as it is, and the person's own files are never touched. A
+// link for what stays shared, the MCP discovery cache among it, is kept.
 func TestAnExistingHomeLosesItsLinksToPerLoginState(t *testing.T) {
 	src := personWorld(t)
 	for _, name := range append(slices.Clone(loginState), nearLoginState...) {
@@ -402,7 +408,7 @@ func TestAnExistingHomeLosesItsLinksToPerLoginState(t *testing.T) {
 		t.Fatal(err)
 	}
 	linked, real := loginState[1:], loginState[0]
-	for _, name := range linked {
+	for _, name := range append(slices.Clone(linked), sharedKeyed...) {
 		if err := os.Symlink(filepath.Join(src, name), filepath.Join(dst, name)); err != nil {
 			t.Fatal(err)
 		}
@@ -436,7 +442,7 @@ func TestAnExistingHomeLosesItsLinksToPerLoginState(t *testing.T) {
 			t.Fatalf("the person's %s is untouched: %v %v", name, fi, err)
 		}
 	}
-	for _, name := range nearLoginState {
+	for _, name := range append(slices.Clone(nearLoginState), sharedKeyed...) {
 		linksTo(t, filepath.Join(dst, name), filepath.Join(src, name))
 	}
 	for _, msg := range said {
