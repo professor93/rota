@@ -1,0 +1,311 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	rota "github.com/professor93/rota/lib"
+)
+
+// usageFake stands in for claude's usage endpoint, answering each request
+// with the next answer it was given and counting them.
+type usageFake struct {
+	mu      sync.Mutex
+	answers []usageAnswer
+	asked   int
+}
+
+type usageAnswer struct {
+	status     int
+	retryAfter string
+	body       string
+}
+
+func fakeUsage(t *testing.T) *usageFake {
+	t.Helper()
+	f := &usageFake{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.asked++
+		a := usageAnswer{status: 500}
+		if len(f.answers) > 0 {
+			a, f.answers = f.answers[0], f.answers[1:]
+		}
+		f.mu.Unlock()
+		if a.retryAfter != "" {
+			w.Header().Set("Retry-After", a.retryAfter)
+		}
+		w.WriteHeader(a.status)
+		fmt.Fprint(w, a.body)
+	}))
+	t.Cleanup(srv.Close)
+	old := rota.ClaudeEndpoints.Usage
+	rota.ClaudeEndpoints.Usage = srv.URL
+	t.Cleanup(func() { rota.ClaudeEndpoints.Usage = old })
+	return f
+}
+
+func (f *usageFake) next(status int, retryAfter, body string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.answers = append(f.answers, usageAnswer{status, retryAfter, body})
+}
+
+func (f *usageFake) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.asked
+}
+
+// percent is a usage reply whose five-hour window stands at p.
+func percent(p int) string { return fmt.Sprintf(`{"five_hour":{"utilization":%d}}`, p) }
+
+// heldClock holds rota's clock at a moment the test moves by hand.
+type heldClock struct{ now time.Time }
+
+func holdClock(t *testing.T) *heldClock {
+	t.Helper()
+	c := &heldClock{now: time.Now().Truncate(time.Second)}
+	old := rota.Now
+	rota.Now = func() time.Time { return c.now }
+	t.Cleanup(func() { rota.Now = old })
+	return c
+}
+
+func (c *heldClock) pass(d time.Duration) { c.now = c.now.Add(d) }
+
+// tokenClaude is a claude account on a token rota holds, in a directory the
+// person chose, so reading its usage is one request and nothing else.
+func tokenClaude(t *testing.T, s *Store) *rota.Account {
+	t.Helper()
+	a := s.add("claude")
+	a.Email = "w@x"
+	a.Token = rota.Token{Access: "A-w", Refresh: "R-w", ExpiresAt: rota.Now().Add(8 * time.Hour).UnixMilli()}
+	a.ConfigDir = t.TempDir()
+	return a
+}
+
+// The usage endpoint's 429 with a Retry-After in seconds is kept to: nothing
+// asks it again before then — not a forced reading, not another store opened
+// on the same directory, not a server's sweep — and every reading that wanted
+// asking says why it was not, with the reading it has. The refusal kills
+// nothing. Once the wait is over the endpoint is asked again, and its answer
+// ends the wait.
+func TestTheUsageEndpointIsLeftAloneForAsLongAsItSays(t *testing.T) {
+	clock := holdClock(t)
+	u := fakeUsage(t)
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a := tokenClaude(t, s)
+	a.Quota = &rota.Quota{Windows: []rota.Window{{Name: "5h", Percent: 30, Primary: true}}}
+	a.QuotaAt = clock.now.Add(-20 * time.Minute).UnixMilli()
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	u.next(429, "120", `{"error":{"type":"rate_limit_error"}}`)
+	errs := s.Refresh(context.Background(), true, a)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "asked rota to wait") || !strings.Contains(errs[0].Error(), "429") {
+		t.Fatalf("one line, saying the provider asked to wait: %v", errs)
+	}
+	var he *rota.HTTPError
+	if !errors.As(errs[0], &he) || he.Status != 429 {
+		t.Fatalf("the refusal itself is still there to classify: %v", errs[0])
+	}
+	want := rota.QuotaWait{Until: clock.now.Add(2 * time.Minute).UnixMilli(), Status: 429, Count: 1}
+	if a.QuotaWait != want {
+		t.Fatalf("wait %+v, want %+v", a.QuotaWait, want)
+	}
+	if a.Dead || a.Status() != rota.StatusOK || a.Quota.Windows[0].Percent != 30 {
+		t.Fatalf("the account lives on with its last reading: dead=%v %s %+v", a.Dead, a.Status(), a.Quota)
+	}
+	s.Close()
+
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	b := s2.Find(a.ID)
+	if b.QuotaWait != want {
+		t.Fatalf("the wait is in the store: %+v", b.QuotaWait)
+	}
+	for _, force := range []bool{true, false} {
+		errs = s2.Refresh(context.Background(), force, b)
+		if u.count() != 1 {
+			t.Fatalf("force=%v: asked %d times", force, u.count())
+		}
+		if len(errs) != 1 || !strings.Contains(errs[0].Error(), "asked rota to wait") || !strings.Contains(errs[0].Error(), "reading shown was taken") {
+			t.Fatalf("force=%v: says why it did not ask, and how old the reading is: %v", force, errs)
+		}
+	}
+	if errs := s2.Maintain(context.Background()); len(errs) != 0 || u.count() != 1 {
+		t.Fatalf("a sweep asks nothing and has nothing new to say: %v, asked %d", errs, u.count())
+	}
+
+	clock.pass(2*time.Minute + time.Second)
+	u.next(200, "", percent(42))
+	if errs := s2.Refresh(context.Background(), true, b); len(errs) != 0 || u.count() != 2 {
+		t.Fatalf("asked again once the wait is over: %v, asked %d", errs, u.count())
+	}
+	if b.Quota.Windows[0].Percent != 42 || b.QuotaWait != (rota.QuotaWait{}) {
+		t.Fatalf("a reading ends the wait: %+v %+v", b.Quota, b.QuotaWait)
+	}
+	s2.Close()
+	s3, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s3.Close()
+	if c := s3.Find(a.ID); c.Quota.Windows[0].Percent != 42 || c.QuotaWait != (rota.QuotaWait{}) {
+		t.Fatalf("on disk: %+v %+v", c.Quota, c.QuotaWait)
+	}
+}
+
+// A Retry-After that is a date is kept to the second; one longer than an hour
+// is kept for an hour; and a refusal that says nothing — a 429 without it, or
+// the endpoint failing on its side — waits a minute, twice as long each time
+// in a row, up to the same hour. A reading starts the count again. Anything
+// else that goes wrong is reported as ever and asks no wait.
+func TestAUsageWaitIsTheProvidersWordOrABackoffBoundedByAnHour(t *testing.T) {
+	clock := holdClock(t)
+	u := fakeUsage(t)
+	s := openTemp(t)
+	a := tokenClaude(t, s)
+	refuse := func(status int, retryAfter string, wait time.Duration, count int) {
+		t.Helper()
+		a.Token.ExpiresAt = clock.now.Add(8 * time.Hour).UnixMilli() // hours pass here
+		u.next(status, retryAfter, "")
+		before := u.count()
+		errs := s.Refresh(context.Background(), true, a)
+		if u.count() != before+1 || len(errs) != 1 {
+			t.Fatalf("%d %q: asked once, said once: %d %v", status, retryAfter, u.count()-before, errs)
+		}
+		want := rota.QuotaWait{Until: clock.now.Add(wait).UnixMilli(), Status: status, Count: count}
+		if a.QuotaWait != want {
+			t.Fatalf("%d %q: %+v, want %+v", status, retryAfter, a.QuotaWait, want)
+		}
+		clock.pass(wait + time.Second)
+	}
+
+	refuse(429, clock.now.Add(3*time.Minute).UTC().Format(http.TimeFormat), 3*time.Minute, 1)
+	refuse(503, "", 2*time.Minute, 2)
+	refuse(429, "soon", 4*time.Minute, 3)
+	refuse(429, "86400", time.Hour, 4)
+	refuse(500, "0", 16*time.Minute, 5)
+	refuse(502, "", 32*time.Minute, 6)
+	refuse(429, "", time.Hour, 7)
+	for n := 8; n < 70; n++ {
+		refuse(429, "", time.Hour, n)
+	}
+
+	u.next(200, "", percent(5))
+	if errs := s.Refresh(context.Background(), true, a); len(errs) != 0 || a.QuotaWait != (rota.QuotaWait{}) {
+		t.Fatalf("a reading ends it: %v %+v", errs, a.QuotaWait)
+	}
+	refuse(429, "", time.Minute, 1)
+
+	u.next(401, "", "")
+	errs := s.Refresh(context.Background(), true, a)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "http 401") || a.QuotaWait.Waiting() || a.QuotaWait.Count != 1 {
+		t.Fatalf("a 401 is reported as before and asks no wait: %v %+v", errs, a.QuotaWait)
+	}
+}
+
+// A store whose lock was released — `--with quota` reads after a run —
+// still keeps what it learned: the wait a provider asked for, and a reading,
+// go into the store on disk under the lock taken again for that one write,
+// and nothing else of the account does. The token another process rotated
+// meanwhile stays the one on disk.
+func TestAStoreWithoutItsLockStillKeepsTheWaitAndTheReading(t *testing.T) {
+	clock := holdClock(t)
+	u := fakeUsage(t)
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a := tokenClaude(t, s)
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	s.Release()
+
+	other, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other.Find(a.ID).Token.Access = "A-rotated"
+	if err := other.Save(); err != nil {
+		t.Fatal(err)
+	}
+	other.Close()
+
+	onDisk := func() *rota.Account {
+		t.Helper()
+		d, err := Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer d.Close()
+		return d.Find(a.ID)
+	}
+
+	u.next(429, "60", "")
+	if errs := s.Refresh(context.Background(), true, a); len(errs) != 1 || !strings.Contains(errs[0].Error(), "asked rota to wait") {
+		t.Fatalf("the refusal is said: %v", errs)
+	}
+	if d := onDisk(); d.QuotaWait.Until != clock.now.Add(time.Minute).UnixMilli() || d.Token.Access != "A-rotated" {
+		t.Fatalf("the wait is on disk and the token is the one there: %+v %q", d.QuotaWait, d.Token.Access)
+	}
+
+	clock.pass(time.Minute + time.Second)
+	u.next(200, "", percent(17))
+	if errs := s.Refresh(context.Background(), true, a); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	d := onDisk()
+	if d.Quota == nil || d.Quota.Windows[0].Percent != 17 || d.QuotaAt != clock.now.UnixMilli() || d.QuotaWait != (rota.QuotaWait{}) || d.Token.Access != "A-rotated" {
+		t.Fatalf("the reading is on disk, the wait gone, the token untouched: %+v %d %+v %q", d.Quota, d.QuotaAt, d.QuotaWait, d.Token.Access)
+	}
+}
+
+// A store written before waits were kept reads as one with none, and a wait
+// written down reads back as it was.
+func TestAStoreWithoutWaitsReadsAndAWaitRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	writeAccounts(t, dir, `{"accounts":[{"id":1,"provider":"claude","token":{"accessToken":"t"},"quotaAt":5}],"nextId":2}`)
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := s.Find(1)
+	if a.QuotaWait != (rota.QuotaWait{}) || a.QuotaAt != 5 {
+		t.Fatalf("%+v", a)
+	}
+	a.QuotaWait = rota.QuotaWait{Until: 99, Status: 503, Count: 2}
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	s2, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if got := s2.Find(1).QuotaWait; got != (rota.QuotaWait{Until: 99, Status: 503, Count: 2}) {
+		t.Fatalf("%+v", got)
+	}
+}

@@ -156,6 +156,25 @@ func TestDescribeReportsWhenLimitsWereChecked(t *testing.T) {
 	}
 }
 
+// A wait the provider asked for is shown while it runs, as the moment usage is
+// asked again, and not at all once it has run out or when there is none.
+func TestDescribeSaysWhenUsageIsAskedAgainWhileAWaitRuns(t *testing.T) {
+	a := &rota.Account{ID: 1, Provider: "claude", QuotaAt: msAgo(20 * time.Minute)}
+	raw, err := json.Marshal(Describe(a))
+	if err != nil || strings.Contains(string(raw), "usage_wait_until") {
+		t.Fatalf("no wait, no field: %s %v", raw, err)
+	}
+	until := time.Now().Add(2 * time.Minute).Truncate(time.Second)
+	a.QuotaWait = rota.QuotaWait{Until: until.UnixMilli(), Status: 429, Count: 1}
+	if got := Describe(a).UsageWaitUntil; got != until.UTC().Format(time.RFC3339) {
+		t.Fatalf("while it runs: %q", got)
+	}
+	a.QuotaWait.Until = msAgo(time.Second)
+	if got := Describe(a).UsageWaitUntil; got != "" {
+		t.Fatalf("once it has run out: %q", got)
+	}
+}
+
 // A view carries the numbers a store holds, present even when they are zero:
 // what an order or threshold of 0 means is decided by whoever runs the
 // rotation, and a missing field would leave that decision with nothing to

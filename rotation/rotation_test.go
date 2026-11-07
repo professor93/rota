@@ -242,6 +242,38 @@ func TestChooseRefreshesUsageBeforeChoosing(t *testing.T) {
 	}
 }
 
+// A usage endpoint that turns the reading away never costs the account its
+// turn: the rotation picks it on the reading it has, and while the provider's
+// wait runs, a choice asks it nothing.
+func TestARefusedReadingNeverTakesAnAccountOutOfTheRotation(t *testing.T) {
+	m := &refusing{provider: provider{name: "t-rot-429"}}
+	rota.Register(m)
+	s := openTemp(t)
+	s.Accounts = []*rota.Account{{ID: 1, Provider: "t-rot-429", Order: 1,
+		Quota: &rota.Quota{Windows: []rota.Window{{Name: "w", Percent: 40, Primary: true}}}}}
+	for range 3 {
+		got, err := Choose(context.Background(), s, 0)
+		if err != nil || got.ID != 1 || got.Dead {
+			t.Fatalf("picked %v, %v", got, err)
+		}
+	}
+	if m.asked != 1 || !s.Accounts[0].QuotaWait.Waiting() {
+		t.Fatalf("asked %d times, wait %+v", m.asked, s.Accounts[0].QuotaWait)
+	}
+}
+
+// refusing is a usage endpoint that is rate-limited, and says nothing of how
+// long.
+type refusing struct {
+	provider
+	asked int
+}
+
+func (m *refusing) Quota(context.Context, string) (*rota.Quota, error) {
+	m.asked++
+	return nil, &rota.HTTPError{Status: 429}
+}
+
 func TestChooseReportsAnExhaustedRotation(t *testing.T) {
 	s := openTemp(t)
 	s.Accounts = []*rota.Account{{ID: 1, Provider: "claude", Order: 0}}
