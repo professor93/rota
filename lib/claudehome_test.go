@@ -520,6 +520,40 @@ func TestALoginReadsThePlanAndSurvivesWithoutIt(t *testing.T) {
 	}
 }
 
+// A claude account held as a refresh token alone is refreshed once, the
+// refresh token presented being the account's own, and what Stage then hands
+// Claude Code is the access token the refresh gave it: in the login written
+// into a home, and in the environment without one. Never an empty one.
+func TestAClaudeAccountHeldAsARefreshTokenAloneIsRefreshedBeforeItIsStaged(t *testing.T) {
+	onDisk(t)
+	f := newFakeServer(t, false)
+	setURL(t, &ClaudeEndpoints.Token, f.URL+"/token")
+	f.reply["/token"] = func(_ *http.Request, b map[string]any) (int, any) {
+		if b["grant_type"] != "refresh_token" || b["refresh_token"] != "R1" {
+			return 400, map[string]string{"error": "invalid_grant"}
+		}
+		return 200, map[string]any{"access_token": "A2", "refresh_token": "R2", "expires_in": 28800}
+	}
+	a := &Account{ID: 5, Provider: "claude", Token: Token{Refresh: "R1"}, Staged: stagedNone}
+	if changed, err := Refresh(context.Background(), a); !changed || err != nil || f.count("/token") != 1 {
+		t.Fatalf("refreshed once: changed=%v err=%v asked=%d", changed, err, f.count("/token"))
+	}
+	if a.Token.Access != "A2" || a.Token.Refresh != "R2" || a.Token.ExpiresAt <= nowMS() || a.Expired() {
+		t.Fatalf("the account runs on what the refresh gave it: %+v", a.Token)
+	}
+	home := t.TempDir()
+	if _, err := Stage(a, home); err != nil {
+		t.Fatal(err)
+	}
+	if l, ok := readClaudeLogin(os.DirFS(home)); !ok || l.AccessToken != "A2" || l.RefreshToken != "R2" || int64(l.ExpiresAt) != a.Token.ExpiresAt {
+		t.Fatalf("the home holds the refreshed login: %+v %v", l, ok)
+	}
+	cmd, err := Stage(a, "")
+	if err != nil || cmd.Env[0] != "CLAUDE_CODE_OAUTH_TOKEN=A2" {
+		t.Fatalf("without a home, the refreshed access token: %v %v", cmd, err)
+	}
+}
+
 // Remote Control is Claude Code's, and an account of another provider is
 // refused it rather than told something it cannot obey.
 func TestRemoteControlIsClaudeCodesSetting(t *testing.T) {
