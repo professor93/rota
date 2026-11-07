@@ -139,9 +139,9 @@ const heldSendMax = 256 << 10
 // Enter. It is typing, so it goes under the keyboard's rule: the keyboard
 // free, or held by the sender's own person, and from the moment it is let in
 // until it is answered nobody else types into the session but one Esc or
-// Ctrl-C (heldTerm.sendingFor). A session waiting on its person for a permission or
-// a question refuses it unless it is forced, because Enter there may approve
-// something.
+// Ctrl-C (heldTerm.sendingFor). A session waiting on its person for a
+// permission or a question refuses it unless it is forced, because Enter
+// there may approve something.
 //
 // The answer is 200 once the text is in, or the refusal with a reason a
 // program can act on: 409 waiting, keyboard (naming the holder), ended or

@@ -191,6 +191,52 @@ func TestASendIsNotTypedOverWhileItWaits(t *testing.T) {
 	}
 }
 
+// A send holds the session against everyone but its own person, whose keys
+// on another device are typed as ever while it waits, two Ctrl-C included.
+// They are not the hold's one interrupt either: once that person has let
+// the keyboard go, whoever takes it may still stop the turn once.
+func TestASendersOwnPersonTypesWhileItWaits(t *testing.T) {
+	p, id, rec, ready := heldBusy(t)
+	answered := p.sendLater(id, p.signIn("alice"), "", "from alice")
+	waitRecorded(t, rec, `send "from alice" force=false wait=30000`)
+	desk := p.attachAs(id, p.signIn("alice"), "")
+	if holder := desk.waitType("hello")["holder"]; holder != "alice" {
+		t.Fatalf("alice's other device attaching to a free keyboard did not take it: %v", holder)
+	}
+
+	desk.typeIn("mine\r")
+	desk.waitOut("got:mine")
+	desk.typeIn("\x03\x03")
+	desk.typeIn("\x1b")
+	waitRecorded(t, rec, `input "\x1b"`)
+	desk.settled()
+	if errs := desk.errors(); len(errs) != 0 {
+		t.Fatalf("alice typing under her own send was refused: %q", errs)
+	}
+
+	desk.say(map[string]any{"type": "release"})
+	desk.settled()
+	bob := p.attachAs(id, p.signIn("bob"), "")
+	if holder := bob.waitType("hello")["holder"]; holder != "bob" {
+		t.Fatalf("bob attaching to the keyboard alice let go did not take it: %v", holder)
+	}
+	bob.typeIn("\x03")
+	waitRecorded(t, rec, `input "\x03"`)
+	bob.typeIn("\x03")
+	if msg := bob.waitType("error")["message"]; msg != fmt.Sprintf(sendFirst, "alice") {
+		t.Fatalf("a second Ctrl-C under alice's send is refused with %q", msg)
+	}
+
+	becomeReady(t, ready)
+	answeredWith(t, answered, 200)
+	bob.waitOut("from alice")
+	bob.typeIn("after\r")
+	waitRecorded(t, rec, `input "after\r"`)
+	if got, want := typedInto(rec), "mine\r\x03\x03\x1b\x03after\r"; got != want {
+		t.Fatalf("the holder was given %q, want %q", got, want)
+	}
+}
+
 /* ------------------------------------------------- stopping a turn meanwhile --- */
 
 // heldBusy is a held session, between alice and bob, whose holder types a
@@ -492,8 +538,10 @@ func TestAWaitingSendIsNamedAtMostEveryTwoSeconds(t *testing.T) {
 
 	becomeReady(t, ready)
 	answeredWith(t, answered, 200)
-	if got := typedInto(rec); got != "" {
-		t.Fatalf("the holder was given %q while the send waited", got)
+	bob.typeIn("after\r")
+	waitRecorded(t, rec, `input "after\r"`)
+	if got := typedInto(rec); got != "after\r" {
+		t.Fatalf("the holder was given %q, want nothing while the send waited and the line after it", got)
 	}
 }
 
@@ -514,17 +562,20 @@ func TestATokensSendHoldsTheSessionAgainstEveryoneButAnInterrupt(t *testing.T) {
 	own.typeIn("mine")
 	own.typeIn("more")
 	own.typeIn("\x03")
-	waitRecorded(t, rec, `input "\x03"`)
 	own.typeIn("\x1b")
 	own.settled()
 	if errs := own.errors(); len(errs) != 1 || errs[0] != fmt.Sprintf(sendFirst, "alice") {
 		t.Fatalf("the token's own connection typing under its send was answered %q", errs)
 	}
-	if got := typedInto(rec); got != "\x03" {
-		t.Fatalf("the holder was given %q while the token's send waited, want one Ctrl-C alone", got)
-	}
 
 	becomeReady(t, ready)
 	answeredWith(t, answered, 200)
-	own.waitOut("got:from a token")
+	own.waitOut("from a token")
+	// The holder takes one connection's keys in order, so once it has the
+	// line typed after the send it has everything typed before it.
+	own.typeIn("after\r")
+	waitRecorded(t, rec, `input "after\r"`)
+	if got := typedInto(rec); got != "\x03after\r" {
+		t.Fatalf("the holder was given %q, want one Ctrl-C while the token's send waited and the line after it", got)
+	}
 }
