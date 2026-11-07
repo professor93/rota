@@ -56,16 +56,26 @@ func (s *Store) Maintain(ctx context.Context) []error {
 		// Adopt before refreshing. The vendor CLI may have rotated the
 		// refresh token during the last run, and presenting rota's older
 		// copy is how a codex or kimi lineage is permanently killed.
+		//
+		// What adoption read back is saved, not only what a refresh changed:
+		// while a daemon Codex left in the home refreshes the login (see
+		// codexDaemon), adoption is how the store keeps up with it.
 		var err error
+		before := snapshot(a)
 		if !s.whileIdle(a, func() { err = rota.Adopt(a, s.Home(a)) }) {
 			continue
 		}
+		changed = changed || before.differs(a)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", a, err))
 			continue
 		}
 		var did bool
-		if !s.whileIdle(a, func() { did, err = rota.Refresh(ctx, a) }) {
+		if !s.whileIdle(a, func() {
+			if !s.heldByDaemon(a) {
+				did, err = rota.Refresh(ctx, a)
+			}
+		}) {
 			continue
 		}
 		changed = changed || did
@@ -75,7 +85,7 @@ func (s *Store) Maintain(ctx context.Context) []error {
 	}
 	if changed {
 		if err := s.Save(); err != nil {
-			errs = append(errs, fmt.Errorf("refreshed tokens could not be saved: %w", err))
+			errs = append(errs, fmt.Errorf("tokens could not be saved: %w", err))
 		}
 	}
 	// Usage honours the five-minute cache and saves whatever it changed.

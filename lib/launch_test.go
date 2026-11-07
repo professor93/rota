@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -135,5 +136,58 @@ func TestAPlanCarriesTheAccountIdentityAsWell(t *testing.T) {
 	want := []string{"ROTA_PROVIDER=codex", "ROTA_ACCOUNT_ID=12", "ROTA_ACCOUNT=planner@example.com"}
 	if got := cmd.Env[len(cmd.Env)-3:]; !slices.Equal(got, want) {
 		t.Fatalf("got %v, want %v", got, want)
+	}
+}
+
+// A codex auth.json that already holds the very login rota would stage is
+// left as it is, and is known to be rota's. Writing it again would change
+// nothing rota keeps, and it would be a write over a file a daemon Codex left
+// running in the home may be rotating at that moment: the refresh token it
+// had just written would be lost, and the one rota put back is spent. A file
+// that differs in anything rota writes is written as before.
+func TestCodexLeavesAnAuthFileThatAlreadyHoldsTheLogin(t *testing.T) {
+	p, _ := Lookup("codex")
+	held := `{"auth_mode":"chatgpt","OPENAI_API_KEY":null,"last_refresh":"2026-01-02T03:04:05Z",` +
+		`"tokens":{"id_token":"i","access_token":"a1","refresh_token":"r1","account_id":"acct","login_owner_id":"o"}}`
+	for _, c := range []struct {
+		what, file string
+		kept       bool
+	}{
+		{"the same login", held, true},
+		{"another access token", strings.Replace(held, `"a1"`, `"a0"`, 1), false},
+		{"another id token", strings.Replace(held, `"id_token":"i"`, `"id_token":"j"`, 1), false},
+		{"an API key beside it", strings.Replace(held, `"OPENAI_API_KEY":null`, `"OPENAI_API_KEY":"sk-x"`, 1), false},
+		{"no auth mode", strings.Replace(held, `"auth_mode":"chatgpt",`, ``, 1), false},
+	} {
+		home := t.TempDir()
+		path := filepath.Join(home, "auth.json")
+		if err := os.WriteFile(path, []byte(c.file), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		a := &Account{ID: 1, Provider: "codex", Staged: fingerprint("r1"),
+			Token: Token{Access: "a1", Refresh: "r1"}, Extra: map[string]string{"id_token": "i", "account_id": "acct"}}
+		if _, err := p.Launch(a, home); err != nil {
+			t.Fatalf("%s: %v", c.what, err)
+		}
+		raw, _ := os.ReadFile(path)
+		if kept := string(raw) == c.file; kept != c.kept {
+			t.Fatalf("%s: kept=%v, file now %s", c.what, kept, raw)
+		}
+		if !a.StagedCurrent() || a.Token.Refresh != "r1" {
+			t.Fatalf("%s: the file is rota's staging either way: %+v %q", c.what, a.Token, a.Staged)
+		}
+	}
+
+	// Fields beside the tokens of a shape nobody expected still leave a
+	// rotated token to be adopted.
+	home := t.TempDir()
+	odd := `{"auth_mode":{"x":1},"OPENAI_API_KEY":7,"tokens":{"id_token":"i","access_token":"a2","refresh_token":"r2","account_id":"acct"}}`
+	if err := os.WriteFile(filepath.Join(home, "auth.json"), []byte(odd), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &Account{ID: 1, Provider: "codex", Staged: fingerprint("r1"),
+		Token: Token{Access: "a1", Refresh: "r1"}, Extra: map[string]string{"id_token": "i", "account_id": "acct"}}
+	if _, err := p.Launch(a, home); err != nil || a.Token.Refresh != "r2" {
+		t.Fatalf("a rotation beside odd fields is adopted: %v %+v", err, a.Token)
 	}
 }

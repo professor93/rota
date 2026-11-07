@@ -231,7 +231,16 @@ func (s *Store) prepareAlone(ctx context.Context, a *rota.Account, mirror bool) 
 	if aerr := rota.Adopt(a, s.Home(a)); aerr != nil {
 		return nil, nil, aerr
 	}
-	changed, err := refreshForLaunch(ctx, a)
+	// A daemon Codex left running in the home refreshes this login itself,
+	// and the CLI refreshes a token that is due when it starts; rota
+	// refreshing it too would spend the daemon's copy (see codexDaemon).
+	var (
+		changed bool
+		err     error
+	)
+	if !s.heldByDaemon(a) {
+		changed, err = refreshForLaunch(ctx, a)
+	}
 	if changed {
 		if serr := s.Save(); serr != nil {
 			return nil, nil, errors.Join(err, fmt.Errorf("refusing to run: store not saved after a token change: %w", serr))

@@ -2678,6 +2678,21 @@ person's own and is left alone — and a file naming a different ChatGPT
 account is never adopted. Account ids are never reused, so a home cannot be
 inherited.
 
+A codex home can have a daemon of Codex's own in it. An interactive codex
+session starts Codex's app-server daemon in its `CODEX_HOME` by default and
+leaves it running when the session ends, and that daemon refreshes the login
+itself when it falls due — five minutes before expiry, rota's margin too — and
+writes the rotated tokens to `auth.json`. While Codex's record of it there
+(`app-server-daemon/daemon.pid`) names a live process, the home owns the login:
+rota reads back what the daemon wrote and keeps it, and refreshes nothing
+itself, neither for a run nor in a server's maintenance, because the daemon
+would then present a refresh token rota had already spent. A run stages the
+login as ever, and the CLI refreshes a token that is due when it starts. An
+`auth.json` that already holds the login rota would write is left as it is,
+so what Codex adds to the file stays and a rotation the daemon has just
+written is never written over. Once the daemon is gone the login is rota's to
+refresh again.
+
 ## Quota
 
 Only claude publishes a usage endpoint, and only for a login: a claude
@@ -2738,7 +2753,8 @@ Measured, not assumed — from live accounts:
 rota refreshes a token within five minutes of expiry, and only while running
 a command — and a claude login kept in its home only while nothing of Claude
 Code's runs there, because then Claude Code refreshes it itself, unless that
-home is stranded or blanked. A refresh is never retried within one look: if the
+home is stranded or blanked; and a codex login only while no daemon of
+Codex's is alive in its home, for the same reason. A refresh is never retried within one look: if the
 reply was lost, the retry would reuse a rotated token and kill the lineage. Treat `re-auth needed` as normal
 rather than as a fault. The refusal that ended the lineage is kept: `rota
 list` shows it in parentheses after `re-auth needed` — `re-auth needed

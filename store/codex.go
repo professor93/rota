@@ -1,0 +1,68 @@
+package store
+
+import (
+	"errors"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"strconv"
+
+	"github.com/professor93/rota/internal/proc"
+	rota "github.com/professor93/rota/lib"
+)
+
+// An interactive codex session starts Codex's app-server daemon in its
+// CODEX_HOME and leaves it running when the session ends: detached, with no
+// idle exit, until `codex app-server daemon stop`, a signal or a reboot. It is
+// on by default (the daemon_auto_start feature) in every release since 0.158.
+// The daemon holds the account's login and refreshes it itself — it looks
+// every four and a half minutes and refreshes once the access token is within
+// five minutes of expiry, the margin rota's own ExpiryBuffer uses — and
+// writes the rotated tokens to auth.json in the home. Before refreshing it
+// reads auth.json again, and takes the login there instead if the file has
+// changed; if it has not, it presents the refresh token it holds.
+//
+// So while the daemon is alive the home owns the login, as a Claude Code home
+// does while something runs there: rota reads back what the daemon wrote and
+// refreshes nothing itself. A refresh by rota would leave the daemon holding
+// a refresh token already spent, which it presents the next time its token
+// falls due, and codex refuses a reused refresh token for good. Each account
+// has a home of its own, so each has a daemon of its own.
+const codexDaemonDir = "app-server-daemon"
+
+// codexDaemonRecords are the records Codex keeps for the daemon it runs in a
+// home: one for a daemon of the package it installs there, and one for a
+// daemon started from an older standalone install. The updater Codex may run
+// beside the daemon holds no login and is not among them.
+var codexDaemonRecords = []string{"daemon.pid", "app-server.pid"}
+
+// codexDaemon reports whether Codex's daemon is alive in a home, and names
+// it. A record nobody can read counts as alive, as a Claude Code one does: a
+// home wrongly thought quiet is one rota refreshes underneath the process
+// holding its login.
+func codexDaemon(home string) (string, bool) {
+	for _, name := range codexDaemonRecords {
+		raw, err := os.ReadFile(filepath.Join(home, codexDaemonDir, name))
+		if errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		pid, _, ok := readRecord(raw, err)
+		switch {
+		case !ok:
+			return name + " (unreadable)", true
+		case proc.Alive(pid):
+			return "codex daemon " + strconv.Itoa(pid), true
+		}
+	}
+	return "", false
+}
+
+// heldByDaemon reports whether the account's login is held by a daemon its
+// CLI left running in its home, which then refreshes it in rota's place.
+func (s *Store) heldByDaemon(a *rota.Account) bool {
+	if rota.Flavor(a.Provider) != "codex" {
+		return false
+	}
+	_, alive := codexDaemon(s.Home(a))
+	return alive
+}
