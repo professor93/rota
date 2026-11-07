@@ -34,9 +34,10 @@ import (
 // rotates nothing at all: no refresh, no claim, nothing written into a home.
 // It reads homes into memory and reads usage with tokens that have not
 // expired, because a refresh token it rotated there could never be saved, and
-// the one it replaced would already be spent. What it reads, and any wait a
-// provider asks for, it writes into the store under the lock taken again for
-// that one write, and nothing else (keepReadings).
+// the one it replaced would already be spent. Before it asks, it reads each
+// account's reading and wait from the store again (catchUp); what it reads,
+// and any wait a provider asks for, it writes into the store under the lock
+// taken again for that one write, and nothing else (keepReadings).
 //
 // A usage endpoint that turns a reading away — 429, or a failure on its
 // side — is left alone for as long as it says, or for a backoff when it does
@@ -111,6 +112,15 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 		}
 		report(true, nil)
 	}
+	// A store without its lock was opened before the run it served, which may
+	// have lasted hours: a wait another process has recorded since, and a newer
+	// reading, are on disk and not here. They are read in before anything is
+	// asked.
+	if s.released {
+		if err := s.catchUp(accounts); err != nil {
+			report(false, fmt.Errorf("usage readings could not be read from the store: %w", err))
+		}
+	}
 	// Before any worker starts, because a rescue saves the store, and a save
 	// reads every account.
 	homes := s.lookIn(ctx, accounts, collect, report)
@@ -124,9 +134,13 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 		if !readsUsage(a) || (!force && !due(a, now)) {
 			continue
 		}
+		// The provider's "not before" is a check of its own, after the question
+		// of whether a reading is due and never folded into it: whatever makes
+		// a reading due — force, the cache's age, a window that has reset — the
+		// wait holds it back, and before anything else, a refresh included,
+		// since a token is refreshed here only to read with it. Whatever
+		// schedules a look for a reading looks no sooner than QuotaWait.Until.
 		if a.QuotaWait.Waiting() {
-			// Before anything else, a refresh included: a token is refreshed
-			// here only to read with it.
 			if sayWaits {
 				report(false, waitNote(a, nil))
 			}
@@ -454,7 +468,12 @@ func turnedAway(a *rota.Account, err error) bool {
 	}
 	now := rota.Now()
 	count := a.QuotaWait.Count + 1
+	if now.Sub(time.UnixMilli(a.QuotaWait.Until)) > QuotaWaitMax {
+		count = 1 // long after the last wait ran out: a new run of refusals
+	}
 	wait := quotaBackoff << min(count-1, 12)
+	// A Retry-After that names no moment still to come — 0, or a date already
+	// past — says nothing of how long, and the backoff stands.
 	if he.RetryAfter.After(now) {
 		wait = he.RetryAfter.Sub(now)
 	}
@@ -500,13 +519,45 @@ type waitError struct {
 func (e *waitError) Error() string { return e.msg }
 func (e *waitError) Unwrap() error { return e.cause }
 
+// catchUp brings what a store without its lock holds of each account's
+// reading and wait up to what is on disk: a newer reading, and a wait that
+// runs later — or whatever wait goes with a newer reading, which may have
+// ended one. It reads under the lock, taken for the read alone, and only when
+// one of the accounts has its usage read at all.
+func (s *Store) catchUp(accounts []*rota.Account) error {
+	if !slices.ContainsFunc(accounts, func(a *rota.Account) bool {
+		return !a.Dead && !a.APIKey() && rota.Metered(a.Provider)
+	}) {
+		return nil
+	}
+	disk, err := NewStore(s.backend)
+	if err != nil {
+		return err
+	}
+	defer disk.Close()
+	for _, a := range accounts {
+		d := disk.Find(a.ID)
+		if d == nil || d.Provider != a.Provider {
+			continue
+		}
+		if d.QuotaWait.Until > a.QuotaWait.Until || d.QuotaAt > a.QuotaAt {
+			a.QuotaWait = d.QuotaWait
+		}
+		if d.QuotaAt > a.QuotaAt {
+			a.Quota, a.QuotaAt = d.Quota, d.QuotaAt
+		}
+	}
+	return nil
+}
+
 // keepReadings writes what a store without its lock read — each account's
 // reading, or the wait its provider asked for — into the store on disk,
 // under the lock taken again for this one write. Nothing else of any account
 // is touched: a token this store holds may be older than the one on disk.
 // The newer reading wins; a wait on disk that has not run out gives way only
 // to a longer one, because the refusal behind it may be newer than this
-// reading.
+// reading; and a refusal keeps the longer run of refusals, so a store that
+// knew of fewer does not start the backoff over.
 func (s *Store) keepReadings(read []*rota.Account) error {
 	if len(read) == 0 {
 		return nil
@@ -525,8 +576,15 @@ func (s *Store) keepReadings(read []*rota.Account) error {
 		if a.QuotaAt > d.QuotaAt {
 			d.Quota, d.QuotaAt, changed = a.Quota, a.QuotaAt, true
 		}
-		if a.QuotaWait != d.QuotaWait && (a.QuotaWait.Until > d.QuotaWait.Until || !d.QuotaWait.Waiting()) {
-			d.QuotaWait, changed = a.QuotaWait, true
+		w := d.QuotaWait
+		if a.QuotaWait.Until > w.Until || !w.Waiting() {
+			w = a.QuotaWait
+		}
+		if a.QuotaWait.Until > 0 {
+			w.Count = max(w.Count, a.QuotaWait.Count, d.QuotaWait.Count)
+		}
+		if w != d.QuotaWait {
+			d.QuotaWait, changed = w, true
 		}
 	}
 	if !changed {

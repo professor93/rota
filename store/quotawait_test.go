@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -307,5 +308,139 @@ func TestAStoreWithoutWaitsReadsAndAWaitRoundTrips(t *testing.T) {
 	defer s2.Close()
 	if got := s2.Find(1).QuotaWait; got != (rota.QuotaWait{Until: 99, Status: 503, Count: 2}) {
 		t.Fatalf("%+v", got)
+	}
+}
+
+// A store without its lock was opened before the run it served, which may
+// have lasted hours. A wait another process recorded meanwhile — and the
+// reading it took before that — is read from disk before anything is asked:
+// `--with quota` at the end of the run asks nothing, says why, and shows the
+// newer reading.
+func TestAStoreWithoutItsLockKeepsAWaitRecordedSinceItWasOpened(t *testing.T) {
+	clock := holdClock(t)
+	u := fakeUsage(t)
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a := tokenClaude(t, s)
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	s.Release() // the run starts
+
+	other, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := other.Find(a.ID)
+	u.next(200, "", percent(33))
+	if errs := other.Refresh(context.Background(), true, b); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	read := b.QuotaAt
+	clock.pass(time.Minute)
+	u.next(429, "600", "")
+	if errs := other.Refresh(context.Background(), true, b); len(errs) != 1 {
+		t.Fatalf("the other process is refused: %v", errs)
+	}
+	want := b.QuotaWait
+	other.Close()
+
+	clock.pass(time.Minute) // the run ends
+	errs := s.Refresh(context.Background(), true, a)
+	if u.count() != 2 {
+		t.Fatalf("asked %d times: the wait on disk must hold the run's reading back", u.count())
+	}
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "is not asked again until") || !strings.Contains(errs[0].Error(), "asked rota to wait") {
+		t.Fatalf("one line saying why: %v", errs)
+	}
+	if a.QuotaWait != want || a.QuotaAt != read || a.Quota.Windows[0].Percent != 33 {
+		t.Fatalf("the wait and the reading are the ones on disk: %+v %d %+v", a.QuotaWait, a.QuotaAt, a.Quota)
+	}
+}
+
+// Stores without their locks that were each refused write their waits in any
+// order, and the store ends up with the longest and the longest run of
+// refusals; a reading goes in only when it is newer. An account removed since,
+// or whose id now names an account of another provider, is not written at
+// all.
+func TestReadingsKeptWithoutTheLockMergeIntoTheStore(t *testing.T) {
+	clock := holdClock(t)
+	dir := t.TempDir()
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := tokenClaude(t, s)
+	a.Quota, a.QuotaAt = &rota.Quota{Windows: []rota.Window{{Name: "5h", Percent: 50}}}, clock.now.UnixMilli()
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	at := func(d time.Duration) int64 { return clock.now.Add(d).UnixMilli() }
+	keep := func(w rota.QuotaWait, quotaAt int64) {
+		t.Helper()
+		x := *a
+		x.QuotaWait, x.QuotaAt = w, quotaAt
+		x.Quota = &rota.Quota{Windows: []rota.Window{{Name: "5h", Percent: float64(quotaAt % 100)}}}
+		r := &Store{backend: s.backend, released: true}
+		if err := r.keepReadings([]*rota.Account{&x}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	onDisk := func() *rota.Account {
+		t.Helper()
+		d, err := Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer d.Close()
+		return d.Find(a.ID)
+	}
+
+	keep(rota.QuotaWait{Until: at(10 * time.Minute), Status: 429, Count: 1}, a.QuotaAt)
+	keep(rota.QuotaWait{Until: at(time.Minute), Status: 503, Count: 4}, a.QuotaAt)
+	keep(rota.QuotaWait{Until: at(2 * time.Minute), Status: 429, Count: 2}, a.QuotaAt-1)
+	d := onDisk()
+	if d.QuotaWait != (rota.QuotaWait{Until: at(10 * time.Minute), Status: 429, Count: 4}) || d.QuotaAt != a.QuotaAt || d.Quota.Windows[0].Percent != 50 {
+		t.Fatalf("the longest wait, the most refusals, the newest reading: %+v %d %+v", d.QuotaWait, d.QuotaAt, d.Quota)
+	}
+
+	writeAccounts(t, dir, `{"accounts":[{"id":`+fmt.Sprint(a.ID)+`,"provider":"codex","token":{"accessToken":"c"}}],"nextId":9}`)
+	before := readFile(filepath.Join(dir, "accounts.json"))
+	keep(rota.QuotaWait{Until: at(time.Hour), Status: 429, Count: 1}, at(time.Second))
+	x := *a
+	x.ID = 7
+	x.QuotaAt = at(time.Second)
+	if err := (&Store{backend: s.backend, released: true}).keepReadings([]*rota.Account{&x}); err != nil {
+		t.Fatal(err)
+	}
+	if after := readFile(filepath.Join(dir, "accounts.json")); after != before {
+		t.Fatalf("nothing written for an id another provider has, or one that is gone:\n%s", after)
+	}
+}
+
+// A refusal long after the last wait ran out — longer than the longest wait —
+// is the first of a new run, and waits a minute rather than where the old
+// run left off.
+func TestARefusalLongAfterTheLastWaitStartsTheBackoffAgain(t *testing.T) {
+	clock := holdClock(t)
+	u := fakeUsage(t)
+	s := openTemp(t)
+	a := tokenClaude(t, s)
+	a.QuotaWait = rota.QuotaWait{Until: clock.now.Add(-QuotaWaitMax - time.Second).UnixMilli(), Status: 429, Count: 5}
+	u.next(429, "", "")
+	s.Refresh(context.Background(), true, a)
+	if want := (rota.QuotaWait{Until: clock.now.Add(time.Minute).UnixMilli(), Status: 429, Count: 1}); a.QuotaWait != want {
+		t.Fatalf("%+v, want %+v", a.QuotaWait, want)
+	}
+	a.QuotaWait = rota.QuotaWait{Until: clock.now.Add(-time.Minute).UnixMilli(), Status: 429, Count: 5}
+	u.next(429, "", "")
+	s.Refresh(context.Background(), true, a)
+	if want := (rota.QuotaWait{Until: clock.now.Add(32 * time.Minute).UnixMilli(), Status: 429, Count: 6}); a.QuotaWait != want {
+		t.Fatalf("a refusal soon after the last is the next in the run: %+v, want %+v", a.QuotaWait, want)
 	}
 }

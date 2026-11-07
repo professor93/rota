@@ -2601,8 +2601,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
   the home has been read again — a sibling may have refreshed first, and its
   login, confirmed, is taken. A store whose lock a run has released — the
   reading `--with quota` takes after a run — rotates nothing at all, and does
-  not so much as try an account's claim. The reading, or the wait the provider
-  asked for, it writes into the store under the lock taken again for that one
+  not so much as try an account's claim. Before it asks, it reads the store's
+  reading and wait again, and afterwards writes its reading, or the wait the
+  provider asked for, into the store under the lock taken again for that one
   write, and nothing else of the account.
 - **Stranded.** Claude Code's daemon refreshes the login itself, and now and
   then the refresh fails, on a plain `~/.claude` as much as in a home of
@@ -2950,13 +2951,16 @@ use.
 
 A usage endpoint that turns a reading away — `429`, or a `5xx` failure of
 its own — is left alone until it may be asked again: for as long as its
-`Retry-After` says, in seconds or as a date, and without one for a minute,
-twice that for each refusal in a row, never more than an hour whatever it
-says. The wait is kept in the store beside the reading, so every rota
-process honours it: `rota list`, `list -r`, `?refresh=1`, a bare `rota run`
-choosing an account, `--with quota` after a run, and the server's sweep.
-The next reading that succeeds ends it, and so does logging the account in
-again.
+`Retry-After` says, in seconds or as a date, and without one — or with one
+that names no moment still to come, `0` or a date already past — for a
+minute, twice that for each refusal in a row, never more than an hour
+whatever it says. A refusal more than an hour after the last wait ran out
+starts again at a minute. The wait is kept in the store beside the reading,
+so every rota process honours it: `rota list`, `list -r`, `?refresh=1`, a
+bare `rota run` choosing an account, the server's sweep, and `--with quota`
+after a run, which reads the store again first, so a wait recorded while
+the run went on holds it back too. The next reading taken once the wait has
+run out ends it, and so does logging the account in again.
 
 Meanwhile the account keeps its last reading, and nothing else changes: a
 refusal is never `re-auth needed`, never takes the account out of the
