@@ -124,3 +124,58 @@ func TestALaunchHandedOverKeepsItsClaimAcrossExec(t *testing.T) {
 		})
 	}
 }
+
+// A handover may lend its claims to a process of its own rather than keep them
+// across the exec. The file is lent as it is, still close-on-exec, and a
+// process given it holds the claim through its own descriptor once this one
+// has let go, until that process ends: a flock belongs to the open file, and
+// is gone when the last descriptor of it is.
+func TestAClaimLentToAnotherProcessIsHeldUntilThatProcessEnds(t *testing.T) {
+	dir := t.TempDir()
+	writeAccounts(t, dir, `{"accounts":[{"id":1,"provider":"t-owns-creds","token":{"accessToken":"tok"}}],"nextId":2}`)
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	a := st.Find(1)
+	release, ok := st.holdRun(a)
+	if !ok {
+		t.Fatal("nothing is holding it")
+	}
+	defer release()
+	mine := filepath.Join(st.Home(a), runLock)
+	lent := func() *os.File {
+		for _, f := range ClaimFiles() {
+			if f.Name() == mine {
+				return f
+			}
+		}
+		return nil
+	}
+	f := lent()
+	if f == nil {
+		t.Fatal("ClaimFiles lends the run's claim")
+	}
+	if !closeOnExec(t, f) {
+		t.Fatal("lent, not kept across exec: it stays close-on-exec")
+	}
+	holder := exec.Command("/bin/sleep", "30")
+	holder.ExtraFiles = []*os.File{f}
+	if err := holder.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+	release()
+	if lent() != nil {
+		t.Fatal("a claim this process let go of is not lent any more")
+	}
+	if !st.claimed(a) {
+		t.Fatal("the process it was lent to holds it after this one has let go")
+	}
+	_ = holder.Process.Kill()
+	_ = holder.Wait()
+	// A killed process's lock can be let go of a moment after it has been
+	// waited for (macOS, under load).
+	eventually(t, "the claim is free once the process it was lent to has ended", func() bool { return !st.claimed(a) })
+}
