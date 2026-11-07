@@ -59,6 +59,42 @@ func TestHTTPFailuresAreMachineReadable(t *testing.T) {
 	}
 }
 
+// A refusal that says when to ask again carries that moment, read from
+// Retry-After in either of its forms, against the injectable clock; one that
+// says nothing, or nothing that can be read, carries none.
+func TestARefusalCarriesWhenToAskAgain(t *testing.T) {
+	old := Now
+	t.Cleanup(func() { Now = old })
+	frozen := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	Now = func() time.Time { return frozen }
+	at := time.Date(2030, 1, 1, 12, 3, 0, 0, time.UTC)
+	for _, c := range []struct {
+		status int
+		header string
+		want   time.Time
+	}{
+		{429, "120", frozen.Add(2 * time.Minute)},
+		{503, at.Format(http.TimeFormat), at},
+		{429, "", time.Time{}},
+		{429, "soon", time.Time{}},
+		{429, "-5", time.Time{}},
+		{500, "0", frozen},
+	} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if c.header != "" {
+				w.Header().Set("Retry-After", c.header)
+			}
+			w.WriteHeader(c.status)
+		}))
+		err := getJSON(context.Background(), srv.URL, "", nil, nil)
+		srv.Close()
+		var he *HTTPError
+		if !errors.As(err, &he) || he.Status != c.status || !he.RetryAfter.Equal(c.want) {
+			t.Fatalf("%d %q: want %v, got %T %+v", c.status, c.header, c.want, err, he)
+		}
+	}
+}
+
 // A terminal OAuth refusal keeps its RFC 6749 code. The prose stays for
 // people; the code is for the application, which may localize, branch, or
 // map the outcome onto its own vocabulary.

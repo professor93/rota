@@ -97,7 +97,9 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 		}
 	}
 	a.Apply(tok)
-	a.Quota, a.QuotaAt = nil, 0
+	// The reading, and any wait asked of it, belonged to the login this one
+	// replaces.
+	a.Quota, a.QuotaAt, a.QuotaWait = nil, 0, rota.QuotaWait{}
 	a.StagedSuperseded() // whatever is staged belongs to the previous login
 	if err := s.Save(); err != nil {
 		return nil, false, err
@@ -172,7 +174,9 @@ func (s *Store) LoginKey(ctx context.Context, provider, key, label string) (a *r
 		}
 	}
 	a.Apply(tok)
-	a.Quota, a.QuotaAt = nil, 0
+	// The reading, and any wait asked of it, belonged to the login this one
+	// replaces.
+	a.Quota, a.QuotaAt, a.QuotaWait = nil, 0, rota.QuotaWait{}
 	if label != "" {
 		a.Name = label
 	}

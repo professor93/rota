@@ -30,9 +30,10 @@ import (
 // recoverable, while a wait of a second is.
 func (s *Store) Maintain(ctx context.Context) []error {
 	// Without the lock nothing may rotate, so all that is left is reading:
-	// see Refresh.
+	// see Refresh. A wait the provider asked for is kept as ever, and not
+	// said again on every sweep.
 	if s.released {
-		return s.Refresh(ctx, false)
+		return s.refresh(ctx, false, false, nil)
 	}
 	var errs []error
 	// unsaved is whether the store holds something the sweep has not yet
@@ -142,8 +143,9 @@ func (s *Store) Maintain(ctx context.Context) []error {
 			errs = append(errs, fmt.Errorf("tokens could not be saved: %w", err))
 		}
 	}
-	// Usage honours the five-minute cache and saves whatever it changed.
-	return append(errs, s.Refresh(ctx, false)...)
+	// Usage honours the five-minute cache and any wait a provider asked for,
+	// and saves whatever it changed.
+	return append(errs, s.refresh(ctx, false, false, nil)...)
 }
 
 // maintainShared is Maintain for a claude account. Its home is read first,

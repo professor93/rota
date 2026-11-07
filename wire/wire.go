@@ -87,6 +87,11 @@ type Account struct {
 	// "just now", "4m ago", "2d ago".
 	CheckedAt  string `json:"checkedAt,omitempty"`
 	CheckedAgo string `json:"checkedAgo,omitempty"`
+	// UsageWaitUntil is when the provider's usage endpoint is asked again,
+	// RFC 3339, while it is being left alone because it turned a reading
+	// away — rate-limited, or failing on its side. Absent otherwise. The
+	// reading shown meanwhile is the one CheckedAt dates.
+	UsageWaitUntil string `json:"usage_wait_until,omitempty"`
 }
 
 // Window is one quota window with its countdown rendered.
@@ -156,6 +161,9 @@ func Describe(a *rota.Account) Account {
 		t := time.UnixMilli(a.QuotaAt)
 		v.CheckedAt = t.UTC().Format(time.RFC3339)
 		v.CheckedAgo = Since(t)
+	}
+	if a.QuotaWait.Waiting() {
+		v.UsageWaitUntil = time.UnixMilli(a.QuotaWait.Until).UTC().Format(time.RFC3339)
 	}
 	if q := a.Quota; q != nil {
 		v.Note = q.Note

@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -83,6 +84,12 @@ func truncate(s string, n int) string {
 type HTTPError struct {
 	Status int
 	Body   string
+	// RetryAfter is when the reply said to ask again, read from its
+	// Retry-After header — a number of seconds counted from Now, or a date —
+	// and the zero time when it said nothing that can be read. A request to
+	// wait is the provider's to make and the caller's to keep: nothing here
+	// waits, or remembers.
+	RetryAfter time.Time
 }
 
 func (e *HTTPError) Error() string {
@@ -111,10 +118,36 @@ func doWith(client *http.Client, req *http.Request) ([]byte, error) {
 		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return raw, &HTTPError{Status: resp.StatusCode, Body: string(raw)}
+		return raw, &HTTPError{Status: resp.StatusCode, Body: string(raw), RetryAfter: retryAfter(resp.Header.Get("Retry-After"))}
 	}
 	return raw, nil
 }
+
+// retryAfter reads a Retry-After value, in either of the forms RFC 9110
+// allows: whole seconds from now, or an HTTP date. Anything else is the zero
+// time.
+func retryAfter(v string) time.Time {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return time.Time{}
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if n < 0 {
+			return time.Time{}
+		}
+		return Now().Add(time.Duration(min(n, int64(maxRetryAfter/time.Second))) * time.Second)
+	}
+	t, err := http.ParseTime(v)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+// maxRetryAfter keeps a Retry-After of absurd size from overflowing the
+// clock. What a caller makes of a long wait is its own business; this only
+// keeps the arithmetic whole.
+const maxRetryAfter = 100 * 365 * 24 * time.Hour
 
 // send performs the request and decodes whatever JSON came back into out —
 // on a failing status too, because OAuth verdicts (authorization_pending,

@@ -112,6 +112,11 @@ type Account struct {
 	// back when somebody buys more, which nothing here can see — and a key
 	// pasted again forgets it. 0 when no run has found the credit gone.
 	NoCreditUntil int64 `json:"noCreditUntil,omitzero"`
+	// QuotaWait is the usage endpoint asking to be left alone for a while.
+	// Like Order and Threshold it is carried, not interpreted: Usage asks
+	// whenever it is called, and an application that keeps readings — the
+	// store rota ships is one — decides what a refusal costs and keeps to it.
+	QuotaWait QuotaWait `json:"quotaWait,omitzero"`
 }
 
 // LongToken is a credential that outlives the run it was made for: the
