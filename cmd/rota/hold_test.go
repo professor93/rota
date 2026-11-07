@@ -202,6 +202,44 @@ func TestTheChildsEnvironmentIsScrubbed(t *testing.T) {
 	}
 }
 
+// A held CLI reads the project settings of the folder it starts in, not of
+// wherever its holder runs, so that is the folder the warning about them
+// names — in holder.log, where a holder's warnings go. A value is never
+// written.
+func TestAHeldSessionIsWarnedAboutTheSettingsOfItsOwnFolder(t *testing.T) {
+	_, terminals := holdStore(t)
+	bin := holdFake(t, "claude", fakecli.Spec{})
+	put := func(path, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	elsewhere := t.TempDir()
+	put(filepath.Join(elsewhere, ".claude", "settings.json"), `{"env":{"CLAUDE_CODE_USE_VERTEX":"SECRET-1"}}`)
+	t.Chdir(elsewhere)
+	req := holdRequest(t)
+	own := filepath.Join(req.Cwd, ".claude", "settings.json")
+	put(own, `{"env":{"ANTHROPIC_BASE_URL":"https://SECRET.example"}}`)
+
+	h := startHolder(t, terminals, bin, req)
+	if !h.ready.OK {
+		t.Fatalf("%+v", h.ready)
+	}
+	h.link().wait("ready")
+	raw, err := os.ReadFile(holdwire.LogPath(h.dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(raw, []byte(own+" sets env.ANTHROPIC_BASE_URL")) ||
+		bytes.Contains(raw, []byte("SECRET")) || bytes.Contains(raw, []byte("VERTEX")) {
+		t.Fatalf("holder.log warns about %s, and only it, with no value:\n%s", own, raw)
+	}
+}
+
 func TestTheConversationComesFromTheRegistry(t *testing.T) {
 	_, terminals := holdStore(t)
 	bin := holdFake(t, "claude", fakecli.Spec{})

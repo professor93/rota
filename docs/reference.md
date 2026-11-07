@@ -2671,7 +2671,9 @@ waited on. A run that names `setting_sources` is held to the sources it names,
 managed settings counting whatever it says, so a `rota serve` run, which names
 none unless asked, is checked against the managed files alone; a hermetic run
 has no user settings. A `rota serve` terminal is checked in the directory it
-starts in, and the server writes the warning to its log. Some settings are
+starts in, and the server writes the warning to its log; a held session is
+checked in its folder too, and its holder writes the warning to
+`<store>/terminals/<id>/holder.log`. Some settings are
 not read: the macOS configuration profile and the Windows registry, which can
 carry managed settings; the settings an account's organisation sends from
 claude.ai, which Claude Code caches per login in `remote-settings.json`; and

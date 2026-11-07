@@ -297,7 +297,9 @@ func (h *holder) plan(st *store.Store) (*plan, error) {
 	if err := st.Launchable(ctx, a); err != nil {
 		return nil, err
 	}
-	path, env, release, err := st.Prepare(ctx, a)
+	// Prepared for the folder the CLI starts in, whose project settings it
+	// reads, rather than for the holder's own.
+	path, env, release, err := st.PrepareIn(ctx, a, h.req.Cwd)
 	if err != nil {
 		return nil, err
 	}
