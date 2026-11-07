@@ -353,8 +353,8 @@ Held sessions run on Linux and macOS:
 | `--all` | end every session as well, after asking `stop the rota daemon and end N sessions? [y/N]`; with no daemon running, end the sessions its holders still hold |
 | `--yes` | with `--all`, end them without asking; off a terminal `--all` needs it, and without `--all` it is a usage error |
 | `rota serve status` | whether a daemon runs, its pid, version, control socket and port, and how many sessions are running and stopped; `--json` for the same as a document. Exits `0` when a daemon runs and `3` when none does |
-| `rota serve install` | make the daemon a systemd user unit on Linux or a launchd agent on macOS, which starts it at login and keeps its sessions through a restart, and start it; refused while a daemon started by hand runs and no unit of this store's is installed. Run again, it stops any daemon running, as `serve stop` does, then rewrites the unit and restarts it. A supervisor does not pass `ROTA_TOKEN`, so a daemon's TCP port wants `auth.token_file` or `[[users]]` — see *Under a supervisor* in *[The daemon](#the-daemon)* |
-| `rota serve uninstall` | stop the daemon the unit runs and take the unit away; every session goes on running. Refused inside a held session, as `serve stop` is |
+| `rota serve install` | make the daemon a systemd user unit on Linux or a launchd agent on macOS, which starts it at login and keeps its sessions through a restart, and start it; refused while a daemon started by hand runs and no unit of this store's is installed. Run again, it stops any daemon running, as `serve stop` does, then rewrites the unit and restarts it. Refused inside a held session. A supervisor does not pass `ROTA_TOKEN`, so a daemon's TCP port wants `auth.token_file` or `[[users]]` — see *Under a supervisor* in *[The daemon](#the-daemon)* |
+| `rota serve uninstall` | stop the daemon the unit runs and take the unit away; every session goes on running. Refused inside a held session, as `serve stop` and `serve install` are |
 | `rota serve hold` | internal: one held session's process, started by the daemon with its request on standard input; refuses a terminal |
 
 The whole `[routes]` and `[terminal]` groups — the terminal page among them —
@@ -899,23 +899,25 @@ The store `~/.rota` has the unit `rota.service` and the label
 has a unit of its own. The unit runs `rota serve start --foreground` from the
 path rota was started by, links kept as typed, so a package manager's link
 that an upgrade moves on — Homebrew's `/opt/homebrew/bin/rota` — is followed
-at the next start. It is given `ROTA_HOME`, the store's absolute path, `PATH` as
-it is where `install` runs, and the person's own Claude Code directory as
-`CLAUDE_CONFIG_DIR`, by absolute path, only when a variable names one, by
-the rule every rota finds the person's by: `ROTA_CLAUDE_HOME` where it is
-set — inside a CLI rota launched, whose `CLAUDE_CONFIG_DIR` is the
-account's — none inside one an older rota launched (`ROTA_ACCOUNT_ID` with
-no `ROTA_CLAUDE_HOME`), and `CLAUDE_CONFIG_DIR` elsewhere. Nothing else of
-that environment is. A supervisor does
-not pass `ROTA_TOKEN`, so a daemon that opens a TCP port wants
-`auth.token_file` or `[[users]]` in `server.toml`; the control socket needs
-no token. The systemd unit has `KillMode=process` and the launchd agent
-`AbandonProcessGroup`, so stopping either stops the daemon and never its
-sessions, and each restarts a daemon that fails, five seconds later under
-systemd. On Linux, where the user does not linger, it adds *run "loginctl
-enable-linger <user>" so the daemon starts at boot and outlives your
-login*: without it, systemd starts a user's units at login and stops them at
-logout.
+at the next start. It is given `ROTA_HOME`, the store's absolute path,
+`PATH` as it is where `install` runs, and the person's own Claude Code
+directory as `CLAUDE_CONFIG_DIR`, by absolute path, only when a variable
+names one, by the rule every rota finds the person's by: `ROTA_CLAUDE_HOME`
+where it is set — inside a CLI rota launched, whose `CLAUDE_CONFIG_DIR` is
+the account's — none inside one an older rota launched (`ROTA_ACCOUNT_ID`
+with no `ROTA_CLAUDE_HOME`), and `CLAUDE_CONFIG_DIR` elsewhere. Nothing else
+of that environment is. A supervisor does not pass `ROTA_TOKEN`, so a daemon
+that opens a TCP port wants `auth.token_file` or `[[users]]` in
+`server.toml`; the control socket needs no token. The systemd unit has
+`KillMode=process` and the launchd agent `AbandonProcessGroup`, so stopping
+either stops the daemon and never its sessions, and each restarts a daemon
+that fails, five seconds later under systemd. The agent names no
+`ProcessType`, so launchd runs it, and every session it holds, as it runs a
+daemon started by hand, rather than throttling their CPU and I/O as it does
+a `Background` one's. On Linux, where the user does not linger, it adds
+*run "loginctl enable-linger <user>" so the daemon starts at boot and
+outlives your login*: without it, systemd starts a user's units at login and
+stops them at logout.
 
 `install` reads `server.toml` as the daemon will, so a file the daemon
 would refuse is refused before anything is written. While a daemon runs
@@ -928,21 +930,28 @@ finds the store taken. Then it rewrites the unit and restarts it —
 `systemctl --user restart` after `daemon-reload` and `enable`, or the same
 bootout and bootstrap — and says `rota daemon reinstalled for <store> and
 restarted: <path>`; that is how a new `PATH` or binary is taken up. A
-supervisor that will not load the unit is said with its own words, and the
-file, written by then, is named: *<path> is written, but …; rota serve
-uninstall takes it away*.
+supervisor that will not load the unit is said with its own words, each
+command it failed named, and the file, written by then, is named too:
+*<path> is written, but …; rota serve uninstall takes it away*. When a
+daemon was stopped first, the error adds *The rota daemon that was running
+is stopped, and its sessions keep running; rota serve start starts one
+again*.
 
 `rota serve uninstall` runs `systemctl --user disable --now` on the unit,
 deletes it and reloads, or runs `launchctl bootout` and deletes the agent.
-Like `rota serve stop`, it is refused inside a held session: *rota serve
-uninstall is refused inside held session <id>; run it from outside the
-session*.
 The file is deleted whatever the supervisor says, and what it said is the
-error. Every session goes on running, for the next daemon to take up: it
-says `rota daemon uninstalled for <store>; N sessions keep running`. With no
-unit installed it says `no rota daemon is installed for <store>`, asks the
-supervisor nothing, and exits `0`. On Windows both are refused, as every
-held-session command is.
+error; on Linux, a `disable` that fails has the link `enable` made in
+`default.target.wants` deleted too, so nothing is left that names a unit
+that is gone. Every session goes on running, for the next daemon to take
+up: it says `rota daemon uninstalled for <store>; N sessions keep running`.
+With no unit installed it says `no rota daemon is installed for <store>`,
+asks the supervisor nothing, and exits `0`.
+
+Like `rota serve stop`, `install` and `uninstall` are refused inside a held
+session, since either may stop the daemon: *rota serve install is refused
+inside held session <id>; run it from outside the session*, and the same
+for `uninstall`. On Windows both are refused, as every held-session command
+is.
 
 ### Who is asking, and what they may do
 

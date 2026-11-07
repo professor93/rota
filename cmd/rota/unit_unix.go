@@ -20,10 +20,14 @@ import (
 // install takes up a new binary or PATH; a daemon running then, the unit's
 // or one started by hand meanwhile, is stopped first as serve stop stops
 // one, its sessions running on, so the daemon the unit starts never finds
-// the store taken.
+// the store taken. Since it may stop the daemon, it is not run from inside
+// a held session, as serve stop is not.
 func (c *cli) installDaemon() error {
 	home, terminals, err := daemonStore()
 	if err != nil {
+		return err
+	}
+	if err := refusedInsideHeldSession("rota serve install", terminals); err != nil {
 		return err
 	}
 	if err := holdwire.SockFits(holdwire.CtlSock(terminals)); err != nil {
@@ -44,6 +48,7 @@ func (c *cli) installDaemon() error {
 	if err != nil {
 		return err
 	}
+	stopped := false
 	if d, ok := daemonOf(terminals); ok {
 		if !again {
 			return fmt.Errorf("a rota daemon is running for %s%s, started by hand; rota serve stop it, then install", home, pidOf(d))
@@ -51,12 +56,16 @@ func (c *cli) installDaemon() error {
 		if err := endDaemon(terminals); err != nil {
 			return err
 		}
+		stopped = true
 	}
 	if written, err := writeUnit(exe, home, unitEnv(), again); err != nil {
-		if written == "" {
-			return err
+		if written != "" {
+			err = fmt.Errorf("%s is written, but %w; rota serve uninstall takes it away", written, err)
 		}
-		return fmt.Errorf("%s is written, but %w; rota serve uninstall takes it away", written, err)
+		if stopped {
+			err = fmt.Errorf("%w. The rota daemon that was running is stopped, and its sessions keep running; rota serve start starts one again", err)
+		}
+		return err
 	}
 	if again {
 		fmt.Fprintf(c.out, "rota daemon reinstalled for %s and restarted: %s\n", home, path)

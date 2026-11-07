@@ -80,7 +80,7 @@ WantedBy=default.target
 func TestTheUnitQuotesOddPaths(t *testing.T) {
 	got := systemdUnit("/opt/my rota/r$ota", `/s/a "b" 100%`, []string{`PATH=/x\y$z`})
 	for _, w := range []string{
-		`ExecStart="/opt/my rota/r$$ota" serve start --foreground`,
+		`ExecStart="/opt/my rota/r$ota" serve start --foreground`,
 		`Description=rota daemon for /s/a "b" 100%%`,
 		`Environment="ROTA_HOME=/s/a \"b\" 100%%"`,
 		`Environment="PATH=/x\\y$z"`,
@@ -88,6 +88,11 @@ func TestTheUnitQuotesOddPaths(t *testing.T) {
 		if !strings.Contains(got, w) {
 			t.Errorf("missing %q in:\n%s", w, got)
 		}
+	}
+	// systemd execs the program's path as written, and expands variables
+	// in no value here: a $ is one $ everywhere.
+	if strings.Contains(got, "$$") {
+		t.Errorf("a $ doubled in:\n%s", got)
 	}
 }
 
@@ -103,7 +108,6 @@ func TestThePlistKeepsSessions(t *testing.T) {
 		"<key>AbandonProcessGroup</key>\n\t<true/>",
 		"<key>RunAtLoad</key>\n\t<true/>",
 		"<key>SuccessfulExit</key>\n\t\t<false/>",
-		"<key>ProcessType</key>\n\t<string>Background</string>",
 		"<key>StandardOutPath</key>\n\t<string>/dev/null</string>",
 		"<key>StandardErrorPath</key>\n\t<string>/dev/null</string>",
 	} {
@@ -113,6 +117,11 @@ func TestThePlistKeepsSessions(t *testing.T) {
 	}
 	if strings.Contains(launchdPlist("l", "/u/rota", "/s", []string{"PATH=/p"}), "CLAUDE_CONFIG_DIR") {
 		t.Error("config dir written while unset")
+	}
+	// launchd's default, Standard: a Background agent, and every held CLI
+	// it starts, would have its CPU and I/O throttled.
+	if strings.Contains(got, "ProcessType") {
+		t.Error("the agent names a ProcessType")
 	}
 }
 
