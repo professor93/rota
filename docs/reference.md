@@ -634,7 +634,7 @@ see *Who is asking, and what they may do*.
 | `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up |
 | `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended; a running held session the daemon is not linked to is hung up by signal, once however often it is asked, and only while its pid is still the holder its record names: `409` when it is not, or when its record names no process this rota can check |
 | `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame. A held session the daemon is not linked to answers `409`, saying why |
-| `POST` | `/v1/terminals/{id}/send` | control | `{"text":"…","force":false}` — type a message into a held session the way a person would, once it is ready for one: the text, then Enter. It is typing, so the keyboard must be free or held by the sender's own person, and until it is typed nobody else types into the session but Esc or Ctrl-C. `200 {"ok":true}` once typed; `409` with `reason` `waiting` (the CLI waits on its person, where Enter may approve something; `"force":true` types anyway), `keyboard` (with `holder`), `ended`, or `not_held` (a terminal that is not a held session, or one the daemon is not linked to); `504` with `reason` `timeout` when it never became ready in 30 seconds |
+| `POST` | `/v1/terminals/{id}/send` | control | `{"text":"…","force":false}` — type a message into a held session the way a person would, once it is ready for one: the text, then Enter. It is typing, so the keyboard must be free or held by the sender's own person, and until it is typed nobody else types into the session but one Esc or Ctrl-C. `200 {"ok":true}` once typed; `409` with `reason` `waiting` (the CLI waits on its person, where Enter may approve something; `"force":true` types anyway), `keyboard` (with `holder`), `ended`, or `not_held` (a terminal that is not a held session, or one the daemon is not linked to); `504` with `reason` `timeout` when it never became ready in 30 seconds |
 | `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
 | `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"long_until":"...","status":"long"}`, and an API key sent as `token` is refused with `400` by its prefix, without being sent anywhere. Neither comes back or is logged |
@@ -1585,14 +1585,14 @@ server runs itself does not have:
   asked — so a watcher's terminal answering is not a watcher typing, and a
   frame that held nothing else does nothing at all.
 - **A send is not typed over.** While a `send` waits to be typed, it holds
-  the session for its person: anybody else's typing is refused, said once a
-  send to each connection as `a send from <name> is waiting to be typed
-  into this session; type once it is in`, so no half-typed line goes in
-  ahead of it and is submitted by its Enter. While a send waits, only its
-  sender's person may type; anyone at the keyboard may still press Esc or
-  Ctrl-C, which stops the turn and leaves the send to be typed. A send whose
-  asker went away still holds it until its holder answers, for at most 35
-  seconds.
+  the session for its person: anybody else's typing is refused, said to
+  each connection at most once every 2 seconds as `a send from <name> is
+  waiting to be typed into this session; type once it is in`, so no
+  half-typed line goes in ahead of it and is submitted by its Enter. While a
+  send waits, only its sender's person may type; anyone at the keyboard may
+  still press Esc or Ctrl-C once, a single key in a frame of its own, which
+  stops the turn and leaves the send to be typed. A send whose asker went
+  away still holds it until its holder answers, for at most 35 seconds.
 - **Falling behind repaints.** A viewer that cannot keep up with the output
   is not closed with `1013`; see *Falling behind* below.
 

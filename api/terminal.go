@@ -143,17 +143,24 @@ const (
 	heldNoFit = "this session's size changes only when a viewer asks to fit it"
 	// sendFirst is somebody typing into a held session while another
 	// person's send waits there to be typed, naming who sent it. It is said
-	// once a send to each connection, and its keystrokes after are refused
-	// without a word (errSendTold).
+	// to each connection at most once every sendFirstEvery, and keystrokes
+	// refused in between are refused without a word (errSendTold).
 	sendFirst = "a send from %s is waiting to be typed into this session; type once it is in"
 )
 
+// sendFirstEvery is the least time between two sendFirst said to one
+// connection whose keystrokes go on being refused: often enough that a key
+// never vanishes for long without a reason, and seldom enough that a typist
+// on a slow link is not sent so many refusals that it falls behind.
+const sendFirstEvery = 2 * time.Second
+
 var (
 	errNotHolding = errors.New(notHolding)
-	// errSendTold is a keystroke refused under a send the connection was
-	// told of already: nothing is typed and nothing more is said, so a
-	// typist on a slow link is not sent a refusal for every key.
-	errSendTold    = errors.New("refused under a waiting send this connection was told of")
+	// errSendTold is a keystroke refused under a waiting send less than
+	// sendFirstEvery after the connection was told of one: nothing is typed
+	// and nothing more is said, so a typist on a slow link is not sent a
+	// refusal for every key.
+	errSendTold    = errors.New("refused under a waiting send this connection was just told of")
 	errTermEnded   = errors.New("this terminal has ended")
 	errSharedWatch = errors.New(sharedWatch)
 	errSharedSize  = errors.New(sharedSize)
@@ -251,10 +258,10 @@ type termConn struct {
 	// the goroutine reading the connection.
 	replies *vtscan.ReplyFilter
 	noFit   bool
-	// toldSend is the waiting send this connection was last told of
-	// (sendFirst), so that it is told once a send. It belongs to the
-	// session's mu.
-	toldSend uint64
+	// toldSendAt is when this connection was last told a send is waiting
+	// (sendFirst), so that it is told at most once every sendFirstEvery. It
+	// belongs to the session's mu.
+	toldSendAt time.Time
 	// catchUp is what a viewer that fell behind is sent instead of being
 	// closed with 1013. depth is how many frames of output it may fall
 	// behind by, and queued how many of them are in its queue. behind is it
@@ -777,18 +784,21 @@ func (ts *termSession) typeInto(tc *termConn, p []byte) error {
 		return errNotHolding
 	}
 	h, held := ts.back.(*heldTerm)
-	if held && !interrupts(p) {
+	if held {
 		// A send waiting to be typed was let in under the keyboard's rule,
 		// and holds the session for its person until it is in: somebody
 		// else's keystrokes would be typed into the middle of it, and its
-		// Enter would submit them. Esc and Ctrl-C alone are let through,
+		// Enter would submit them. One Esc or one Ctrl-C is let through,
 		// because a person must always be able to stop a turn, and the send
 		// goes on waiting.
-		if by, seq, ok := h.sendingFor(tc.person, tc.toldSend); ok {
-			told := seq == tc.toldSend
-			tc.toldSend = seq
+		if by, ok := h.sendingFor(tc.person, interrupts(p)); ok {
+			now := ts.s.now()
+			say := tc.toldSendAt.IsZero() || now.Sub(tc.toldSendAt) >= sendFirstEvery
+			if say {
+				tc.toldSendAt = now
+			}
 			ts.mu.Unlock()
-			if told {
+			if !say {
 				return errSendTold
 			}
 			return fmt.Errorf(sendFirst, by)
@@ -806,17 +816,14 @@ func (ts *termSession) typeInto(tc *termConn, p []byte) error {
 	return back.typeInto(p)
 }
 
-// interrupts reports whether a frame is nothing but Esc and Ctrl-C: somebody
-// stopping a turn, which a waiting send does not hold the session against.
-// An arrow key or history recall begins with Esc but carries more, and
-// Ctrl-D may end the CLI, so neither is one.
+// interrupts reports whether a frame is one Esc or one Ctrl-C and nothing
+// else: somebody stopping a turn, which a waiting send lets through once.
+// Two of them may do more than stop it — a second Ctrl-C quits Claude Code,
+// and a second Esc opens its rewind picker — an arrow key or history recall
+// begins with Esc but carries more, and Ctrl-D may end the CLI, so none of
+// those is one.
 func interrupts(p []byte) bool {
-	for _, b := range p {
-		if b != 0x1b && b != 0x03 {
-			return false
-		}
-	}
-	return len(p) > 0
+	return len(p) == 1 && (p[0] == 0x1b || p[0] == 0x03)
 }
 
 // resizeTo is the other thing only the holder may do: the size is the
