@@ -128,10 +128,25 @@ func (p codexProvider) Launch(a *Account, home string) (*Command, error) {
 	if home == "" {
 		return nil, errors.New("this provider keeps its credentials in a file and needs a private home directory")
 	}
-	adoptCodexFS(a, os.DirFS(home))
+	// One read answers both questions below, so nothing the CLI writes
+	// between them can be lost to rota's own write.
+	doc, found := readCodexAuth(os.DirFS(home))
+	if found {
+		adoptCodex(a, doc)
+	}
 	cmd, files, err := p.Plan(context.Background(), a, home)
 	if err != nil {
 		return nil, err
+	}
+	// A file that already holds this very login is left as it is, and is
+	// rota's staging as much as one it wrote. Writing it again would change
+	// nothing rota keeps, and would drop what Codex adds to the file; and a
+	// daemon Codex left running in the home may be rotating it at that
+	// moment, so the write would put back a refresh token the daemon has just
+	// spent.
+	if found && doc.holds(a) {
+		a.Staged = fingerprint(a.Token.Refresh)
+		return cmd, nil
 	}
 	for _, f := range files {
 		if err := stageRaw(a, filepath.Join(home, f.Path), f); err != nil {
@@ -190,20 +205,44 @@ func (p codexProvider) Plan(ctx context.Context, a *Account, home string) (*Comm
 	}, []StagedFile{{Path: "auth.json", Mode: 0o600, Content: raw}}, nil
 }
 
-// adoptCodex pulls a token the CLI rotated back into the account. A file
-// for a different ChatGPT account is never adopted.
+// codexAuth is what rota reads of the CLI's auth.json: the fields it writes.
+// The two fields beside the tokens are read as anything at all, so one of an
+// unexpected shape cannot keep a rotated token from being adopted.
+type codexAuth struct {
+	AuthMode any `json:"auth_mode"`
+	APIKey   any `json:"OPENAI_API_KEY"`
+	Tokens   struct {
+		IDToken      string `json:"id_token"`
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		AccountID    string `json:"account_id"`
+	} `json:"tokens"`
+}
+
+func readCodexAuth(fsys fs.FS) (codexAuth, bool) {
+	var doc codexAuth
+	return doc, readJSONFS(fsys, "auth.json", &doc)
+}
+
+// holds reports whether the file already says everything Plan would write
+// for the account, last_refresh aside.
+func (doc codexAuth) holds(a *Account) bool {
+	t := doc.Tokens
+	return doc.AuthMode == "chatgpt" && (doc.APIKey == nil || doc.APIKey == "") &&
+		t.RefreshToken != "" && t.RefreshToken == a.Token.Refresh && t.AccessToken == a.Token.Access &&
+		t.IDToken == a.Extra["id_token"] && t.AccountID == a.Extra["account_id"]
+}
+
+// adoptCodexFS pulls a token the CLI rotated back into the account.
 func adoptCodexFS(a *Account, fsys fs.FS) {
-	var doc struct {
-		Tokens struct {
-			IDToken      string `json:"id_token"`
-			AccessToken  string `json:"access_token"`
-			RefreshToken string `json:"refresh_token"`
-			AccountID    string `json:"account_id"`
-		} `json:"tokens"`
+	if doc, ok := readCodexAuth(fsys); ok {
+		adoptCodex(a, doc)
 	}
-	if !readJSONFS(fsys, "auth.json", &doc) {
-		return
-	}
+}
+
+// adoptCodex is adoptCodexFS on a file already read. A file for a different
+// ChatGPT account is never adopted.
+func adoptCodex(a *Account, doc codexAuth) {
 	tok := doc.Tokens
 	if tok.AccountID != "" && a.Extra["account_id"] != "" && tok.AccountID != a.Extra["account_id"] {
 		return
