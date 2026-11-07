@@ -98,7 +98,8 @@ const (
 // the cookie to it.
 //
 // local is LocalHandler's principal, as for guard: with one, no credential
-// is looked for, and the role table alone decides.
+// and no Origin is looked for, whoever the principal is, and the role table
+// alone decides.
 func (s *Server) wsAuth(pattern string, local *Principal, next http.HandlerFunc) http.HandlerFunc {
 	need := needs(pattern)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -110,7 +111,7 @@ func (s *Server) wsAuth(pattern string, local *Principal, next http.HandlerFunc)
 			s.refuseToken(w, r, guessed)
 			return
 		}
-		if !originFree(p) && !sameOrigin(r) {
+		if local == nil && !originFree(p) && !sameOrigin(r) {
 			s.log.Warn("refused a cross-site socket", "name", p.Name, "role", p.Role,
 				"path", r.URL.Path, "ip", clientIP(r))
 			fail(w, http.StatusForbidden, crossSiteNo)

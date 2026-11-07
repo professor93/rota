@@ -126,6 +126,33 @@ func TestLocalNeedsNoTokenAndNoOrigin(t *testing.T) {
 	}
 }
 
+// The Origin rule is skipped by LocalHandler itself, not by who its
+// principal is: an SSH server will mount it with a user, and that user's
+// request, with a cross-site Origin or none at all, is let through to the
+// route exactly as local's is. Handler still holds a user to the rule.
+func TestLocalHandlerNeverReadsOriginForAnyPrincipal(t *testing.T) {
+	s := apiOnly(t)
+	user := &Principal{Name: "alice", Role: RoleControl, Via: "user"}
+	h := s.LocalHandler(user)
+	for _, origin := range []string{"https://evil.example", ""} {
+		var headers []string
+		if origin != "" {
+			headers = []string{"Origin", origin}
+		}
+		if code, body := ask(h, "POST", "/v1/terminals", "{", headers...); code != http.StatusBadRequest {
+			t.Errorf("a user's POST through LocalHandler with Origin %q answers %d %s, want the route's own 400", origin, code, body)
+		}
+		code, body := ask(h, "GET", "/v1/terminals/0123456789abcdef/ws", "", headers...)
+		if code != http.StatusNotFound || !strings.HasPrefix(errorOf(body), "no terminal") {
+			t.Errorf("a user's socket through LocalHandler with Origin %q answers %d %s, want the route's own 404", origin, code, body)
+		}
+	}
+	code, body := ask(h, "GET", "/v1/session", "")
+	if code != http.StatusOK || !strings.Contains(body, `"via":"user"`) {
+		t.Errorf("GET /v1/session through LocalHandler as a user says %d %s", code, body)
+	}
+}
+
 // The watch principal reads and changes nothing, whatever it carries: even
 // the server's own token on the request does not make it control.
 func TestLocalWatchCannotChange(t *testing.T) {
