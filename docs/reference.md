@@ -905,10 +905,11 @@ that opens a TCP port wants `auth.token_file` or `[[users]]` in
 `server.toml`; the control socket needs no token. The systemd unit has
 `KillMode=process` and the launchd agent `AbandonProcessGroup`, so stopping
 either stops the daemon and never its sessions, and each restarts a daemon
-that fails, five seconds later under systemd. The agent names no
-`ProcessType`, so launchd runs it, and every session it holds, as it runs a
-daemon started by hand, rather than throttling their CPU and I/O as it does
-a `Background` one's. On Linux, where the user does not linger, it adds
+that fails, five seconds later under systemd. The agent's `ProcessType` is
+`Interactive` because with none, launchd's default, the daemon and every
+session it holds were measured at priority 20 under a ceiling of 20, where
+`Interactive` runs them at 31 under 63, as a daemon started by hand does.
+On Linux, where the user does not linger, it adds
 *run "loginctl enable-linger <user>" so the daemon starts at boot and
 outlives your login*: without it, systemd starts a user's units at login and
 stops them at logout.
@@ -934,12 +935,14 @@ again*.
 `rota serve uninstall` runs `systemctl --user disable --now` on the unit,
 deletes it and reloads, or runs `launchctl bootout` and deletes the agent.
 The file is deleted whatever the supervisor says, and what it said is the
-error; on Linux, a `disable` that fails has the link `enable` made in
-`default.target.wants` deleted too, so nothing is left that names a unit
-that is gone. Every session goes on running, for the next daemon to take
-up: it says `rota daemon uninstalled for <store>; N sessions keep running`.
-With no unit installed it says `no rota daemon is installed for <store>`,
-asks the supervisor nothing, and exits `0`.
+error, except a `launchctl bootout` that answers the agent is not loaded —
+exit status 3, *No such process*, as after a bootout by hand — which is
+what uninstall asks for; on Linux, a `disable` that fails has the link
+`enable` made in `default.target.wants` deleted too, so nothing is left
+that names a unit that is gone. Every session goes on running, for the
+next daemon to take up: it says `rota daemon uninstalled for <store>; N
+sessions keep running`. With no unit installed it says `no rota daemon is
+installed for <store>`, asks the supervisor nothing, and exits `0`.
 
 Like `rota serve stop`, `install` and `uninstall` are refused inside a held
 session, since either may stop the daemon: *rota serve install is refused

@@ -108,6 +108,7 @@ func TestThePlistKeepsSessions(t *testing.T) {
 		"<key>AbandonProcessGroup</key>\n\t<true/>",
 		"<key>RunAtLoad</key>\n\t<true/>",
 		"<key>SuccessfulExit</key>\n\t\t<false/>",
+		"<key>ProcessType</key>\n\t<string>Interactive</string>",
 		"<key>StandardOutPath</key>\n\t<string>/dev/null</string>",
 		"<key>StandardErrorPath</key>\n\t<string>/dev/null</string>",
 	} {
@@ -118,10 +119,10 @@ func TestThePlistKeepsSessions(t *testing.T) {
 	if strings.Contains(launchdPlist("l", "/u/rota", "/s", []string{"PATH=/p"}), "CLAUDE_CONFIG_DIR") {
 		t.Error("config dir written while unset")
 	}
-	// launchd's default, Standard: a Background agent, and every held CLI
-	// it starts, would have its CPU and I/O throttled.
-	if strings.Contains(got, "ProcessType") {
-		t.Error("the agent names a ProcessType")
+	// Interactive, once: with none, the daemon and every held CLI ran at a
+	// lower priority than under a daemon started by hand.
+	if n := strings.Count(got, "<key>ProcessType</key>"); n != 1 {
+		t.Errorf("the agent names a ProcessType %d times", n)
 	}
 }
 
