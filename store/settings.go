@@ -321,19 +321,28 @@ func resolveFrom(dir, path string) string {
 
 // readSmallFile reads a regular file of at most limit bytes, and nothing
 // else: a FIFO would block the launch on its open, and a device or a huge
-// file is not a settings file. The shape is checked before the open and again
-// on what was opened.
+// file is not a settings file. The shape is looked at before the open, so
+// that nothing else is opened at all, and checked again on what was opened
+// (openSmallFile).
 func readSmallFile(path string, limit int64) ([]byte, bool) {
-	small := func(fi os.FileInfo) bool { return fi.Mode().IsRegular() && fi.Size() <= limit }
-	if fi, err := os.Stat(path); err != nil || !small(fi) {
+	if fi, err := os.Stat(path); err != nil || !smallFile(fi, limit) {
 		return nil, false
 	}
-	f, err := os.Open(path)
+	return openSmallFile(path, limit)
+}
+
+// openSmallFile is readSmallFile on whatever is at path by the time it is
+// opened, which may no longer be what was looked at. The open does not wait
+// (noWait): a FIFO put there since opens at once, rather than when somebody
+// writes to it, and is refused like anything else that is not a regular file.
+// A regular file ignores the flag, and is read as it always was.
+func openSmallFile(path string, limit int64) ([]byte, bool) {
+	f, err := os.OpenFile(path, os.O_RDONLY|noWait, 0)
 	if err != nil {
 		return nil, false
 	}
 	defer f.Close()
-	if fi, err := f.Stat(); err != nil || !small(fi) {
+	if fi, err := f.Stat(); err != nil || !smallFile(fi, limit) {
 		return nil, false
 	}
 	raw, err := io.ReadAll(io.LimitReader(f, limit+1))
@@ -342,3 +351,6 @@ func readSmallFile(path string, limit int64) ([]byte, bool) {
 	}
 	return raw, true
 }
+
+// smallFile reports whether fi is a regular file of at most limit bytes.
+func smallFile(fi os.FileInfo, limit int64) bool { return fi.Mode().IsRegular() && fi.Size() <= limit }
