@@ -16,7 +16,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -84,7 +83,7 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 		from = fi.Size()
 	}
 
-	exe, err := os.Executable()
+	exe, err := invokedAs()
 	if err != nil {
 		return err
 	}
@@ -105,7 +104,14 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 	exited := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(exited) }()
 	pid := cmd.Process.Pid
-	for deadline := time.Now().Add(daemonReady); ; time.Sleep(50 * time.Millisecond) {
+	// One try at a time, none of which waits, and the whole bounded by
+	// daemonReady even should a try be slow: a try still out when the time
+	// is up is left to finish on its own.
+	deadline := time.NewTimer(daemonReady)
+	defer deadline.Stop()
+	for {
+		tried := make(chan *holdwire.Daemon, 1)
+		go func() { tried <- daemonAnswering(terminals) }()
 		select {
 		case <-exited:
 			if d, ok := daemonOf(terminals); ok {
@@ -116,28 +122,29 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 				return fmt.Errorf("the rota daemon did not start; the end of %s:\n  %s", logPath, strings.Join(lines, "\n  "))
 			}
 			return fmt.Errorf("the rota daemon did not start, and wrote nothing to %s", logPath)
-		default:
-		}
-		if d := daemonAnswering(terminals); d != nil && d.PID == pid {
-			line := fmt.Sprintf("rota daemon started for %s (pid %d); control socket %s", home, pid, sock)
-			if d.HTTP != "" {
-				line += "; http on " + d.HTTP
+		case d := <-tried:
+			if d != nil && d.PID == pid {
+				line := fmt.Sprintf("rota daemon started for %s (pid %d); control socket %s", home, pid, sock)
+				if d.HTTP != "" {
+					line += "; http on " + d.HTTP
+				}
+				fmt.Fprintln(c.out, line)
+				return nil
 			}
-			fmt.Fprintln(c.out, line)
-			return nil
-		}
-		if time.Now().After(deadline) {
+		case <-deadline.C:
 			return fmt.Errorf("the rota daemon (pid %d) has not answered on %s within %s; rota serve status says when it does, and %s what it is doing",
 				pid, sock, daemonReady, logPath)
 		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
-// daemonAnswering is the daemon serving the store, if one answers on its control
-// socket, as daemon.pid says once it has: whatever it records before it
-// listens is there by then.
+// daemonAnswering is the daemon serving the store, if one answers on its
+// control socket at once, as daemon.pid says once it has: whatever it
+// records before it listens is there by then. It does not wait for a
+// socket that is slow to answer; its caller tries again.
 func daemonAnswering(terminals string) *holdwire.Daemon {
-	c, err := rotaclient.Dial(terminals)
+	c, err := rotaclient.DialNow(terminals)
 	if err != nil || c.Health() != nil {
 		return nil
 	}
@@ -235,7 +242,7 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 		}
 		tok = hex.EncodeToString(b[:])
 	}
-	exe, err := os.Executable()
+	exe, err := invokedAs()
 	if err != nil {
 		return failed(err)
 	}
@@ -361,10 +368,19 @@ func daemonPort(cfg *api.Config, ctlOnly bool, listener api.Listener, srv *api.S
 /* ----------------------------------------------------------------- stop --- */
 
 // stopDaemon is `rota serve stop`, and with --all `rota serve stop --all`.
+// Neither is run from inside a held session, where it is most likely the
+// agent in one by mistake: the same rule, and the same guard against
+// accidents, as ctl.sock's watch-only one.
 func (c *cli) stopDaemon(all, yes bool) error {
 	home, terminals, err := daemonStore()
 	if err != nil {
 		return err
+	}
+	switch id, err := heldSessionOf(os.Getpid(), terminals); {
+	case err != nil:
+		return fmt.Errorf("rota serve stop cannot tell whether it is inside a held session (%v), so it is refused; run it from outside the session", err)
+	case id != "":
+		return fmt.Errorf("rota serve stop is refused inside held session %s; run it from outside the session", id)
 	}
 	if all {
 		return c.stopAll(home, terminals, yes)
@@ -498,47 +514,6 @@ func (c *cli) stopHolders(home, terminals string, yes bool) error {
 	}
 	fmt.Fprintf(c.out, "%s; %s ended\n", said, sessionsN(len(ids)))
 	return nil
-}
-
-// runningRecords is every held session whose holder is running, by its
-// lock: one this rota cannot read, and one still starting, as well.
-func runningRecords(terminals string) []holdwire.Record {
-	var out []holdwire.Record
-	for _, r := range holdwire.Scan(terminals) {
-		if r.Locked {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// waitEnded waits up to within for each session's lock to be let go of,
-// and says which are still held then.
-func waitEnded(terminals string, ids []string, within time.Duration) []string {
-	left := slices.Clone(ids)
-	for deadline := time.Now().Add(within); ; time.Sleep(50 * time.Millisecond) {
-		left = slices.DeleteFunc(left, func(id string) bool {
-			return !holdwire.Locked(holdwire.LockPath(holdwire.Dir(terminals, id)))
-		})
-		if len(left) == 0 || time.Now().After(deadline) {
-			return left
-		}
-	}
-}
-
-// notEnded is the error for sessions stop --all could not end: which they
-// are, and why where it was told.
-func notEnded(said string, asked int, left []string, why map[string]error) error {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%s; %s ended, and %s did not:", said, sessionsN(asked-len(left)), sessionsN(len(left)))
-	for _, id := range left {
-		if err := why[id]; err != nil {
-			fmt.Fprintf(&b, "\n  %s: %v", id, err)
-		} else {
-			fmt.Fprintf(&b, "\n  %s: still running", id)
-		}
-	}
-	return errors.New(b.String())
 }
 
 /* --------------------------------------------------------------- status --- */

@@ -347,7 +347,7 @@ Held sessions run on Linux and macOS:
 | `--foreground` | be the daemon in this process instead, as a supervisor runs it: it logs to its file and says nothing on stderr |
 | `--ctl-only` | serve the control socket alone, whatever `server.toml` says about a port |
 | `--config <path>` | the file to read the rest of this from (default `<store dir>/server.toml`) |
-| `rota serve stop` | stop the daemon; every session it holds goes on running, for the next daemon to take up |
+| `rota serve stop` | stop the daemon; every session it holds goes on running, for the next daemon to take up. Refused, with or without `--all`, inside a held session |
 | `--all` | end every session as well, after asking `stop the rota daemon and end N sessions? [y/N]`; with no daemon running, end the sessions its holders still hold |
 | `--yes` | with `--all`, end them without asking; off a terminal `--all` needs it |
 | `rota serve status` | whether a daemon runs, its pid, version, control socket and port, and how many sessions are running and stopped; `--json` for the same as a document. Exits `0` when a daemon runs and `3` when none does |
@@ -801,9 +801,16 @@ running on its store, as one restarted would.
 A daemon serves the store it is started for, which is the one `serve stop`
 and `serve status` look at, so a `server.toml` whose `[store] dir` names
 another store is refused; start it with `ROTA_HOME` set to that one instead.
-The holders it starts are `rota serve hold` from the path this binary had
-when it started, links resolved, so a rota replaced in place starts new
-holders from the new binary.
+A daemon runs in `/`, so a relative `[runs] roots` entry would name a folder
+under `/`: in daemon mode one is refused, *runs.roots: "work" is relative; a
+daemon runs in /, so every root must be absolute in daemon mode*.
+
+The holders it starts are `rota serve hold` from the path rota was started
+by — links kept as typed, found on `PATH` as the shell found it — resolved
+once at start. A rota replaced in place at that resolved path starts new
+holders from the new binary. An upgrade that removes it, as a versioned
+install does when it moves its link on, is followed: the path rota was
+started by is resolved again, and new holders come from where it leads now.
 
 **While it runs** it logs to `<store>/daemon.log`, or to `[server] log_file`,
 rotated as *[A log file instead of the
@@ -813,7 +820,12 @@ before it says it has started, and the warnings foreground serve prints for
 a port go into the log. `daemon.pid` names it, and the port it serves on,
 for `serve status` to read. A hangup does not stop it.
 
-**Stopping.** `rota serve stop` sends the daemon SIGTERM — only while its pid
+**Stopping.** Run from inside a held session — by the agent in one, or by
+anything it started — `rota serve stop` is refused, with or without `--all`:
+*rota serve stop is refused inside held session <id>; run it from outside
+the session*. It tells by the same rule the control socket lets such a caller
+only watch by, and is the same guard against accidents, not a wall.
+Elsewhere it sends the daemon SIGTERM — only while its pid
 is still the process `daemon.pid` names — and waits up to fifteen seconds for
 it to let go of the store. Within ten seconds the daemon closes its port and
 its control socket, giving what they are serving all but the last second to

@@ -65,6 +65,34 @@ func TestDialNeverTrustsAFailedConnect(t *testing.T) {
 	}
 }
 
+// DialNow is Dial without the wait: a held lock whose socket does not
+// accept is the daemon not answering at once, a free one is no daemon, and
+// one that answers is dialled.
+func TestDialNowDoesNotWait(t *testing.T) {
+	dir := terminals(t)
+	release, err := holdwire.ClaimDaemon(dir, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	began := time.Now()
+	_, err = DialNow(dir)
+	want := fmt.Sprintf("the rota daemon (pid %d) is not answering on %s", os.Getpid(), holdwire.CtlSock(dir))
+	if err == nil || err.Error() != want || time.Since(began) > time.Second {
+		t.Fatalf("DialNow to a silent daemon: %v after %s, want %q at once", err, time.Since(began), want)
+	}
+	release()
+	if _, err := DialNow(dir); !errors.Is(err, ErrNoDaemon) {
+		t.Fatalf("DialNow with no claim: %v", err)
+	}
+	c, err := DialNow(daemon(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Health(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // daemon stands in for one: it holds the claim and answers on ctl.sock with
 // the description documents a daemon writes, one session running and one
 // stopped, and refuses to stop the stopped one the way a daemon does.
