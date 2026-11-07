@@ -126,6 +126,42 @@ func TestAStaleDaemonPIDNamesNobody(t *testing.T) {
 	}
 }
 
+// The daemon says where else it serves, in its own record and nowhere else:
+// before its claim, or after it is let go of, nothing is written.
+func TestOnlyTheClaimRecordsItsHTTP(t *testing.T) {
+	terminals := t.TempDir()
+	if err := RecordHTTP(terminals, "127.0.0.1:8787"); err == nil {
+		t.Fatal("an address was recorded with no claim")
+	}
+	release, err := ClaimDaemon(terminals, "1.4.0-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := RunningDaemon(terminals)
+	if before.HTTP != "" {
+		t.Fatalf("a new claim serves http on %q", before.HTTP)
+	}
+	if err := RecordHTTP(terminals, "127.0.0.1:8787"); err != nil {
+		t.Fatal(err)
+	}
+	d, ok := RunningDaemon(terminals)
+	if want := *before; !ok || d.HTTP != "127.0.0.1:8787" ||
+		d.PID != want.PID || d.Version != want.Version || !d.Started.Equal(want.Started) ||
+		!d.ProcStart.Equal(want.ProcStart) || d.BootID != want.BootID {
+		t.Fatalf("daemon.pid became %+v from %+v", d, before)
+	}
+	if fi, err := os.Stat(DaemonPIDFile(terminals)); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("daemon.pid: %v %v", fi, err)
+	}
+	release()
+	if err := RecordHTTP(terminals, "127.0.0.1:8787"); err == nil {
+		t.Fatal("an address was recorded after the claim was let go of")
+	}
+	if _, err := os.Stat(DaemonPIDFile(terminals)); !os.IsNotExist(err) {
+		t.Fatalf("a refused record wrote daemon.pid: %v", err)
+	}
+}
+
 // A pid is the process that was recorded only while its start time and the
 // boot it runs in both still match: anything else is a pid reused.
 func TestSameProcessIsAboutThisProcess(t *testing.T) {

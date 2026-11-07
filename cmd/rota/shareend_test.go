@@ -47,6 +47,8 @@ type peer struct {
 	mu  sync.Mutex
 	out strings.Builder
 	doc []map[string]any
+	// bye is the close frame's body once one has come: its code and why.
+	bye []byte
 }
 
 func attachTo(t *testing.T, base, path, token string) *peer {
@@ -59,11 +61,19 @@ func attachTo(t *testing.T, base, path, token string) *peer {
 	if err != nil {
 		t.Fatal(err)
 	}
+	return attachOver(t, conn, u.Host, path, "Authorization: Bearer "+token+"\r\n")
+}
+
+// attachOver is attachTo on a connection already made — a control socket's,
+// which needs no credential — with header lines of its own, each ending in
+// CRLF.
+func attachOver(t *testing.T, conn net.Conn, host, path, header string) *peer {
+	t.Helper()
 	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
-	req := "GET " + path + " HTTP/1.1\r\nHost: " + u.Host + "\r\n" +
+	req := "GET " + path + " HTTP/1.1\r\nHost: " + host + "\r\n" +
 		"Upgrade: websocket\r\nConnection: Upgrade\r\n" +
 		"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
-		"Authorization: Bearer " + token + "\r\n\r\n"
+		header + "\r\n"
 	if _, err := conn.Write([]byte(req)); err != nil {
 		t.Fatal(err)
 	}
@@ -118,6 +128,7 @@ func (p *peer) read() {
 		case 0x2:
 			p.out.Write(body)
 		case 0x8:
+			p.bye = body
 			p.mu.Unlock()
 			return
 		}
@@ -144,6 +155,21 @@ func (p *peer) send(op byte, payload []byte) {
 	if _, err := p.conn.Write(append(out, body...)); err != nil {
 		p.t.Fatalf("writing a frame: %v", err)
 	}
+}
+
+// closed waits for the close frame and says its code and why.
+func (p *peer) closed(within time.Duration) (code uint16, why string) {
+	p.t.Helper()
+	for deadline := time.Now().Add(within); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		p.mu.Lock()
+		bye := p.bye
+		p.mu.Unlock()
+		if len(bye) >= 2 {
+			return binary.BigEndian.Uint16(bye), string(bye[2:])
+		}
+	}
+	p.t.Fatalf("no close frame came within %s", within)
+	return 0, ""
 }
 
 func (p *peer) printed() string {
