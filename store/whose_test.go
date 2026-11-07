@@ -198,6 +198,11 @@ func TestWhoseDirectoryIsThePersonsIsToldDownNotGuessed(t *testing.T) {
 			if got := PersonalClaudeDir(); got != c.want {
 				t.Fatalf("the person's directory: %q, want %q", got, c.want)
 			}
+			// Named exactly where it is told down by name: a directory a
+			// process of its own may be handed as CLAUDE_CONFIG_DIR.
+			if dir, named := PersonalClaudeWorld(); dir != c.want || named != (c.handedDown != "") {
+				t.Fatalf("PersonalClaudeWorld: %q named %v, want %q named %v", dir, named, c.want, c.handedDown != "")
+			}
 			s := openTemp(t)
 			a := livingClaude(s, "u1")
 			env, err := launchEnv(t, s, a)

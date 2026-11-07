@@ -100,6 +100,13 @@ func PersonalClaudeDir() string {
 	return dir
 }
 
+// PersonalClaudeWorld is personalWorld for whoever hands the person's
+// directory on to a process of its own: the directory, and whether a
+// variable named it. When none did it is the default, which is better left
+// unnamed — Claude Code reads .claude.json inside a directory a variable
+// names, and beside the home directory otherwise.
+func PersonalClaudeWorld() (dir string, named bool) { return personalWorld() }
+
 // personalDir is personalWorld, with the one thing only a store can add: a
 // directory inside its own homes is an account's, never the person's.
 func (s *Store) personalDir() (dir string, explicit bool) {
