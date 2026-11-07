@@ -163,10 +163,13 @@ var diskLoginPlatform = runtime.GOOS != "darwin"
 // claudeStored reports whether this launch takes the stored route: there is
 // a home to keep the login in, the login is one Claude Code can keep — a
 // refresh token and an expiry, which is what makes it a login rather than a
-// bare token — and it is not dead.
+// bare token — and it is not dead. It needs an access token too: a login
+// written without one would be Claude Code's to refresh, with a refresh token
+// rota also holds, so an account held as a refresh token alone stays off this
+// route until it has been refreshed.
 func claudeStored(a *Account, home string) bool {
 	return storedLoginPlatform && home != "" && !a.Dead && !a.APIKey() &&
-		a.Token.Refresh != "" && a.Token.ExpiresAt != 0
+		a.Token.Access != "" && a.Token.Refresh != "" && a.Token.ExpiresAt != 0
 }
 
 // claudeEnvCommand is the environment route: the token in
@@ -571,11 +574,12 @@ func loadClaudeLogin(fsys fs.FS) (claudeLogin, bool, error) {
 // know is left out rather than written empty: an empty refresh token is how
 // Claude Code marks a dead login, and an empty plan is one it would believe.
 func claudeCredentialDoc(a *Account) ([]byte, error) {
-	if a.Token.Refresh == "" || a.Token.ExpiresAt == 0 {
-		// Claude Code would read either absence as a token good for
-		// inference only and never refresh it. claudeStored keeps such an
+	if a.Token.Access == "" || a.Token.Refresh == "" || a.Token.ExpiresAt == 0 {
+		// Claude Code would read a missing refresh token or expiry as a token
+		// good for inference only and never refresh it, and a missing access
+		// token is not something to write at all. claudeStored keeps such an
 		// account off this route, so reaching here is a caller's mistake.
-		return nil, failf(ErrInvalidRequest, "%s: a stored login needs a refresh token and an expiry", a)
+		return nil, failf(ErrInvalidRequest, "%s: a stored login needs an access token, a refresh token and an expiry", a)
 	}
 	scopes := a.Token.Scopes
 	if len(scopes) == 0 {

@@ -714,9 +714,18 @@ func (s *Store) loginInHome(a *rota.Account) bool {
 
 // keepsLogin reports whether a launch keeps this account's login in its home
 // now: rota keeps it there at all, and lib takes the stored route for it —
-// a refresh token and an expiry, and not dead.
+// an access token, a refresh token and an expiry, and not dead.
 func (s *Store) keepsLogin(a *rota.Account) bool {
 	return s.loginInHome(a) && rota.StoresLogin(a, s.Home(a))
+}
+
+// unrefreshed reports whether rota holds a living account's login as a
+// refresh token alone: no access token to run on, and so no stored route,
+// until a refresh gives it one. Such a login is refreshed the way an expired
+// one kept in a home is, by renew in a quiet home, and never past the checks
+// that keep rota from presenting a refresh token a live Claude Code may hold.
+func unrefreshed(a *rota.Account) bool {
+	return !a.Dead && a.Token.Access == "" && a.Token.Refresh != ""
 }
 
 // whyNoLogin says why an account does not run on a login of its own in its
@@ -734,6 +743,9 @@ func (s *Store) whyNoLogin(a *rota.Account) string {
 		return "its home " + home + " is not a plain ASCII path, so the keychain item Claude Code would keep its login in cannot be found"
 	case a.Dead:
 		return "its login is dead"
+	case unrefreshed(a):
+		return "rota holds its login as a refresh token alone until it is refreshed, which its next run or " +
+			"`rota list` does while nothing runs in its home"
 	case !rota.StoresLogin(a, home):
 		return "its login has no refresh token or no expiry"
 	}
@@ -1379,9 +1391,12 @@ func (h *claudeHome) launch(ctx context.Context, mirror bool) (*rota.Command, er
 		return h.envRun(ctx)
 	case h.hold != "":
 		return h.launchHeld()
-	case !rota.StoresLogin(a, h.home):
+	case !rota.StoresLogin(a, h.home) && !unrefreshed(a):
 		return h.launchOnToken(ctx)
 	}
+	// A login held as a refresh token alone goes the stored way too: it is
+	// refreshed there exactly when an expired one would be, in a quiet home,
+	// and written in before the launch, which then takes the stored route on it.
 	return h.launchStored(ctx)
 }
 
@@ -1496,6 +1511,20 @@ func (h *claudeHome) launchStored(ctx context.Context) (*rota.Command, error) {
 	if h.hold != "" {
 		return h.launchHeld() // a refused refresh found a login it could not place
 	}
+	if !rota.StoresLogin(a, h.home) {
+		if a.Token.Access != "" {
+			// Refreshed into a token with no expiry, which runs on the token
+			// route as it always has.
+			return h.launchOnToken(ctx)
+		}
+		// Still a refresh token alone: something runs here, so nothing may
+		// refresh it, and the login the home holds is joined as it is.
+		if !a.StagedCurrent() {
+			h.sayAnotherLogin()
+		}
+		h.remember(routeStored)
+		return h.s.mirrored(a, rota.JoinHome(a, h.home), h.quiet())
+	}
 	cmd, files, err := rota.StagePlan(ctx, a, h.home)
 	if err != nil {
 		return nil, err
@@ -1506,14 +1535,20 @@ func (h *claudeHome) launchStored(ctx context.Context) (*rota.Command, error) {
 			return nil, err
 		}
 	case len(files) > 0:
-		h.warn(fmt.Sprintf("%s: Claude Code is running in its home (%s) on another login than the account's current one; "+
-			"the account's login takes over when those sessions end, or at once in any of them where you run /login",
-			a, strings.Join(h.live(), ", ")))
+		h.sayAnotherLogin()
 	case h.quiet():
 		h.tidy()
 	}
 	h.remember(routeStored)
 	return h.s.mirrored(a, cmd, h.quiet())
+}
+
+// sayAnotherLogin is the one line a launch owes the person when it joins a
+// login in the home that is not the account's current one.
+func (h *claudeHome) sayAnotherLogin() {
+	h.warn(fmt.Sprintf("%s: Claude Code is running in its home (%s) on another login than the account's current one; "+
+		"the account's login takes over when those sessions end, or at once in any of them where you run /login",
+		h.a, strings.Join(h.live(), ", ")))
 }
 
 // launchBeside launches on a token while Claude Code from before runs in a

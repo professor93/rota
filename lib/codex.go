@@ -166,11 +166,17 @@ func (p codexProvider) Plan(ctx context.Context, a *Account, home string) (*Comm
 		return nil, nil, errors.New("codex keeps its credentials in CODEX_HOME and needs a private home")
 	}
 	// The CLI refuses an auth.json without an id_token, and accounts stored
-	// before rota captured it have none. One refresh grant returns a fresh
-	// one, so such an account repairs itself instead of demanding a login.
-	if a.Extra["id_token"] == "" {
+	// before rota captured it have none; an account held as a refresh token
+	// alone has no access token to write. One refresh grant returns both, so
+	// such an account repairs itself instead of demanding a login, and no
+	// auth.json is ever written with an empty access token.
+	if a.Extra["id_token"] == "" || a.Token.Access == "" {
 		if a.Token.Refresh == "" {
-			return nil, nil, failf(ErrReauth, "%s: no id_token and no refresh token", a)
+			missing := "id_token"
+			if a.Extra["id_token"] != "" {
+				missing = "access token"
+			}
+			return nil, nil, failf(ErrReauth, "%s: no %s and no refresh token", a, missing)
 		}
 		t, err := p.Refresh(ctx, a)
 		switch {

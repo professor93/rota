@@ -29,16 +29,24 @@ func refreshOnlyClaude(s *Store, uuid string) *rota.Account {
 }
 
 // noEmptyAccessToken fails when the home's credential store holds a login
-// whose access token is empty.
+// whose access token is empty. A store with no login in it holds no such thing.
 func noEmptyAccessToken(t *testing.T, home string) {
 	t.Helper()
 	_, doc := readLogin(t, home)
-	if doc == nil {
+	l, ok := doc["claudeAiOauth"].(map[string]any)
+	if !ok {
 		return
 	}
-	if l, _ := doc["claudeAiOauth"].(map[string]any); l["accessToken"] == "" || l["accessToken"] == nil {
+	if access, _ := l["accessToken"].(string); access == "" {
 		t.Fatalf("a login with an empty access token was written into the home: %v", doc)
 	}
+}
+
+// accessIn is the access token of the login a credential store holds.
+func accessIn(doc map[string]any) string {
+	l, _ := doc["claudeAiOauth"].(map[string]any)
+	access, _ := l["accessToken"].(string)
+	return access
 }
 
 // tokenVars is what of an environment hands Claude Code a token, for a
@@ -48,34 +56,153 @@ func tokenVars(env []string) []string {
 }
 
 // A claude account held as a refresh token alone is refreshed before its
-// first run, the refresh saved before anything starts, and the run goes on
-// the access token the refresh gave it. That first run is on a token, since
-// the account had no expiry to take its stored route by when the route was
-// chosen; the next one takes it, and the home then holds the refreshed login.
-// No login with an empty access token is ever written into the home.
+// first run in its quiet home, the way an expired login there is: saved first,
+// written into the home after, and the run takes the stored route on it, as
+// every login does. A second run while the first one's window is open joins
+// that login, with no refresh and no word of Claude Code from before. No login
+// with an empty access token is ever written into the home.
 func TestARefreshOnlyClaudeAccountIsRefreshedBeforeItRuns(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) { f.refresh = refreshesTo("A-new", "R-new") })
+	s, ob := orderedStore(t)
+	words := said(s)
+	a := refreshOnlyClaude(s, "u1")
+	ob.watch(s, a, "R-new")
+
+	env, err := launchEnv(t, s, a)
+	if err != nil || hasVar(env, "CLAUDE_CODE_OAUTH_TOKEN") || f.refreshes.Load() != 1 {
+		t.Fatalf("refreshed once, and run on its stored login: %v %d %q", err, f.refreshes.Load(), tokenVars(env))
+	}
+	if got := configDirs(env); len(got) != 1 || got[0] != s.Home(a) || a.Extra[routeKey] != routeStored {
+		t.Fatalf("pointed at its home, the stored route remembered: %v %q", got, a.Extra[routeKey])
+	}
+	ob.savedThenWritten(t)
+	if r, doc := readLogin(t, s.Home(a)); r != "R-new" || accessIn(doc) != "A-new" {
+		t.Fatalf("the home holds the refreshed login: %v", doc)
+	}
+
+	alive(t, s.Home(a), "sessions/1.json", os.Getpid()) // the first run's window
+	env, err = launchEnv(t, s, a)
+	if err != nil || hasVar(env, "CLAUDE_CODE_OAUTH_TOKEN") || f.refreshes.Load() != 1 {
+		t.Fatalf("the next run joins that login, with no refresh: %v %d %q", err, f.refreshes.Load(), tokenVars(env))
+	}
+	if slices.ContainsFunc(*words, func(w string) bool { return strings.Contains(w, "from before") }) {
+		t.Fatalf("nothing in the home is from before: %q", *words)
+	}
+	noEmptyAccessToken(t, s.Home(a))
+}
+
+// While anything of Claude Code's that may hold its refresh token runs in its
+// home, a claude account held as a refresh token alone is refreshed by
+// nothing, exactly as an expired login there is not: not by a run, a hermetic
+// run, a listing or the server's sweep, and nothing is written into the home.
+// A home holding the account's own refresh token is joined as it is; one that
+// shows no login with a window alive on the stored route, or that cannot be
+// read, refuses the run as busy; and so does a home Claude Code blanked.
+func TestARefreshOnlyClaudeAccountIsNotRefreshedWhileItsHomeMayHoldItsToken(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) { f.refresh = refreshesTo("A-new", "R-new") })
+	hermetic := func(s *Store, a *rota.Account) error {
+		_, release, err := s.prepare(context.Background(), a, false)
+		if err == nil {
+			release()
+		}
+		return err
+	}
+	// untouched lists and sweeps the account too, and finds nothing presented,
+	// nothing taken and nothing written.
+	untouched := func(t *testing.T, s *Store, a *rota.Account, store string) {
+		t.Helper()
+		s.Refresh(context.Background(), true, a)
+		s.Maintain(context.Background())
+		if f.refreshes.Load() != 0 || a.Token.Access != "" || a.Token.Refresh != "R-u1" {
+			t.Fatalf("nothing presented its refresh token: %d %+v", f.refreshes.Load(), a.Token)
+		}
+		if got := readFile(filepath.Join(s.Home(a), ".credentials.json")); got != store {
+			t.Fatalf("nothing written into the home: %q", got)
+		}
+	}
+	busy := func(t *testing.T, s *Store, a *rota.Account) {
+		t.Helper()
+		if _, err := launchEnv(t, s, a); !errors.Is(err, rota.ErrBusy) {
+			t.Fatalf("a run is refused as busy: %v", err)
+		}
+		if err := hermetic(s, a); !errors.Is(err, rota.ErrBusy) {
+			t.Fatalf("a hermetic run too: %v", err)
+		}
+	}
+
+	t.Run("in the hold", func(t *testing.T) {
+		f.refreshes.Store(0)
+		s := openTemp(t)
+		a := refreshOnlyClaude(s, "u1")
+		torn := `{"claudeAiOauth":{"refreshToken":"R-cc"`
+		writeFile(t, filepath.Join(s.Home(a), ".credentials.json"), torn)
+		alive(t, s.Home(a), "sessions/1.json", os.Getpid())
+		busy(t, s, a)
+		untouched(t, s, a, torn)
+	})
+	t.Run("a window on its stored route and no login in the home", func(t *testing.T) {
+		f.refreshes.Store(0)
+		s := openTemp(t)
+		a := refreshOnlyClaude(s, "u1")
+		a.Extra = map[string]string{routeKey: routeStored}
+		alive(t, s.Home(a), "sessions/1.json", os.Getpid())
+		busy(t, s, a)
+		untouched(t, s, a, "")
+	})
+	t.Run("a Claude Code holding its own refresh token", func(t *testing.T) {
+		f.refreshes.Store(0)
+		s := openTemp(t)
+		a := refreshOnlyClaude(s, "u1")
+		held := `{"claudeAiOauth":{"accessToken":"","refreshToken":"R-u1","expiresAt":1999999999000,"scopes":["user:inference"]}}`
+		writeFile(t, filepath.Join(s.Home(a), ".credentials.json"), held)
+		alive(t, s.Home(a), "sessions/1.json", os.Getpid())
+		env, err := launchEnv(t, s, a)
+		if err != nil || hasVar(env, "CLAUDE_CODE_OAUTH_TOKEN") {
+			t.Fatalf("joined as it is: %v %q", err, tokenVars(env))
+		}
+		if got := configDirs(env); len(got) != 1 || got[0] != s.Home(a) {
+			t.Fatalf("pointed at its home: %v", got)
+		}
+		if err := hermetic(s, a); !errors.Is(err, rota.ErrBusy) {
+			t.Fatalf("a hermetic run cannot be handed a token while that runs: %v", err)
+		}
+		untouched(t, s, a, held)
+	})
+	t.Run("a home Claude Code blanked", func(t *testing.T) {
+		f.refreshes.Store(0)
+		s := openTemp(t)
+		a := refreshOnlyClaude(s, "u1")
+		a.StagedWritten()
+		blank := `{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}`
+		writeFile(t, filepath.Join(s.Home(a), ".credentials.json"), blank)
+		busy(t, s, a)
+		untouched(t, s, a, blank)
+	})
+}
+
+// Beside windows that were never on its stored login and hold none, the
+// account's refresh token lives in rota's store alone, so a run refreshes it
+// and goes on a token, exactly as it does for an expired login in that home.
+func TestARefreshOnlyClaudeAccountBesideWindowsThatHoldNoLoginRunsOnAToken(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
 	f := fakeAnthropic(t)
 	f.set(func(f *anthropic) { f.refresh = refreshesTo("A-new", "R-new") })
 	s := openTemp(t)
 	a := refreshOnlyClaude(s, "u1")
-
+	alive(t, s.Home(a), "sessions/1.json", os.Getpid())
 	env, err := launchEnv(t, s, a)
 	if err != nil || !slices.Contains(env, "CLAUDE_CODE_OAUTH_TOKEN=A-new") || f.refreshes.Load() != 1 {
 		t.Fatalf("refreshed once, and run on the new token: %v %d %q", err, f.refreshes.Load(), tokenVars(env))
 	}
-	if raw := readFile(filepath.Join(storeDir(s), "accounts.json")); !strings.Contains(raw, "A-new") || !strings.Contains(raw, "R-new") {
-		t.Fatalf("the refresh is on disk before the run: %s", raw)
-	}
-	noEmptyAccessToken(t, s.Home(a))
-
-	env, err = launchEnv(t, s, a)
-	if err != nil || hasVar(env, "CLAUDE_CODE_OAUTH_TOKEN") || f.refreshes.Load() != 1 {
-		t.Fatalf("the next run takes the stored route, with no refresh: %v %d %q", err, f.refreshes.Load(), tokenVars(env))
-	}
-	if r, doc := readLogin(t, s.Home(a)); r != "R-new" || doc["claudeAiOauth"].(map[string]any)["accessToken"] != "A-new" {
-		t.Fatalf("the home holds the refreshed login: %v", doc)
+	if _, err := os.Stat(filepath.Join(s.Home(a), ".credentials.json")); !os.IsNotExist(err) {
+		t.Fatal("nothing written into a home where something runs")
 	}
 }
 
@@ -159,24 +286,27 @@ func TestAListingRefreshesARefreshOnlyClaudeAccount(t *testing.T) {
 }
 
 // The server's sweep refreshes a claude account held as a refresh token alone
-// and saves it; the next launch writes the login into the home.
+// the way it refreshes an expired login in a quiet home: under the idle
+// claim, saved, and then written into the home.
 func TestMaintenanceRefreshesARefreshOnlyClaudeAccount(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
 	f := fakeAnthropic(t)
 	f.set(func(f *anthropic) { f.refresh = refreshesTo("A-new", "R-new") })
-	s := openTemp(t)
+	s, ob := orderedStore(t)
 	a := refreshOnlyClaude(s, "u1")
+	ob.watch(s, a, "R-new")
 	if errs := s.Maintain(context.Background()); len(errs) != 0 {
 		t.Fatal(errs)
 	}
 	if f.refreshes.Load() != 1 || a.Token.Access != "A-new" || a.Token.Refresh != "R-new" || a.Expired() {
 		t.Fatalf("refreshed: %d %+v", f.refreshes.Load(), a.Token)
 	}
-	if raw := readFile(filepath.Join(storeDir(s), "accounts.json")); !strings.Contains(raw, "A-new") {
-		t.Fatalf("and saved: %s", raw)
-	}
+	ob.savedThenWritten(t)
 	noEmptyAccessToken(t, s.Home(a))
+	if s.claimed(a) {
+		t.Fatal("the claim the sweep took is let go")
+	}
 }
 
 // A hermetic run of a claude account held as a refresh token alone refreshes
