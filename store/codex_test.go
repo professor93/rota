@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -252,4 +253,93 @@ func TestARunLeavesACodexLoginToItsDaemon(t *testing.T) {
 			t.Fatalf("%s: presented %v, token %q", c.what, e.grants(), a.Token.Refresh)
 		}
 	}
+}
+
+// Maintenance writes what it refreshed into the home through a launch, which
+// reads the home back first. The home still holds the token the refresh has
+// just spent, and that file must be known to be the store's own, or it would
+// be taken for a newer rotation and read back over the good token, to be
+// presented again at the next sweep. It is known when rota wrote it last
+// ("-" is a login newer than the file, which is never read back either). It
+// must also be known when rota's record of its own write says nothing — a
+// store from before rota kept one — or names an older write, as after a run
+// whose last save failed: reading back a file that holds exactly the store's
+// login now records it.
+func TestAHomeWriteAfterARefreshReadsNothingBack(t *testing.T) {
+	for _, staged := range []string{"", "0123abcd", "-"} {
+		e := codexRefreshes(t)
+		s := openTemp(t)
+		a := s.add("codex")
+		due := time.Now().Add(time.Minute)
+		a.Token = rota.Token{Access: codexJWT(due), Refresh: "r-old", ExpiresAt: due.UnixMilli()}
+		a.Extra = map[string]string{"id_token": "i", "account_id": "acct"}
+		if _, err := rota.Stage(a, s.Home(a)); err != nil {
+			t.Fatal(err)
+		}
+		a.Staged = staged
+		if err := s.Save(); err != nil {
+			t.Fatal(err)
+		}
+		for sweep := range 3 {
+			if errs := s.Maintain(context.Background()); len(errs) != 0 {
+				t.Fatalf("staged %q, sweep %d: %v (presented %v)", staged, sweep, errs, e.grants())
+			}
+		}
+		if got := e.grants(); !slices.Equal(got, []string{"r-old"}) || a.Dead || a.Token.Refresh != "r-rota-1" {
+			t.Fatalf("staged %q: presented %v, dead=%v, token %q", staged, got, a.Dead, a.Token.Refresh)
+		}
+		if got := homeHolds(t, s.Home(a)); got != "r-rota-1" {
+			t.Fatalf("staged %q: the home holds %q", staged, got)
+		}
+	}
+}
+
+// The refreshed token is on disk before the home is written, as a launch's
+// is: the token it replaced is spent, so nothing after the refresh — a write,
+// another account's network call, a process that ends — may stand between
+// the new one and the store.
+func TestMaintenanceSavesARefreshedCodexTokenBeforeWritingTheHome(t *testing.T) {
+	codexRefreshes(t)
+	var (
+		s          *Store
+		a          *rota.Account
+		homeAtSave []string
+	)
+	b := watchedSaves{memBackend: &memBackend{home: t.TempDir()}}
+	b.saved = func(blob []byte) {
+		if a != nil && strings.Contains(string(blob), "r-rota-1") {
+			homeAtSave = append(homeAtSave, homeHolds(t, s.Home(a)))
+		}
+	}
+	s, err := NewStore(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a = s.add("codex")
+	a.Token = rota.Token{Access: "a-old", Refresh: "r-old", ExpiresAt: 1}
+	a.Extra = map[string]string{"id_token": "i", "account_id": "acct"}
+	if _, err := rota.Stage(a, s.Home(a)); err != nil {
+		t.Fatal(err)
+	}
+	if errs := s.Maintain(context.Background()); len(errs) != 0 {
+		t.Fatalf("%v", errs)
+	}
+	if len(homeAtSave) == 0 || homeAtSave[0] != "r-old" {
+		t.Fatalf("the refreshed token is saved while the home still holds the spent one: the home held %v at those saves", homeAtSave)
+	}
+	if got := homeHolds(t, s.Home(a)); got != "r-rota-1" {
+		t.Fatalf("and then it goes into the home: %q", got)
+	}
+}
+
+// watchedSaves is a memBackend that shows each save to a test as it happens.
+type watchedSaves struct {
+	*memBackend
+	saved func([]byte)
+}
+
+func (w watchedSaves) Save(b []byte) error {
+	w.saved(b)
+	return w.memBackend.Save(b)
 }
