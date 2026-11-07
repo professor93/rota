@@ -18,8 +18,9 @@ import (
 // heldSendWaitMS before it types. From the moment it is let in until it is
 // answered it holds the session for its person: nobody else types into it
 // meanwhile (sendingFor), so the rule it was let in under is the rule it is
-// typed under. Esc and Ctrl-C alone are the exception, since a person must
-// always be able to stop a turn; they leave the send waiting.
+// typed under. One Esc or one Ctrl-C while it holds the session is the
+// exception, since a person must always be able to stop a turn; it leaves
+// the send waiting.
 
 var (
 	// heldSendWait is how long a send waits for its holder's answer. The
@@ -46,14 +47,17 @@ const (
 
 // sending is one send waiting for its answer, the link it went down, and
 // who sent it: person, as personOf has it, and the name to say. until is
-// when it stops holding the session whether or not it was answered.
+// when it stops holding the session whether or not it was answered, and
+// stopped is an Esc or Ctrl-C having gone through while it held it, after
+// which no other does. stopped belongs to the heldTerm's mu.
 type sending struct {
-	seq    uint64
-	answer chan holdwire.SentMsg
-	conn   *share.Conn
-	person string
-	name   string
-	until  time.Time
+	seq     uint64
+	answer  chan holdwire.SentMsg
+	conn    *share.Conn
+	person  string
+	name    string
+	until   time.Time
+	stopped bool
 }
 
 // hold is a send by person, made ready to go and holding the session for
@@ -115,27 +119,40 @@ func (h *heldTerm) sendText(ctx context.Context, x *sending, text string, force 
 	}
 }
 
-// sendingFor is a send waiting to be typed that is not person's, by who sent
-// it and its seq: "" is nobody's, so a send by a token holds the session
-// against everyone. told is the send a connection was last told of, and is
-// the one given while it still waits, so that a connection is told of a
-// send once rather than once a keystroke. ok is false when no other send is
-// waiting. A send past its until is let go of on the way.
-func (h *heldTerm) sendingFor(person string, told uint64) (name string, seq uint64, ok bool) {
+// sendingFor is who sent a send waiting to be typed that holds the session
+// against what person types: one that is not person's, and "" is nobody's,
+// so a send by a token holds the session against everyone. held is false
+// when none does.
+//
+// stop is a frame of one Esc or one Ctrl-C. The first one while the sends
+// holding the session wait goes through, and they remember it; any after it
+// is held like any other keystroke, so the CLI is never sent two, which may
+// do more than stop a turn. A send past its until is let go of on the way.
+func (h *heldTerm) sendingFor(person string, stop bool) (by string, held bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	now := time.Now()
-	for s, x := range h.sends {
+	var holding []*sending
+	stopped := false
+	for seq, x := range h.sends {
 		switch {
 		case now.After(x.until):
-			delete(h.sends, s)
+			delete(h.sends, seq)
 		case x.person == "" || x.person != person:
-			if !ok || s == told {
-				name, seq, ok = x.name, s, true
-			}
+			holding = append(holding, x)
+			stopped = stopped || x.stopped
 		}
 	}
-	return name, seq, ok
+	switch {
+	case len(holding) == 0:
+		return "", false
+	case stop && !stopped:
+		for _, x := range holding {
+			x.stopped = true
+		}
+		return "", false
+	}
+	return holding[0].name, true
 }
 
 // sent hands the holder's answer to the send waiting for it, if one still

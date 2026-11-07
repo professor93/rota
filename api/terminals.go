@@ -138,8 +138,8 @@ const heldSendMax = 256 << 10
 // its holder waits until the CLI is ready for one, types it, and presses
 // Enter. It is typing, so it goes under the keyboard's rule: the keyboard
 // free, or held by the sender's own person, and from the moment it is let in
-// until it is answered nobody else types into the session but Esc and Ctrl-C
-// (heldTerm.sendingFor). A session waiting on its person for a permission or
+// until it is answered nobody else types into the session but one Esc or
+// Ctrl-C (heldTerm.sendingFor). A session waiting on its person for a permission or
 // a question refuses it unless it is forced, because Enter there may approve
 // something.
 //

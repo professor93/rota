@@ -239,6 +239,18 @@ func (p *terms) sendLater(id, cookie, token, text string) <-chan int {
 	return answered
 }
 
+// waitTyped waits for the holder to have been given exactly want to type.
+func waitTyped(t *testing.T, rec, want string) {
+	t.Helper()
+	for range 500 {
+		if typedInto(rec) == want {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("the holder was given %q, want %q", typedInto(rec), want)
+}
+
 // answeredWith waits for a send made with sendLater to be answered with want.
 func answeredWith(t *testing.T, answered <-chan int, want int) {
 	t.Helper()
@@ -252,34 +264,32 @@ func answeredWith(t *testing.T, answered <-chan int, want int) {
 	}
 }
 
-// While a send waits, whoever holds the keyboard may still stop the turn: a
-// frame of nothing but Esc and Ctrl-C goes through. Anything else is still
-// refused — an arrow key or history recall begins with Esc but carries
-// more, and Ctrl-D may end the CLI — and going through is typing under the
-// keyboard's rules all the same: a connection that does not hold the
-// keyboard, one attached to watch, and a watcher type nothing.
-func TestEscAndCtrlCGoThroughAWaitingSend(t *testing.T) {
+// frozenClock stops the clock the terminals are measured against, and
+// returns what moves it on: how often a refusal is said is a matter of time,
+// and a test about it must not be one about how fast it runs.
+func (p *terms) frozenClock() (forward func(time.Duration)) {
+	var mu sync.Mutex
+	at := time.Now()
+	p.api.clock.set(func() time.Time { mu.Lock(); defer mu.Unlock(); return at })
+	return func(d time.Duration) { mu.Lock(); at = at.Add(d); mu.Unlock() }
+}
+
+// While a send waits, whoever holds the keyboard may still stop the turn:
+// one frame of a single Esc or a single Ctrl-C goes through, once a hold. A
+// second would do more than stop it — two Ctrl-C quit Claude Code, two Esc
+// open its rewind picker — so it is refused, together or apart, and so is
+// everything else: an arrow key or history recall begins with Esc but
+// carries more, and Ctrl-D may end the CLI. Going through is typing under
+// the keyboard's rules all the same: a connection that does not hold the
+// keyboard, one attached to watch, and a watcher type nothing, and do not
+// use the hold's one interrupt up. Once the send is in, keys are keys again.
+func TestOneEscOrCtrlCGoesThroughAWaitingSend(t *testing.T) {
 	p, id, rec, ready := heldBusy(t)
 	answered := p.sendLater(id, p.signIn("alice"), "", "from alice")
 	waitRecorded(t, rec, `send "from alice" force=false wait=30000`)
 	bob := p.attachAs(id, p.signIn("bob"), "")
 	if holder := bob.waitType("hello")["holder"]; holder != "bob" {
 		t.Fatalf("bob attaching to a free keyboard did not take it: %v", holder)
-	}
-
-	bob.typeIn("\x1b[A")
-	if msg := bob.waitType("error")["message"]; msg != fmt.Sprintf(sendFirst, "alice") {
-		t.Fatalf("an arrow key while another person's send waits is refused with %q", msg)
-	}
-	bob.typeIn("\x04")
-	stops := []string{"\x1b", "\x03", "\x1b\x1b", "\x03\x03", "\x1b\x03"}
-	for _, key := range stops {
-		bob.typeIn(key)
-	}
-	waitRecorded(t, rec, `input "\x1b\x03"`)
-	want := strings.Join(stops, "")
-	if got := typedInto(rec); got != want {
-		t.Fatalf("the holder was given %q while the send waited, want the interrupts alone, %q", got, want)
 	}
 
 	for _, o := range []struct {
@@ -297,19 +307,41 @@ func TestEscAndCtrlCGoThroughAWaitingSend(t *testing.T) {
 			t.Fatalf("Ctrl-C from %s while a send waits is answered %q, want %q", o.who, msg, o.want)
 		}
 	}
-	if got := typedInto(rec); got != want {
-		t.Fatalf("the holder was given %q, want only the holder's interrupts, %q", got, want)
+
+	bob.typeIn("\x1b[A")
+	if msg := bob.waitType("error")["message"]; msg != fmt.Sprintf(sendFirst, "alice") {
+		t.Fatalf("an arrow key while another person's send waits is refused with %q", msg)
+	}
+	for _, key := range []string{"\x04", "\x1b\x1b", "\x03\x03", "\x1b\x03"} {
+		bob.typeIn(key)
+	}
+	bob.typeIn("\x1b")
+	waitRecorded(t, rec, `input "\x1b"`)
+	bob.typeIn("\x03")
+	bob.typeIn("\x1b")
+	bob.settled()
+	if got := typedInto(rec); got != "\x1b" {
+		t.Fatalf("the holder was given %q while the send waited, want one Esc alone", got)
 	}
 
 	becomeReady(t, ready)
 	answeredWith(t, answered, 200)
+	bob.waitOut("from alice")
+	bob.typeIn("\x03\x03")
+	bob.typeIn("\x1b\x1b")
+	waitRecorded(t, rec, `input "\x1b\x1b"`)
+	if got, want := typedInto(rec), "\x1b\x03\x03\x1b\x1b"; got != want {
+		t.Fatalf("once the send was in the holder was given %q, want %q", got, want)
+	}
 }
 
 // An interrupt stops the turn, not the send: the send goes on waiting, still
-// holds the session, and is typed once the holder finds the CLI ready.
+// holds the session, and is typed once the holder finds the CLI ready. The
+// next send's hold lets one interrupt through again.
 func TestAnInterruptLeavesAWaitingSendToBeTyped(t *testing.T) {
 	p, id, rec, ready := heldBusy(t)
-	answered := p.sendLater(id, p.signIn("alice"), "", "from alice")
+	alice := p.signIn("alice")
+	answered := p.sendLater(id, alice, "", "from alice")
 	waitRecorded(t, rec, `send "from alice" force=false wait=30000`)
 	bob := p.attachAs(id, p.signIn("bob"), "")
 	if holder := bob.waitType("hello")["holder"]; holder != "bob" {
@@ -333,8 +365,29 @@ func TestAnInterruptLeavesAWaitingSendToBeTyped(t *testing.T) {
 	bob.waitOut("got:from alice")
 	bob.typeIn("x\r")
 	bob.waitOut("got:x")
-	if got := typedInto(rec); got != "\x03x\r" {
-		t.Fatalf("the holder was given %q besides the send, want %q", got, "\x03x\r")
+
+	// bob lets the keyboard go, so that alice's next send is let in, and
+	// takes it again while that one waits.
+	if err := os.Remove(ready); err != nil {
+		t.Fatal(err)
+	}
+	bob.say(map[string]any{"type": "release"})
+	bob.settled()
+	again := p.sendLater(id, alice, "", "again")
+	waitRecorded(t, rec, `send "again" force=false wait=30000`)
+	bob.say(map[string]any{"type": "claim"})
+	bob.waitDoc("the keyboard back", func(doc map[string]any) bool {
+		return doc["type"] == "keyboard" && doc["holder"] == "bob"
+	})
+	bob.typeIn("\x03")
+	waitTyped(t, rec, "\x03x\r\x03")
+	bob.typeIn("\x03")
+	bob.settled()
+	becomeReady(t, ready)
+	answeredWith(t, again, 200)
+	bob.waitOut("got:again")
+	if got := typedInto(rec); got != "\x03x\r\x03" {
+		t.Fatalf("the holder was given %q besides the sends, want one Ctrl-C a send and %q", got, "x\r")
 	}
 }
 
@@ -388,71 +441,69 @@ func TestASendHoldsTheSessionFromTheMomentItIsLetIn(t *testing.T) {
 	}
 }
 
-// A connection typing while a send waits is told so once a hold, not once a
-// keystroke: a typist on a slow link who keeps typing is not sent a refusal
-// for every key until it is too far behind to be kept. Another connection
-// is told on its own, and a later send's hold is told anew.
-func TestAWaitingSendIsNamedOnceAConnection(t *testing.T) {
+// A connection typing while a send waits is told so at most once every
+// sendFirstEvery while its keys go on being refused: a typist on a slow link
+// who keeps typing is not sent a refusal for every key until it is too far
+// behind to be kept, and a key never vanishes for long without a reason.
+// Another connection is told on its own.
+func TestAWaitingSendIsNamedAtMostEveryTwoSeconds(t *testing.T) {
 	p, id, rec, ready := heldBusy(t)
-	alice := p.signIn("alice")
-	answered := p.sendLater(id, alice, "", "first")
-	waitRecorded(t, rec, `send "first" force=false wait=30000`)
+	forward := p.frozenClock()
+	answered := p.sendLater(id, p.signIn("alice"), "", "from alice")
+	waitRecorded(t, rec, `send "from alice" force=false wait=30000`)
 	bob := p.attachAs(id, p.signIn("bob"), "")
 	if holder := bob.waitType("hello")["holder"]; holder != "bob" {
 		t.Fatalf("bob attaching to a free keyboard did not take it: %v", holder)
 	}
 	named := fmt.Sprintf(sendFirst, "alice")
+	saidOnly := func(conn *term, n int, when string) {
+		t.Helper()
+		errs := conn.errors()
+		if len(errs) != n {
+			t.Fatalf("%s the refusals were said %d times, want %d", when, len(errs), n)
+		}
+		for _, e := range errs {
+			if e != named {
+				t.Fatalf("%s a refusal was said as %q, want %q", when, e, named)
+			}
+		}
+	}
 
 	for range 100 {
 		bob.typeIn("x")
 	}
 	bob.settled()
-	if errs := bob.errors(); len(errs) != 1 || errs[0] != named {
-		t.Fatalf("100 frames refused under one send were answered with %d errors, want one naming the send", len(errs))
-	}
+	saidOnly(bob, 1, "with no time passing, after 100 refused frames")
 	desk := p.attachAs(id, p.signIn("bob"), "")
 	desk.waitType("hello")
 	desk.typeIn("y")
 	desk.typeIn("y")
 	desk.settled()
-	if errs := desk.errors(); len(errs) != 1 || errs[0] != named {
-		t.Fatalf("another connection of bob's was answered %q, want the send named once", errs)
-	}
+	saidOnly(desk, 1, "on another connection of bob's,")
+
+	forward(sendFirstEvery - time.Millisecond)
+	bob.typeIn("x")
+	bob.settled()
+	saidOnly(bob, 1, "just short of sendFirstEvery later,")
+	forward(time.Millisecond)
+	bob.typeIn("x")
+	bob.settled()
+	saidOnly(bob, 2, "sendFirstEvery later,")
 
 	becomeReady(t, ready)
 	answeredWith(t, answered, 200)
-	if err := os.Remove(ready); err != nil {
-		t.Fatal(err)
-	}
-	// bob lets the keyboard go, so that alice's next send is let in, and
-	// takes it again while that one waits.
-	bob.say(map[string]any{"type": "release"})
-	bob.settled()
-	again := p.sendLater(id, alice, "", "second")
-	waitRecorded(t, rec, `send "second" force=false wait=30000`)
-	bob.say(map[string]any{"type": "claim"})
-	bob.waitDoc("the keyboard back", func(doc map[string]any) bool {
-		return doc["type"] == "keyboard" && doc["holder"] == "bob"
-	})
-	bob.typeIn("z")
-	bob.typeIn("z")
-	bob.settled()
-	if errs := bob.errors(); len(errs) != 2 || errs[1] != named {
-		t.Fatalf("a later send's hold was told %q, want it named once more", errs)
-	}
-	becomeReady(t, ready)
-	answeredWith(t, again, 200)
 	if got := typedInto(rec); got != "" {
-		t.Fatalf("the holder was given %q while sends waited", got)
+		t.Fatalf("the holder was given %q while the send waited", got)
 	}
 }
 
 // A token is never a person, so its send holds the session against everyone,
-// its own connections too, under the same rules: Esc and Ctrl-C from
-// whoever holds the keyboard go through, and the refusal is said once a
-// connection.
+// its own connections too, under the same rules: one Esc or one Ctrl-C from
+// whoever holds the keyboard goes through, and a refusal is said at most so
+// often.
 func TestATokensSendHoldsTheSessionAgainstEveryoneButAnInterrupt(t *testing.T) {
 	p, id, rec, ready := heldBusy(t)
+	p.frozenClock()
 	answered := p.sendLater(id, "", p.alice, "from a token")
 	waitRecorded(t, rec, `send "from a token" force=false wait=30000`)
 	own := p.attach(id, p.alice, "")
@@ -464,12 +515,13 @@ func TestATokensSendHoldsTheSessionAgainstEveryoneButAnInterrupt(t *testing.T) {
 	own.typeIn("more")
 	own.typeIn("\x03")
 	waitRecorded(t, rec, `input "\x03"`)
+	own.typeIn("\x1b")
 	own.settled()
 	if errs := own.errors(); len(errs) != 1 || errs[0] != fmt.Sprintf(sendFirst, "alice") {
 		t.Fatalf("the token's own connection typing under its send was answered %q", errs)
 	}
 	if got := typedInto(rec); got != "\x03" {
-		t.Fatalf("the holder was given %q while the token's send waited, want Ctrl-C alone", got)
+		t.Fatalf("the holder was given %q while the token's send waited, want one Ctrl-C alone", got)
 	}
 
 	becomeReady(t, ready)
