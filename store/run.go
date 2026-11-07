@@ -27,9 +27,10 @@ import (
 // than released here because the CLI is about to run on it: a caller that
 // starts the CLI as a child — a terminal, a shared session — holds it until
 // that child ends and then releases it; a caller that replaces this process
-// with the CLI calls KeepClaimsAcrossExec immediately before, so the claim
-// outlives the replacing; and a caller that does not go through with either
-// calls release.
+// with the CLI lends the claim to a process of its own that holds it until
+// the CLI exits (ClaimFiles), or calls KeepClaimsAcrossExec immediately
+// before where it cannot, so the claim outlives the replacing; and a caller
+// that does not go through with either calls release.
 func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env []string, release func(), err error) {
 	cmd, release, err := s.prepare(ctx, a, true)
 	if err != nil {
@@ -391,16 +392,19 @@ var (
 )
 
 // KeepClaimsAcrossExec arranges for every claim this process holds to
-// survive the exec it is about to make, and is called by nothing but the
-// handover, immediately before it replaces this process with the vendor CLI.
+// survive the exec it is about to make, and is called by nothing but a
+// handover that could not lend its claims (ClaimFiles), immediately before it
+// replaces this process with the vendor CLI.
 //
 // Go opens every file close-on-exec, which is right for every other moment:
 // a child started while a claim is held — another account's CLI, a shell on
 // the server's terminal page — must not inherit the claim and keep the
-// account looking busy long after its run ended. The handover is the one
-// exception, because there the CLI is the run, and the claim has to be held
-// by whatever is running rather than by the process image that took it. The
-// kernel releases it when the CLI finally exits, however it exits.
+// account looking busy long after its run ended. Here the CLI is the run,
+// and the claim has to be held by whatever is running rather than by the
+// process image that took it. The kernel releases it when the last process
+// holding it exits — the CLI, and anything the CLI started that inherited
+// it, a daemon it leaves behind included; that is why a handover lends its
+// claims where it can.
 func KeepClaimsAcrossExec() {
 	heldMu.Lock()
 	defer heldMu.Unlock()
@@ -409,9 +413,31 @@ func KeepClaimsAcrossExec() {
 	}
 }
 
+// ClaimFiles lends the file of every claim this process holds, for a
+// handover that gives them to a process of its own to hold while the CLI
+// runs, rather than keeping them across the exec, where everything the CLI
+// starts would inherit them too.
+//
+// A flock belongs to the open file, not to the descriptor or the process: a
+// process given one of these files holds the claim through its own
+// descriptor, and it is let go of when the last descriptor of it is closed.
+// So the files are lent as they are, still close-on-exec: the caller passes
+// them on and closes none of them, and each claim's release still lets go of
+// this process's own.
+func ClaimFiles() []*os.File {
+	heldMu.Lock()
+	defer heldMu.Unlock()
+	files := make([]*os.File, 0, len(heldClaims))
+	for f := range heldClaims {
+		files = append(files, f)
+	}
+	return files
+}
+
 // claimFile claims an account whose CLI owns its credential file: shared or
 // exclusively. The claim stays close-on-exec, so no child of this process
-// holds it; KeepClaimsAcrossExec is the handover's own exception.
+// holds it; a handover lends it (ClaimFiles), or keeps it across its exec
+// (KeepClaimsAcrossExec), as its own exception.
 //
 // ok is false when someone else holds it in a way that excludes this claim.
 // That is an answer rather than a failure — the caller wants to know whether
@@ -454,7 +480,7 @@ func (s *Store) claimFile(a *rota.Account, shared bool) (release func(), ok bool
 }
 
 // holdRun is the claim a run takes, held by this process until release —
-// across the handover too, when KeepClaimsAcrossExec is called.
+// and past it, by whatever a handover lent it to or kept it for.
 //
 // It is exclusive for a CLI that keeps its credential file to one process at
 // a time, and shared for one whose home is shared (rota.SharedHome): many

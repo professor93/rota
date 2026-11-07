@@ -33,8 +33,8 @@ import (
 var startWatcher = watchInBackground
 
 // watchLogin starts the watcher for an account a handover is about to open, if
-// it has anything to keep. It must run before the claim is kept across the
-// exec, so the watcher cannot inherit it.
+// it has anything to keep. It must run before the claim is lent to a holder
+// or kept across the exec, so the watcher cannot inherit it.
 func (c *cli) watchLogin(s *store.Store, a *rota.Account) {
 	if !s.Watchable(a) {
 		return

@@ -1187,11 +1187,16 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 	// execve keeps the process id, so the entry above goes on describing
 	// what is running and is cleaned up by the liveness check rather than
 	// by anything rota runs afterwards -- there is no afterwards. The claim
-	// on the account goes with it: the CLI is the run now.
-	store.KeepClaimsAcrossExec()
+	// on the account is lent to a holder that lets go of it when this
+	// process, the CLI by then, exits: the CLI is the run now, and nothing
+	// it leaves running is (see holdClaims).
+	held := c.holdClaims(a)
+	// Run before the release deferred above, so a holder has let go by the
+	// time this process does: on every way out but the exec that worked.
+	defer held.letGo()
 	err = execProcess(path, append([]string{bin}, args...), env)
 	// Only reached when the handover did not happen, and the deferred
-	// release lets go of the claim.
+	// calls let go of the claim.
 	var ee *exec.ExitError
 	if errors.As(err, &ee) {
 		return exitCode(ee.ExitCode())
@@ -2166,10 +2171,11 @@ var serveGrace = 10 * time.Second
 // serve runs the HTTP API and its playground. The token is mandatory: an
 // account runner anyone can reach is not something to start by accident.
 func (c *cli) serve(args []string) (err error) {
-	// Three of serve's words are not a server at all: two print a block to
-	// paste into its file, and one asks a server already running for a link.
-	// They live under serve because that is what they are about, and they
-	// are matched before the flags because none of them is an address.
+	// Five of serve's words are not a server at all: two print a block to
+	// paste into its file, one asks a server already running for a link, and
+	// two are processes an interactive run starts beside its CLI. They live
+	// under serve because that is what they are about, and they are matched
+	// before the flags because none of them is an address.
 	if len(args) > 0 {
 		switch args[0] {
 		case "passwd":
@@ -2180,6 +2186,8 @@ func (c *cli) serve(args []string) (err error) {
 			return c.serveInvite(args[1:])
 		case "watch":
 			return c.serveWatch(args[1:])
+		case "claim":
+			return c.serveClaim(args[1:])
 		}
 	}
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
