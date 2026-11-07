@@ -15,12 +15,15 @@ import (
 // Daemon is who serves a store, as daemon.pid says. ProcStart and BootID
 // are there so that its pid is signalled only while it is still the same
 // process: a pid file left from before a reboot names some other program.
+// HTTP is the TCP address it serves its API on besides its control socket,
+// once it has said so with RecordHTTP; empty for a daemon on ctl.sock alone.
 type Daemon struct {
 	PID       int       `json:"pid"`
 	Version   string    `json:"version"`
 	Started   time.Time `json:"started"`
 	ProcStart time.Time `json:"proc_start"`
 	BootID    string    `json:"boot_id"`
+	HTTP      string    `json:"http,omitempty"`
 }
 
 // DaemonRunning is a claim refused because another daemon holds the store.
@@ -65,6 +68,27 @@ func ClaimDaemon(terminals, version string) (release func(), err error) {
 		_ = os.Remove(DaemonPIDFile(terminals))
 		unlock(f)
 	}), nil
+}
+
+// RecordHTTP adds to daemon.pid the TCP address the daemon serves its API on
+// besides ctl.sock, so that whoever asks which daemon runs is also told
+// where else it can be reached. Only the daemon itself may: a daemon.pid
+// that does not name this process, or whose lock nobody holds, is not this
+// process's claim, and nothing is written.
+func RecordHTTP(terminals, addr string) error {
+	d, err := readDaemon(terminals)
+	if err != nil {
+		return err
+	}
+	if d.PID != os.Getpid() || !Locked(DaemonLock(terminals)) {
+		return fmt.Errorf("holdwire: %s is not this process's claim", DaemonPIDFile(terminals))
+	}
+	d.HTTP = addr
+	raw, err := rota.EncodeIndent(d)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(DaemonPIDFile(terminals), append(raw, '\n'))
 }
 
 // claimant is the pid of the daemon holding the lock. A daemon writes its

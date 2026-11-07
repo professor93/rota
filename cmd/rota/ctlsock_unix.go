@@ -34,10 +34,17 @@ var ctlOwner = os.Geteuid
 // covers the moment between making the socket and narrowing it, which the
 // umask decides.
 //
-// stop shuts the socket down within serveGrace and takes the file with it.
-// What it does not end are the sockets taken over as WebSockets; those are
-// the server's to let go of, in srv.Stop.
-func listenCtl(srv *api.Server, terminals string, log *slog.Logger) (stop func(), err error) {
+// stop shuts the socket down within serveGrace, less the daemonGoodbye a
+// daemon keeps for what it ends after it, and takes the file with it — only
+// while the file is still this socket. Go's listener would unlink the path
+// whoever's socket it had become, and after this daemon has let go of the
+// store it may be a successor's, live. A daemon stops here before it lets go
+// of the claim (srv.Stop), and the check makes the order matter less.
+//
+// What stop does not end are the sockets taken over as WebSockets: those
+// are the server's to end, in srv.Stop. A daemon passes inFlight to count
+// them with every other request, so it can wait for their goodbyes.
+func listenCtl(srv *api.Server, terminals string, log *slog.Logger, requests ...*inFlight) (stop func(), err error) {
 	path := holdwire.CtlSock(terminals)
 	if err := holdwire.SockFits(path); err != nil {
 		return nil, err
@@ -59,11 +66,27 @@ func listenCtl(srv *api.Server, terminals string, log *slog.Logger) (stop func()
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	ln.SetUnlinkOnClose(false)
+	ours, err := os.Lstat(path)
+	if err != nil {
 		ln.Close()
+		return nil, err
+	}
+	closeOurs := func() {
+		_ = ln.Close()
+		if now, err := os.Lstat(path); err == nil && os.SameFile(ours, now) {
+			_ = os.Remove(path)
+		}
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		closeOurs()
 		return nil, fmt.Errorf("the control socket %s could not be made its owner's alone: %w", path, err)
 	}
-	server := httpServer(ctlHandler(srv), log)
+	h := ctlHandler(srv)
+	for _, r := range requests {
+		h = r.count(h)
+	}
+	server := newHTTPServer("", h, log)
 	// Who the caller is, is asked once per connection and only when it first
 	// asks for something: the accept loop never waits on the store.
 	server.ConnContext = func(ctx context.Context, c net.Conn) context.Context {
@@ -80,11 +103,12 @@ func listenCtl(srv *api.Server, terminals string, log *slog.Logger) (stop func()
 	}()
 	log.Info("control socket listening", "path", path)
 	return sync.OnceFunc(func() {
-		ctx, cancel := context.WithTimeout(context.Background(), serveGrace)
+		ctx, cancel := context.WithTimeout(context.Background(), serveGrace-daemonGoodbye)
 		defer cancel()
 		_ = server.Shutdown(ctx)
 		_ = server.Close()
 		<-done
+		closeOurs()
 	}), nil
 }
 
