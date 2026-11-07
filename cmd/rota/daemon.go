@@ -42,9 +42,12 @@ every session too, and asks first; off a terminal it needs --yes.
   rota serve uninstall   take that away; its sessions go on
 
 An installed daemon starts at login and keeps its sessions through a
-restart. It is given PATH and CLAUDE_CONFIG_DIR as they are where install
-runs, and not ROTA_TOKEN, so a port it opens wants auth.token_file or
-[[users]] in server.toml. Run install again to take up a new PATH or binary.
+restart. It is given PATH as it is where install runs and, as
+CLAUDE_CONFIG_DIR, your own Claude Code directory when a variable names it:
+never an account's, even when install runs inside a CLI rota launched. It is
+not given ROTA_TOKEN, so a port it opens wants auth.token_file or [[users]]
+in server.toml. Run install again to take up a new PATH or binary; install,
+like stop and uninstall, is refused inside a held session.
 `
 
 // daemonReady is how long serve start waits for the daemon it started to
