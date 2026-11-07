@@ -42,6 +42,9 @@ func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env 
 		return "", nil, nil, fmt.Errorf("%s not found in PATH: %w", cmd.Bin, err)
 	}
 	env = rota.Environ(HostEnv(), cmd)
+	// The CLI starts where this process is: the handover replaces it there.
+	cwd, _ := os.Getwd()
+	s.sayRiskySettings(a, env, cwd, nil, false)
 	handed = true
 	return path, env, release, nil
 }
@@ -123,6 +126,7 @@ func (s *Store) Run(ctx context.Context, a *rota.Account, spec rota.Spec, lim *r
 		return nil, err
 	}
 	defer release()
+	s.sayRunSettings(a, cmd, spec)
 	return rota.Run(ctx, a, s.Home(a), cmd, spec, lim, events)
 }
 
@@ -143,6 +147,7 @@ func (s *Store) Start(ctx context.Context, a *rota.Account, spec rota.Spec, lim 
 	}
 	handed := false
 	defer unlessHanded(&handed, release) // nothing started, so nothing is holding the home
+	s.sayRunSettings(a, cmd, spec)
 	sess, err := rota.Start(ctx, a, s.Home(a), cmd, spec, lim, events)
 	if err != nil {
 		return nil, err
