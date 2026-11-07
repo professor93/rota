@@ -16,9 +16,10 @@ import (
 // Refresh brings quota readings up to date, in parallel, for the given
 // accounts (all when none are given). Only providers that publish a quota
 // endpoint are touched — refreshing a token nobody is about to use would
-// just rotate it for nothing. Readings younger than a minute are kept
-// unless force is set. Failures are collected, never fatal, and anything
-// that changed is saved.
+// just rotate it for nothing. A reading is kept unless force is set or it
+// is due: older than QuotaTTL, or taken before a window it reports reset
+// (see due). Failures are collected, never fatal, and anything that changed
+// is saved.
 //
 // A claude account whose login lives in its home is read first, every time:
 // Claude Code may have rotated the login there, or somebody may have signed
@@ -333,10 +334,12 @@ func readsUsage(a *rota.Account) bool {
 
 // due reports whether an account's reading is out of date at now: there is
 // none, it is older than QuotaTTL, or a window it reports has reset since it
-// was taken. This is the one place a look decides to read again. A "not
-// before" a provider asks for — a Retry-After — belongs here when there is
-// one, and then holds back every read, the one a reset makes due as much as
-// the one the cache does; NextReset would wait for it too.
+// was taken. It says nothing about whether a read may be sent. A "not before"
+// a provider asks for — a Retry-After — is a check of its own beside the
+// gate in Refresh that asks this, not a part of it: due is not asked at all
+// for a forced read, and the wait holds that one back as well as the reads
+// a reset or the cache makes due. NextReset would then take the later of a
+// reset and the wait's end.
 func due(a *rota.Account, now time.Time) bool {
 	if a.QuotaAt == 0 || now.Sub(time.UnixMilli(a.QuotaAt)) > QuotaTTL {
 		return true
@@ -369,8 +372,9 @@ func pendingReset(a *rota.Account) time.Time {
 // reading out of date — ResetGrace after the reset itself — or zero when no
 // reading is waiting on one. It is for a process that keeps readings current
 // on its own, as rota serve does: it can look again then, rather than up to a
-// whole sweep later, and Refresh reads what is due. A reading already due is
-// left out, since any look reads it, and so is one Refresh would never read.
+// whole sweep later, and Refresh reads what is due. A reset that has already
+// put its reading out of date is left out, since any look reads it, and so
+// is every reading Refresh would never read.
 func (s *Store) NextReset() time.Time {
 	now := rota.Now()
 	var next time.Time
