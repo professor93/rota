@@ -15,8 +15,8 @@ import (
 // watchInBackground runs `rota serve watch <id>` and waits for it, which takes
 // only as long as that process needs to start the watcher in a session of its
 // own and leave. Its stdin, stdout and stderr are /dev/null, and it is given no
-// other descriptor: every one of rota's is close-on-exec until the handover
-// clears the claim's, which is after this.
+// other descriptor: every one of rota's is close-on-exec, and the handover
+// lends the claim, or clears the claim's flag, only after this.
 func watchInBackground(id int) error {
 	if _, err := sessionOf(0); err != nil {
 		// A unix with no getsid: the watcher could not tell it had left this
