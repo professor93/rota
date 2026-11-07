@@ -401,6 +401,9 @@ func checkUsers(in []User) ([]user, error) {
 		if seen[u.Name] {
 			return nil, fmt.Errorf("api: %s: there is already a user called %q", at, u.Name)
 		}
+		if u.Name == localName {
+			return nil, fmt.Errorf("api: %w", reservedUser(at))
+		}
 		seen[u.Name] = true
 		role, err := parseRole(string(u.Role))
 		if err != nil {
@@ -610,22 +613,56 @@ func (s *Server) Handler() http.Handler {
 
 	if s.opts.Routes.API {
 		for pattern, h := range s.guarded() {
-			mux.Handle(pattern, s.guard(pattern, h))
+			mux.Handle(pattern, s.guard(pattern, nil, h))
 		}
 	}
 	if s.opts.Routes.WebSocket {
 		for pattern, h := range s.sockets() {
-			mux.Handle(pattern, s.wsAuth(pattern, h))
+			mux.Handle(pattern, s.wsAuth(pattern, nil, h))
 		}
 	}
 	return s.recover(mux)
 }
 
-// guarded is every route under /v1 that takes a principal, HTTP side. It is
-// a method rather than a literal inside Handler so that the role table can
-// be checked against it: a route added here without a row there is a failing
-// test rather than a route that quietly takes control.
-func (s *Server) guarded() map[string]http.HandlerFunc {
+// LocalHandler serves every route that takes a principal — the API, the
+// sockets and the terminals with their send, whatever Routes says — to p, and
+// to nobody else: whoever mounts it has already decided who is at the other
+// end, from something no request can forge. The control socket decides by
+// the socket's own permissions and the peer's process; an SSH server would
+// decide by the key. So no token, cookie or Origin is read here, a wrong
+// token is not a guess, and the role table alone says what p may do.
+//
+// Beside those it answers /v1/health, and GET /v1/session with p, so a
+// client can ask whether it may change anything before it tries. Nothing a
+// browser alone uses is here — no page, its assets, the invite landing, or
+// signing in and out — because nothing that reaches this handler is a
+// browser.
+func (s *Server) LocalHandler(p *Principal) http.Handler {
+	local := *p // a copy: every request is this principal, whatever the caller does with p later
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/health", s.health)
+	mux.HandleFunc("GET /v1/session", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, view(&local))
+	})
+	for pattern, h := range s.guardedIn(true) {
+		mux.Handle(pattern, s.guard(pattern, &local, h))
+	}
+	for pattern, h := range s.socketsIn(true) {
+		mux.Handle(pattern, s.wsAuth(pattern, &local, h))
+	}
+	return s.recover(mux)
+}
+
+// guarded is every route under /v1 that takes a principal, HTTP side, as
+// Handler registers it: the terminals only where that group is on.
+func (s *Server) guarded() map[string]http.HandlerFunc { return s.guardedIn(s.opts.Routes.Terminal) }
+
+// guardedIn is the table guarded and LocalHandler are both read from, with
+// the terminals or without. It is a method rather than a literal inside
+// Handler so that the role table can be checked against it: a route added
+// here without a row there is a failing test rather than a route that
+// quietly takes control.
+func (s *Server) guardedIn(terminal bool) map[string]http.HandlerFunc {
 	routes := map[string]http.HandlerFunc{
 		"GET /v1/schema":               s.schema,
 		"GET /v1/accounts":             s.listAccounts,
@@ -655,7 +692,7 @@ func (s *Server) guarded() map[string]http.HandlerFunc {
 	}
 	// A group that is off is not registered at all, so its paths answer 404
 	// like any path this server never had.
-	if s.opts.Routes.Terminal {
+	if terminal {
 		routes["GET /v1/terminals"] = s.listTerminals
 		routes["GET /v1/terminals/{id}"] = s.describeTerminal
 		routes["POST /v1/terminals"] = s.createTerminal
@@ -668,13 +705,17 @@ func (s *Server) guarded() map[string]http.HandlerFunc {
 // sockets is the same three doors as a WebSocket: one run, carried both
 // ways. They are guarded apart because a browser cannot put a header on a
 // WebSocket, so the credential may arrive as a subprotocol or a cookie.
-func (s *Server) sockets() map[string]http.HandlerFunc {
+func (s *Server) sockets() map[string]http.HandlerFunc { return s.socketsIn(s.opts.Routes.Terminal) }
+
+// socketsIn is sockets with the terminal's socket or without, for Handler
+// and LocalHandler alike.
+func (s *Server) socketsIn(terminal bool) map[string]http.HandlerFunc {
 	routes := map[string]http.HandlerFunc{
 		"GET /v1/runs/{id}/ws":     s.attachWS,
 		"GET /v1/accounts/{id}/ws": s.startWS,
 		"GET /v1/ws":               s.startWS,
 	}
-	if s.opts.Routes.Terminal {
+	if terminal {
 		routes["GET /v1/terminals/{id}/ws"] = s.terminalWS
 	}
 	return routes

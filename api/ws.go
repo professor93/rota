@@ -96,15 +96,21 @@ const (
 // cookie-authenticated write, because an upgrade is one: any page on the
 // internet may open a WebSocket to this server, and the browser would attach
 // the cookie to it.
-func (s *Server) wsAuth(pattern string, next http.HandlerFunc) http.HandlerFunc {
+//
+// local is LocalHandler's principal, as for guard: with one, no credential
+// is looked for, and the role table alone decides.
+func (s *Server) wsAuth(pattern string, local *Principal, next http.HandlerFunc) http.HandlerFunc {
 	need := needs(pattern)
 	return func(w http.ResponseWriter, r *http.Request) {
-		p, guessed := s.principalWS(r)
+		p, guessed := local, false
+		if p == nil {
+			p, guessed = s.principalWS(r)
+		}
 		if p == nil {
 			s.refuseToken(w, r, guessed)
 			return
 		}
-		if p.Via != "token" && !sameOrigin(r) {
+		if !originFree(p) && !sameOrigin(r) {
 			s.log.Warn("refused a cross-site socket", "name", p.Name, "role", p.Role,
 				"path", r.URL.Path, "ip", clientIP(r))
 			fail(w, http.StatusForbidden, crossSiteNo)

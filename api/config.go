@@ -391,6 +391,9 @@ func (c *Config) checkPrincipals() error {
 		if seen[u.Name] {
 			return fmt.Errorf("%s: there is already a user called %q", at, u.Name)
 		}
+		if u.Name == localName {
+			return reservedUser(at)
+		}
 		seen[u.Name] = true
 		if _, err := parseRole(u.Role); err != nil {
 			return fmt.Errorf("%s: role: %w", at, err)

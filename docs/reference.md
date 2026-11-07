@@ -782,7 +782,9 @@ thing must not cost their address its access.
 
 The token `rota serve` is started with — `--token`, `ROTA_TOKEN`,
 `[auth] token`, `token_file`, `token_env` — is the principal `token`, with
-the role `control`. Nothing about it has changed.
+the role `control`. Nothing about it has changed. The daemon's control
+socket has one more, `local`, which no request names; see
+*[The control socket](#the-control-socket)*.
 
 Beside it the file may name people and more tokens:
 
@@ -798,9 +800,10 @@ role   = "watch"
 sha256 = "<hex of sha256(the token)>"
 ```
 
-Names are unique within each table and non-empty; a role is one of the two
-words; a password must parse, with at least 100 000 iterations, a salt of at
-least 16 bytes and a 32-byte hash; a digest is 64 hexadecimal characters.
+Names are unique within each table and non-empty, and no user is called
+`local`, which is the control socket's own; a role is one of the two words;
+a password must parse, with at least 100 000 iterations, a salt of at least
+16 bytes and a 32-byte hash; a digest is 64 hexadecimal characters.
 Every refusal names the entry — `[[users]] "inoyat": password: …` — because
 whoever reads it is looking at a file with several of them in it.
 
@@ -861,7 +864,8 @@ on; this is the second lock, and it costs nothing because a browser puts
 upgrade authorized by a cookie is held to the same rule: any page on the
 internet may open one, and the browser would attach the cookie. Requests
 authorized by a bearer token are exempt — nothing attaches one to a request
-but the code that meant to make it.
+but the code that meant to make it — and so is everything on the control
+socket, which no page can open.
 
 #### Invite links
 
@@ -890,6 +894,58 @@ says nothing else — not even a version, because whoever can reach it has
 proved nothing. It is its own route group so that a server with its page
 switched off, which takes `GET /` with it, still has something a watchdog
 can read.
+
+#### The control socket
+
+The rota daemon — a server holding a store's held sessions — also listens on
+a unix socket, `<store>/terminals/ctl.sock`. It is the daemon's API for this
+machine's own user: what a command on this machine talks to.
+
+**Who reaches it.** The socket is `0600` in a directory that is `0700`, so
+only the user the daemon runs as can connect, and that is its whole
+authorization. Nothing on a request is read to find out who is asking — no
+token, no cookie, no `Origin`, and no header ever names anybody — and a
+wrong token there is not a guess. Every request is the principal `local`,
+`"via":"local"`, and the role table decides what it may do, as for anyone.
+
+**What it serves.** Every route that takes a principal — the API, the
+WebSockets, and the terminals with their `send` — whatever `[routes]` says:
+routes choose what a port opens, and this is not a port. Beside those it
+answers `GET /v1/health`, and `GET /v1/session` with
+`{"name":"local","role":…,"via":"local"}`, so a client can ask whether it
+may change anything before it tries. There is no page, asset or invite
+landing, and no signing in or out: nothing that reaches a unix socket is a
+browser.
+
+**Inside a held session it only watches.** A caller is `local` with
+`control`, unless it is running inside a held session — the agent in it, or
+anything that agent started. Then it is `local` with `watch`: it may list,
+describe and attach, every change is `403` *this sign-in may only watch;
+nothing here can be changed from it*, its typing is refused in the same
+words, and it never holds a keyboard. The daemon tells by the caller's
+session, which the caller cannot say for itself: the kernel gives the pid at
+the other end of the socket, `getsid` the session that pid is in, and a
+session led by the holder or the CLI of any session whose lock is held is
+inside one. A caller the daemon cannot place is given `watch` as well. This
+keeps an agent from starting, typing into or ending sessions by mistake. It
+is not a wall: a process that leaves its session on purpose is no longer
+told apart, and as the same user it has other ways in.
+
+**At the keyboard** `local` is a person, as a user signed in on the page is
+(*[Roles, and the keyboard](#roles-and-the-keyboard)*): two clients of the
+socket are one person on two devices, and with `[auth] local_user` — or a
+single `[[users]]` entry that may control — it is that user's device. That
+is why no user may be called `local`: a file with one is refused at start-up
+with *`[[users]] "local"`: the name "local" is reserved for the control
+socket's own principal; give this user another*.
+
+**Only the daemon listens there.** The socket is opened by the process
+holding the store's daemon claim, and by no other. Holding it, the daemon
+removes whatever a daemon that crashed left at the path before it listens; a
+server without the claim is refused and leaves the file alone, since it may
+be a live daemon's. A path longer than a hundred bytes is refused by name,
+since a unix socket's address cannot hold it. Stopping the daemon removes
+the socket. It runs on linux and macOS, as the daemon does.
 
 #### What is written down
 
