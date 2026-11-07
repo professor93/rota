@@ -391,8 +391,8 @@ func readsUsage(a *rota.Account) bool {
 // a provider asks for — a Retry-After — is a check of its own beside the
 // gate in Refresh that asks this, not a part of it: due is not asked at all
 // for a forced read, and the wait holds that one back as well as the reads
-// a reset or the cache makes due. NextReset would then take the later of a
-// reset and the wait's end.
+// a reset or the cache makes due. NextReset takes the later of a reset and
+// the wait's end.
 func due(a *rota.Account, now time.Time) bool {
 	if a.QuotaAt == 0 || now.Sub(time.UnixMilli(a.QuotaAt)) > QuotaTTL {
 		return true
@@ -428,6 +428,10 @@ func pendingReset(a *rota.Account) time.Time {
 // whole sweep later, and Refresh reads what is due. A reset that has already
 // put its reading out of date is left out, since any look reads it, and so
 // is every reading Refresh would never read.
+//
+// While the provider has asked rota to wait (QuotaWait), the moment is the
+// wait's end when that is later: a look before it reads nothing, and a reset
+// that passed during the wait is still pending when it ends.
 func (s *Store) NextReset() time.Time {
 	now := rota.Now()
 	var next time.Time
@@ -440,6 +444,9 @@ func (s *Store) NextReset() time.Time {
 			continue
 		}
 		at := r.Add(ResetGrace)
+		if end := time.UnixMilli(a.QuotaWait.Until); end.After(at) {
+			at = end
+		}
 		if at.After(now) && (next.IsZero() || at.Before(next)) {
 			next = at
 		}
@@ -468,8 +475,8 @@ func turnedAway(a *rota.Account, err error) bool {
 	}
 	now := rota.Now()
 	count := a.QuotaWait.Count + 1
-	if now.Sub(time.UnixMilli(a.QuotaWait.Until)) > QuotaWaitMax {
-		count = 1 // long after the last wait ran out: a new run of refusals
+	if lapsed(a.QuotaWait, now) {
+		count = 1
 	}
 	wait := quotaBackoff << min(count-1, 12)
 	// A Retry-After that names no moment still to come — 0, or a date already
@@ -480,6 +487,13 @@ func turnedAway(a *rota.Account, err error) bool {
 	wait = min(wait, QuotaWaitMax)
 	a.QuotaWait = rota.QuotaWait{Until: now.Add(wait).UnixMilli(), Status: he.Status, Count: count}
 	return true
+}
+
+// lapsed reports whether a wait ran out longer ago at now than the longest
+// wait lasts: a refusal after it is the first of a new run of refusals, not
+// the next in the old one, and the old run's count is history.
+func lapsed(w rota.QuotaWait, now time.Time) bool {
+	return now.Sub(time.UnixMilli(w.Until)) > QuotaWaitMax
 }
 
 // waitNote is what is said of a reading not taken for an account's wait:
@@ -525,9 +539,7 @@ func (e *waitError) Unwrap() error { return e.cause }
 // ended one. It reads under the lock, taken for the read alone, and only when
 // one of the accounts has its usage read at all.
 func (s *Store) catchUp(accounts []*rota.Account) error {
-	if !slices.ContainsFunc(accounts, func(a *rota.Account) bool {
-		return !a.Dead && !a.APIKey() && rota.Metered(a.Provider)
-	}) {
+	if !slices.ContainsFunc(accounts, readsUsage) {
 		return nil
 	}
 	disk, err := NewStore(s.backend)
@@ -557,7 +569,8 @@ func (s *Store) catchUp(accounts []*rota.Account) error {
 // The newer reading wins; a wait on disk that has not run out gives way only
 // to a longer one, because the refusal behind it may be newer than this
 // reading; and a refusal keeps the longer run of refusals, so a store that
-// knew of fewer does not start the backoff over.
+// knew of fewer does not start the backoff over — unless the run on disk has
+// lapsed, which a new refusal starts over, as turnedAway does.
 func (s *Store) keepReadings(read []*rota.Account) error {
 	if len(read) == 0 {
 		return nil
@@ -581,7 +594,10 @@ func (s *Store) keepReadings(read []*rota.Account) error {
 			w = a.QuotaWait
 		}
 		if a.QuotaWait.Until > 0 {
-			w.Count = max(w.Count, a.QuotaWait.Count, d.QuotaWait.Count)
+			w.Count = max(w.Count, a.QuotaWait.Count)
+			if !lapsed(d.QuotaWait, rota.Now()) {
+				w.Count = max(w.Count, d.QuotaWait.Count)
+			}
 		}
 		if w != d.QuotaWait {
 			d.QuotaWait, changed = w, true

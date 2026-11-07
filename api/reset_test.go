@@ -127,6 +127,57 @@ func TestTheServerReadsAnAccountAgainOnceItsWindowResets(t *testing.T) {
 	})
 }
 
+// A window that resets while the provider has asked rota to wait is read when
+// the wait ends: the keeper does not wake at the reset only to read nothing
+// and then sleep until the next sweep, an hour off here. It wakes at the
+// wait's end and reads the account then, once, and not before.
+func TestTheServerReadsAResetThatPassedDuringAWaitWhenTheWaitEnds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		resetReads.Lock()
+		resetReads.at = nil
+		resetReads.Unlock()
+		start := time.Now()
+		reset := start.Add(30 * time.Second)
+		end := start.Add(10 * time.Minute)
+		blob := fmt.Sprintf(`{"ordered":true,"nextId":2,"accounts":[
+			{"id":1,"provider":"t-api-reset","order":1,"token":{"accessToken":"a"},"quotaAt":%d,
+			 "quota":{"windows":[{"name":"5h","percent":100,"primary":true,"resetsAt":%q}]},
+			 "quotaWait":{"until":%d,"status":429,"count":1}}]}`,
+			start.Add(-time.Minute).UnixMilli(), reset.Format(time.RFC3339Nano), end.UnixMilli())
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "accounts.json"), []byte(blob), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		srv, err := New(Options{Token: "t", Dir: dir, RefreshEvery: time.Hour})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer srv.Stop()
+		reads := func() []time.Time {
+			resetReads.Lock()
+			defer resetReads.Unlock()
+			return append([]time.Time(nil), resetReads.at...)
+		}
+		until := func(d time.Duration) {
+			time.Sleep(time.Until(start.Add(d)))
+			synctest.Wait()
+		}
+
+		until(end.Sub(start) - time.Millisecond)
+		if got := reads(); len(got) != 0 {
+			t.Fatalf("read while the provider asked rota to wait: %v", got)
+		}
+		until(end.Sub(start))
+		if got := reads(); len(got) != 1 || !got[0].Equal(end) {
+			t.Fatalf("the wait is over, and the reset it held back is read then, once: %v, end %v", got, end)
+		}
+		until(time.Hour - time.Millisecond)
+		if got := reads(); len(got) != 1 {
+			t.Fatalf("one reset is one read, and nothing else is due before the sweep: %v", got)
+		}
+	})
+}
+
 // untilNext is how long the keeper sleeps: until the sweep, or until a reset
 // if that is sooner — but never less than a second for a reset, so a clock
 // that disagrees about when it is cannot make the keeper sweep without

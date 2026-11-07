@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,5 +115,68 @@ func TestNextResetIsTheSoonestResetAReadingPredates(t *testing.T) {
 	now = now.Add(40*time.Minute + ResetGrace)
 	if got, want := s.NextReset(), now.Add(20*time.Minute); !got.Equal(want) {
 		t.Fatalf("a reset already due gives way to the next one: got %v, want %v", got, want)
+	}
+}
+
+// A window that resets while the provider has asked rota to wait is read once
+// the wait is over, and not a moment before: the reset makes the reading due,
+// and the wait holds it back. NextReset, which a server sleeps on, says the
+// later of the two — the reset's moment when the wait ends first, and the
+// wait's end when the reset passes during it, since a look at the reset
+// would read nothing.
+func TestAResetDuringAWaitIsReadWhenTheWaitEnds(t *testing.T) {
+	now := time.Now().Truncate(time.Second) // a wait is kept to the millisecond
+	clockAt(t, &now)
+	calls := 0
+	p := &fakeProvider{name: "t-reset-wait", quotaCalls: &calls}
+	rota.Register(fakeMeter{fakeRefresher{p}})
+	reset := now.Add(2 * time.Minute)
+	p.quota = spentUntil(100, reset)
+
+	s := openTemp(t)
+	a := &rota.Account{ID: 1, Provider: "t-reset-wait", Order: 1, Token: rota.Token{Access: "a"}}
+	s.Accounts = []*rota.Account{a}
+	if errs := s.Refresh(context.Background(), false); len(errs) != 0 || calls != 1 {
+		t.Fatalf("the first look reads: %v, %d reads", errs, calls)
+	}
+	look := func(why string) {
+		t.Helper()
+		errs := s.Refresh(context.Background(), false)
+		if calls != 1 {
+			t.Fatalf("%s: %d reads", why, calls)
+		}
+		if len(errs) != 1 || !strings.Contains(errs[0].Error(), "is not asked again until") {
+			t.Fatalf("%s: one line saying why: %v", why, errs)
+		}
+	}
+
+	a.QuotaWait = rota.QuotaWait{Until: reset.Add(-time.Minute).UnixMilli(), Status: 429, Count: 1}
+	if got, want := s.NextReset(), reset.Add(ResetGrace); !got.Equal(want) {
+		t.Fatalf("a wait that ends before the reset leaves it be: got %v, want %v", got, want)
+	}
+
+	end := reset.Add(10 * time.Minute)
+	a.QuotaWait = rota.QuotaWait{Until: end.UnixMilli(), Status: 429, Count: 1}
+	if got := s.NextReset(); !got.Equal(end) {
+		t.Fatalf("a reset that passes during the wait is looked at when the wait ends: got %v, want %v", got, end)
+	}
+	now = reset.Add(ResetGrace + time.Second)
+	look("the window has reset, and the provider still asks rota to wait")
+	if got := s.NextReset(); !got.Equal(end) {
+		t.Fatalf("the reset passed, and the wait's end is still when to look: got %v, want %v", got, end)
+	}
+	now = end.Add(-time.Millisecond)
+	look("a moment before the wait ends")
+
+	p.quota = spentUntil(3, reset.Add(5*time.Hour))
+	now = end
+	if errs := s.Refresh(context.Background(), false); len(errs) != 0 || calls != 2 {
+		t.Fatalf("the wait is over, and the reset still makes the reading due: %v, %d reads", errs, calls)
+	}
+	if a.Percent() != 3 || a.QuotaWait != (rota.QuotaWait{}) {
+		t.Fatalf("the new reading is kept and ends the wait: %v %+v", a.Percent(), a.QuotaWait)
+	}
+	if got, want := s.NextReset(), reset.Add(5*time.Hour+ResetGrace); !got.Equal(want) {
+		t.Fatalf("the next reset is the new reading's: got %v, want %v", got, want)
 	}
 }

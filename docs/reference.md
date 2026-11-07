@@ -461,14 +461,15 @@ the flag.
 A running server keeps itself current: every two minutes it rotates any
 access token close to expiring and re-reads the usage whose cached value has
 aged past five minutes, and a few seconds after a usage window resets it
-reads that account again rather than waiting for the next sweep; while the
-provider has asked rota to wait, neither reads it before the wait ends. A
-request should never be the thing that discovers its credential expired, and
-the rotation decides from stored numbers — a stale one sends work to an
-account that is already spent. Nothing there is fatal: a provider that
-cannot be reached leaves its account exactly as it was, and the next sweep
-tries again. `--refresh-every 0` turns it off, and the command line still
-refreshes what it is about to use.
+reads that account again rather than waiting for the next sweep. While the
+provider has asked rota to wait, neither reads before the wait is over, and
+a window that reset during it is read the moment it is. A request should
+never be the thing that discovers its credential expired, and the rotation
+decides from stored numbers — a stale one sends work to an account that is
+already spent. Nothing there is fatal: a provider that cannot be reached
+leaves its account exactly as it was, and the next sweep tries again.
+`--refresh-every 0` turns it off, and the command line still refreshes what
+it is about to use.
 
 ### One file for the server
 
@@ -2839,8 +2840,10 @@ starts again at a minute. The wait is kept in the store beside the reading,
 so every rota process honours it: `rota list`, `list -r`, `?refresh=1`, a
 bare `rota run` choosing an account, the server's sweep, and `--with quota`
 after a run, which reads the store again first, so a wait recorded while
-the run went on holds it back too. The next reading taken once the wait has
-run out ends it, and so does logging the account in again.
+the run went on holds it back too. A window that resets during the wait is
+read once the wait is over, and the server wakes then rather than at the
+reset. The next reading taken once the wait has run out ends it, and so does
+logging the account in again.
 
 Meanwhile the account keeps its last reading, and nothing else changes: a
 refusal is never `re-auth needed`, never takes the account out of the
