@@ -80,3 +80,7 @@ func tryLockRegion(path string, flags uintptr) (f *os.File, ok bool, err error) 
 // vendor CLI runs as a child while this process stays alive holding the
 // lock, so there is nothing for the lock to survive.
 func keepAcrossExec(*os.File) error { return nil }
+
+// dupClaim lends nothing here: no handover lends its claims, because the CLI
+// runs as a child while this process holds them.
+func dupClaim(*os.File) (*os.File, error) { return nil, nil }

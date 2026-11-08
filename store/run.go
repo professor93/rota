@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/professor93/rota/internal/lend"
 	rota "github.com/professor93/rota/lib"
 )
 
@@ -28,7 +29,7 @@ import (
 // starts the CLI as a child — a terminal, a shared session — holds it until
 // that child ends and then releases it; a caller that replaces this process
 // with the CLI lends the claim to a process of its own that holds it until
-// the CLI exits (ClaimFiles), or calls KeepClaimsAcrossExec immediately
+// the CLI exits (lentClaims), or calls KeepClaimsAcrossExec immediately
 // before where it cannot, so the claim outlives the replacing; and a caller
 // that does not go through with either calls release.
 //
@@ -514,7 +515,7 @@ var (
 
 // KeepClaimsAcrossExec arranges for every claim this process holds to
 // survive the exec it is about to make, and is called by nothing but a
-// handover that could not lend its claims (ClaimFiles), immediately before it
+// handover that could not lend its claims (lentClaims), immediately before it
 // replaces this process with the vendor CLI.
 //
 // Go opens every file close-on-exec, which is right for every other moment:
@@ -534,30 +535,37 @@ func KeepClaimsAcrossExec() {
 	}
 }
 
-// ClaimFiles lends the file of every claim this process holds, for a
-// handover that gives them to a process of its own to hold while the CLI
-// runs, rather than keeping them across the exec, where everything the CLI
-// starts would inherit them too.
-//
-// A flock belongs to the open file, not to the descriptor or the process: a
-// process given one of these files holds the claim through its own
-// descriptor, and it is let go of when the last descriptor of it is closed.
-// So the files are lent as they are, still close-on-exec: the caller passes
-// them on and closes none of them, and each claim's release still lets go of
-// this process's own.
-func ClaimFiles() []*os.File {
+// lentClaims are copies of every claim this process holds, for a handover
+// that lends them to a process of its own rather than keeping them across
+// its exec (see internal/lend, which is how the program reaches it without
+// its being any part of this package's API): each a close-on-exec duplicate
+// of the claim's descriptor, the caller's to close. A flock belongs to the
+// open file, so a duplicate holds the same claim, and closing it lets go of
+// nothing while this process's own is open.
+func lentClaims() ([]*os.File, error) {
 	heldMu.Lock()
 	defer heldMu.Unlock()
 	files := make([]*os.File, 0, len(heldClaims))
 	for f := range heldClaims {
-		files = append(files, f)
+		d, err := dupClaim(f)
+		if err != nil {
+			for _, c := range files {
+				_ = c.Close()
+			}
+			return nil, err
+		}
+		if d != nil {
+			files = append(files, d)
+		}
 	}
-	return files
+	return files, nil
 }
+
+func init() { lend.Register(lentClaims) }
 
 // claimFile claims an account whose CLI owns its credential file: shared or
 // exclusively. The claim stays close-on-exec, so no child of this process
-// holds it; a handover lends it (ClaimFiles), or keeps it across its exec
+// holds it; a handover lends it (lentClaims), or keeps it across its exec
 // (KeepClaimsAcrossExec), as its own exception.
 //
 // ok is false when someone else holds it in a way that excludes this claim.

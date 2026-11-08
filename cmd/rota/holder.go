@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strconv"
 
+	"github.com/professor93/rota/internal/lend"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/store"
 )
@@ -55,14 +56,25 @@ var startHolder = holdInBackground
 // across the exec where it cannot. It is called immediately before the exec,
 // after every other process the handover starts, so none of those is given a
 // claim either.
+//
+// What it lends are copies (see internal/lend), and the copies are closed here
+// whatever happens: the holder has its own by the time startHolder returns,
+// and the store's own are what is kept across the exec otherwise.
 func (c *cli) holdClaims(a *rota.Account) claimHolder {
-	files := store.ClaimFiles()
-	if len(files) == 0 {
-		return keptAcrossExec{}
-	}
-	h, err := startHolder(files)
+	files, err := lend.Claims()
 	if err == nil {
-		return h
+		if len(files) == 0 {
+			return keptAcrossExec{}
+		}
+		defer func() {
+			for _, f := range files {
+				_ = f.Close()
+			}
+		}()
+		var h claimHolder
+		if h, err = startHolder(files); err == nil {
+			return h
+		}
 	}
 	if !errors.Is(err, errNoHolder) {
 		warn(c.err, "could not start the process that holds %s's claim while it runs, so the CLI holds it, "+

@@ -126,10 +126,11 @@ func TestALaunchHandedOverKeepsItsClaimAcrossExec(t *testing.T) {
 }
 
 // A handover may lend its claims to a process of its own rather than keep them
-// across the exec. The file is lent as it is, still close-on-exec, and a
-// process given it holds the claim through its own descriptor once this one
-// has let go, until that process ends: a flock belongs to the open file, and
-// is gone when the last descriptor of it is.
+// across the exec. What it is given are copies of its own, close-on-exec:
+// closing one lets go of nothing while this process holds the claim, and a
+// process given one holds the claim through its own descriptor once this one
+// has let go, until that process ends — a flock belongs to the open file,
+// and is gone when the last descriptor of it is.
 func TestAClaimLentToAnotherProcessIsHeldUntilThatProcessEnds(t *testing.T) {
 	dir := t.TempDir()
 	writeAccounts(t, dir, `{"accounts":[{"id":1,"provider":"t-owns-creds","token":{"accessToken":"tok"}}],"nextId":2}`)
@@ -145,20 +146,41 @@ func TestAClaimLentToAnotherProcessIsHeldUntilThatProcessEnds(t *testing.T) {
 	}
 	defer release()
 	mine := filepath.Join(st.Home(a), runLock)
-	lent := func() *os.File {
-		for _, f := range ClaimFiles() {
+	lent := func() []*os.File {
+		files, err := lentClaims()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []*os.File
+		for _, f := range files {
 			if f.Name() == mine {
-				return f
+				out = append(out, f)
+			} else {
+				_ = f.Close()
 			}
 		}
-		return nil
+		return out
 	}
-	f := lent()
-	if f == nil {
-		t.Fatal("ClaimFiles lends the run's claim")
+	copies := lent()
+	if len(copies) != 1 {
+		t.Fatalf("the run's claim is lent once: %d", len(copies))
 	}
+	f := copies[0]
+	heldMu.Lock()
+	for own := range heldClaims {
+		if own.Fd() == f.Fd() {
+			t.Error("lent as a copy, not as the store's own")
+		}
+	}
+	heldMu.Unlock()
 	if !closeOnExec(t, f) {
-		t.Fatal("lent, not kept across exec: it stays close-on-exec")
+		t.Fatal("lent, not kept across exec: the copy is close-on-exec")
+	}
+	if spare := lent(); len(spare) == 1 {
+		_ = spare[0].Close()
+	}
+	if !st.claimed(a) {
+		t.Fatal("closing a copy lets go of nothing while the store holds its own")
 	}
 	holder := exec.Command("/bin/sleep", "30")
 	holder.ExtraFiles = []*os.File{f}
@@ -166,8 +188,9 @@ func TestAClaimLentToAnotherProcessIsHeldUntilThatProcessEnds(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = holder.Process.Kill(); _ = holder.Wait() })
+	_ = f.Close()
 	release()
-	if lent() != nil {
+	if len(lent()) != 0 {
 		t.Fatal("a claim this process let go of is not lent any more")
 	}
 	if !st.claimed(a) {

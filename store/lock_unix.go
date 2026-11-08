@@ -61,3 +61,16 @@ func lockFile(path string) (*os.File, error) {
 	}
 	return f, nil
 }
+
+// dupClaim is a close-on-exec duplicate of a claim's descriptor: the same
+// open file, so the same flock, under a descriptor of the caller's own.
+func dupClaim(f *os.File) (*os.File, error) {
+	syscall.ForkLock.RLock()
+	defer syscall.ForkLock.RUnlock()
+	fd, err := syscall.Dup(int(f.Fd()))
+	if err != nil {
+		return nil, err
+	}
+	syscall.CloseOnExec(fd)
+	return os.NewFile(uintptr(fd), f.Name()), nil
+}
