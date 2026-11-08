@@ -2688,7 +2688,8 @@ Code blanked: see *Stranded* and *Blanked*, below.
   Every look that finds the home holding exactly the account's token says
   when, and which token by its fingerprint, never the token itself; a record
   less than a minute old is left as it is, so the store is not saved at every
-  look, and a record about another token counts for nothing. A watched home
+  look, and so the ten minutes count from up to a minute before the last look
+  in sync; a record about another token counts for nothing. A watched home
   (*Watched*) is looked at every five minutes. Otherwise rota presents nothing
   and the account is dead:
   `Claude Code's refresh was refused and rota's copy is older than the home's
