@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 )
 
 // A claude account reaches Claude Code by one of two routes, and this file
@@ -324,23 +325,25 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //     login's refreshTokenExpiresAt, give or take the second a reply in
 //     whole seconds may take off it (sameGrant), so a value within a minute
 //     of the account's is how a rotation is told apart, with no network
-//     call. One that is not newer is
-//     behind: the home does not hold the account's current login, and the
-//     next staging writes it. What this package itself wrote there before a
-//     refresh of its own stays recorded as that write — it is what proves
-//     the login there spent (ClaudeHomeSpent) — and any other older login is
-//     recorded as nothing of the account's. A rotation is taken even when
-//     the home is recorded as holding nothing of the account's, provided the
-//     account knows its login's refreshTokenExpiresAt and the rotation
-//     expires later than its own token: a look that found the store empty,
-//     blanked, without an expiry, behind or unreadable says nothing about
-//     what Claude Code wrote there after it, and an account that passed over
-//     its own login rotated would go on to present the refresh token that
-//     rotation replaced;
+//     call — unless Claude Code records the login as another account's
+//     (tokenAccount), which no rotation of this one can be. One that is not
+//     newer is behind: the home does not hold the account's current login,
+//     and the next staging writes it. What this package itself wrote there
+//     before a refresh of its own stays recorded as that write — it is what
+//     proves the login there spent (ClaudeHomeSpent) — and any other older
+//     login is recorded as nothing of the account's. A rotation is taken
+//     even when the home is recorded as holding nothing of the account's,
+//     provided the account knows its login's refreshTokenExpiresAt and the
+//     rotation expires later than its own token: a look that found the
+//     store empty, blanked, without an expiry, behind or unreadable says
+//     nothing about what Claude Code wrote there after it, and an account
+//     that passed over its own login rotated would go on to present the
+//     refresh token that rotation replaced;
 //   - a new login — a refreshTokenExpiresAt more than a minute from the
-//     account's, one where only one side has any, or any living login in
-//     the home of a dead account — which somebody made by running /login
-//     inside that home. Nothing of it is taken here, because the home says
+//     account's, one where only one side has any, a login Claude Code
+//     records as another account's, or any living login in the home of a
+//     dead account — which somebody made by running /login inside that
+//     home. Nothing of it is taken here, because the home says
 //     nothing trustworthy about whose it is: it comes back as a *NewLogin
 //     for the application to check (NewLogin.Identify) and then Accept or
 //     Refuse. In a home recorded as holding nothing of the account's — it was
@@ -407,22 +410,23 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 		// the look found: it is the newest there is, and the account's token
 		// is spent. A grant ending later was signed in after the account's
 		// login, with /login in the home, and is checked like any new login
-		// rather than written over. One ending earlier predates the account's
-		// login — it was logged in again with rota since — so it is older,
-		// rotated or not, and the next write replaces it; and so, as ever, is
-		// anything when either end is unknown.
+		// rather than written over; so is one ending in the same minute that
+		// Claude Code records as another account's. One ending earlier
+		// predates the account's login — it was logged in again with rota
+		// since — so it is older, rotated or not, and the next write replaces
+		// it; and so, as ever, is anything when either end is unknown.
 		home, own := l.refreshUntil(), a.Extra[claudeRefreshUntil]
 		switch {
 		case home == "" || own == "":
-		case sameGrant(home, own):
+		case l.ofGrant(a):
 			if int64(l.ExpiresAt) > a.Token.ExpiresAt {
 				l.adopt(a)
 			}
-		case endsAfter(home, own):
+		case endsAfter(home, own) || sameGrant(home, own):
 			return &NewLogin{Access: l.AccessToken, login: l}
 		}
 		return nil
-	case !sameGrant(l.refreshUntil(), a.Extra[claudeRefreshUntil]):
+	case !l.ofGrant(a):
 		return &NewLogin{Access: l.AccessToken, login: l}
 	}
 	if fingerprint(l.RefreshToken) == a.Staged {
@@ -542,6 +546,10 @@ type claudeLogin struct {
 	RateLimitTier         string   `json:"rateLimitTier"`
 	RefreshTokenExpiresAt float64  `json:"refreshTokenExpiresAt"`
 	ClientID              string   `json:"clientId"`
+	// TokenAccount is whose login Claude Code says this is, when it says —
+	// {"uuid": …, "emailAddress": …} — kept as it came, so that a shape this
+	// package does not expect never makes the whole login unreadable.
+	TokenAccount jsontext.Value `json:"tokenAccount"`
 }
 
 func (l *claudeLogin) usable() bool { return l.RefreshToken != "" && l.ExpiresAt != 0 }
@@ -568,6 +576,31 @@ func sameGrant(a, b string) bool {
 		return false
 	}
 	return x-y <= grantSlack && y-x <= grantSlack
+}
+
+// ofGrant reports whether a login found in a home is of the account's own
+// grant: it ends within a minute of the account's login (sameGrant), and
+// Claude Code does not record it as another account's (otherAccount). A login
+// that is not is never taken as a rotation, however close its end.
+func (l *claudeLogin) ofGrant(a *Account) bool {
+	return sameGrant(l.refreshUntil(), a.Extra[claudeRefreshUntil]) && !l.otherAccount(a)
+}
+
+// otherAccount reports whether Claude Code recorded the login as another
+// account's (tokenAccount): its uuid and the account's are both known, and
+// differ. Nothing recorded, nothing to compare it with, or a record of a shape
+// this package does not read says nothing, and costs no network call.
+func (l *claudeLogin) otherAccount(a *Account) bool {
+	if len(l.TokenAccount) == 0 || a.UUID == "" {
+		return false
+	}
+	var who struct {
+		UUID string `json:"uuid"`
+	}
+	if decodeLenient(l.TokenAccount, &who) != nil || who.UUID == "" {
+		return false
+	}
+	return !strings.EqualFold(who.UUID, a.UUID)
 }
 
 // endsAfter reports whether the grant ending at a, as the account keeps such

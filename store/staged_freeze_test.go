@@ -429,3 +429,34 @@ func TestAfterAFreshRotaLoginTheHomesLoginIsToldByItsEnd(t *testing.T) {
 		})
 	}
 }
+
+// A login in the home that ends in the same minute as the account's but that
+// Claude Code records as another account's (tokenAccount) is not taken as a
+// rotation without a word: the provider is asked whose it is, as for any new
+// login, and somebody else's is refused, naming them.
+func TestALoginRecordedAsAnotherAccountsGoesTheNewLoginWay(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) { f.profile = profileOf("A-x", "u2") })
+	s := openTemp(t)
+	words := said(s)
+	a := livingClaude(s, "u1")
+	if _, err := launchEnv(t, s, a); err != nil || !a.StagedCurrent() {
+		t.Fatalf("setup: the account's login in its home: %v staged-current=%v", err, a.StagedCurrent())
+	}
+	home := s.Home(a)
+	alive(t, home, "daemon.lock", os.Getpid())
+	writeFile(t, filepath.Join(home, ".credentials.json"),
+		`{"claudeAiOauth":{"accessToken":"A-x","refreshToken":"R-x","expiresAt":`+itoa(int(later(2*time.Hour)))+
+			`,"refreshTokenExpiresAt":1999999998100,"scopes":["user:inference"],`+
+			`"tokenAccount":{"uuid":"u2","emailAddress":"u2@x"}}}`)
+	s.Refresh(context.Background(), false, a)
+	if a.Token.Refresh != "R-u1" || f.profiles.Load() == 0 || f.refreshes.Load() != 0 {
+		t.Fatalf("not taken as a rotation; the provider was asked: holds %s, %d profile reads, %d refreshes",
+			a.Token.Refresh, f.profiles.Load(), f.refreshes.Load())
+	}
+	if len(*words) == 0 || !strings.Contains((*words)[0], "u2@x") {
+		t.Fatalf("refused, naming whose it is: %q", *words)
+	}
+}

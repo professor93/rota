@@ -124,3 +124,47 @@ func TestAGrantEndingMoreThanAMinuteLaterWasSignedInAfter(t *testing.T) {
 		}
 	}
 }
+
+// Claude Code may record whose login it is (tokenAccount). A login ending in
+// the same minute as the account's but recorded as another account's is never
+// a rotation of it: it is a NewLogin, in sync or after a look that found the
+// home without the account's login. The same account recorded, or nothing to
+// go by — no record, one of another shape, an account whose uuid is not known
+// — leaves the one-minute rule alone, with no network call, and never makes
+// the login unreadable.
+func TestALoginRecordedAsAnotherAccountsIsNeverARotation(t *testing.T) {
+	later := time.Now().Add(3 * time.Hour).UnixMilli()
+	login := func(until, who string) string {
+		return `{"accessToken":"A-R2","refreshToken":"R2","expiresAt":` + strconv.FormatInt(later, 10) +
+			`,"refreshTokenExpiresAt":` + until + `,"tokenAccount":` + who + `}`
+	}
+	const sameMinute, other = "1999999998100", `{"uuid":"u-other","emailAddress":"other@x"}` // livingClaude: u-5, ends 1999999999000
+	for _, staged := range []string{fingerprint("R1"), stagedNone} {
+		a := livingClaude()
+		a.Staged = staged
+		var nl *NewLogin
+		if err := AdoptFrom(a, homeWith(login(sameMinute, other))); !errors.As(err, &nl) || a.Token.Refresh != "R1" ||
+			a.Staged != staged {
+			t.Fatalf("staged %q: another account's login, however close its end, is a new login: %+v %v", staged, a, err)
+		}
+		for _, who := range []string{`{"uuid":"u-5","emailAddress":"five@x"}`, `{"uuid":"U-5"}`, `null`,
+			`{"emailAddress":"five@x"}`, `"u-other"`, `[1]`} {
+			a := livingClaude()
+			a.Staged = staged
+			if err := AdoptFrom(a, homeWith(login(sameMinute, who))); err != nil || a.Token.Refresh != "R2" || !a.StagedCurrent() {
+				t.Fatalf("staged %q, tokenAccount %s: a rotation as before: %+v %v", staged, who, a, err)
+			}
+		}
+	}
+	a := livingClaude()
+	a.Staged, a.UUID = fingerprint("R1"), ""
+	if err := AdoptFrom(a, homeWith(login(sameMinute, other))); err != nil || a.Token.Refresh != "R2" {
+		t.Fatalf("an account whose uuid is not known has nothing to compare: a rotation as before: %+v %v", a, err)
+	}
+	a = livingClaude()
+	a.Staged = stagedNone
+	if err := AdoptFrom(a, homeWith(login("1999913599000", other))); err != nil || a.Token.Refresh != "R1" ||
+		a.Staged != stagedNone {
+		t.Fatalf("ending a day earlier it is the login from before, passed over whoever's: %+v %v", a, err)
+	}
+}
