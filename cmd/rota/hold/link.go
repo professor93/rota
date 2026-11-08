@@ -92,18 +92,15 @@ func (s *Session) Serve(ln *net.UnixListener) {
 //
 // Only the process holding the store's daemon lock may link, and the kernel
 // says which process is at the other end: nothing the peer sends can change
-// it. A valid link replaces the one before, which is closed, so a daemon
-// that restarted takes its sessions back without waiting for the old link
-// to time out.
+// it. So that is asked first, before anything the peer sent is read, and
+// any other process is refused at once rather than read up to a frame's
+// size and given helloWithin to send it. A valid link replaces the one
+// before, which is closed, so a daemon that restarted takes its sessions
+// back without waiting for the old link to time out.
 func (s *Session) take(c *net.UnixConn) {
 	defer s.recovered("a link")
 	k := share.NewConn(c, Beat)
 	k.Deadline(time.Now().Add(helloWithin))
-	kind, payload, err := k.Read()
-	if err != nil || kind != holdwire.Hello {
-		_ = k.Close()
-		return
-	}
 	refuse := func(why string) {
 		_ = k.SendJSON(holdwire.Refused, holdwire.RefusedMsg{Message: why})
 		_ = k.Close()
@@ -111,6 +108,11 @@ func (s *Session) take(c *net.UnixConn) {
 	if pid, ok := s.fromDaemon(c); !ok {
 		s.log("refused a link from a process that is not the daemon", "pid", pid)
 		refuse(refusedNotDaemon)
+		return
+	}
+	kind, payload, err := k.Read()
+	if err != nil || kind != holdwire.Hello {
+		_ = k.Close()
 		return
 	}
 	var hello holdwire.HelloMsg
