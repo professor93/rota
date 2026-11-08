@@ -198,16 +198,34 @@ var (
 // start installs a fake with Spec.Ready set to ready, starts whatever runs
 // it, and returns a channel closed when that run has ended. Each start is
 // given a ready file of its own, so only the fake of the last start can
-// prove it came up.
+// prove it came up. Whatever else start makes for its run, it makes afresh
+// each time, so that the test goes on with the last start's run and never
+// with one Up gave up on:
 //
-// macOS now and then kills a fake inside exec, a later run as well as a first
-// one (see warm). Such a fake never runs a line, so it never says it ran, and
-// its run ends: that is no fault of the code under test, and Up starts it
+//	var done chan error
+//	fakecli.Up(t, func(ready string) <-chan struct{} {
+//		bin := fakecli.Install(t, t.TempDir(), "claude", fakecli.Spec{Ready: ready, Sleep: "30s"})
+//		done = make(chan error, 1)
+//		ended := make(chan struct{})
+//		go func() { _, err := rota.Run(ctx, a, "", &rota.Command{Bin: bin}, spec, nil, nil); done <- err; close(ended) }()
+//		return ended
+//	})
+//
+// A fake that never runs a line never says it ran, and its run ends. macOS
+// killing it inside exec, a later run as well as a first one (see warm), is
+// the usual cause and no fault of the code under test, so Up starts it
 // again, up to startTries times. Anything else fails the test: a fake that
-// ran but whose run ended before it said it was up, which is the code under
-// test or the fake, and a fake that neither comes up nor ends within upLimit.
-// A fake that says it is up just as its run ends is up: what the run did
-// next is for the test to judge.
+// ran but whose run ended without it saying it was up, which is the code
+// under test or the fake, and a fake that neither comes up nor ends within
+// upLimit. Once the run has ended a fake still has upGrace to say it is up,
+// for a helper on its way. A fake that says it is up just as its run ends is
+// up: what the run did next is for the test to judge.
+//
+// Up proves one fake per start, and learns that one died only from its run
+// ending. A helper that a CLI spawns while the CLI goes on running fits
+// neither: were macOS to kill the helper inside exec the run would not end,
+// and Up would fail at upLimit rather than start it again. A test of such a
+// group waits for each of its fakes with WaitReady.
 func Up(t testing.TB, start func(ready string) (ended <-chan struct{})) int {
 	t.Helper()
 	for try := 1; ; try++ {
@@ -219,9 +237,9 @@ func Up(t testing.TB, start func(ready string) (ended <-chan struct{})) int {
 		case ran:
 			t.Fatalf("the fake ran but its run ended before it said it was up at %s", ready)
 		case try == startTries:
-			t.Fatalf("the fake was killed before it ran a line, %d times in a row", startTries)
+			t.Fatalf("the fake never ran a line, %d times in a row (macOS killing it inside exec is the usual cause)", startTries)
 		}
-		t.Logf("start %d: the fake was killed before it ran a line, as macOS now and then does inside exec; starting it again", try)
+		t.Logf("start %d: the fake never ran a line (macOS killing it inside exec is the usual cause); starting it again", try)
 	}
 }
 
@@ -236,17 +254,17 @@ func upOrEnded(t testing.TB, ready string, ended <-chan struct{}) (pid int, ran 
 		select {
 		case <-ended:
 			// The run is over. A fake started by something other than the
-			// run itself, a helper, may still be on its way; one killed
-			// inside exec never gets anywhere.
+			// run itself, a helper, may still be on its way: it says it ran
+			// as it starts, and that it is up only once what it starts first
+			// is going. So whether it ran is asked only when the grace is
+			// over. One killed inside exec never gets anywhere.
 			for grace := time.Now().Add(upGrace); ; time.Sleep(5 * time.Millisecond) {
 				if pid := readyPid(ready); pid > 0 {
 					return pid, true
 				}
-				if _, err := os.Stat(ready + ranSuffix); err == nil {
-					return 0, true
-				}
 				if time.Now().After(grace) {
-					return 0, false
+					_, err := os.Stat(ready + ranSuffix)
+					return 0, err == nil
 				}
 			}
 		case <-time.After(5 * time.Millisecond):
@@ -267,10 +285,10 @@ func readyPid(path string) int {
 	return pid
 }
 
-// refuseRun plays Spec.KilledRuns, and returns only for a run it lets
-// through.
-func refuseRun(killed string) {
-	n, file, ok := strings.Cut(killed, ":")
+// playKill plays macOS killing a fake inside exec, as "N:file" asks (see
+// Spec.KilledRuns), and returns only for a run it lets through.
+func playKill(knob string) {
+	n, file, ok := strings.Cut(knob, ":")
 	limit, err := strconv.Atoi(n)
 	if !ok || err != nil {
 		return
@@ -335,7 +353,7 @@ func Maybe() {
 		fmt.Fprintln(os.Stderr, "fake cli:", err)
 		os.Exit(70)
 	}
-	refuseRun(spec.KilledRuns)
+	playKill(spec.KilledRuns)
 	if spec.Ready != "" {
 		// The first thing a fake that runs at all does: see Up.
 		_ = os.WriteFile(spec.Ready+ranSuffix, nil, 0o600)

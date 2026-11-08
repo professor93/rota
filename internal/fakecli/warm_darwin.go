@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -78,20 +77,4 @@ func killed(err error) bool {
 const warmKillEnv = "FAKECLI_WARM_KILL"
 
 // refuseWarm is that stand-in, and returns only for a run it lets through.
-func refuseWarm() {
-	n, file, ok := strings.Cut(os.Getenv(warmKillEnv), ":")
-	limit, err := strconv.Atoi(n)
-	if !ok || err != nil {
-		return
-	}
-	f, err := os.OpenFile(file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return
-	}
-	_, _ = f.Write([]byte{'x'})
-	st, err := f.Stat()
-	f.Close()
-	if err == nil && st.Size() <= int64(limit) {
-		_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
-	}
-}
+func refuseWarm() { playKill(os.Getenv(warmKillEnv)) }
