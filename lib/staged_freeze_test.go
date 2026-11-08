@@ -1,7 +1,9 @@
 package rota
 
 import (
+	"context"
 	"errors"
+	"net/http"
 	"strconv"
 	"testing"
 	"testing/fstest"
@@ -184,8 +186,8 @@ func TestARefusedGrantIsPassedOverUntilTheAccountsOwnLoginIsBackIn(t *testing.T)
 		t.Fatal("setup: another grant is a new login")
 	}
 	_ = nl.Refuse(a, &Identity{UUID: "u-other", Email: "other@x"})
-	if a.Extra[claudeRefusedGrant] != refused || a.Staged != stagedNone {
-		t.Fatalf("the refused grant is remembered: %v %q", a.Extra, a.Staged)
+	if a.Extra[claudeRefusedGrant] != refused+" u-other" || a.Staged != stagedNone {
+		t.Fatalf("the refused grant is remembered, with whose it is: %v %q", a.Extra, a.Staged)
 	}
 	for _, rt := range []string{"RX", "RY"} {
 		if err := AdoptFrom(a, homeWith(freezeLogin(rt, later+3_600_000, refused))); err != nil || a.Token.Refresh != "R1" ||
@@ -217,5 +219,64 @@ func TestARefusedGrantIsPassedOverUntilTheAccountsOwnLoginIsBackIn(t *testing.T)
 	}
 	if _, ok := c.Extra[claudeRefusedGrant]; ok || !c.StagedCurrent() {
 		t.Fatalf("a stage that writes the account's login forgets it: %v", c.Extra)
+	}
+}
+
+// A login is taken for the refused grant only when Claude Code records it as
+// the account refused, or records nothing; one recorded as this account — a
+// /login of its own in the minute after the refusal — or as a third account is
+// handed back as a new login. A dead account passes the refused grant over
+// too, rather than asking about it at every look.
+func TestARefusalIsTakenOnlyForTheAccountRefusedOrNobody(t *testing.T) {
+	later := time.Now().Add(3 * time.Hour).UnixMilli()
+	const refused = "2000086399000"
+	login := func(until, who string) string {
+		return `{"accessToken":"A-RX","refreshToken":"RX","expiresAt":` + strconv.FormatInt(later, 10) +
+			`,"refreshTokenExpiresAt":` + until + `,"tokenAccount":` + who + `}`
+	}
+	for _, c := range []struct {
+		record, who string
+		passed      bool
+	}{
+		{refused + " u2", `{"uuid":"u2"}`, true},
+		{refused + " u2", `null`, true},
+		{refused + " u2", `{"uuid":"u-5"}`, false}, // this account's own /login (livingClaude is u-5)
+		{refused + " u2", `{"uuid":"u3"}`, false},
+		{refused, `null`, true},
+		{refused, `{"uuid":"u3"}`, false},
+	} {
+		for _, dead := range []bool{false, true} {
+			a := livingClaude()
+			a.Staged, a.Dead, a.Extra[claudeRefusedGrant] = stagedNone, dead, c.record
+			err := AdoptFrom(a, homeWith(login("2000086429000", c.who))) // thirty seconds after the refused one
+			var nl *NewLogin
+			if got := !errors.As(err, &nl); got != c.passed || a.Token.Refresh != "R1" {
+				t.Errorf("record %q, tokenAccount %s, dead=%v: passed over %v, want %v (%v)", c.record, c.who, dead, got, c.passed, err)
+			}
+		}
+	}
+}
+
+// A fresh login forgets a refusal along with everything else of the login
+// before it.
+func TestAFreshLoginForgetsARefusal(t *testing.T) {
+	f := newFakeServer(t, false)
+	setURL(t, &ClaudeEndpoints.Token, f.URL+"/token")
+	setURL(t, &ClaudeEndpoints.Profile, f.URL+"/profile")
+	f.reply["/token"] = func(*http.Request, map[string]any) (int, any) {
+		return 200, map[string]any{"access_token": "A", "refresh_token": "R", "expires_in": 3600}
+	}
+	f.reply["/profile"] = func(*http.Request, map[string]any) (int, any) { return 500, nil }
+	p, _ := Lookup("claude")
+	_, state, _ := p.Begin(context.Background())
+	tok, err := p.Complete(context.Background(), "CODE#ST", state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a := livingClaude()
+	a.Extra[claudeRefusedGrant] = "2000086399000 u2"
+	a.Apply(tok)
+	if _, ok := a.Extra[claudeRefusedGrant]; ok {
+		t.Fatalf("forgotten: %v", a.Extra)
 	}
 }
