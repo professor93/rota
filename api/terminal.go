@@ -223,7 +223,10 @@ type termConn struct {
 	name  string
 	role  Role
 	watch bool // this connection may never hold the keyboard
-	since time.Time
+	// refusal is the sentence a change this role does not cover is refused
+	// in, which depends on who the principal is (watchOnlyFor).
+	refusal string
+	since   time.Time
 
 	c    *wsConn
 	out  chan termFrame
@@ -281,7 +284,7 @@ func newTermConn(c *wsConn, p *Principal, watch bool, at time.Time) *termConn {
 		depth = 1
 	}
 	return &termConn{
-		id: runID(), name: p.Name, role: p.Role, watch: watch, since: at,
+		id: runID(), name: p.Name, role: p.Role, watch: watch, since: at, refusal: watchOnlyFor(p),
 		c: c, out: make(chan termFrame, depth),
 		gone: make(chan struct{}), drained: make(chan struct{}),
 	}

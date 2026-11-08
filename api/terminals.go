@@ -780,7 +780,7 @@ func (s *Server) onTerm(ts *termSession, tc *termConn, f inFrame) error {
 			}
 		}
 		if !tc.role.allows(termNeeds("input")) {
-			tc.fail(watchOnly)
+			tc.fail(tc.refusal)
 			return nil
 		}
 		if err := ts.typeInto(tc, data); err != nil && !errors.Is(err, errSendTold) {
@@ -796,7 +796,7 @@ func (s *Server) onTerm(ts *termSession, tc *termConn, f inFrame) error {
 		return wsFail{wsPolicy, "a frame this server cannot read"}
 	}
 	if !tc.role.allows(termNeeds(in.Type)) {
-		tc.fail(watchOnly)
+		tc.fail(tc.refusal)
 		return nil
 	}
 	switch in.Type {

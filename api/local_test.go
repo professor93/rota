@@ -173,14 +173,14 @@ func TestLocalWatchCannotChange(t *testing.T) {
 		{"POST", "/v1/invites", `{}`},
 	} {
 		code, body := ask(watch, c.method, c.path, c.body, "Authorization", "Bearer x")
-		if code != http.StatusForbidden || errorOf(body) != watchOnly {
-			t.Errorf("%s %s as the watch principal answers %d %s, want 403 %q", c.method, c.path, code, body, watchOnly)
+		if code != http.StatusForbidden || errorOf(body) != callerWatchOnly {
+			t.Errorf("%s %s as the watch principal answers %d %s, want 403 %q", c.method, c.path, code, body, callerWatchOnly)
 		}
 	}
 	// The socket that starts a run is control, and refused before any
 	// upgrade.
-	if code, body := ask(watch, "GET", "/v1/ws", ""); code != http.StatusForbidden || errorOf(body) != watchOnly {
-		t.Errorf("GET /v1/ws as the watch principal answers %d %s, want 403 %q", code, body, watchOnly)
+	if code, body := ask(watch, "GET", "/v1/ws", ""); code != http.StatusForbidden || errorOf(body) != callerWatchOnly {
+		t.Errorf("GET /v1/ws as the watch principal answers %d %s, want 403 %q", code, body, callerWatchOnly)
 	}
 }
 

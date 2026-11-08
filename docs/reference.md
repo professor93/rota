@@ -1117,10 +1117,12 @@ handlers, and why the frames a terminal's socket takes are a second table
 beside it. A route nobody wrote a row for takes `control`.
 
 A principal whose role does not cover what it asked for gets `403` and the
-sentence *this sign-in may only watch; nothing here can be changed from it*.
-It is not `401`, because there is nothing to try again with, and it is not
-counted as a guess: somebody who proved who they are and clicked the wrong
-thing must not cost their address its access.
+sentence *this sign-in may only watch; nothing here can be changed from it*,
+or *this caller may only watch; nothing here can be changed from it* for
+`local` on the control socket, which signed in to nothing. It is not
+`401`, because there is nothing to try again with, and it is not counted
+as a guess: somebody who proved who they are and clicked the wrong thing
+must not cost their address its access.
 
 #### The principals
 
@@ -1276,7 +1278,7 @@ its place before handing the link on.
 **Inside a held session it only watches.** A caller is `local` with
 `control`, unless it is running inside a held session — the agent in it, or
 anything that agent started. Then it is `local` with `watch`: it may list,
-describe and attach, every change is `403` *this sign-in may only watch;
+describe and attach, every change is `403` *this caller may only watch;
 nothing here can be changed from it*, its typing is refused in the same
 words, and it never holds a keyboard. The daemon tells by what the caller
 cannot say for itself: the kernel gives the pid at the other end of the
