@@ -22,6 +22,7 @@ import (
 
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/share"
+	"github.com/professor93/rota/store"
 )
 
 // A holder's session, driven through its link the way the daemon drives it,
@@ -931,4 +932,52 @@ func TestTheStateFitsWhateverTheRegistrySays(t *testing.T) {
 	p := r.link(t)
 	p.send(holdwire.Ping, nil)
 	p.until(holdwire.Pong)
+}
+
+// TestHelperCrashesHolding is a holder that has claimed its session's
+// directory, and so logs to its holder.log, and then crashes, for
+// TestAHolderThatCrashesSaysWhyInItsLog. It is not a test on its own.
+func TestHelperCrashesHolding(t *testing.T) {
+	home := os.Getenv("ROTA_HOLD_TEST_CRASH_HOME")
+	if home == "" {
+		t.Skip("a helper process")
+	}
+	st, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := &holder{req: holdwire.Request{ID: testID, Kind: holdwire.KindShell}}
+	if err := h.claimDir(st); err != nil {
+		t.Fatal(err)
+	}
+	fmt.Println("log:", holdwire.LogPath(h.dir))
+	go func() { panic("the holder fell over") }()
+	select {}
+}
+
+// A holder that crashes says why in its holder.log: standard error is
+// /dev/null by then.
+func TestAHolderThatCrashesSaysWhyInItsLog(t *testing.T) {
+	home, err := os.MkdirTemp("", "rh") // short enough for a session's socket
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(home) })
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperCrashesHolding$")
+	cmd.Env = append(os.Environ(), "ROTA_HOLD_TEST_CRASH_HOME="+home)
+	out, err := cmd.Output()
+	if err == nil {
+		t.Fatalf("the helper did not crash: %s", out)
+	}
+	_, path, ok := strings.Cut(string(out), "log: ")
+	if !ok {
+		t.Fatalf("the helper named no log: %q (%v)", out, err)
+	}
+	raw, err := os.ReadFile(strings.TrimSpace(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "panic: the holder fell over") {
+		t.Fatalf("holder.log does not say why the holder crashed:\n%s", raw)
+	}
 }
