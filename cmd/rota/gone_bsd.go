@@ -47,7 +47,9 @@ func exitOf(pid int) (wait func(), err error) {
 			}
 			if err != nil {
 				// kqueue gave up on a process it had taken: ask by its pid
-				// from here on, which can only be held a little long.
+				// from here on. That can follow the pid to a process given
+				// it after the exit, so the claim may be held too long, never
+				// let go too soon.
 				for proc.Alive(pid) {
 					time.Sleep(time.Second)
 				}

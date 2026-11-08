@@ -84,6 +84,12 @@ type Spec struct {
 	// Ready names a file the fake writes its pid to once Term, Spawn and
 	// Detach are in force, so a test can signal it without racing its start.
 	Ready string `json:"ready,omitempty"`
+	// Exec is a program the fake becomes once it has read stdin to its end,
+	// by an exec from a thread other than its main one, as a Go CLI's
+	// syscall.Exec usually is: Linux shows the process as a zombie for that
+	// moment while the thread takes over the pid. Linux only; elsewhere the
+	// fake says it cannot and exits 70.
+	Exec string `json:"exec,omitempty"`
 }
 
 // Result is a Spec that answers as the claude CLI does in print mode: one
@@ -264,6 +270,10 @@ func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	if !spec.KeepStdin {
 		raw, _ := io.ReadAll(stdin)
 		in = strings.TrimRight(string(raw), "\n")
+	}
+	if spec.Exec != "" {
+		fmt.Fprintln(stderr, "fake cli:", execFromThread(spec.Exec))
+		return 70
 	}
 	if spec.Sleep != "" {
 		if d, err := time.ParseDuration(spec.Sleep); err == nil {

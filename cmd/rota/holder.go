@@ -22,9 +22,11 @@ import (
 // to init rather than to the CLI. It holds the claim through its own
 // descriptor, close-on-exec as every one of rota's is, and lets go of it the
 // moment the process it was given exits: rota's own, which after the exec is
-// the CLI's. Nothing the CLI starts holds the claim, and the CLI's process,
-// terminal, signals, job control and exit status are what they were. Where
-// no holder can be started, the claim is kept across the exec as before.
+// the CLI's. It ignores the signals that ask a process to end, so only that
+// exit lets go — or SIGKILL, early. Nothing the CLI starts holds the claim,
+// and the CLI's process, terminal, signals, job control and exit status are
+// what they were. Where no holder can be started, the claim is kept across
+// the exec as before.
 
 // errNoHolder says a holder is not to be had here, rather than that starting
 // one went wrong: the claim is kept across the exec, and nothing is said.

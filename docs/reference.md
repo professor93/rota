@@ -2832,21 +2832,27 @@ ones destroyed on disk and still listed.
 The handover is the awkward one. It replaces rota with the CLI through
 `execve`, and Go opens every file close-on-exec, so the claim would be dropped
 at exactly the moment it starts to matter. Kept across the exec instead, it
-would go to everything the CLI starts as well: Codex's app-server daemon,
-which its TUI starts and leaves running, or on macOS a tool a codex agent left
-running in the background, would keep the account busy long after the session
-ended. So immediately before the exec the handover lends the claim to a
-holder, `rota serve claim`: a process in a session of its own, at `/`, with
-stdin, stdout and stderr on `/dev/null`, not the CLI's child nor its parent,
-holding the claim close-on-exec and nothing else of the run's. It lets go the
-moment the CLI exits, however it exits, which it learns from the kernel: a
-pidfd on Linux, falling back to reading `/proc` ten times a second on a kernel
-without one, and kqueue on macOS and the BSDs. Nothing the CLI starts holds
-the claim, and its process, pid, terminal, signals, job control and exit
-status are what they were. If the exec fails the holder is told to let go, and
-the run ends with the account free. A holder that is killed lets go early,
-while the CLI still runs. Where no holder can be started — another unix, or a
-failure, which is said — the claim is kept across the exec as before.
+would go to what the CLI starts as well, unless the CLI closes it first:
+Codex's app-server daemon, which its TUI starts and leaves running, or on
+macOS a tool a codex agent left running in the background, would keep the
+account busy long after the session ended, and what a claude session left
+running with it, a background shell say, would keep `rota login`,
+`rota remove` and the maintenance off its account. So immediately before the
+exec the handover lends the claim to a holder, `rota serve claim`: a process
+in a session of its own, at `/`, with stdin, stdout and stderr on `/dev/null`,
+not the CLI's child nor its parent, holding the claim close-on-exec and
+nothing else of the run's. It lets go the moment the CLI exits, however it
+exits, which it learns from the kernel: a pidfd on Linux, and kqueue on macOS
+and the BSDs. On a Linux kernel without pidfds it reads `/proc` ten times a
+second instead, and believes a zombie there only once it has stayed one for 50
+ms, because an exec from a thread other than the main one shows the process as
+a zombie for a moment. Nothing the CLI starts holds the claim, and its
+process, pid, terminal, signals, job control and exit status are what they
+were. If the exec fails the holder is told to let go, and the run ends with
+the account free. The holder ignores SIGTERM, SIGINT, SIGHUP and SIGQUIT, so
+`pkill rota` leaves it holding; only SIGKILL makes it let go early, while the
+CLI still runs. Where no holder can be started — another unix, or a failure,
+which is said along with why — the claim is kept across the exec as before.
 Everywhere rota stays the parent — a run, an open session, a terminal on the
 server, `--share`, and Windows, which has no exec — the claim keeps the flag
 and rota holds it until the run ends, so a child started meanwhile, another
