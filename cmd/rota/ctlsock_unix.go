@@ -197,12 +197,15 @@ var parentOf = proc.Parent
 // goes up the parents to pid 1, maxAncestry of them at most, and only while
 // some session is held at all.
 //
-// An ancestor whose parent cannot be read ends the walk, outside: on a
+// An ancestor whose parent cannot be read ends the walk, outside. On a
 // Linux whose /proc is mounted with hidepid it is another user's, as root's
-// sshd is above every ssh login, and a holder and its CLI are this user's,
-// which hidepid never hides from it, so none is above it. One that went
-// meanwhile has had its children handed on, and nothing it held is above
-// them either.
+// sshd is above every ssh login, or one of this user's that is not
+// dumpable, as after a setuid exec. A holder and its CLI are matched by the
+// pid their child's stat names before their own is read, so one hidden is
+// still found; only a process with other privileges between a command and
+// its CLI ends the walk short of it, which is the same escape as forking
+// twice. One that went meanwhile has had its children handed on, and
+// nothing it held is above them either.
 //
 // Any record whose lock is held counts — one this rota cannot read
 // included, since its holder is running all the same — and one nobody holds
