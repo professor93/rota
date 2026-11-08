@@ -1172,9 +1172,11 @@ func fileIsNewer(file, item []byte) bool {
 //
 // itemGone marks a read whose store is the file only because the keychain item
 // was not there, twice (readItem), where the home's login was last found in the
-// item (inItemKey) and something runs in the home: an item being rewritten may
-// read as none, and the file beside it then says nothing about what Claude Code
-// holds (see adopt, synced). In a quiet home nothing can be rewriting the item,
+// item (inItemKey) and something runs in the home, unless this look holds
+// Claude Code's refresh lock: an item being rewritten may read as none, and the
+// file beside it then says nothing about what Claude Code holds, so such a read
+// records, confirms and settles nothing (see adopt, synced, lost, clearedOwn).
+// In a quiet home nothing can be rewriting the item,
 // so one that is not there is gone, and the account forgets it (forgetItem);
 // that, and rota taking the item away itself, are the only ways the record
 // goes. Adoption records it again whenever a read finds the item (noteItem).
@@ -1195,7 +1197,11 @@ func (h *claudeHome) read() (fsys storeFS, ok bool) {
 	gone := false
 	if inItem && h.item == nil {
 		if alive || !h.quiet() {
-			gone = true
+			// Under rota's own refresh lock nothing of Claude Code's is in the
+			// middle of writing the item — it takes the lock to refresh, and
+			// updates the item in place — so an item twice not there is not
+			// there, for this read.
+			gone = !h.locked
 		} else {
 			h.forgetItem() // nothing runs, so nothing is rewriting it: the item is gone, the login is in the file
 		}
@@ -1242,6 +1248,9 @@ func (h *claudeHome) adopt(ctx context.Context) error {
 	h.lost(fsys)
 	if h.blanked = h.clearedOwn(fsys); h.blanked {
 		return nil
+	}
+	if l, ok := storedLogin(fsys.store); ok && l.Refresh == "" && fsys.itemGone {
+		return nil // nor is the account's login taken for cleared on it: a blank there says nothing of the item
 	}
 	staged, token := h.a.Staged, h.a.Token.Refresh
 	err := rota.AdoptFrom(h.a, fsys)
@@ -1293,10 +1302,11 @@ func (h *claudeHome) adopt(ctx context.Context) error {
 // clearedOwn reports whether the home's store is blanked where the account's
 // current login was, the account being alive and holding its own refresh token.
 // A file beside a blanked keychain item is the store only when it counts
-// (judgeFile), so a leftover there changes nothing about that.
+// (judgeFile), so a leftover there changes nothing about that; nor does a file
+// read only because the item was not there (itemGone).
 func (h *claudeHome) clearedOwn(fsys storeFS) bool {
 	a := h.a
-	if a.Dead || !a.StagedCurrent() {
+	if a.Dead || !a.StagedCurrent() || fsys.itemGone {
 		return false
 	}
 	l, ok := storedLogin(fsys.store)
@@ -1312,9 +1322,10 @@ func (h *claudeHome) clearedOwn(fsys storeFS) bool {
 // reads, and shows nothing — unless this look has just taken the new login in it
 // (taken), which rota then holds exactly as the home does. Nor does a file read
 // only because the item was not there, where the login was last found in it
-// (itemGone), nor a read made while somebody else holds Claude Code's refresh
-// lock (refreshing): between a refresh's request and its write the store still
-// shows the token just spent.
+// (itemGone; never so under rota's own refresh lock, where an item that is not
+// there is not there), nor a read made while somebody else holds Claude Code's
+// refresh lock (refreshing): between a refresh's request and its write the
+// store still shows the token just spent.
 //
 // What this lets through, knowingly: rota writes its file and removes the item;
 // Claude Code then moves the login into a new item rota never sees; a read then
@@ -1351,10 +1362,11 @@ func (h *claudeHome) refreshing() bool {
 // its home since the home was last found holding it: blanked there, or behind a
 // keychain item Claude Code blanked. newest counts from that look, so a rescue
 // that does not get through is tried again by a later look on the same terms;
-// the home holds no login Claude Code could rotate meanwhile.
+// the home holds no login Claude Code could rotate meanwhile. A file read only
+// because the item was not there (itemGone) shows nothing lost.
 func (h *claudeHome) lost(fsys storeFS) {
 	a := h.a
-	if a.Dead || !a.StagedCurrent() {
+	if a.Dead || !a.StagedCurrent() || fsys.itemGone {
 		return
 	}
 	if at, ok := extraTime(a, homeLostKey); ok {

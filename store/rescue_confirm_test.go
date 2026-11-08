@@ -1018,6 +1018,86 @@ func TestAFileReadForAMissingItemRecordsNoSync(t *testing.T) {
 	})
 }
 
+// A file read only because the item was not there, where the login was last
+// found in it and something runs in the home, shows no blank: the item may be
+// in the middle of being rewritten. Such a read starts no rescue, records no
+// loss, and does not take the account's login for cleared — even with rota's
+// copy seen a moment ago, when a rescue would present it. Once the item reads
+// again the home is in sync.
+func TestAFileReadForAMissingItemShowsNoBlank(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	k := fakeKeychain(t)
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) { f.refresh = refreshesTo("A-new", "R-new") })
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	home := s.Home(a)
+	svc := service(t, home)
+	login := storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000")
+	k.items[svc] = login
+	writeFile(t, filepath.Join(home, ".credentials.json"), clearedLogin)
+	a.StagedWritten()
+	alive(t, home, "sessions/1.json", os.Getpid())
+	looked(t, s, a)
+	if a.Extra[inItemKey] == "" || !a.StagedCurrent() {
+		t.Fatalf("setup: the login is in the item, in sync: %q %q", a.Extra[inItemKey], a.Staged)
+	}
+	seenInSync(a)
+	staged := a.Staged
+	delete(k.items, svc)
+	for _, look := range []struct {
+		what string
+		do   func()
+	}{
+		{"maintenance", func() { s.Maintain(context.Background()) }},
+		{"a listing", func() { s.Refresh(context.Background(), false, a) }},
+		{"a listing that asks nothing", func() { s.Rescue(context.Background(), a) }},
+		{"a launch", func() { _, _ = launchEnv(t, s, a) }},
+	} {
+		look.do()
+		if f.refreshes.Load() != 0 || a.Dead || a.Staged != staged || a.Extra[homeLostKey] != "" {
+			t.Fatalf("%s: nothing presented, nothing dead, nothing recorded: refreshes=%d dead=%v %q staged=%q lost=%q",
+				look.what, f.refreshes.Load(), a.Dead, a.WhyDead(), a.Staged, a.Extra[homeLostKey])
+		}
+	}
+	k.items[svc] = login
+	h := looked(t, s, a)
+	if !h.usable || h.blanked || a.Dead || !a.StagedCurrent() || f.refreshes.Load() != 0 {
+		t.Fatalf("the item back, the home is in sync: usable=%v blanked=%v dead=%v staged=%q", h.usable, h.blanked, a.Dead, a.Staged)
+	}
+}
+
+// Under rota's own refresh lock nothing of Claude Code's is rewriting the
+// item, so an item twice not there is not there: a read under it records the
+// home in sync, and a stranded home whose login Claude Code moved into the file
+// itself is rescued, wherever the login was last found.
+func TestUnderRotasOwnLockAnItemNotThereIsNotThere(t *testing.T) {
+	for _, noted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "never in an item", true: "last found in the item"}[noted], func(t *testing.T) {
+			storedRouteHere(t)
+			claudeWorld(t)
+			fakeKeychain(t)
+			f := fakeAnthropic(t)
+			f.set(func(f *anthropic) { f.refresh = refreshesTo("A-new", "R-new") })
+			s := openTemp(t)
+			a := livingClaude(s, "u1")
+			stranded(t, s, a)
+			seenInSync(a)
+			a.Extra[homeSyncedKey] = strconv.FormatInt(rota.Now().Add(-time.Hour).UnixMilli(), 10) // an hour ago
+			if noted {
+				a.Extra[inItemKey] = "1"
+			}
+			if errs := s.Rescue(context.Background(), a); len(errs) != 0 {
+				t.Fatal(errs)
+			}
+			if f.refreshes.Load() != 1 || a.Dead || a.Token.Refresh != "R-new" {
+				t.Fatalf("rescued under the lock: refreshes=%d dead=%v %q holds %q", f.refreshes.Load(), a.Dead, a.WhyDead(), a.Token.Refresh)
+			}
+		})
+	}
+}
+
 // The store's fingerprint is the one lib records in Staged, or nothing a look
 // compares would ever match.
 func TestTheFingerprintIsTheOneStagedRecords(t *testing.T) {
