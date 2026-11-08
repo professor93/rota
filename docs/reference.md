@@ -2530,13 +2530,15 @@ Code blanked: see *Stranded* and *Blanked*, below.
 
 - **Reading.** Before anything uses the account's tokens, the home's store
   is read. A rotation by Claude Code keeps the login's own
-  `refreshTokenExpiresAt` and is taken with no network call. A login that
+  `refreshTokenExpiresAt` — the end its grant was signed in with, which a
+  refresh of rota's never changes and one of Claude Code's moves only when the
+  provider shortens the grant — and is taken with no network call. A login that
   expires before the account's own token is behind, and so is the one rota
-  wrote before a refresh of its own — which rota goes on remembering as its
-  own write, however often the home is looked at, because that is what
-  proves it spent (*Writing*): the account's current login goes in on the
-  next launch that may write. A login with another `refreshTokenExpiresAt` — or any living
-  login in the home of an account marked dead — is somebody running `/login`
+  wrote before a refresh of its own, whatever end it carries — which rota goes
+  on remembering as its own write, however often the home is looked at,
+  because that is what proves it spent (*Writing*): the account's current
+  login goes in on the next launch that may write. Any other login with another `refreshTokenExpiresAt` — or any living
+  login in the home of an account marked dead but rota's own write — is somebody running `/login`
   inside that home: rota asks the provider whose it is, with that login's own
   access token, and takes it when it is this account's (a dead account comes
   back that way); somebody else's is not taken, the account's own tokens stay
@@ -3055,11 +3057,16 @@ the provider fixes at sign-in, thirty days later, and after that nobody can
 refresh it, Claude Code included: only a new sign-in brings the account back.
 rota records that end at `rota login`, from the token reply's
 `refresh_token_expires_in` or as thirty days from then when the reply has
-none, the way Claude Code reckons a sign-in of its own. Each refresh rota
-makes keeps the earlier of the end it has and the end the reply gives, so the
-end never moves later, and a rotation rota reads back from the home brings the
-end Claude Code recorded with it. The end goes into the home with the login,
-as Claude Code's `refreshTokenExpiresAt`. Once it has passed, nothing of
+none, the way Claude Code reckons a sign-in of its own, and takes the one
+Claude Code records in the home; that is the grant's own end. It goes into the
+home with the login, as Claude Code's `refreshTokenExpiresAt`, and it is how a
+rotation of the login there is told from a new one, so a refresh of rota's
+never changes it. Claude Code's own refresh keeps the earlier of the end it
+had and the end the reply gives. rota keeps the same earliest end beside the
+grant's, the end in effect: the earliest of the sign-in's, each of its own
+refreshes' replies and the home's. It never moves later until a new sign-in,
+`rota login` or a `/login` rota takes from the home, starts a new grant, and it
+never goes into the home. Once the end in effect has passed, nothing of
 rota's presents the refresh token: no listing, rescue, maintenance, launch or
 HTTP request. An access token still good runs until it expires, and the first
 refresh due after that leaves the account `re-auth needed` with this reason:
@@ -3069,7 +3076,10 @@ its login ended on 2026-11-06 23:57 UTC: a Claude login lasts 30 days from sign-
 ```
 
 An account whose end rota has never learned, one logged in by an older rota
-and never refreshed since, say, is refreshed as before.
+and never refreshed since, say, is refreshed as before; the first refresh
+whose reply says an end gives it an end in effect, and its home's login stays
+as it was. `login_until` in `--json` and `GET /v1/accounts`, the STATUS cell
+and the note under the listing all show the end in effect.
 
 ### A token that outlives the window
 
