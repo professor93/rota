@@ -55,11 +55,14 @@ rota send 7f3c1a5d "and the tests?"  # ...or send into that run from another ter
 rota run 2                     # open account 2's CLI interactively
 rota run 2 --share             # ...and let a rota server's page watch it too
 rota run 2 --remote-control    # ...with Claude Code's own Remote Control on
+rota run 2 --detach --label api  # hand it to the daemon; it runs on with no terminal
+rota send api "and the tests?" # ...and type into that held session once it is ready
 rota set 2 --order first       # put account 2 first; the rest move down
 rota set 2 --order before:5    # ...or right before account 5, or up, down, last, out
 rota set 2 --threshold 80      # move on to the next account at 80% usage
 
 rota serve 8787 --token=SECRET # the same over HTTP, with a web playground
+rota serve start               # this store's daemon, which keeps held sessions running
 ```
 
 Every answer prints to stdout; add `--json` anywhere for machine-readable
