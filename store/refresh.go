@@ -184,17 +184,46 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 		case s.released, h != nil && (h.hold != "" || h.blanked):
 			// Nothing may rotate here; the account keeps its last reading.
 		case h != nil:
-			// Expired: a refresh, which only a quiet home may have. The claim
-			// is kept until the new login is in the home. The home is given
-			// the account's login first, as for a launch's refresh (see
+			// Expired: a refresh, which only a quiet home may have. The claim,
+			// and Claude Code's refresh lock with it, are kept until the new
+			// login is in the home, and the home is read again once both are
+			// held (lockAndRead): a lock somebody holds is Claude Code
+			// refreshing right now, which leaves the account to the next look,
+			// and a rotation found under it is read with instead. The home is
+			// given the account's login first, as for a launch's refresh (see
 			// renew), and the save below says so on disk.
 			release, ok := s.holdIdle(a)
 			if !ok {
 				continue
 			}
-			held = append(held, release)
+			// The lock goes before the claim, on every path; both are safe to
+			// let go of more than once.
+			var lock *refreshLock
+			letGo := func() {
+				if lock != nil {
+					lock.release()
+				}
+				release()
+			}
+			held = append(held, letGo)
 			h.others = false
-			err := func() (err error) {
+			lock, changed, err := h.lockAndRead(ctx)
+			report(changed, err)
+			if lock == nil {
+				letGo()
+				continue
+			}
+			if !h.renewable() {
+				letGo()
+				if readsUsage(a) && !a.Expired() {
+					plain = append(plain, work{a, func() {
+						q, err := h.usage(ctx)
+						reading(a, q, err)
+					}})
+				}
+				continue
+			}
+			err = func() (err error) {
 				// The provider plans what is written: see guard.
 				defer func() {
 					if v := recover(); v != nil {
