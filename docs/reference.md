@@ -2689,7 +2689,12 @@ Code blanked: see *Stranded* and *Blanked*, below.
   when, and which token by its fingerprint, never the token itself; a record
   less than a minute old is left as it is, so the store is not saved at every
   look, and so the ten minutes count from up to a minute before the last look
-  in sync; a record about another token counts for nothing. A watched home
+  in sync; a record about another token counts for nothing. A look records
+  nothing while somebody else holds Claude Code's refresh lock — between its
+  request and its write the store still shows the token it has just spent —
+  nor when, with something running in the home, it reads the file only
+  because the keychain item was not there although rota last found the login
+  in the item: an item being rewritten can read as none. A watched home
   (*Watched*) is looked at every five minutes. Otherwise rota presents nothing
   and the account is dead:
   `Claude Code's refresh was refused and rota's copy is older than the home's
