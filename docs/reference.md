@@ -2535,7 +2535,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
   look before it found there (no login, a blanked or older one, one without
   an expiry, a store it could not read), as long as rota knows when the
   account's login ends and the rotation expires after the account's own
-  token. On macOS a keychain read that says there is no item is asked once
+  token. A login Claude Code records as another account's (`tokenAccount`)
+  is never a rotation, however close its end: rota asks the provider whose
+  it is, as below. On macOS a keychain read that says there is no item is asked once
   more before the file is read in its place, and while the home's login was
   last found in its keychain item, such a file read changes nothing rota
   believes about the home: an item being rewritten can read as none, and the
