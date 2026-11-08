@@ -107,6 +107,30 @@ func TestAKilledHolderReadsInterrupted(t *testing.T) {
 	})
 }
 
+// A session that stops says how in the same description that says it
+// stopped. The terminal itself finishes a moment after its held part sees
+// the holder go, and a reader that caught the state in between read an
+// interrupted session that had not ended.
+func TestAStoppedHeldSessionSaysHowItEndedWithItsState(t *testing.T) {
+	for _, c := range []struct {
+		state string
+		code  int
+	}{{heldInterrupted, -1}, {heldEnded, 3}} {
+		h := &heldTerm{s: &Server{}, ts: &termSession{id: "0abc1604d1c86f85", cwd: "/w/tree"}, state: heldLive}
+		live := map[string]any{"ended": false}
+		h.describe(live)
+		if live["ended"] != false || live["exit"] != nil {
+			t.Fatalf("a live session has not ended: %v", live)
+		}
+		h.setState(c.state, c.code)
+		doc := map[string]any{"ended": false}
+		h.describe(doc)
+		wants(t, "a session "+c.state+" before its terminal has finished", doc, map[string]any{
+			"state": c.state, "status": "stopped", "ended": true, "exit": c.code,
+		})
+	}
+}
+
 // A crashed holder's socket goes at the next sweep. A session whose lock is
 // held keeps its socket through every sweep, and one that holds its lock
 // while its socket says nothing is still a live session — not one that has

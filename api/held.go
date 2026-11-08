@@ -159,6 +159,9 @@ type heldTerm struct {
 	conn     *share.Conn // nil while the link is down
 	features []string
 	state    string
+	// exit is how the CLI ended once state is no longer live: its code, or
+	// -1 for a session that was interrupted.
+	exit int
 	// stopped is when this server saw the session stop.
 	stopped time.Time
 	title   string
@@ -276,8 +279,14 @@ func (h *heldTerm) describe(doc map[string]any) {
 	doc["resumable"] = h.state == heldInterrupted && h.conv != ""
 	doc["name"] = h.name()
 	doc["status"] = h.status()
-	if h.state != heldLive && !h.stopped.IsZero() {
-		doc["ended_at"] = h.stopped.Format(time.RFC3339)
+	if h.state != heldLive {
+		// Said as soon as the state is, rather than once the terminal has
+		// finished: a reader that sees a session ended or interrupted sees
+		// how it ended in the same description.
+		doc["ended"], doc["exit"] = true, h.exit
+		if !h.stopped.IsZero() {
+			doc["ended_at"] = h.stopped.Format(time.RFC3339)
+		}
 	}
 }
 
@@ -326,7 +335,7 @@ func (h *heldTerm) run(termSink) int {
 	for {
 		conn := h.link()
 		if code, ended := h.read(conn); ended {
-			h.setState(heldEnded)
+			h.setState(heldEnded, code)
 			go h.settle()
 			return code
 		}
@@ -437,11 +446,11 @@ func (h *heldTerm) relink() (code int, back bool) {
 			// missed.
 			m, err := holdwire.ReadMeta(h.dir)
 			if err == nil && m.Exit != nil {
-				h.setState(heldEnded)
+				h.setState(heldEnded, *m.Exit)
 				h.stoppedFrom(m)
 				return *m.Exit, false
 			}
-			h.setState(heldInterrupted)
+			h.setState(heldInterrupted, -1)
 			if err == nil {
 				h.stoppedFrom(m)
 			}
@@ -499,13 +508,15 @@ func (h *heldTerm) settle() {
 	}
 }
 
-func (h *heldTerm) setState(state string) {
+// setState is the session's state, and once it is no longer live, how its
+// CLI ended: code, or -1 for one interrupted.
+func (h *heldTerm) setState(state string, code int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if state != heldLive && h.stopped.IsZero() {
 		h.stopped = h.s.now()
 	}
-	h.state = state
+	h.state, h.exit = state, code
 	if state != heldLive {
 		h.answerSends(nil, holdwire.SentEnded)
 	}
