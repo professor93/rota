@@ -194,27 +194,39 @@ var parentOf = proc.Parent
 // ancestors, or leads the session getsid says it is in. Ancestry is what
 // tells most: Claude Code starts every command its Bash tool runs in a
 // session of its own, and a session started so keeps its parent. The walk
-// goes up the parents to pid 1, maxAncestry of them at most.
+// goes up the parents to pid 1, maxAncestry of them at most, and only while
+// some session is held at all.
+//
+// An ancestor whose parent cannot be read ends the walk, outside: on a
+// Linux whose /proc is mounted with hidepid it is another user's, as root's
+// sshd is above every ssh login, and a holder and its CLI are this user's,
+// which hidepid never hides from it, so none is above it. One that went
+// meanwhile has had its children handed on, and nothing it held is above
+// them either.
 //
 // Any record whose lock is held counts — one this rota cannot read
 // included, since its holder is running all the same — and one nobody holds
-// is a session that has stopped. A process whose session or parent cannot
-// be had, or a store whose records cannot be listed, is an error, which
-// every caller takes as inside: ctl.sock lets such a caller only watch, and
-// serve stop refuses it. It is a guard against accidents, not a wall: a
-// process that leaves its parent as well as its session, as a daemon does
-// by forking twice, is handed to init and is no longer told apart.
+// is a session that has stopped. A process whose session or own parent
+// cannot be had, one further from pid 1 than maxAncestry, or a store whose
+// records cannot be listed, is an error, which every caller takes as
+// inside: ctl.sock lets such a caller only watch, and serve stop refuses
+// it. It is a guard against accidents, not a wall: a process that leaves
+// its parent as well as its session, as a daemon does by forking twice, is
+// handed to init and is no longer told apart.
 func heldSessionOf(pid int, terminals string) (string, error) {
+	held, err := heldProcesses(terminals)
+	if err != nil {
+		return "", err
+	}
+	if len(held) == 0 {
+		return "", nil
+	}
 	sid, err := sessionOf(pid)
 	if err == nil && sid <= 0 {
 		err = fmt.Errorf("getsid gave %d", sid)
 	}
 	if err != nil {
 		return "", fmt.Errorf("the session of pid %d: %w", pid, err)
-	}
-	held, err := heldProcesses(terminals)
-	if err != nil {
-		return "", err
 	}
 	if id := held[sid]; id != "" {
 		return id, nil
@@ -227,8 +239,11 @@ func heldSessionOf(pid int, terminals string) (string, error) {
 			return "", fmt.Errorf("pid %d has more than %d ancestors", pid, maxAncestry)
 		}
 		parent, err := parentOf(p)
-		if err != nil {
+		switch {
+		case err != nil && p == pid:
 			return "", fmt.Errorf("the parent of pid %d: %w", p, err)
+		case err != nil:
+			return "", nil
 		}
 		p = parent
 	}

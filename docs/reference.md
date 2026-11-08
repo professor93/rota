@@ -1260,8 +1260,11 @@ socket, and that process is inside a held session when it is the holder or
 the CLI of any session whose lock is held, descends from one, up to 64
 parents and pid 1, or is in a session one of them leads (`getsid`). So a
 command the agent runs is inside, though Claude Code starts each in a
-session of its own. A caller the daemon cannot place is given `watch` as
-well. The watch-only rule is a guard against accidents, not a wall: a
+session of its own. The walk up the parents ends at one the caller cannot
+read, which under a `/proc` mounted with `hidepid` is another user's, such
+as root's `sshd` above an ssh login: holders and CLIs are the caller's own.
+With no session held nothing is walked. A caller the daemon cannot place
+is given `watch` as well. The watch-only rule is a guard against accidents, not a wall: a
 process that leaves both its parent and its session, as a daemon does by
 forking twice, escapes it.
 
