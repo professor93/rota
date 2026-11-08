@@ -3057,7 +3057,10 @@ list` or `rota run` — for up to 35 seconds (the HTTP client's 30-second
 ceiling and a margin), because by then the provider has replaced the token and
 its answer is the only copy of the new one. Nothing is sent once whoever asked
 has gone: what had not been sent is left for the next look, and `rota list` or
-`rota run` then exits with status 130 instead of going on. Treat `re-auth
+`rota run` — headless, `--input` or the handover alike — then exits with status
+130 instead of going on, starting no CLI, after saying anything that went wrong
+beside the interrupt, such as a save that failed. An interrupt once the CLI is
+running is the CLI's, as it always was. Treat `re-auth
 needed` as normal rather than as a fault. The refusal
 that ended the lineage is kept: `rota
 list` shows it in parentheses after `re-auth needed` — `re-auth needed
@@ -3428,9 +3431,13 @@ half done. A refresh that `Refresh`, `Rescue`, `Maintain` or a launch (`Run`,
 `Start`, `Prepare`) has sent goes on to its answer, the save and the write into
 the home after ctx is done, for up to `store.RefreshTimeout()` (the client's
 ceiling and five seconds); nothing else is started after that, and `Refresh`,
-`Rescue` and `Maintain` return one error saying what was left. A process
-about to exit calls `store.Settle(ctx)` first, which waits for every such
-refresh in the process, as `rota serve` does. `rota.Refresh` itself honours
+`Rescue` and `Maintain` return one error saying what was left, which
+`store.Left(err)` recognises, so a caller that went away on purpose can pass
+over it and still show the rest. A process about to exit calls
+`store.Settle(ctx)` first, which waits for every such refresh in the process,
+as `rota serve` does. `Store.Preparing`, when set, is what `Run` and `Start`
+make the launch inside, under a context of its own, while the CLI runs under
+the caller's: the command line holds its signals there. `rota.Refresh` itself honours
 ctx as every network verb does: an application calling it directly keeps the
 answer the same way, with `context.WithoutCancel` and a timeout of its own.
 
