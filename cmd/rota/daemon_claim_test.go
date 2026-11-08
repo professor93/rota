@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -34,5 +35,22 @@ func TestAForegroundDaemonThatFindsAnotherExitsZero(t *testing.T) {
 	}
 	if d, ok := holdwire.RunningDaemon(r.terminals); !ok || d.PID != os.Getpid() {
 		t.Fatalf("the daemon serving is %+v, not the one that was", d)
+	}
+}
+
+// A daemon's control socket serves as the principal local, so no user or
+// token in its file may have that name: serve start refuses the file at this
+// terminal, naming the entry, and nothing is started.
+func TestADaemonRefusesAPrincipalCalledLocal(t *testing.T) {
+	r := newDaemonRig(t)
+	if err := os.WriteFile(filepath.Join(r.home, "server.toml"), []byte(localToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := `[[tokens]] "local": the name "local" is reserved for the control socket's own principal; choose another`
+	if out, errb, code := r.rota("serve", "start"); code != 1 || out != "" || errb != "error: "+want+"\n" {
+		t.Fatalf("serve start with a token called local: exit %d %q %q, want %q", code, out, errb, want)
+	}
+	if _, ok := holdwire.RunningDaemon(r.terminals); ok {
+		t.Fatal("a daemon serves with a token called local")
 	}
 }

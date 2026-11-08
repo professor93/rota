@@ -391,9 +391,6 @@ func (c *Config) checkPrincipals() error {
 		if seen[u.Name] {
 			return fmt.Errorf("%s: there is already a user called %q", at, u.Name)
 		}
-		if err := ReservedName(u.Name); err != nil {
-			return fmt.Errorf("%s: %w", at, err)
-		}
 		seen[u.Name] = true
 		if _, err := parseRole(u.Role); err != nil {
 			return fmt.Errorf("%s: role: %w", at, err)
@@ -413,9 +410,6 @@ func (c *Config) checkPrincipals() error {
 		}
 		if seen[t.Name] {
 			return fmt.Errorf("%s: there is already a token called %q", at, t.Name)
-		}
-		if err := ReservedName(t.Name); err != nil {
-			return fmt.Errorf("%s: %w", at, err)
 		}
 		seen[t.Name] = true
 		if _, err := parseRole(t.Role); err != nil {
