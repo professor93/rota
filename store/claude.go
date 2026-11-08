@@ -117,13 +117,16 @@ const (
 // routeKey is where an account remembers which route its last launch in its
 // home took, so the next launch can tell when the home's daemon was started
 // on the other one. seedOwedKey is where it remembers that its home is owed the
-// login rota refreshed (see owesWrite). Both belong to the home, and are
-// forgotten when the account is given another (MoveHome).
+// login rota refreshed (see owesWrite). inItemKey is where it remembers that
+// the home's login was last found in its macOS keychain item (see adopt). All
+// three belong to the home, and are forgotten when the account is given
+// another (MoveHome).
 const (
 	routeKey    = "route"
 	routeStored = "stored"
 	routeEnv    = "env"
 	seedOwedKey = "seed_owed"
+	inItemKey   = "login_in_item"
 )
 
 // How long the things this file waits for may take. Variables so a test
@@ -817,12 +820,22 @@ func keychainContext() (context.Context, context.CancelFunc) {
 // because a write has to get it out of the way either way. A keychain that
 // cannot be read is errKeychain; a file that cannot be read is the read's own
 // error, which adoption takes for an unreadable store.
+//
+// "No such item" is asked once more before the file is read in its place. A
+// read made while Claude Code rewrites the item may find none, while the home
+// holds the newest login there is and the file beside it an older one. A file
+// read because the item was absent twice is still the home's store, as Claude
+// Code reads it, but where the home's login was last found in the item it
+// never demotes what the account recorded (see adopt).
 func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
 	h.blankItem, h.item = nil, nil
 	if svc, ok := h.service(); ok {
 		ctx, cancel := keychainContext()
 		defer cancel()
 		raw, found, err := claudecode.Read(ctx, svc)
+		if err == nil && !found {
+			raw, found, err = claudecode.Read(ctx, svc)
+		}
 		if err != nil {
 			return nil, false, fmt.Errorf("%w: the item %q that holds its login: %v", errKeychain, svc, err)
 		}
@@ -890,7 +903,9 @@ func (h *claudeHome) read() (fsys storeFS, ok bool) {
 			"or keep a long-lived token for this account (`rota login --long`)", err)
 		return storeFS{}, false
 	}
-	return storeFS{FS: os.DirFS(h.home), store: raw, err: err}, true
+	_, kept := h.service()
+	gone := kept && h.item == nil && h.a.Extra[inItemKey] != ""
+	return storeFS{FS: os.DirFS(h.home), store: raw, err: err, itemGone: gone}, true
 }
 
 // adopt reads the home's login into the account, and works out what the
@@ -902,6 +917,20 @@ func (h *claudeHome) read() (fsys storeFS, ok bool) {
 // The account's own login blanked is left out of adoption, which would call the
 // account dead: that is for mend to find out, before anything is saved (see the
 // comment at the top).
+//
+// On macOS a home's login lives in its keychain item from Claude Code's first
+// refresh there until rota writes one into the file again, and the account
+// remembers which (noteItem). Where it was last found in the item, a file read
+// only because the keychain twice said there is no item is adopted from — a
+// login there newer than the account's is taken, as from any store — but it
+// never demotes what the account recorded about the home: an item being
+// rewritten reads as none, and the file beside it, left from before the login
+// moved into the item, then says nothing about what the home holds. Taken for
+// the home's word, an older file would have rota write its own login over the
+// newest one and present a token Claude Code has replaced. Where the login
+// lives in the file, the file is the home's store and is read as one. A login
+// that the provider itself says is somebody else's (confirm) is not one of
+// these either: the home is marked as it would be for any store.
 func (h *claudeHome) adopt(ctx context.Context) error {
 	h.hold, h.usable, h.spent, h.blanked = "", false, false, false
 	if err := h.s.oneHomeOneAccount(h.a); err != nil {
@@ -915,6 +944,7 @@ func (h *claudeHome) adopt(ctx context.Context) error {
 	if h.blanked = h.clearedOwn(fsys); h.blanked {
 		return nil
 	}
+	staged := h.a.Staged
 	err := rota.AdoptFrom(h.a, fsys)
 	if errors.Is(err, rota.ErrUnreadableLogin) {
 		if !h.quiet() {
@@ -929,10 +959,16 @@ func (h *claudeHome) adopt(ctx context.Context) error {
 			return nil
 		}
 		if err = rota.AdoptFrom(h.a, fsys); errors.Is(err, rota.ErrUnreadableLogin) {
-			h.a.StagedSuperseded() // empty, then: the next write replaces it
+			if !fsys.itemGone {
+				h.a.StagedSuperseded() // empty, then: the next write replaces it
+			}
 			err = nil
 		}
 	}
+	if fsys.itemGone && h.a.Staged != staged && !h.a.StagedCurrent() {
+		h.a.Staged = staged // demoted on a file read in place of the item: undone
+	}
+	h.noteItem(fsys)
 	var nl *rota.NewLogin
 	if errors.As(err, &nl) {
 		err = nil
@@ -959,6 +995,26 @@ func (h *claudeHome) clearedOwn(fsys storeFS) bool {
 	}
 	l, ok := storedLogin(fsys.store)
 	return ok && (l.Refresh == "" || (h.blankItem != nil && int64(l.Expires) < a.Token.ExpiresAt))
+}
+
+// noteItem records where the home's login lives, for the next read that finds
+// no keychain item (see adopt): in the item while one is found, and in the file
+// once no item is and the file holds the account's own refresh token, as a
+// write of rota's leaves it.
+func (h *claudeHome) noteItem(fsys storeFS) {
+	if _, kept := h.service(); !kept {
+		return
+	}
+	l, ok := storedLogin(fsys.store)
+	switch {
+	case h.item != nil:
+		if h.a.Extra == nil {
+			h.a.Extra = map[string]string{}
+		}
+		h.a.Extra[inItemKey] = "1"
+	case ok && l.Refresh != "" && l.Refresh == h.a.Token.Refresh:
+		delete(h.a.Extra, inItemKey)
+	}
 }
 
 // confirm settles a login found in the home that is not the account's own,
@@ -992,6 +1048,10 @@ type storeFS struct {
 	fs.FS
 	store []byte
 	err   error
+	// itemGone says the store is the file only because the keychain said,
+	// twice, that the home has no item, where its login was last found in one:
+	// a read that never demotes (see adopt).
+	itemGone bool
 }
 
 func (f storeFS) ReadFile(name string) ([]byte, error) {
@@ -2013,6 +2073,7 @@ func (s *Store) MoveHome(ctx context.Context, a *rota.Account, configDir string)
 	a.StagedSuperseded()
 	delete(a.Extra, routeKey)
 	delete(a.Extra, seedOwedKey)
+	delete(a.Extra, inItemKey)
 	a.ConfigDir = configDir
 	return s.Save()
 }
