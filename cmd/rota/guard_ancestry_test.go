@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/proc"
 	"github.com/professor93/rota/wire"
 )
 
@@ -183,8 +184,9 @@ func TestASetsidChildOfAHeldCLIIsRefusedTheDaemon(t *testing.T) {
 
 // The walk up a caller's parents ends at pid 1, which is outside every held
 // session; it goes maxAncestry parents up at most, and a caller further
-// down than that, or one whose parent cannot be read, cannot be placed,
-// which every caller of heldSessionOf takes as inside.
+// down than that, or one whose own parent cannot be read, cannot be placed,
+// which every caller of heldSessionOf takes as inside. Some session is held
+// throughout, elsewhere, or the walk would not be taken at all.
 func TestTheAncestryWalkIsBounded(t *testing.T) {
 	terminals := t.TempDir()
 	was := parentOf
@@ -195,6 +197,7 @@ func TestTheAncestryWalkIsBounded(t *testing.T) {
 		asked = 0
 		parentOf = func(pid int) (int, error) { asked++; return next(pid) }
 	}
+	heldRecord(t, terminals, "00000000000000e4", 2)
 
 	chain(func(int) (int, error) { return 1, nil })
 	if id, err := heldSessionOf(self, terminals); id != "" || err != nil || asked != 1 {
@@ -206,12 +209,77 @@ func TestTheAncestryWalkIsBounded(t *testing.T) {
 	}
 	chain(func(int) (int, error) { return 0, os.ErrNotExist })
 	if _, err := heldSessionOf(self, terminals); err == nil {
-		t.Fatal("a parent that cannot be read placed the caller")
+		t.Fatal("a caller whose own parent cannot be read was placed")
 	}
 	// And a held CLI that many parents up is still found.
 	chain(func(pid int) (int, error) { return pid + 1, nil })
 	heldRecord(t, terminals, "00000000000000e3", self+maxAncestry)
 	if id, err := heldSessionOf(self, terminals); id != "00000000000000e3" || err != nil {
 		t.Fatalf("a held CLI %d parents up gave %q, %v", maxAncestry, id, err)
+	}
+}
+
+// hiddenProc is a Linux /proc mounted with hidepid: the caller, this test,
+// can read its own stat, whose parent is ppid, and every process given in
+// own; any other's stat is refused with hidden, as root's sshd above an ssh
+// login is.
+func hiddenProc(t *testing.T, ppid int, own map[int]int, hidden error) {
+	t.Helper()
+	was := parentOf
+	t.Cleanup(func() { parentOf = was })
+	stat := func(pid, ppid int) []byte {
+		return fmt.Appendf(nil, "%d (sh) S %d %d %d 0 -1 4194560 1 0 0 0 0 0 0 0 20 0 1 0 1234 1 2\n", pid, ppid, pid, pid)
+	}
+	kernel := proc.Procfs{Read: func(name string) ([]byte, error) {
+		var pid int
+		if _, err := fmt.Sscanf(name, "/proc/%d/stat", &pid); err != nil {
+			return nil, os.ErrNotExist
+		}
+		if pid == os.Getpid() {
+			return stat(pid, ppid), nil
+		}
+		if parent, ok := own[pid]; ok {
+			return stat(pid, parent), nil
+		}
+		return nil, hidden
+	}}
+	parentOf = kernel.Parent
+}
+
+// On a /proc mounted with hidepid an ssh caller's walk meets root's sshd,
+// whose stat it cannot read. That ancestor is another user's, and no
+// holder or CLI, which are this user's own, is above it, so the caller is
+// outside by ancestry rather than unplaceable: it may control and is not
+// refused serve stop. A held CLI below that ancestor is still found, and a
+// caller whose own stat cannot be read still cannot be placed. With no
+// session held at all, nothing is walked.
+func TestAnAncestorAnotherUserHidesEndsTheWalk(t *testing.T) {
+	self := os.Getpid()
+	const sshd, cli, elsewhere = 900001, 900003, 900002
+	for name, hidden := range map[string]error{"hidepid=1": os.ErrPermission, "hidepid=2": os.ErrNotExist} {
+		t.Run(name, func(t *testing.T) {
+			terminals := t.TempDir()
+			was := parentOf
+			t.Cleanup(func() { parentOf = was })
+			walked := false
+			parentOf = func(int) (int, error) { walked = true; return 0, hidden }
+			if id, err := heldSessionOf(self, terminals); id != "" || err != nil || walked {
+				t.Fatalf("with nothing held: %q, %v, and walked %v", id, err, walked)
+			}
+			hiddenProc(t, sshd, nil, hidden)
+			heldRecord(t, terminals, "00000000000000e5", elsewhere)
+			if id, err := heldSessionOf(self, terminals); id != "" || err != nil {
+				t.Fatalf("under an ancestor another user's, with a session held elsewhere: %q, %v; want outside", id, err)
+			}
+			hiddenProc(t, cli, map[int]int{cli: sshd}, hidden)
+			heldRecord(t, terminals, "00000000000000e6", cli)
+			if id, err := heldSessionOf(self, terminals); id != "00000000000000e6" || err != nil {
+				t.Fatalf("under a held CLI below that ancestor: %q, %v", id, err)
+			}
+			parentOf = func(int) (int, error) { return 0, hidden }
+			if _, err := heldSessionOf(self, terminals); err == nil {
+				t.Fatal("a caller whose own stat cannot be read was placed")
+			}
+		})
 	}
 }
