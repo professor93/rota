@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
 )
@@ -105,7 +106,7 @@ func (c *cli) uninstallDaemon() error {
 		fmt.Fprintf(c.out, "no rota daemon is installed for %s\n", oneLine(home))
 		return nil
 	}
-	stopped, err := removeUnit(home, terminals)
+	fate, err := removeUnit(home, terminals)
 	n := len(runningRecords(terminals))
 	verb := "keep"
 	if n == 1 {
@@ -114,20 +115,83 @@ func (c *cli) uninstallDaemon() error {
 	var kept unitKept
 	switch {
 	case errors.As(err, &kept):
-		return fmt.Errorf("%w; the rota daemon%s is still running and could not be stopped (%s), so %s is kept: %s; run rota serve uninstall again from %s",
-			kept.supervisor, pidOf(kept.daemon), oneLine(kept.stop.Error()), oneLine(path), keptWhy, keptFrom)
+		who := "a rota daemon"
+		if kept.daemon != nil {
+			who = "the rota daemon" + pidOf(kept.daemon)
+		}
+		return fmt.Errorf("%w; %s is still running and could not be stopped (%s), so %s is kept: %s; run rota serve uninstall again from %s",
+			kept.supervisor, who, oneLine(kept.why.Error()), oneLine(path), keptWhy, keptFrom)
 	case err != nil:
-		if _, lerr := os.Lstat(path); !errors.Is(lerr, fs.ErrNotExist) {
+		_, lerr := os.Lstat(path)
+		removed := errors.Is(lerr, fs.ErrNotExist)
+		if removed {
+			err = fmt.Errorf("%s is removed, but %w", oneLine(path), err)
+		}
+		if fate == nil {
 			return err
 		}
-		err = fmt.Errorf("%s is removed, but %w", oneLine(path), err)
-		if stopped != nil {
-			err = fmt.Errorf("%w; the rota daemon%s was stopped as rota serve stop stops one, and %s %s running", err, pidOf(stopped), sessionsN(n), verb)
+		did := "is no longer running"
+		if fate.signalled {
+			did = "was stopped as rota serve stop stops one"
+		}
+		err = fmt.Errorf("%w; the rota daemon%s %s, and %s %s running", err, pidOf(fate.daemon), did, sessionsN(n), verb)
+		if !removed {
+			err = fmt.Errorf("%w; %s is kept", err, oneLine(path))
 		}
 		return err
 	}
 	fmt.Fprintf(c.out, "rota daemon uninstalled for %s; %s %s running\n", oneLine(home), sessionsN(n), verb)
 	return nil
+}
+
+// daemonExitWait is how long uninstall waits, once the daemon has let go of
+// the store, for its process to be gone: it finishes what it is serving for
+// up to serveGrace first. A variable so a test need not wait.
+var daemonExitWait = serveGrace + 2*time.Second
+
+// daemonExited waits up to within for d's process to have exited, and says
+// whether it has. A process no longer the one d names has; so has a zombie,
+// which its supervisor reaps on the spot, while one nobody reaps — under a
+// container's pid 1 that never waits, say — would otherwise be waited for
+// in vain. exitOf holds on to the process, not its number. Where it cannot
+// be had, d is looked at every 50 ms. A variable so a test can stand in for
+// a daemon that is itself.
+var daemonExited = func(d *holdwire.Daemon, within time.Duration) bool {
+	same := func() bool { return holdwire.SameProcess(d.PID, d.ProcStart, d.ProcStartTicks, d.BootID) }
+	if !same() {
+		return true
+	}
+	deadline := time.Now().Add(within)
+	if wait, err := exitOf(d.PID); err == nil {
+		exited := make(chan struct{})
+		go func() { wait(); close(exited) }()
+		select {
+		case <-exited:
+			return true
+		case <-time.After(time.Until(deadline)):
+			return false
+		}
+	}
+	for same() {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return true
+}
+
+// signalTheDaemon is signalDaemon, and a variable only so that a test can
+// have the daemon go on its own between removeUnit's look and the signal,
+// which nothing outside can arrange.
+var signalTheDaemon = signalDaemon
+
+// daemonFate is what became of the daemon running when the supervisor could
+// not be asked to stop the unit: gone, after the SIGTERM uninstall sent it,
+// or on its own.
+type daemonFate struct {
+	daemon    *holdwire.Daemon
+	signalled bool
 }
 
 // removeUnit takes the store's unit away: the supervisor stops it, which
@@ -137,40 +201,57 @@ func (c *cli) uninstallDaemon() error {
 // the daemon running under the unit, and systemd, once it reloads a unit
 // whose file is gone, no longer has its KillMode=process: the daemon
 // stopping would then end every session the unit holds. So the daemon is
-// stopped first, as serve stop stops one, while the unit is still loaded as
-// it was written. One started by hand is stopped too: without the
-// supervisor the two cannot be told apart. The supervisor is then not asked
-// to reload, which could catch the daemon on its way out; it forgets the
-// stopped unit at its next reload. With no daemon running there is nothing
-// to end and nothing to wait for.
+// stopped first, as serve stop stops one, and its process waited for until
+// it is gone, while the unit is still loaded as it was written: it lets go
+// of the store before it has finished serving, and a reload by anybody in
+// between would catch it on its way out. One started by hand is stopped
+// too: without the supervisor the two cannot be told apart. The supervisor
+// is then not asked to reload; it forgets the stopped unit at its next
+// reload. With no daemon running there is nothing to end and nothing to
+// wait for.
 //
-// A daemon that cannot be stopped keeps the unit's file, and its link,
-// where they are: the error is a unitKept. Otherwise the daemon removeUnit
-// stopped itself, if it did, is returned with whatever went wrong.
-func removeUnit(home, terminals string) (stopped *holdwire.Daemon, err error) {
+// A daemon that cannot be stopped, or whose process outlives
+// daemonExitWait, keeps the unit's file, and its link, where they are: the
+// error is a unitKept. Otherwise what became of a daemon that was running
+// is returned, with whatever went wrong.
+func removeUnit(home, terminals string) (*daemonFate, error) {
 	serr := stopUnit(home)
 	if serr == nil {
 		return nil, deleteUnit(home, true)
 	}
-	d, ok := daemonOf(terminals)
+	seen, ok := daemonOf(terminals)
 	if !ok {
 		return nil, errors.Join(serr, deleteUnit(home, true))
 	}
-	if err := endDaemon(terminals); err != nil {
-		return nil, unitKept{supervisor: serr, daemon: d, stop: err}
+	signalled, err := signalTheDaemon(terminals)
+	var unnamed unnamedDaemon
+	switch {
+	case errors.As(err, &unnamed):
+		return nil, unitKept{supervisor: serr, why: err}
+	case err != nil:
+		return nil, unitKept{supervisor: serr, daemon: seen, why: err}
 	}
-	return d, errors.Join(serr, deleteUnit(home, false))
+	d := seen
+	if signalled != nil {
+		d = signalled
+	}
+	if !daemonExited(d, daemonExitWait) {
+		return nil, unitKept{supervisor: serr, daemon: d,
+			why: fmt.Errorf("it let go of the store but has not exited within %s", daemonExitWait)}
+	}
+	return &daemonFate{daemon: d, signalled: signalled != nil}, errors.Join(serr, deleteUnit(home, false))
 }
 
 // unitKept is a unit whose file uninstall kept, because the supervisor
 // could not be asked to stop it and its daemon could not be stopped either.
+// daemon is nil for one daemon.pid names no process for.
 type unitKept struct {
-	supervisor, stop error
-	daemon           *holdwire.Daemon
+	supervisor, why error
+	daemon          *holdwire.Daemon
 }
 
 func (k unitKept) Error() string {
-	return fmt.Sprintf("%v; the rota daemon could not be stopped: %v", k.supervisor, k.stop)
+	return fmt.Sprintf("%v; the rota daemon could not be stopped: %v", k.supervisor, k.why)
 }
 
-func (k unitKept) Unwrap() []error { return []error{k.supervisor, k.stop} }
+func (k unitKept) Unwrap() []error { return []error{k.supervisor, k.why} }

@@ -105,8 +105,8 @@ func TestUninstallSaysAnyOtherBootoutFailure(t *testing.T) {
 	bootoutFails(t, 5, "Boot-out failed: 5: Input/output error")
 	out, errb, code := call(t, "serve", "uninstall")
 	want := fmt.Sprintf("%s is removed, but %s: exit status 5: Boot-out failed: 5: Input/output error", r.want.path, r.want.uninstall[0])
-	if code != 1 || out != "" || !strings.Contains(errb, want) {
-		t.Fatalf("uninstall with bootout failing 5: exit %d %q %q, want %q", code, out, errb, want)
+	if code != 1 || out != "" || !strings.Contains(errb, want) || strings.Contains(errb, "rota daemon") {
+		t.Fatalf("uninstall with bootout failing 5: exit %d %q %q, want %q and nothing of a daemon, since none runs", code, out, errb, want)
 	}
 	if _, err := os.Lstat(r.want.path); !os.IsNotExist(err) {
 		t.Fatalf("plist still there: %v", err)
