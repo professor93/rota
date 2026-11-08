@@ -935,7 +935,9 @@ that opens a TCP port wants `auth.token_file` or `[[users]]` in
 `server.toml`; the control socket needs no token. The systemd unit has
 `KillMode=process` and the launchd agent `AbandonProcessGroup`, so stopping
 either stops the daemon and never its sessions, and each restarts a daemon
-that fails, five seconds later under systemd. The agent's `ProcessType` is
+that fails, five seconds later under systemd. A daemon that finds another
+already serving the store has not failed: it says so in its log and exits
+`0`, so neither starts it again while that one runs. The agent's `ProcessType` is
 `Interactive` because with none, launchd's default, the daemon and every
 session it holds were measured at priority 20 under a ceiling of 20, where
 `Interactive` runs them at 31 under 63, as a daemon started by hand does.

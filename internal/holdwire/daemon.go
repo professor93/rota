@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -28,12 +29,16 @@ type Daemon struct {
 	HTTP           string    `json:"http,omitempty"`
 }
 
-// DaemonRunning is a claim refused because another daemon holds the store.
-// PID is that daemon's, or 0 when its pid file could not be read.
-type DaemonRunning struct{ PID int }
+// DaemonRunning is a claim refused because another daemon holds the store
+// whose directory is Store. PID is that daemon's, or 0 when its pid file
+// could not be read.
+type DaemonRunning struct {
+	PID   int
+	Store string
+}
 
 func (d DaemonRunning) Error() string {
-	return fmt.Sprintf("another rota daemon serves this store (pid %d)", d.PID)
+	return fmt.Sprintf("another rota daemon serves %s (pid %d)", d.Store, d.PID)
 }
 
 // ClaimDaemon makes this process the one daemon of the store whose
@@ -48,7 +53,7 @@ func ClaimDaemon(terminals, version string) (release func(), err error) {
 	}
 	f, err := tryLock(DaemonLock(terminals))
 	if errors.Is(err, ErrHeld) {
-		return nil, DaemonRunning{PID: claimant(terminals)}
+		return nil, DaemonRunning{PID: claimant(terminals), Store: filepath.Dir(terminals)}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", DaemonLock(terminals), err)

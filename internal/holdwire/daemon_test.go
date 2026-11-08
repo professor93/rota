@@ -4,7 +4,9 @@ package holdwire
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -25,8 +27,11 @@ func TestTwoDaemonsCannotClaimOneStore(t *testing.T) {
 	}
 	_, err = ClaimDaemon(terminals, "1.4.0-other")
 	var running DaemonRunning
-	if !errors.As(err, &running) || running != (DaemonRunning{PID: os.Getpid()}) {
+	if !errors.As(err, &running) || running != (DaemonRunning{PID: os.Getpid(), Store: filepath.Dir(terminals)}) {
 		t.Fatalf("the second claim: %v", err)
+	}
+	if want := fmt.Sprintf("another rota daemon serves %s (pid %d)", filepath.Dir(terminals), os.Getpid()); err.Error() != want {
+		t.Fatalf("the second claim says %q, want %q", err, want)
 	}
 	d, ok := RunningDaemon(terminals)
 	if !ok || d == nil {

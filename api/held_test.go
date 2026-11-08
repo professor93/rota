@@ -4,6 +4,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -191,6 +192,12 @@ func TestTheDaemonClaimIsExclusive(t *testing.T) {
 	want := fmt.Sprintf("api: another rota daemon serves %s (pid %d)", p.dir, os.Getpid())
 	if err.Error() != want {
 		t.Fatalf("the refusal is %q, want %q", err, want)
+	}
+	// And it is that refusal to a caller, which a daemon under a supervisor
+	// tells from a failure.
+	var running holdwire.DaemonRunning
+	if !errors.As(err, &running) || running.PID != os.Getpid() {
+		t.Fatalf("the refusal is not a holdwire.DaemonRunning: %#v", err)
 	}
 }
 
