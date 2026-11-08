@@ -60,7 +60,7 @@ func TestAFailedDisableLeavesNoWantsLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	recordUnits(t, func(call string) error { return errors.New(call + ": Failed to connect to bus") })
-	err = removeUnit(store)
+	_, err = removeUnit(store, filepath.Join(store, "terminals"))
 	for _, want := range []string{"systemctl --user disable --now " + name + ": Failed", "systemctl --user daemon-reload: Failed"} {
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Fatalf("removeUnit: %v, want %q", err, want)

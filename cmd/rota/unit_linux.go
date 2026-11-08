@@ -66,32 +66,47 @@ func writeUnit(exe, store string, env []string, again bool) (string, error) {
 	return path, systemctl("restart", name)
 }
 
-// removeUnit stops and disables the unit and deletes its file. Sessions keep
-// running: the unit has KillMode=process. A disable that fails — with no
-// user bus to reach, say — leaves the link enable made in
-// default.target.wants, which would name a file that is gone and that no
-// later uninstall could find again, so it is taken away here.
-func removeUnit(store string) error {
+// stopUnit has systemd stop and disable the unit. Sessions keep running: the
+// unit has KillMode=process.
+func stopUnit(store string) error {
+	name, _ := unitName(store)
+	return systemctl("disable", "--now", name)
+}
+
+// deleteUnit deletes the unit's file, and the link enable made for it in
+// default.target.wants: a disable that failed — with no user bus to reach,
+// say — leaves that link naming a file that is gone, which no later
+// uninstall could find again. With reload, systemd is then told; without,
+// it forgets the unit at its next reload.
+func deleteUnit(store string, reload bool) error {
 	path, err := unitFile(store)
 	if err != nil {
 		return err
 	}
 	name, _ := unitName(store)
-	serr := systemctl("disable", "--now", name)
-	if serr != nil {
-		wants := filepath.Join(filepath.Dir(path), "default.target.wants", name)
-		if fi, err := os.Lstat(wants); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
-			if err := os.Remove(wants); err != nil {
-				serr = errors.Join(serr, err)
-			}
-		}
+	var lerr error
+	wants := filepath.Join(filepath.Dir(path), "default.target.wants", name)
+	if fi, err := os.Lstat(wants); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+		lerr = os.Remove(wants)
 	}
 	rerr := os.Remove(path)
 	if os.IsNotExist(rerr) {
 		rerr = nil
 	}
-	return errors.Join(serr, rerr, systemctl("daemon-reload"))
+	if !reload {
+		return errors.Join(lerr, rerr)
+	}
+	return errors.Join(lerr, rerr, systemctl("daemon-reload"))
 }
+
+// keptWhy is why a unit whose daemon is still running keeps its file, and
+// keptFrom where uninstall can reach systemd instead. As measured: systemd,
+// reloading a unit whose file is gone, loads it with no KillMode=process,
+// and the daemon then stopping ends every session in the unit.
+const (
+	keptWhy  = "with it gone, systemd would end the unit's sessions when the daemon stops"
+	keptFrom = "a login that has a user bus"
+)
 
 // lingerDir is where systemd records the users whose units start at boot
 // and outlive their logins. A variable so a test can point it elsewhere.

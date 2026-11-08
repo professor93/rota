@@ -66,26 +66,38 @@ func exitedWith(err error, code int) bool {
 	return errors.As(err, &e) && e.ExitCode() == code
 }
 
-// removeUnit boots the agent out and deletes its file. Sessions keep running:
-// the plist has AbandonProcessGroup. An agent not loaded — booted out by
-// hand, or never bootstrapped — is already what bootout asks for, so that
-// answer is not an error; any other failure is.
-func removeUnit(store string) error {
+// stopUnit boots the agent out. Sessions keep running: the plist has
+// AbandonProcessGroup. An agent not loaded — booted out by hand, or never
+// bootstrapped — is already what bootout asks for, so that answer is not an
+// error; any other failure is.
+func stopUnit(store string) error {
+	_, label := unitName(store)
+	err := unitRun("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), label))
+	if exitedWith(err, bootoutNotLoaded) {
+		return nil
+	}
+	return err
+}
+
+// deleteUnit deletes the agent's file. launchd reads it only to load the
+// agent, so there is nothing to tell it.
+func deleteUnit(store string, _ bool) error {
 	path, err := unitFile(store)
 	if err != nil {
 		return err
 	}
-	_, label := unitName(store)
-	serr := unitRun("launchctl", "bootout", fmt.Sprintf("gui/%d/%s", os.Getuid(), label))
-	if exitedWith(serr, bootoutNotLoaded) {
-		serr = nil
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
 	}
-	rerr := os.Remove(path)
-	if os.IsNotExist(rerr) {
-		rerr = nil
-	}
-	return errors.Join(serr, rerr)
+	return nil
 }
+
+// keptWhy is why an agent whose daemon is still running keeps its file, and
+// keptFrom where uninstall can reach launchd instead.
+const (
+	keptWhy  = "launchd still has the agent loaded"
+	keptFrom = "a login in the Mac's GUI session"
+)
 
 // lingerHint is nothing here: a launchd agent starts at login on its own.
 func lingerHint() string { return "" }
