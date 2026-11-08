@@ -327,6 +327,38 @@ func TestAHomeLeftOnASpentLoginGetsTheNewOne(t *testing.T) {
 	}
 }
 
+// A login made inside the home that the profile confirms as the account's own
+// takes over when the account's own refresh comes to nothing. When that refresh
+// came to nothing because the login had ended, nothing was presented, so
+// nothing is kept or said as a refusal the home's login covered.
+func TestAnEndedLoginTakenOverInTheHomeKeepsNoRefusal(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w, _ := endedWorld(t, m.keychain, "quiet")
+			words := said(w.s)
+			h := w.s.claudeHome(w.a, false)
+			if err := h.adopt(context.Background()); err != nil || h.hold != "" {
+				t.Fatalf("in sync before: %v %q", err, h.hold)
+			}
+			w.p.mu.Lock()
+			w.p.issued["A-new"] = true
+			w.p.mu.Unlock()
+			w.cc.write(storeLogin("A-new", "R-new", rota.Now().Add(8*time.Hour).UnixMilli(),
+				strconv.FormatInt(rota.Now().Add(30*24*time.Hour).UnixMilli(), 10)))
+			changed, err := h.refresh(context.Background())
+			if !changed || err != nil || w.a.Dead || w.a.Token.Refresh != "R-new" {
+				t.Fatalf("taken over by the new login: %v %v dead=%v %q holds %q", changed, err, w.a.Dead, w.a.WhyDead(), w.a.Token.Refresh)
+			}
+			if got := w.p.rotaPresented(); len(got) != 0 {
+				t.Fatalf("nothing presented: %+v", got)
+			}
+			if w.a.Extra[lastRefusalKey] != "" || w.a.Extra[pendingRefusalKey] != "" || len(*words) != 0 {
+				t.Fatalf("no refusal kept or said: %q %q %q", w.a.Extra[lastRefusalKey], w.a.Extra[pendingRefusalKey], *words)
+			}
+		})
+	}
+}
+
 // A login made inside the home that rota cannot confirm yet puts the account in
 // the hold when its own refresh comes to nothing. When that refresh came to
 // nothing because the login had ended, nothing was presented and nothing

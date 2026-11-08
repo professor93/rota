@@ -701,9 +701,11 @@ func (h *claudeHome) lockAndRead(ctx context.Context) (*refreshLock, bool, error
 // may be one Claude Code has already spent, which would revoke the whole
 // lineage: nothing is presented, and the account is dead, on disk at once like
 // any death, so no other process makes the same look and decides otherwise.
+// A login past its end is never presented either, by anyone (rota.Refresh says
+// so): the account is dead for that, the truer reason, whatever its copy.
 func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 	a := h.a
-	if h.superseded || !h.newest() {
+	if !a.LoginEnded() && (h.superseded || !h.newest()) {
 		a.Dead, a.DeadReason = true, fmt.Sprintf(olderCopy, a.ID)
 		if err := h.s.saveFirmly(); err != nil {
 			return true, fmt.Errorf("%s: %s, and the store could not be saved: %w", a, a.DeadReason, err)
@@ -1934,6 +1936,7 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 	rescue := h.rescuing
 	h.rescuing = false
 	j := h.journalStart(h.refreshPath(rescue)).presenting()
+	ended := a.LoginEnded() // then rota.Refresh presents nothing, and nothing is refused
 	changed, err = rota.Refresh(ctx, a)
 	defer j.finish(refreshOutcome(j, changed, err))
 	if rescue && changed && err == nil {
@@ -1952,7 +1955,9 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 	}
 	switch {
 	case !a.Dead:
-		h.keepRefusal(j)
+		if !ended {
+			h.keepRefusal(j)
+		}
 		return true, nil
 	case h.hold != "" && h.usable:
 		// A login past its end was never presented, and its reason says so whole:
