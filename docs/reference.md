@@ -1782,7 +1782,9 @@ so neither needs to be running. The section is there only when there is a
 record, newest first: `●` for a session that is running and `○` for one that
 has stopped, then its name, the account, the CLI, `running` or how it
 stopped (`ended`, or `interrupted` when its holder went without its CLI
-ending), its folder, and the start of its id, which `rota send` takes:
+ending), its folder, and the start of its id, which `rota send` takes. A
+running one's CLI is listed here alone, and left out of `Running
+instances`, in text and in `--json`:
 
 ```
 Held sessions:

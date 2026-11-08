@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -108,6 +109,43 @@ func TestSendFindsAnUnlabelledSessionByTheWordDetachSaid(t *testing.T) {
 	out, errb, code := r.rota("list", "--short", "--sessions")
 	if code != 0 || !regexp.MustCompile(`(?m)^  ● fake +#1 a@x +claude +running +\S*api1755 +`+id[:8]+`$`).MatchString(out) {
 		t.Fatalf("list --sessions: exit %d %q\n%s", code, errb, out)
+	}
+}
+
+// A held session's CLI is listed once, under Held sessions: the scan for
+// every CLI running on the machine leaves it out of Running instances, in
+// text and in --json.
+func TestAHeldCLIIsListedOnce(t *testing.T) {
+	r := newDaemonRig(t)
+	r.start()
+	id, _, _ := r.detach(r.cmd("run", "1", "--detach", "--label", "once"))
+	var child int
+	within(t, "the holder records its CLI", 20*time.Second, func() bool {
+		rec := holdwire.Judge(r.terminals, id)
+		if rec.Meta != nil {
+			child = rec.Meta.ChildPID
+		}
+		return child > 0
+	})
+	out, errb, code := r.rota("--json", "list", "--short", "--sessions")
+	var doc struct {
+		Instances []struct {
+			PID int `json:"pid"`
+		} `json:"instances"`
+		Held []map[string]any `json:"held"`
+	}
+	if code != 0 || json.Unmarshal([]byte(out), &doc) != nil || len(doc.Held) != 1 || doc.Held[0]["id"] != id {
+		t.Fatalf("list --sessions --json: exit %d %q\n%s", code, errb, out)
+	}
+	for _, in := range doc.Instances {
+		if in.PID == child {
+			t.Fatalf("the held CLI, pid %d, is among the running instances too:\n%s", child, out)
+		}
+	}
+	out, errb, code = r.rota("list", "--short", "--sessions")
+	running, _, _ := strings.Cut(out, "\nSessions:")
+	if code != 0 || strings.Contains(running, fmt.Sprintf("pid %d", child)) || !strings.Contains(out, "● once ") {
+		t.Fatalf("list --sessions: exit %d %q; the held CLI, pid %d, is listed under Held sessions alone\n%s", code, errb, child, out)
 	}
 }
 
