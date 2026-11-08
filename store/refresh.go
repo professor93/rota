@@ -194,6 +194,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			}
 			held = append(held, release)
 			h.others = false
+			h.via = "list.renew"
 			err := func() (err error) {
 				// The provider plans what is written: see guard.
 				defer func() {
@@ -239,7 +240,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			}
 			held = append(held, release)
 			plain = append(plain, work{a, func() {
-				changed, err := rota.Refresh(ctx, a)
+				changed, err := s.refreshLogged(ctx, "list", a)
 				if err != nil {
 					report(changed, err)
 					return

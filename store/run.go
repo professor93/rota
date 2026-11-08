@@ -89,13 +89,13 @@ func unlessHanded(handed *bool, release func()) {
 // token, a network that is down — would stop a run that had a perfectly good
 // credential in hand. Usage still wants a fresh token, and still refreshes
 // for itself: `rota list` and the server's background sweep are untouched.
-func refreshForLaunch(ctx context.Context, a *rota.Account) (bool, error) {
+func (s *Store) refreshForLaunch(ctx context.Context, a *rota.Account) (bool, error) {
 	// A dead account is never refreshed: its refresh token was refused, and
 	// presenting it again may cost the provider's patience with the login.
 	if a.LongValid() || a.Dead {
 		return false, nil
 	}
-	return rota.Refresh(ctx, a)
+	return s.refreshLogged(ctx, "launch", a)
 }
 
 // mayLaunch decides whether a run may start on this account, and says out
@@ -379,7 +379,7 @@ func (s *Store) prepareAlone(ctx context.Context, a *rota.Account, mirror bool) 
 				return nil, nil, err
 			}
 		}
-		changed, err = refreshForLaunch(ctx, a)
+		changed, err = s.refreshForLaunch(ctx, a)
 	}
 	if changed {
 		if serr := s.Save(); serr != nil {

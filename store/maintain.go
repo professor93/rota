@@ -119,7 +119,7 @@ func (s *Store) Maintain(ctx context.Context) []error {
 				}
 				since = snapshot(a)
 			}
-			if did, err = rota.Refresh(ctx, a); err != nil || !did || a.Dead {
+			if did, err = s.refreshLogged(ctx, "serve", a); err != nil || !did || a.Dead {
 				return
 			}
 			if serr := save(); serr != nil {
@@ -164,7 +164,7 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 		if a.Dead {
 			return false, nil
 		}
-		did, err := rota.Refresh(ctx, a)
+		did, err := s.refreshLogged(ctx, "serve", a)
 		return did, wrapAccount(a, err)
 	}
 	before := snapshot(a)
@@ -177,7 +177,7 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 		return changed, nil
 	}
 	if !rota.StoresLogin(a, h.home) && !unrefreshed(a) {
-		did, err := rota.Refresh(ctx, a)
+		did, err := s.refreshLogged(ctx, "serve", a)
 		return changed || did, wrapAccount(a, err)
 	}
 	release, idle := s.holdIdle(a)
@@ -186,6 +186,7 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 	}
 	defer release()
 	h.others = false
+	h.via = "serve.renew"
 	did, err := h.renew(ctx)
 	return changed || did, wrapAccount(a, err)
 }

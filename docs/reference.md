@@ -2697,6 +2697,45 @@ Code blanked: see *Stranded* and *Blanked*, below.
   lock for dead after a minute untouched. A lock somebody holds leaves this look
   to them. A lock somebody took meanwhile is theirs, and is neither touched nor
   removed.
+- **The journal.** Every refresh rota makes, for any provider and whatever
+  came of it, leaves one line in `refresh.log` in the store's directory, and so
+  does every change a look at a claude home finds there and every login rota
+  writes into a home. Each line is one JSON object (JSON Lines); the file is
+  mode `0600`, and at one MiB it is moved aside to `refresh.log.1`, replacing
+  the one there, as `watch.log` is. A line that cannot be written is lost and
+  fails nothing. No token is ever written, only its fingerprint: the first
+  sixteen hex digits of its SHA-256, the handle the account's `staged` keeps.
+  The fields:
+  - `ts` (UTC, RFC 3339 with milliseconds), `pid`, `version`, `account` (its
+    id) and `provider`;
+  - `path`, the way in: `launch.renew`, `list.renew` or `serve.renew` for a
+    launch's, a listing's or a server's maintenance's refresh of a login kept
+    in a home, and for another provider's refresh by the same look;
+    `rescue.blank` and `rescue.stranded` for the two exceptions; `token.env`
+    for a claude login rota alone holds, on a token in the environment;
+    `adopt` for a change a look found in the home; `seed` and `uncover` for a
+    login rota wrote there;
+  - `before` and `after`, the fingerprints of the account's refresh token
+    before and after;
+  - `home`, what rota's last read of the home found: `fp`, the fingerprint of
+    the refresh token there (empty for none, or a blanked login), and
+    `source` — `item` (the macOS keychain item), `file`, `none` or
+    `unreadable`; absent for a token rota alone holds;
+  - `staged_before` and `staged_after`, what the account recorded the home as
+    holding, `-` being nothing of the account's;
+  - `alive`, what was alive in the home (`daemon <pid>`, `session <pid>`,
+    `another rota run`), absent when nothing was;
+  - `lock`, whether rota held Claude Code's refresh lock;
+  - `outcome`: for a refresh, `rotated`, `refused:<OAuth code>`,
+    `transient:<status or error>` or `skipped:<why>`; for `adopt`,
+    `rotation`, `new-login`, `blanked` or `demoted`;
+    for `seed` and `uncover`, `written`;
+  - `exp_before` and `exp_after`, when the access token expires; a rescue
+    counts it expired before it presents.
+
+  It is rota's own record: nothing is written into a home for it, and nothing
+  a CLI sees changes. A refresh of a token rota alone holds that had nothing
+  to do writes no line.
 - **Changing route.** A launch remembers which route the account's last one
   in the home took, and decides its own before anything else. When it is
   another, and the home's daemon is running with nothing beside it but the
@@ -3224,7 +3263,8 @@ account has one — treat it like a private key.
 The rest of what persists is in that directory too, and nowhere else: the
 private homes under `homes/` — a claude account's login among them, in
 `.credentials.json` there or, on macOS, the keychain item Claude Code names
-for that home — the server's own `server.toml`, the socket a
+for that home — the server's own `server.toml`, the journal of every refresh
+(`refresh.log`, see *A login of its own*), the socket a
 run that stays open is reached through (`runs/<id>.sock`), and, where the
 server holds terminals, `terminals/` — the share socket and any recordings,
 mode `0600` inside a directory that is `0700`. rota has no database.
