@@ -279,7 +279,7 @@ func (h *holder) claimDir(st *store.Store) error {
 		}
 		return err
 	}
-	h.logs = &logFile{path: holdwire.LogPath(h.dir)}
+	h.logs = &logFile{path: holdwire.LogPath(h.dir), crash: true}
 	h.log = h.logs.logger()
 	st.Warn = func(msg string) { h.log("warning", "msg", msg) }
 	h.log("holding", "session", h.req.ID, "kind", h.req.Kind, "account", h.req.Account, "version", wire.Version)
