@@ -37,7 +37,7 @@ func TestALoginsLastThreeDaysAreNoted(t *testing.T) {
 	} {
 		want := ""
 		if c.hours != 0 {
-			want = fmt.Sprintf("login ends in %dh (%s); rota login 13 before then", c.hours, now.Add(c.left).Format(time.DateOnly))
+			want = fmt.Sprintf("login ends in %dh (%s); rota login 13 before then", c.hours, now.Add(c.left).UTC().Format(time.DateOnly))
 		}
 		if got := LoginNote(ending(c.left)); got != want {
 			t.Errorf("%v left: %q, want %q", c.left, got, want)
@@ -68,5 +68,22 @@ func TestTheStatusCellAndTheNoteReadOneClock(t *testing.T) {
 	a.Extra["refresh_token_expires_at"] = strconv.FormatInt(at.Add(-3*time.Hour).UnixMilli(), 10)
 	if s := LoginStatus(a); s != "login ended 3h ago" {
 		t.Fatalf("three hours past on the account's clock: %q", s)
+	}
+}
+
+// The note's date is UTC's, as the reason an account gives once its login has
+// ended is, wherever the machine is: an end shortly after midnight UTC is that
+// day, even west of UTC, where it is still the day before.
+func TestALoginsNoteGivesTheDateInUTC(t *testing.T) {
+	end := time.Date(2026, 11, 10, 0, 30, 0, 0, time.UTC)
+	west := time.FixedZone("west", -8*60*60)
+	oldLocal, oldNow := time.Local, rota.Now
+	time.Local = west
+	rota.Now = func() time.Time { return end.Add(-47 * time.Hour) }
+	t.Cleanup(func() { time.Local, rota.Now = oldLocal, oldNow })
+	a := &rota.Account{ID: 13, Provider: "claude",
+		Extra: map[string]string{"refresh_token_expires_at": strconv.FormatInt(end.UnixMilli(), 10)}}
+	if got, want := LoginNote(a), "login ends in 47h (2026-11-10); rota login 13 before then"; got != want {
+		t.Fatalf("%q\nwant %q", got, want)
 	}
 }

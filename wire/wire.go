@@ -216,13 +216,14 @@ const LoginSoon = 72 * time.Hour
 
 // LoginNote is what a listing should say about when an account's login
 // ends, or "" when that is far off or unknown. It counts whole hours, as the
-// STATUS cell does, and never fewer than one.
+// STATUS cell does, and never fewer than one. Its date is UTC's, like the
+// reason an account gives once its login has ended.
 func LoginNote(a *rota.Account) string {
 	t := a.LoginUntil()
 	if t.IsZero() || a.Dead {
 		return ""
 	}
-	day := t.Format(time.DateOnly)
+	day := t.UTC().Format(time.DateOnly)
 	switch left := t.Sub(rota.Now()); {
 	case left <= 0:
 		return "its login ended on " + day + "; `rota login`, or /login in one of its windows, for a new one"

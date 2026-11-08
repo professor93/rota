@@ -3345,7 +3345,8 @@ that names no account at all. So log the account in normally first.
 while it is within thirty days of expiry, and one more if it lapses — after
 which those runs are back on the eight-hour token. It says the same about the
 ordinary login in its last 72 hours, when its end is known (*Token
-lifetimes*) — `login ends in 47h (2026-11-10); rota login 13 before then` —
+lifetimes*) — `login ends in 47h (2026-11-10); rota login 13 before then`, the
+date in UTC like the reason a login that has ended gives —
 and the STATUS column says so too — `ok (login ends in
 1d)`, then `ok (login ended 3h ago)` once it is over, because sessions that
 outlive a login stop making progress and cannot recover by themselves. `--json` and `GET /v1/accounts` carry `long_until` and `login_until`
