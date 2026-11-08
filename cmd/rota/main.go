@@ -630,7 +630,7 @@ func (c *cli) list(args []string) error {
 			doc["warnings"] = warnings
 		}
 		if withSessions {
-			rep := sessions.Scan(s, recent)
+			rep := scanSessions(s, recent)
 			doc["instances"] = rep.Instances
 			doc["sessions"] = rep.Sessions
 			if rep.Shared != nil {
@@ -659,7 +659,7 @@ func (c *cli) list(args []string) error {
 		c.sayLeftOut(g.render(c.out), width)
 		c.sayLongNotes(shown, width)
 		if withSessions {
-			c.showSessions(sessions.Scan(s, recent), width)
+			c.showSessions(scanSessions(s, recent), width)
 			held, note := listHeld(s)
 			c.showHeld(held, note, width)
 		}
@@ -703,7 +703,7 @@ func (c *cli) list(args []string) error {
 	}
 	c.sayLongNotes(shown, width)
 	if withSessions {
-		c.showSessions(sessions.Scan(s, recent), width)
+		c.showSessions(scanSessions(s, recent), width)
 		held, note := listHeld(s)
 		c.showHeld(held, note, width)
 	}
