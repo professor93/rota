@@ -270,7 +270,10 @@ func (r *rig) dial(t *testing.T) *peer {
 	}
 	p := &peer{t: t, c: share.NewConn(conn, 0)}
 	t.Cleanup(func() { p.c.Close() })
-	p.json(holdwire.Hello, holdwire.HelloMsg{Majors: holdwire.Majors})
+	// A holder refuses a peer that is not the daemon before it reads a
+	// thing, and may have closed by the time this is sent: what it answered
+	// is read next, whatever became of the Hello.
+	_ = p.c.SendJSON(holdwire.Hello, holdwire.HelloMsg{Majors: holdwire.Majors})
 	return p
 }
 
