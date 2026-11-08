@@ -1353,8 +1353,9 @@ Three things are being read, and they know different amounts:
   the workspace, the process and the editor's name from it — never the
   authentication token those files also carry.
 - **Everything else running** comes from the process list. A working directory
-  takes `/proc` on Linux and `lsof` on macOS; where it cannot be read the
-  instance is still listed, with a note saying what is missing.
+  takes `/proc` on Linux and, on macOS, one `lsof` for every process at once;
+  where it cannot be read the instance is still listed, with a note saying
+  what is missing.
 
 Attribution is exact for codex, grok and kimi, which are always launched with
 a private home of their own. A claude account without a `--config` runs in a
