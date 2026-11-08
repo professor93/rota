@@ -244,6 +244,11 @@ func daemonConfig(conf, home string) (*api.Config, api.Options, api.Listener, er
 	if err != nil {
 		return nil, api.Options{}, api.Listener{}, err
 	}
+	// The control socket's principal is local, so no user or token of a
+	// daemon may be; foreground serve's may.
+	if err := api.ReservedNames(opts.Users, opts.Tokens); err != nil {
+		return nil, api.Options{}, api.Listener{}, err
+	}
 	if dir := opts.Dir; dir != "" {
 		if abs, err := filepath.Abs(dir); err != nil || abs != home {
 			return nil, api.Options{}, api.Listener{}, fmt.Errorf(

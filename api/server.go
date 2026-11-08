@@ -347,6 +347,11 @@ func New(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	if opts.HoldCommand != nil {
+		if err := ReservedNames(opts.Users, opts.Tokens); err != nil {
+			return nil, fmt.Errorf("api: %w", err)
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		opts: opts, sem: make(chan struct{}, opts.MaxConcurrent), limit: newLimiter(),
@@ -405,9 +410,6 @@ func checkUsers(in []User) ([]user, error) {
 		if seen[u.Name] {
 			return nil, fmt.Errorf("api: %s: there is already a user called %q", at, u.Name)
 		}
-		if err := ReservedName(u.Name); err != nil {
-			return nil, fmt.Errorf("api: %s: %w", at, err)
-		}
 		seen[u.Name] = true
 		role, err := parseRole(string(u.Role))
 		if err != nil {
@@ -432,9 +434,6 @@ func checkTokens(in []TokenPrincipal) ([]token, error) {
 		}
 		if seen[t.Name] {
 			return nil, fmt.Errorf("api: %s: there is already a token called %q", at, t.Name)
-		}
-		if err := ReservedName(t.Name); err != nil {
-			return nil, fmt.Errorf("api: %s: %w", at, err)
 		}
 		seen[t.Name] = true
 		role, err := parseRole(string(t.Role))

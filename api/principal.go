@@ -168,16 +168,36 @@ func needs(pattern string) Role {
 // keyboard when nothing else is said.
 const localName = "local"
 
-// ReservedName refuses a name that no user and no token may have: local,
-// the control socket's own principal. A user called that would be the same
-// person as the socket at a held session's keyboard, and either would read
-// as the socket wherever a name is shown — who holds a keyboard, and every
-// audit line. It is one sentence wherever a name is chosen: in the file, in
-// Options, and in the commands that print a block for the file. Any other
-// name is nil.
+// ReservedName refuses a name that no user and no token of a daemon may
+// have: local, the control socket's own principal. A user called that would
+// be the same person as the socket at a held session's keyboard, and either
+// would read as the socket wherever a name is shown — who holds a keyboard,
+// and every audit line. It is one sentence wherever a name is chosen: for a
+// daemon (ReservedNames), and in the commands that print a block for the
+// file. Any other name is nil.
 func ReservedName(name string) error {
 	if name == localName {
 		return fmt.Errorf("the name %q is reserved for the control socket's own principal; choose another", localName)
+	}
+	return nil
+}
+
+// ReservedNames refuses a user or a token called local, naming the entry,
+// for a server that has a control socket: one with HoldCommand, which New
+// asks this of, and a daemon's file before it is started. A server without
+// one, foreground `rota serve`, has no principal called local, and a file
+// whose user or token has that name serves there as it did before the
+// daemon.
+func ReservedNames(users []User, tokens []TokenPrincipal) error {
+	for i, u := range users {
+		if err := ReservedName(u.Name); err != nil {
+			return fmt.Errorf("%s: %w", entryName("users", i, u.Name), err)
+		}
+	}
+	for i, t := range tokens {
+		if err := ReservedName(t.Name); err != nil {
+			return fmt.Errorf("%s: %w", entryName("tokens", i, t.Name), err)
+		}
 	}
 	return nil
 }
