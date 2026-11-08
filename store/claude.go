@@ -318,6 +318,11 @@ type claudeHome struct {
 	// Set before a refresh; a login whose save failed goes into the home only
 	// then, and is not written over a login rota cannot place.
 	readBack bool
+	// via names, for the journal, the look that refreshes through this one:
+	// list.renew, serve.renew or token.env; "" is a launch's renew.
+	via string
+	// seen is what readStore last found, for the journal.
+	seen homeSeen
 }
 
 func (s *Store) claudeHome(a *rota.Account, others bool) *claudeHome {
@@ -730,6 +735,7 @@ func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 	// A login past its end was never presented, and its reason says so whole.
 	if cleared && a.Dead && h.hold == "" && !a.LoginEnded() {
 		a.DeadReason = fmt.Sprintf("Claude Code cleared the login in its home, and the provider refused rota's own refresh token too (%s)", a.DeadReason)
+		h.blameRefusal()
 	}
 	if !changed {
 		return false, err
@@ -788,6 +794,7 @@ func (h *claudeHome) uncover() error {
 		return fmt.Errorf("%s: could not take the keychain item Claude Code blanked out of the way of its login: %w", h.a, err)
 	}
 	h.blankItem = nil
+	h.wrote("uncover")
 	return nil
 }
 
@@ -843,6 +850,7 @@ func takeRefreshLock(home string) (*refreshLock, error) {
 		return nil, fmt.Errorf("Claude Code's refresh lock in its home could not be read back, so nothing there is refreshed: %w", err)
 	}
 	l := &refreshLock{path: path, held: fi, stop: make(chan struct{}), done: make(chan struct{})}
+	heldLocks.Store(path, true)
 	go l.beat()
 	return l, nil
 }
@@ -878,6 +886,7 @@ func (l *refreshLock) ours() bool {
 // to call more than once.
 func (l *refreshLock) release() {
 	l.once.Do(func() {
+		heldLocks.Delete(l.path)
 		close(l.stop)
 		<-l.done
 		if l.ours() {
@@ -1046,6 +1055,7 @@ func keychainContext() (context.Context, context.CancelFunc) {
 // it is for Claude Code: an older file there is most likely rota's own earlier
 // write, holding a token Claude Code has since spent.
 func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
+	defer func() { h.seen = homeSeen{raw: raw, item: h.item, err: err, read: true} }()
 	h.blankItem, h.item, h.passedOver, h.superseded = nil, nil, false, false
 	if svc, ok := h.service(); ok {
 		ctx, cancel := keychainContext()
@@ -1217,6 +1227,7 @@ func (h *claudeHome) read() (fsys storeFS, ok bool) {
 // home's store; and where the login lives in the file, the file is read as the
 // store, as ever.
 func (h *claudeHome) adopt(ctx context.Context) error {
+	defer h.journalAdopt(h.mark())
 	h.hold, h.usable, h.spent, h.blanked = "", false, false, false
 	if err := h.s.oneHomeOneAccount(h.a); err != nil {
 		return err
@@ -1900,11 +1911,14 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 		// Refused earlier in this process, and not on disk yet: it is not
 		// presented again.
 		a.Dead, a.DeadReason = true, why.(string)
+		h.journalStart(h.refreshPath(h.rescuing)).finish("skipped:refused-before")
 		return true, rota.WrapReauth(a)
 	}
 	rescue := h.rescuing
 	h.rescuing = false
+	j := h.journalStart(h.refreshPath(rescue)).presenting()
 	changed, err = rota.Refresh(ctx, a)
+	defer j.finish(refreshOutcome(j, changed, err))
 	if rescue && changed && err == nil {
 		h.rescuing = true
 		h.owe()
@@ -1921,12 +1935,15 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 	}
 	switch {
 	case !a.Dead:
+		h.keepRefusal(j)
 		return true, nil
 	case h.hold != "" && h.usable:
-		// A login past its end was never presented, and its reason says so whole.
+		// A login past its end was never presented, and its reason says so whole:
+		// nothing was refused that a login confirmed later could have covered.
 		if !a.LoginEnded() {
 			a.DeadReason = fmt.Sprintf("its own refresh token was refused (%s); a login made inside Claude Code in its home "+
 				"is waiting to be confirmed", refused)
+			h.pendRefusal(j)
 		}
 		return true, nil
 	}
@@ -2028,6 +2045,7 @@ func (h *claudeHome) seed(files []rota.StagedFile) error {
 			}
 			time.Sleep(seedPause)
 		}
+		h.wrote("seed")
 		h.a.StagedWritten()
 		delete(h.a.Extra, homeLostKey) // the home holds the account's login again
 		if named {
@@ -2313,6 +2331,7 @@ func (h *claudeHome) launchBeside(ctx context.Context) (*rota.Command, error) {
 // and the run is told to try again in a moment; the account is not dead.
 func (h *claudeHome) tokenNow(ctx context.Context) error {
 	a := h.a
+	h.via = "token.env"
 	if a.LongValid() || !a.Expired() {
 		return nil
 	}
@@ -2389,7 +2408,7 @@ func (h *claudeHome) launchOnToken(ctx context.Context) (*rota.Command, error) {
 // person chose not even what runs there is asked.
 func (h *claudeHome) launchUnkept(ctx context.Context, mirror bool) (*rota.Command, error) {
 	if !mirror {
-		return tokenRun(ctx, h.a)
+		return h.s.tokenRun(ctx, h.a)
 	}
 	cmd, err := h.onToken(ctx)
 	if err != nil {
@@ -2403,7 +2422,7 @@ func (h *claudeHome) launchUnkept(ctx context.Context, mirror bool) (*rota.Comma
 // and the store saved after any change.
 func (h *claudeHome) onToken(ctx context.Context) (*rota.Command, error) {
 	a := h.a
-	changed, err := refreshForLaunch(ctx, a)
+	changed, err := h.s.refreshForLaunch(ctx, a)
 	if changed {
 		if serr := h.s.Save(); serr != nil {
 			return nil, errors.Join(err, fmt.Errorf("refusing to run: store not saved after a token change: %w", serr))
@@ -2455,9 +2474,9 @@ func (h *claudeHome) envRun(ctx context.Context) (*rota.Command, error) {
 
 // tokenRun is a run with no home for an account whose login rota does not
 // keep in one: refreshed as it always was — never a dead one.
-func tokenRun(ctx context.Context, a *rota.Account) (*rota.Command, error) {
+func (s *Store) tokenRun(ctx context.Context, a *rota.Account) (*rota.Command, error) {
 	if !a.Dead && !a.LongValid() && a.Expired() {
-		if _, err := rota.Refresh(ctx, a); err != nil {
+		if _, err := s.refreshLogged(ctx, "launch", a); err != nil {
 			return nil, err
 		}
 	}

@@ -210,6 +210,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			}
 			held = append(held, letGo)
 			h.others = false
+			h.via = callerOf(ctx) + ".renew"
 			lock, changed, err := h.lockAndRead(ctx)
 			report(changed, unlessHeld(err))
 			if lock == nil {
@@ -271,7 +272,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			}
 			held = append(held, release)
 			plain = append(plain, work{a, func() {
-				changed, err := rota.Refresh(ctx, a)
+				changed, err := s.refreshLogged(ctx, callerOf(ctx), a)
 				if err != nil {
 					report(changed, err)
 					return

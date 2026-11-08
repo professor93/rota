@@ -599,7 +599,7 @@ func (c *cli) list(args []string) error {
 	if short {
 		errs = s.Rescue(context.Background(), shown...)
 	} else {
-		errs = s.Refresh(context.Background(), force, shown...)
+		errs = s.Refresh(store.WithCaller(context.Background(), "list"), force, shown...)
 	}
 
 	if c.json {

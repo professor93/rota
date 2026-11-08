@@ -153,7 +153,7 @@ func Choose(ctx context.Context, st *store.Store, id int) (*rota.Account, error)
 		return a, nil
 	}
 	if queue := Queue(st.Accounts); len(queue) > 0 {
-		st.Refresh(ctx, false, queue...)
+		st.Refresh(store.WithCaller(ctx, "choose"), false, queue...)
 	}
 	return pickIdle(st)
 }

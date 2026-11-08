@@ -2670,7 +2670,20 @@ Code blanked: see *Stranded* and *Blanked*, below.
   nothing to do with readings: a reading still fresh, or `--short`, does not
   put them off. A refresh the provider refuses as dead is not believed until
   the home has been read again — a sibling may have refreshed first, and its
-  login, confirmed, is taken. A store whose lock a run has released — the
+  login, confirmed, is taken. That refusal is not forgotten all the same: rota
+  presented a token the provider had already replaced, and a provider that
+  detects reuse may revoke the home's login with it. rota says so on stderr,
+  `rota presented a token the provider had already replaced; the home's login
+  may have been revoked with it`, and the account keeps when, from which path
+  and with which token's fingerprint, as `last_refusal`
+  (`{"at":<ms>,"path":"<path>","fp":"<fingerprint>"}`), until a later rotation
+  — Claude Code's, read from the home, or rota's own — or a new login shows the
+  login lived. A home login that cannot be confirmed at once leaves the account
+  dead in the hold, the refusal waiting beside it (`pending_refusal`), and the
+  look that confirms that login keeps and says the refusal as if it had come
+  at once. Should the account die meanwhile of Claude Code clearing its
+  login, its reason ends `(rota had presented a replaced token at <HH:MM>
+  UTC)`. A store whose lock a run has released — the
   reading `--with quota` takes after a run — rotates nothing at all, and does
   not so much as try an account's claim. Before it asks, it reads the store's
   reading and wait again, and afterwards writes its reading, or the wait the
@@ -2792,6 +2805,64 @@ Code blanked: see *Stranded* and *Blanked*, below.
   on a full disk, is never taken for somebody's: the look says so, as for a
   home that cannot be read, and refreshes nothing there. A lock somebody took
   meanwhile is theirs, and is neither touched nor removed.
+- **The journal.** Every refresh rota's store makes, for any provider, leaves
+  two lines in `refresh.log` in the store's directory — one as the token goes
+  out, one for what came of it — and every change a look at a claude home
+  finds there, and every login rota writes into a home, leaves one. A codex
+  login's repair inside staging, which refreshes a login missing its
+  `id_token` or access token, is not journalled. Each line is one JSON object
+  (JSON Lines). The journal is a regular file, mode `0600`, made so again if
+  it is found wider; a link or a pipe at its path is not written through, and
+  nothing waits on it. At one MiB it is moved aside to `refresh.log.1`,
+  replacing the one there: whichever process takes `refresh.log.lock` first
+  moves it, and only while it is still full, so two rota processes at the cap
+  never move a journal a moment old over the one just moved aside; a lock that
+  cannot be taken at all does not stop it being moved. A line that cannot be
+  written is lost and fails nothing. No token is ever written, only its
+  fingerprint: the first sixteen hex digits of its SHA-256, the handle the
+  account's `staged` keeps. The fields:
+  - `ts`, when the line was written (UTC, RFC 3339 with milliseconds), `pid`,
+    `version`, `account` (its id) and `provider`;
+  - `path`, who refreshed or looked: `<who>.renew` for a refresh of a claude
+    login kept in a home, or of another provider's login, where `<who>` is
+    `launch` (a run), `serve` (a server's maintenance), `list` (`rota list`),
+    `choose` (the rotation choosing an account: `rota run` with no id, an API
+    run or terminal with no id), `api` (the server's `?refresh=1`), the name a
+    program gives the store with `store.WithCaller`, or `refresh` when it
+    gives none; `rescue.blank` and `rescue.stranded` for the two exceptions;
+    `token.env` for a claude login rota alone holds, on a token in the
+    environment; `adopt` for a change a look found in the home; `seed` and
+    `uncover` for a login rota wrote there;
+  - `before` and `after`, the fingerprints of the account's refresh token
+    before and after;
+  - `home`, what rota's last read of the claude home found: `fp`, the
+    fingerprint of the refresh token there (empty for none, or a blanked
+    login), and `source` — `item` (the macOS keychain item), `file`, `none` or
+    `unreadable`; absent for a token rota alone holds, and for another
+    provider;
+  - `staged_before` and `staged_after`, what the account recorded the home as
+    holding, `-` being nothing of the account's;
+  - `alive`, what was alive in the claude home (`daemon <pid>`, `session
+    <pid>`, `another rota run`), absent when nothing was;
+  - `lock`, whether rota held Claude Code's refresh lock;
+  - `outcome`, always a code and never a message: for a refresh,
+    `presenting` (the line written just before the request, so a process that
+    dies waiting leaves word of what it presented), then `rotated`,
+    `refused:<OAuth code>` (`unknown` for a refusal without one),
+    `transient:<HTTP status | OAuth code | timeout | canceled | network |
+    decode | error>`, `skipped:<not-due | no-refresh-token | cannot-refresh |
+    refused-before>` or `accepted-after-refusal` (refused, and the home's
+    login taken by profile after it); for `adopt`, `rotation`, `new-login`,
+    `blanked`, `demoted` or `accepted-after-refusal` (the login a refusal left
+    waiting, confirmed); for `seed` and `uncover`, `written`. A blanked home is
+    written once for as long as it stays as it is;
+  - `exp_before` and `exp_after`, when the access token expires; a rescue
+    counts it expired before it presents;
+  - `presented_at`, on a refresh's two lines, when the token went out.
+
+  It is rota's own record: nothing is written into a home for it, and nothing
+  a CLI sees changes. A refresh of a token rota alone holds that had nothing
+  to do writes no line.
 - **Changing route.** A launch remembers which route the account's last one
   in the home took, and decides its own before anything else. When it is
   another, and the home's daemon is running with nothing beside it but the
@@ -3349,7 +3420,9 @@ account has one — treat it like a private key.
 The rest of what persists is in that directory too, and nowhere else: the
 private homes under `homes/` — a claude account's login among them, in
 `.credentials.json` there or, on macOS, the keychain item Claude Code names
-for that home — the server's own `server.toml`, the socket a
+for that home — the server's own `server.toml`, the journal of every refresh
+(`refresh.log`, with `refresh.log.lock` beside it, see *A login of its
+own*), the socket a
 run that stays open is reached through (`runs/<id>.sock`), and, where the
 server holds terminals, `terminals/` — the share socket and any recordings,
 mode `0600` inside a directory that is `0700`. rota has no database.
@@ -3532,6 +3605,7 @@ defer s.Close()
 l, _ := s.BeginLogin(ctx, "codex")            // parks the login for another process
 a, added, _ := s.FinishLogin(ctx, l.ID, code)
 errs := s.Refresh(ctx, false)                 // quota for metered providers, cached; a provider's wait kept
+errs = s.Refresh(store.WithCaller(ctx, "mine"), false) // the same, journalled as mine.renew
 res, _ := s.Run(ctx, a, rota.Spec{Prompt: "hi"}, nil, os.Stdout)
 ```
 
