@@ -176,6 +176,38 @@ func pidOf(d *holdwire.Daemon) string {
 	return fmt.Sprintf(" (pid %d)", d.PID)
 }
 
+// launchedVars are what a CLI rota launched carries for its account, which
+// a daemon started from inside one must not keep for its life and hand on
+// to every shell it holds: whose account it is, the account's own home for
+// its CLI, and the credential the CLI was handed. CLAUDE_CONFIG_DIR, the
+// account's home too, is daemonEnv's to decide by the person's rule.
+var launchedVars = []string{
+	"ROTA_ACCOUNT_ID", "ROTA_ACCOUNT", "ROTA_PROVIDER",
+	"CODEX_HOME", "GROK_HOME", "KIMI_CODE_HOME",
+	"CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY", "XAI_API_KEY",
+}
+
+// daemonEnv is the environment `serve start`, and a start `rota run
+// --detach` makes, hand the daemon for the store at home: this process's,
+// less what describes the terminal it was typed at (termenv.Scrub), which
+// the daemon outlives, and, inside a CLI rota launched, less what that CLI
+// carries for its account (launchedVars). CLAUDE_CONFIG_DIR is the person's
+// own directory, only where a variable names it, by the rule every rota
+// finds it by (store.PersonalClaudeWorld): inside a CLI rota launched, the
+// one it has is the account's.
+func daemonEnv(home string) []string {
+	env := termenv.Scrub(termenv.Set(os.Environ(), "ROTA_HOME", home))
+	launched := envValue(env, "ROTA_ACCOUNT_ID") != "" || envValue(env, "ROTA_PROVIDER") != ""
+	env = slices.DeleteFunc(env, func(e string) bool {
+		k, _, _ := strings.Cut(e, "=")
+		return k == "CLAUDE_CONFIG_DIR" || launched && slices.Contains(launchedVars, k)
+	})
+	if dir, named := store.PersonalClaudeWorld(); named && dir != "" {
+		env = append(env, "CLAUDE_CONFIG_DIR="+dir)
+	}
+	return env
+}
+
 // absoluteDirs is env with the Claude Code directories it names relatively
 // named absolutely: a daemon, and each holder it starts, runs in /, where a
 // relative one would be another directory.
