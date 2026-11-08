@@ -1195,9 +1195,10 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 	// execve keeps the process id, so the entry above goes on describing
 	// what is running and is cleaned up by the liveness check rather than
 	// by anything rota runs afterwards -- there is no afterwards. The claim
-	// on the account is lent to a holder that lets go of it when this
-	// process, the CLI by then, exits: the CLI is the run now, and nothing
-	// it leaves running is (see holdClaims).
+	// on the account goes with it: the CLI is the run now. A codex account's
+	// is lent to a holder that lets go of it when this process, the CLI by
+	// then, exits, so nothing the CLI leaves running is the run; every other
+	// account's is kept across the exec (see holdClaims).
 	held := c.holdClaims(a)
 	// Run before the release deferred above, so a holder has let go by the
 	// time this process does: on every way out but the exec that worked.

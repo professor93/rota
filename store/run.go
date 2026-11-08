@@ -28,10 +28,11 @@ import (
 // than released here because the CLI is about to run on it: a caller that
 // starts the CLI as a child — a terminal, a shared session — holds it until
 // that child ends and then releases it; a caller that replaces this process
-// with the CLI lends the claim to a process of its own that holds it until
-// the CLI exits (lentClaims), or calls KeepClaimsAcrossExec immediately
-// before where it cannot, so the claim outlives the replacing; and a caller
-// that does not go through with either calls release.
+// with the CLI calls KeepClaimsAcrossExec immediately before, or lends the
+// claim to a process of its own that holds it until the CLI exits
+// (lentClaims), as the program does for codex, so the claim outlives the
+// replacing; and a caller that does not go through with either calls
+// release.
 //
 // The CLI is taken to start where this process is, which is where the
 // handover starts it; one started anywhere else is prepared with PrepareIn.
@@ -538,7 +539,7 @@ var (
 
 // KeepClaimsAcrossExec arranges for every claim this process holds to
 // survive the exec it is about to make, and is called by nothing but a
-// handover that could not lend its claims (lentClaims), immediately before it
+// handover that does not lend its claims (lentClaims), immediately before it
 // replaces this process with the vendor CLI.
 //
 // Go opens every file close-on-exec, which is right for every other moment:
@@ -548,8 +549,8 @@ var (
 // and the claim has to be held by whatever is running rather than by the
 // process image that took it. The kernel releases it when the last process
 // holding it exits — the CLI, and anything the CLI started that inherited
-// it, a daemon it leaves behind included; that is why a handover lends its
-// claims where it can.
+// it, a daemon it leaves behind included; that is why a codex handover lends
+// its claims instead, Codex's CLI leaving its app-server daemon running.
 func KeepClaimsAcrossExec() {
 	heldMu.Lock()
 	defer heldMu.Unlock()
@@ -726,10 +727,7 @@ func (s *Store) Removable(a *rota.Account) error {
 				rota.ErrBusy, a, strings.Join(open, ", "))
 		}
 		if _, daemon := daemonAlive(home); daemon {
-			// What holds the claim may be the daemon, which Remove stops: a
-			// claim kept across a handover's exec, where no holder could be
-			// started for it, is held by what the CLI starts as well.
-			return nil
+			return nil // what holds the claim may be the daemon, which Remove stops
 		}
 	}
 	if s.claimed(a) {

@@ -331,9 +331,9 @@ account's login alive while its CLI runs (see *Watched*). It is not meant to be
 typed.
 
 **`rota serve claim <pid> <count>`** is internal too: started by an
-interactive `rota run`, it holds the account's claim until the CLI exits (see
-*One run at a time, where the CLI owns the credential*). It is not meant to be
-typed, and refuses to run without what the run hands it.
+interactive `rota run` of a codex account, it holds the account's claim until
+the CLI exits (see *One run at a time, where the CLI owns the credential*). It
+is not meant to be typed, and refuses to run without what the run hands it.
 
 The whole `[routes]` and `[terminal]` groups — the terminal page among them —
 have no flag at all and are set in the file only.
@@ -2842,33 +2842,34 @@ ones destroyed on disk and still listed.
 
 The handover is the awkward one. It replaces rota with the CLI through
 `execve`, and Go opens every file close-on-exec, so the claim would be dropped
-at exactly the moment it starts to matter. Kept across the exec instead, it
-would go to what the CLI starts as well, unless the CLI closes it first:
-Codex's app-server daemon, which its TUI starts and leaves running, or on
-macOS a tool a codex agent left running in the background, would keep the
-account busy long after the session ended, and what a claude session left
-running with it, a background shell say, would keep `rota login`,
-`rota remove` and the maintenance off its account. So immediately before the
-exec the handover lends the claim to a holder, `rota serve claim`: a process
-in a session of its own, at `/`, with stdin, stdout and stderr on `/dev/null`,
-not the CLI's child nor its parent, holding the claim close-on-exec and
-nothing else of the run's. It lets go the moment the CLI exits, however it
-exits, which it learns from the kernel: a pidfd on Linux, and kqueue on macOS
-and the BSDs. On a Linux kernel without pidfds it reads `/proc` ten times a
-second instead, and believes a zombie there only once it has stayed one for 50
-ms, because an exec from a thread other than the main one shows the process as
-a zombie for a moment. Nothing the CLI starts holds the claim, and its
-process, pid, terminal, signals, job control and exit status are what they
-were. If the exec fails the holder is told to let go, and the run ends with
-the account free. The holder ignores SIGTERM, SIGINT, SIGHUP and SIGQUIT, so
-`pkill rota` leaves it holding; only SIGKILL makes it let go early, while the
-CLI still runs. Where no holder can be started — another unix, or a failure,
-which is said along with why — the claim is kept across the exec as before.
-Everywhere rota stays the parent — a run, an open session, a terminal on the
-server, `--share`, and Windows, which has no exec — the claim keeps the flag
-and rota holds it until the run ends, so a child started meanwhile, another
-account's CLI or a shell, never inherits it and never keeps an account looking
-busy.
+at exactly the moment it starts to matter. For a claude account the flag is
+cleared for the handover alone, immediately before it, and the kernel releases
+the claim when the CLI finally exits, however it exits. Kept across the exec,
+the claim goes to what the CLI starts as well, unless the CLI closes it
+first, and that is codex's trouble: Codex's app-server daemon, which its TUI
+starts and leaves running, or on macOS a tool a codex agent left running in
+the background, would keep the account busy long after the session ended. So
+for a codex account — and any provider that drives Codex's CLI — immediately
+before the exec the handover lends the claim to a holder, `rota serve claim`:
+a process in a session of its own, at `/`, with stdin, stdout and stderr on
+`/dev/null`, not the CLI's child nor its parent, holding the claim
+close-on-exec and nothing else of the run's. It lets go the moment the CLI
+exits, however it exits, which it learns from the kernel: a pidfd on Linux,
+and kqueue on macOS and the BSDs. On a Linux kernel without pidfds it reads
+`/proc` ten times a second instead, and believes a zombie there only once it
+has stayed one for 50 ms, because an exec from a thread other than the main
+one shows the process as a zombie for a moment. Nothing the CLI starts holds
+the claim, and its process, pid, terminal, signals, job control and exit
+status are what they were. If the exec fails the holder is told to let go,
+and the run ends with the account free. The holder ignores SIGTERM, SIGINT,
+SIGHUP and SIGQUIT, so `pkill rota` leaves it holding; only SIGKILL makes it
+let go early, while the CLI still runs. Where no holder can be started —
+another unix, or a failure, which is said along with why — a codex account's
+claim is kept across the exec, as a claude account's is. Everywhere rota
+stays the parent — a run, an open session, a terminal on the server,
+`--share`, and Windows, which has no exec — the claim keeps the flag and rota
+holds it until the run ends, so a child started meanwhile, another account's
+CLI or a shell, never inherits it and never keeps an account looking busy.
 
 The same lock holds the background maintenance off. A running server renews
 tokens and reads usage every two minutes, and both of those rotate a refresh
