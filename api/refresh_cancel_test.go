@@ -394,15 +394,18 @@ func TestAWebSocketStartAfterStopRefreshesNothing(t *testing.T) {
 // one would be a refresh for a second interrupt to cut short. The runs go on,
 // since they are what the wait is for.
 func TestNoSweepStartsWhileShutdownWaitsForTheRunsInFlight(t *testing.T) {
-	w := newCancelWorld(t, 300*time.Millisecond, "", "Ra")
+	// The first sweep is an hour off, so none can have come before the sweeps
+	// are stopped; the keeper having returned is what says none ever will.
+	w := newCancelWorld(t, time.Hour, "", "Ra")
 	// A run in flight, which the http server's shutdown waits for.
 	block, entered := make(chan struct{}), make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(block) })
 	long := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		close(entered)
 		<-block
 	}))
 	t.Cleanup(long.Close)
-	t.Cleanup(func() { close(block) })
+	t.Cleanup(unblock)
 	go func() {
 		if resp, err := http.Get(long.URL); err == nil {
 			resp.Body.Close()
@@ -410,20 +413,23 @@ func TestNoSweepStartsWhileShutdownWaitsForTheRunsInFlight(t *testing.T) {
 	}()
 	wait(t, entered, "the run to start")
 	w.api.StopRefreshing()
-	if got := w.p.tokens(); len(got) != 0 {
-		t.Fatalf("the keeper swept before the shutdown began: %v", got)
-	}
+	wait(t, w.api.keeperDone, "the sweeps to end as the shutdown begins")
 	shut := make(chan error, 1)
 	go func() { shut <- long.Config.Shutdown(context.Background()) }()
-	select {
-	case rt := <-w.p.arrived:
-		t.Fatalf("a sweep presented %s while the shutdown waited for a run", rt)
-	case err := <-shut:
-		t.Fatalf("the shutdown did not wait for the run: %v", err)
-	case <-time.After(1500 * time.Millisecond):
-	}
 	if w.api.ctx.Err() != nil {
 		t.Fatal("stopping the sweeps stopped the runs too")
+	}
+	unblock()
+	select {
+	case err := <-shut:
+		if err != nil {
+			t.Fatalf("the shutdown: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the shutdown did not end once the run had")
+	}
+	if got := w.p.tokens(); len(got) != 0 {
+		t.Fatalf("a sweep presented %v", got)
 	}
 	w.holds(t, 1, "Ra")
 }

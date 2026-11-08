@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -44,18 +45,46 @@ func TestASignalDuringALookEndsTheLookNotTheProcess(t *testing.T) {
 	}
 }
 
+// watchLooks remembers the context of the latest look a command began.
+func watchLooks(t *testing.T) (latest func() context.Context) {
+	t.Helper()
+	var (
+		mu  sync.Mutex
+		ctx context.Context
+	)
+	lookBegun = func(c context.Context) {
+		mu.Lock()
+		defer mu.Unlock()
+		ctx = c
+	}
+	t.Cleanup(func() { lookBegun = nil })
+	return func() context.Context {
+		mu.Lock()
+		defer mu.Unlock()
+		return ctx
+	}
+}
+
 // interruptOnArrival sends this process SIGINT once the provider has been
-// presented want and is holding its answer, waits for the signal to be taken,
-// runs meanwhile, and lets the answer go.
-func interruptOnArrival(t *testing.T, p *heldProvider, want string, meanwhile func()) {
+// presented want and is holding its answer, waits for the look that is waiting
+// on that answer to be cancelled by it, runs meanwhile, and lets the answer go.
+func interruptOnArrival(t *testing.T, look func() context.Context, p *heldProvider, want string, meanwhile func()) {
 	t.Helper()
 	if rt := p.arrival(t); rt != want {
 		t.Fatalf("presented %s, want %s", rt, want)
 	}
+	waiting := look()
+	if waiting == nil {
+		t.Fatal("the refresh was made outside any look")
+	}
 	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(200 * time.Millisecond) // the signal's goroutine cancels the look
+	select {
+	case <-waiting.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the interrupt did not cancel the look")
+	}
 	if meanwhile != nil {
 		meanwhile()
 	}
@@ -97,10 +126,11 @@ func TestAnInterruptedListFinishesTheRefreshAndSaysWhatWentWrong(t *testing.T) {
 	t.Setenv("ROTA_HOME", home)
 	p := newHeldProvider(t)
 	writeAccounts(t, home, expiredClaude(t, home, 1, "R0"))
+	look := watchLooks(t)
 	got := callAsync(t, "list")
 	accounts := filepath.Join(home, "accounts.json")
 	kept := filepath.Join(t.TempDir(), "accounts.json")
-	interruptOnArrival(t, p, "R0", func() {
+	interruptOnArrival(t, look, p, "R0", func() {
 		// The save after the answer fails, whoever runs the test: a file
 		// cannot be renamed over a directory.
 		if err := os.Rename(accounts, kept); err != nil {
@@ -153,8 +183,9 @@ func TestAnInterruptedLaunchKeepsTheRefreshAndStartsNothing(t *testing.T) {
 			fakecli.Install(t, bin, "claude", fakecli.Spec{Stdout: []string{`[{"type":"result","result":"ANSWERED"}]`}, Touch: ran})
 			t.Setenv("PATH", bin)
 			argv := handover(t)
+			look := watchLooks(t)
 			got := callAsync(t, way.args...)
-			interruptOnArrival(t, p, "R0", nil)
+			interruptOnArrival(t, look, p, "R0", nil)
 			r := result(t, got)
 			if r.code != 130 {
 				t.Fatalf("an interrupted launch exits 130: %d %q %q", r.code, r.out, r.err)

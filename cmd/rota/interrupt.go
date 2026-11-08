@@ -39,9 +39,16 @@ func interrupted() (ctx context.Context, stop context.CancelFunc) {
 func interruptedDuring(look func(ctx context.Context)) (cut bool) {
 	ctx, stop := interrupted()
 	defer stop()
+	if lookBegun != nil {
+		lookBegun(ctx)
+	}
 	look(ctx)
 	return ctx.Err() != nil
 }
+
+// lookBegun, when set, is told of each look's context: how a test waits for a
+// signal to have been taken, rather than for a moment to have passed.
+var lookBegun func(context.Context)
 
 // errInterrupted ends a command whose look a signal cut short, once what was
 // under way is saved: with the status a shell gives a command an interrupt
