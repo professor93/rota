@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -32,6 +33,11 @@ import (
 
 const (
 	journalName = "refresh.log"
+	// lastRefusalKey is where an account keeps the last time rota presented a
+	// refresh token the provider refused and then took the home's login by
+	// profile instead (keepRefusal), until a later rotation shows the login
+	// lived through it.
+	lastRefusalKey = "last_refusal"
 	// refreshUntilKey is where a claude account keeps its login's
 	// refreshTokenExpiresAt: what tells one login from the next.
 	refreshUntilKey = "refresh_token_expires_at"
@@ -73,6 +79,9 @@ type journalEntry struct {
 	// provider at all: a token due, a refresh token to present, a provider
 	// that refreshes.
 	presented bool
+	// accepted is whether the provider refused the token presented and the
+	// home's login was taken by profile after it (keepRefusal).
+	accepted bool
 }
 
 // journalHome is what rota's last read of the home found there: the
@@ -151,9 +160,16 @@ func (h *claudeHome) seenHome() *journalHome {
 }
 
 // finish is the second half: the account as the step left it, and what came
-// of it. The line is written last of all.
+// of it. A rotation of rota's own shows the login lived through any refusal
+// kept before it, which is forgotten. The line is written last of all.
 func (e *journalEntry) finish(outcome string) {
 	a := e.a
+	if e.accepted {
+		outcome = "accepted-after-refusal"
+	}
+	if outcome == "rotated" {
+		delete(a.Extra, lastRefusalKey)
+	}
 	e.Outcome = outcome
 	e.After, e.StagedAfter, e.ExpAfter = fingerprintOf(a.Token.Refresh), a.Staged, journalTime(a.Token.ExpiresAt)
 	e.s.journal(e)
@@ -312,9 +328,12 @@ func (h *claudeHome) mark() journalMark {
 // journalAdopt writes a line for what adopt changed, deferred at its start
 // with the account as it was: a login made inside Claude Code taken, a
 // rotation taken, the home found blanked, or the record of what the home holds
-// demoted.
+// demoted. A rotation of a living login shows it lived through any refusal
+// kept before it, which is forgotten; a death adopt found gets what rota knows
+// of one (blameRefusal).
 func (h *claudeHome) journalAdopt(was journalMark) {
 	a := h.a
+	h.blameRefusal()
 	now := h.mark()
 	var outcome string
 	switch {
@@ -328,6 +347,9 @@ func (h *claudeHome) journalAdopt(was journalMark) {
 		outcome = "demoted"
 	default:
 		return
+	}
+	if !a.Dead && now.refresh != was.refresh {
+		delete(a.Extra, lastRefusalKey)
 	}
 	e := h.journalStart("adopt")
 	e.Before, e.StagedBefore, e.ExpBefore = fingerprintOf(was.refresh), was.staged, journalTime(was.expires)
@@ -343,4 +365,55 @@ func (h *claudeHome) wrote(path string) {
 	e.After, e.StagedAfter, e.ExpAfter = e.Before, fingerprintOf(h.a.Token.Refresh), e.ExpBefore
 	h.s.journal(e)
 	h.seen = homeSeen{read: true, written: e.StagedAfter}
+}
+
+/* ------------------------------------------------------------ refusals --- */
+
+// refusal is what an account keeps of the last time rota presented a refresh
+// token the provider had already replaced, and then took the home's login.
+type refusal struct {
+	At   int64  `json:"at"`
+	Path string `json:"path"`
+	FP   string `json:"fp"`
+}
+
+// keepRefusal is what refresh does when the provider refused the token rota
+// presented and the home's login was then taken by profile. The account is
+// alive on that login, but the refusal is not forgotten: under reuse detection
+// presenting a replaced token can revoke the whole login, the home's with it,
+// and Claude Code's next refresh there would then be refused too. So it is
+// said, kept on the account until a later rotation shows the login lived, and
+// journalled as accepted after a refusal.
+func (h *claudeHome) keepRefusal(e *journalEntry) {
+	a := h.a
+	raw, _ := json.Marshal(refusal{At: rota.NowMS(), Path: e.Path, FP: e.Before})
+	if a.Extra == nil {
+		a.Extra = map[string]string{}
+	}
+	a.Extra[lastRefusalKey] = string(raw)
+	e.accepted = true
+	h.warn(fmt.Sprintf("%s: rota presented a token the provider had already replaced; the home's login may have been revoked with it", a))
+}
+
+// lastRefusal reads what keepRefusal kept.
+func lastRefusal(a *rota.Account) (refusal, bool) {
+	var r refusal
+	raw := a.Extra[lastRefusalKey]
+	if raw == "" || json.Unmarshal([]byte(raw), &r) != nil || r.At <= 0 {
+		return refusal{}, false
+	}
+	return r, true
+}
+
+// blameRefusal adds to the reason of an account that died of Claude Code
+// clearing its login that rota had presented a replaced token before it, when
+// it had and no rotation since has shown the login lived through that.
+func (h *claudeHome) blameRefusal() {
+	a := h.a
+	r, ok := lastRefusal(a)
+	if !ok || !a.Dead || !strings.HasPrefix(a.DeadReason, "Claude Code cleared the login") ||
+		strings.Contains(a.DeadReason, "rota had presented a replaced token") {
+		return
+	}
+	a.DeadReason += fmt.Sprintf(" (rota had presented a replaced token at %s UTC)", time.UnixMilli(r.At).UTC().Format("15:04"))
 }

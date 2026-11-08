@@ -1,8 +1,11 @@
 package store
 
-// The refresh journal: every refresh rota makes, and every change a look at a
-// home finds there, leaves one line in refresh.log beside the store, which
-// holds no token.
+// The refresh journal, and a refusal rota met that the home's login covered.
+//
+// A refusal of rota's that the home's login then covers is kept on the
+// account, said, and named in a later death of that login; a later rotation
+// forgets it. Every refresh rota makes, and every change a look at a home finds
+// there, leaves one line in refresh.log beside the store, which holds no token.
 
 import (
 	"bytes"
@@ -19,6 +22,8 @@ import (
 
 	rota "github.com/professor93/rota/lib"
 )
+
+const replacedWarning = "rota presented a token the provider had already replaced; the home's login may have been revoked with it"
 
 // journalOf is every line of the store's journal, each one JSON object.
 func journalOf(t *testing.T, s *Store) []map[string]any {
@@ -89,6 +94,197 @@ func journalClean(t *testing.T, s *Store, tokens ...string) {
 			t.Fatalf("the journal holds a token, %q:\n%s", tok, raw)
 		}
 	}
+}
+
+// replacedMeanwhile sets the world up so that the first token rota presents
+// has just been presented by somebody outside rota, and the home holds what
+// that refresh issued: a second holder of the lineage, or a login written in
+// without the refresh lock. rota's own request lands on a token the provider
+// has replaced, the provider revokes the family, and the home's login is still
+// one the profile vouches for.
+func replacedMeanwhile(w *lineageWorld) {
+	done := false
+	w.p.onRota = func(rt string) {
+		if done {
+			return
+		}
+		done = true
+		_, body := w.p.present("a second holder", rt)
+		m := body.(map[string]any)
+		w.cc.write(storeLogin(m["access_token"].(string), m["refresh_token"].(string),
+			rota.Now().Add(8*time.Hour).UnixMilli(), lineageUntil))
+	}
+}
+
+func (w *lineageWorld) unrevoke() {
+	w.p.mu.Lock()
+	defer w.p.mu.Unlock()
+	w.p.revoked = ""
+}
+
+// rota's refresh token is refused because somebody presented it first, and the
+// home's login, taken by profile, keeps the account alive. That refusal is not
+// masked: the account keeps when, from where and with which token, the person
+// is told on the existing warning path, and the journal says the login was
+// accepted after a refusal — from each look that renews a home's login.
+func TestARefusalTheHomesLoginCoveredIsKeptSaidAndJournalled(t *testing.T) {
+	looks := []struct {
+		look lineageLook
+		path string
+	}{{lineageLooks()[0], "list.renew"}, {lineageLooks()[2], "serve.renew"}, {lineageLooks()[3], "launch.renew"}}
+	for _, m := range lineageModes() {
+		for _, l := range looks {
+			t.Run(m.name+"/"+l.look.what, func(t *testing.T) {
+				w := newLineageWorld(t, m.keychain)
+				words := said(w.s)
+				replacedMeanwhile(w)
+				w.clock.pass(9 * time.Hour)
+				l.look.do(t, w)
+				w.p.dump(t)
+				if w.a.Dead || w.a.Token.Refresh != "R1" {
+					t.Fatalf("the home's login keeps the account alive: dead=%v %q %q", w.a.Dead, w.a.Token.Refresh, w.a.WhyDead())
+				}
+				want := fmt.Sprintf(`{"at":%d,"path":"%s","fp":"%s"}`, w.clock.at.UnixMilli(), l.path, fingerprintOf("R0"))
+				if got := w.a.Extra[lastRefusalKey]; got != want {
+					t.Fatalf("last_refusal:\n got %s\nwant %s", got, want)
+				}
+				if !strings.Contains(readFile(filepath.Join(storeDir(w.s), "accounts.json")), lastRefusalKey) {
+					t.Fatal("last_refusal is saved")
+				}
+				if msg := saidOf(words, replacedWarning); !strings.HasPrefix(msg, w.a.String()+": ") {
+					t.Fatalf("said, naming the account: %q", *words)
+				}
+				e := journalSays(t, w.s, l.path, "accepted-after-refusal")
+				if e["before"] != fingerprintOf("R0") || e["after"] != fingerprintOf("R1") || e["account"] != float64(w.a.ID) ||
+					e["provider"] != "claude" {
+					t.Fatalf("the refresh's line: %v", e)
+				}
+				if home, _ := e["home"].(map[string]any); home["fp"] != fingerprintOf("R0") || home["source"] != "file" {
+					t.Fatalf("the home rota read before it presented: %v", e["home"])
+				}
+				a := journalSays(t, w.s, "adopt", "new-login")
+				if a["before"] != fingerprintOf("R0") || a["after"] != fingerprintOf("R1") || a["staged_after"] != fingerprintOf("R1") {
+					t.Fatalf("the adoption's line: %v", a)
+				}
+				journalClean(t, w.s, "R0", "R1", "A0", "A1")
+			})
+		}
+	}
+}
+
+// When the login the account was left on after such a refusal then dies of
+// Claude Code clearing it, the reason says rota had presented a replaced token,
+// and when.
+func TestADeathAfterAKeptRefusalSaysRotaHadPresentedAReplacedToken(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := newLineageWorld(t, m.keychain)
+			replacedMeanwhile(w)
+			w.clock.pass(9 * time.Hour)
+			lineageLooks()[0].do(t, w)
+			refusedAt := w.clock.at
+			if w.a.Dead || w.a.Extra[lastRefusalKey] == "" {
+				t.Fatalf("setup: alive on the home's login, the refusal kept: %v %q", w.a.Dead, w.a.Extra)
+			}
+			// A launch in the quiet home finds it in sync, and takes rota's own
+			// older file out from beside the keychain item.
+			lineageLooks()[3].do(t, w)
+			w.clock.pass(time.Minute)
+			w.cc.start()
+			t.Logf("daemon: %s", w.cc.refresh("claude-code daemon"))
+			lineageLooks()[1].do(t, w)
+			w.p.dump(t)
+			want := "Claude Code cleared the login in its home, and the provider refused rota's own refresh token too " +
+				"(invalid_grant: Refresh token not found or invalid) (rota had presented a replaced token at " +
+				refusedAt.UTC().Format("15:04") + " UTC)"
+			if !w.a.Dead || w.a.DeadReason != want {
+				t.Fatalf("dead=%v\n got %q\nwant %q", w.a.Dead, w.a.DeadReason, want)
+			}
+			journalSays(t, w.s, "adopt", "blanked")
+			journalSays(t, w.s, "rescue.blank", "refused:invalid_grant")
+			journalClean(t, w.s, "R0", "R1", "A0", "A1")
+		})
+	}
+}
+
+// Adoption gives the same death the same words: an account a rota marked dead
+// with no reason, whose home Claude Code then blanked.
+func TestADeathAdoptionFindsAfterAKeptRefusalSaysSoToo(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	writeFile(t, filepath.Join(s.Home(a), ".credentials.json"), clearedLogin)
+	a.StagedWritten()
+	a.Dead = true
+	at := time.Date(2026, 11, 7, 6, 22, 0, 0, time.UTC)
+	a.Extra[lastRefusalKey] = fmt.Sprintf(`{"at":%d,"path":"list.renew","fp":"%s"}`, at.UnixMilli(), fingerprintOf(a.Token.Refresh))
+	if err := s.claudeHome(a, false).adopt(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := "Claude Code cleared the login in its home after a refresh of its own was refused (rota had presented a replaced token at 06:22 UTC)"
+	if a.DeadReason != want {
+		t.Fatalf("\n got %q\nwant %q", a.DeadReason, want)
+	}
+	if err := s.claudeHome(a, false).adopt(context.Background()); err != nil || a.DeadReason != want {
+		t.Fatalf("said once: %q", a.DeadReason)
+	}
+}
+
+// A later successful rotation shows the login lived through the refusal, which
+// is then forgotten: Claude Code's, taken from the home; rota's own; and a new
+// login, which replaces the login it was about.
+func TestALaterRotationForgetsAKeptRefusal(t *testing.T) {
+	refused := func(t *testing.T) *lineageWorld {
+		w := newLineageWorld(t, false)
+		replacedMeanwhile(w)
+		w.clock.pass(9 * time.Hour)
+		lineageLooks()[0].do(t, w)
+		if w.a.Dead || w.a.Extra[lastRefusalKey] == "" {
+			t.Fatalf("setup: alive on the home's login, the refusal kept: %v %q", w.a.Dead, w.a.Extra)
+		}
+		w.unrevoke() // this provider let the family live
+		return w
+	}
+	t.Run("Claude Code's", func(t *testing.T) {
+		w := refused(t)
+		w.cc.start()
+		t.Logf("daemon: %s", w.cc.refresh("claude-code daemon"))
+		lineageLooks()[1].do(t, w)
+		if w.a.Token.Refresh != "R2" || w.a.Extra[lastRefusalKey] != "" {
+			t.Fatalf("taken, and the refusal forgotten: %q %q", w.a.Token.Refresh, w.a.Extra[lastRefusalKey])
+		}
+		e := journalSays(t, w.s, "adopt", "rotation")
+		if e["before"] != fingerprintOf("R1") || e["after"] != fingerprintOf("R2") {
+			t.Fatalf("%v", e)
+		}
+	})
+	t.Run("rota's own", func(t *testing.T) {
+		w := refused(t)
+		w.clock.pass(9 * time.Hour)
+		lineageLooks()[0].do(t, w)
+		if w.a.Token.Refresh != "R2" || w.a.Extra[lastRefusalKey] != "" {
+			t.Fatalf("rotated, and the refusal forgotten: %q %q", w.a.Token.Refresh, w.a.Extra[lastRefusalKey])
+		}
+		journalSays(t, w.s, "list.renew", "rotated")
+		if bad := w.p.rotaSpent(); len(bad) != 1 {
+			t.Fatalf("rota presented one spent token, the one the second holder spent: %+v", bad)
+		}
+	})
+	t.Run("a new login", func(t *testing.T) {
+		rota.Register(&fakeProvider{name: "t-journal-login", identity: &rota.Identity{UUID: "u9", Email: "u9@x"}})
+		s := openTemp(t)
+		a := s.add("t-journal-login")
+		a.UUID, a.Extra = "u9", map[string]string{lastRefusalKey: `{"at":1,"path":"list.renew","fp":"0123456789abcdef"}`}
+		l, err := s.BeginLogin(context.Background(), "t-journal-login")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, _, err := s.FinishLogin(context.Background(), l.ID, "CODE")
+		if err != nil || got != a || a.Extra[lastRefusalKey] != "" {
+			t.Fatalf("%v %v %q", err, got == a, a.Extra)
+		}
+	})
 }
 
 // The secrets a journal test works with: long enough that finding one in the

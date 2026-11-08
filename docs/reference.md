@@ -2620,7 +2620,17 @@ Code blanked: see *Stranded* and *Blanked*, below.
   nothing to do with readings: a reading still fresh, or `--short`, does not
   put them off. A refresh the provider refuses as dead is not believed until
   the home has been read again — a sibling may have refreshed first, and its
-  login, confirmed, is taken. A store whose lock a run has released — the
+  login, confirmed, is taken. That refusal is not forgotten all the same: rota
+  presented a token the provider had already replaced, and a provider that
+  detects reuse may revoke the home's login with it. rota says so on stderr,
+  `rota presented a token the provider had already replaced; the home's login
+  may have been revoked with it`, and the account keeps when, from which path
+  and with which token's fingerprint, as `last_refusal`
+  (`{"at":<ms>,"path":"<path>","fp":"<fingerprint>"}`), until a later rotation
+  — Claude Code's, read from the home, or rota's own — or a new login shows the
+  login lived. Should the account die meanwhile of Claude Code clearing its
+  login, its reason ends `(rota had presented a replaced token at <HH:MM>
+  UTC)`. A store whose lock a run has released — the
   reading `--with quota` takes after a run — rotates nothing at all, and does
   not so much as try an account's claim. Before it asks, it reads the store's
   reading and wait again, and afterwards writes its reading, or the wait the
@@ -2727,8 +2737,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
     `another rota run`), absent when nothing was;
   - `lock`, whether rota held Claude Code's refresh lock;
   - `outcome`: for a refresh, `rotated`, `refused:<OAuth code>`,
-    `transient:<status or error>` or `skipped:<why>`; for `adopt`,
-    `rotation`, `new-login`, `blanked` or `demoted`;
+    `transient:<status or error>`, `skipped:<why>` or
+    `accepted-after-refusal` (refused, and the home's login taken by profile
+    after it); for `adopt`, `rotation`, `new-login`, `blanked` or `demoted`;
     for `seed` and `uncover`, `written`;
   - `exp_before` and `exp_after`, when the access token expires; a rescue
     counts it expired before it presents.

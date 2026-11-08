@@ -540,6 +540,7 @@ func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 	}
 	if cleared && a.Dead && h.hold == "" {
 		a.DeadReason = fmt.Sprintf("Claude Code cleared the login in its home, and the provider refused rota's own refresh token too (%s)", a.DeadReason)
+		h.blameRefusal()
 	}
 	if !changed {
 		return false, err
@@ -1436,6 +1437,7 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 	}
 	switch {
 	case !a.Dead:
+		h.keepRefusal(j)
 		return true, nil
 	case h.hold != "" && h.usable:
 		a.DeadReason = fmt.Sprintf("its own refresh token was refused (%s); a login made inside Claude Code in its home "+

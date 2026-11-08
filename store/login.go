@@ -97,6 +97,7 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 		}
 	}
 	a.Apply(tok)
+	delete(a.Extra, lastRefusalKey) // kept about the login this one replaces
 	// The reading, and any wait asked of it, belonged to the login this one
 	// replaces.
 	a.Quota, a.QuotaAt, a.QuotaWait = nil, 0, rota.QuotaWait{}
@@ -174,6 +175,7 @@ func (s *Store) LoginKey(ctx context.Context, provider, key, label string) (a *r
 		}
 	}
 	a.Apply(tok)
+	delete(a.Extra, lastRefusalKey) // kept about the login this one replaces
 	// The reading, and any wait asked of it, belonged to the login this one
 	// replaces.
 	a.Quota, a.QuotaAt, a.QuotaWait = nil, 0, rota.QuotaWait{}
