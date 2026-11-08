@@ -604,7 +604,8 @@ func (s *Server) attachWS(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	s.serveWS(c, lr, since, who(r).Role)
+	p := who(r)
+	s.serveWS(c, lr, since, p.Role, watchOnlyFor(p))
 }
 
 // startWS starts a run over a socket. The first frame is the request — the
@@ -651,7 +652,7 @@ func (s *Server) startWS(w http.ResponseWriter, r *http.Request) {
 	}
 	// Only control reaches this route at all, so the run is served as what
 	// started it.
-	s.serveWS(c, lr, 0, RoleControl)
+	s.serveWS(c, lr, 0, RoleControl, watchOnlyFor(who(r)))
 }
 
 // startFrame reads the opening frame as a run request. Unknown fields are
@@ -693,10 +694,11 @@ func (s *Server) refuseWS(c *wsConn, r *http.Request, err error) {
 // serveWS carries the run both ways until one end of it stops.
 //
 // role is what the socket's own principal may do. A watcher gets every event
-// and none of the acts: what it sends back is answered with a refusal and
-// the connection carries on, because a page that is read-only by design must
+// and none of the acts: what it sends back is answered with a refusal, in
+// the words refusal has for that principal (watchOnlyFor), and the
+// connection carries on, because a page that is read-only by design must
 // not be able to hang up on itself by mistake.
-func (s *Server) serveWS(c *wsConn, lr *liveRun, since int, role Role) {
+func (s *Server) serveWS(c *wsConn, lr *liveRun, since int, role Role, refusal string) {
 	rd := newWSReader(c)
 	lr.attach(rd, since)
 	reads := make(chan []byte, 8)
@@ -718,7 +720,7 @@ func (s *Server) serveWS(c *wsConn, lr *liveRun, since int, role Role) {
 				c.bye(code, "", reads)
 				return
 			}
-			if err := s.onWS(c, lr, raw, role); err != nil {
+			if err := s.onWS(c, lr, raw, role, refusal); err != nil {
 				lr.detach(rd)
 				c.bye(wsPolicy, err.Error(), reads)
 				return
@@ -768,7 +770,7 @@ type wsAck struct {
 // onWS acts on one frame and answers it. Returning an error ends the socket:
 // that is for a frame this server cannot read at all. Everything it can read
 // and will not do is an ack with a reason, because the connection is fine.
-func (s *Server) onWS(c *wsConn, lr *liveRun, raw []byte, role Role) error {
+func (s *Server) onWS(c *wsConn, lr *liveRun, raw []byte, role Role, refusal string) error {
 	if !isObject(raw) {
 		return wsFail{wsPolicy, "every frame is one JSON object"}
 	}
@@ -778,7 +780,7 @@ func (s *Server) onWS(c *wsConn, lr *liveRun, raw []byte, role Role) error {
 	}
 	// A write that fails is a peer that has gone, which the reading side will
 	// find on its own: this one has nothing left to say about it.
-	id, err := s.actWS(lr, f, role)
+	id, err := s.actWS(lr, f, role, refusal)
 	if err != nil {
 		_ = c.say(wsAck{Type: "ack", Ref: f.Ref, Error: s.wsErr(lr, err)})
 		return nil
@@ -791,11 +793,11 @@ func (s *Server) onWS(c *wsConn, lr *liveRun, raw []byte, role Role) error {
 // carry, when the act has one. A close and a raw line have none: the CLI is
 // told something, and what it makes of it is in the stream like everything
 // else.
-func (s *Server) actWS(lr *liveRun, f wsFrame, role Role) (string, error) {
+func (s *Server) actWS(lr *liveRun, f wsFrame, role Role, refusal string) (string, error) {
 	// Everything a socket carries inward changes the run, so a watcher is
 	// told so once, whatever the frame was going to ask for.
 	if !role.allows(RoleControl) {
-		return "", refuse(http.StatusForbidden, watchOnly)
+		return "", refuse(http.StatusForbidden, refusal)
 	}
 	if lr.over() {
 		return "", refuse(http.StatusConflict, "run "+lr.id+" has ended")

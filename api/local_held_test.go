@@ -106,12 +106,12 @@ func TestALocalWatcherNeverTakesTheKeyboard(t *testing.T) {
 		t.Fatalf("the watch principal attaching to a free keyboard took it: %v", hello)
 	}
 	w.typeIn("peek\r")
-	if msg := w.waitType("error")["message"]; msg != watchOnly {
-		t.Fatalf("the watch principal typing is refused with %q, want %q", msg, watchOnly)
+	if msg := w.waitType("error")["message"]; msg != callerWatchOnly {
+		t.Fatalf("the watch principal typing is refused with %q, want %q", msg, callerWatchOnly)
 	}
 	w.say(map[string]any{"type": "claim"})
-	if msg := w.waitType("error")["message"]; msg != watchOnly {
-		t.Fatalf("the watch principal claiming is refused with %q, want %q", msg, watchOnly)
+	if msg := w.waitType("error")["message"]; msg != callerWatchOnly {
+		t.Fatalf("the watch principal claiming is refused with %q, want %q", msg, callerWatchOnly)
 	}
 	for _, c := range []struct {
 		method, path string
@@ -122,7 +122,7 @@ func TestALocalWatcherNeverTakesTheKeyboard(t *testing.T) {
 		{"POST", "/v1/terminals", map[string]any{"account": 1}},
 	} {
 		resp, raw := look.do(c.method, c.path, c.body)
-		if resp.StatusCode != 403 || errorOf(string(raw)) != watchOnly {
+		if resp.StatusCode != 403 || errorOf(string(raw)) != callerWatchOnly {
 			t.Fatalf("%s %s as the watch principal answered %d %s", c.method, c.path, resp.StatusCode, raw)
 		}
 	}
@@ -138,12 +138,12 @@ func TestALocalWatcherNeverTakesTheKeyboard(t *testing.T) {
 	a.c.conn.Close()
 	p.waitViewers(id, 1)
 	w.typeIn("now\r")
-	if msg := w.waitType("error")["message"]; msg != watchOnly {
-		t.Fatalf("the watch principal typing in local's grace is refused with %q, want %q", msg, watchOnly)
+	if msg := w.waitType("error")["message"]; msg != callerWatchOnly {
+		t.Fatalf("the watch principal typing in local's grace is refused with %q, want %q", msg, callerWatchOnly)
 	}
 	w.say(map[string]any{"type": "claim"})
-	if msg := w.waitType("error")["message"]; msg != watchOnly {
-		t.Fatalf("the watch principal claiming in local's grace is refused with %q, want %q", msg, watchOnly)
+	if msg := w.waitType("error")["message"]; msg != callerWatchOnly {
+		t.Fatalf("the watch principal claiming in local's grace is refused with %q, want %q", msg, callerWatchOnly)
 	}
 	again := look.attachHere(id, "")
 	again.waitType("hello")

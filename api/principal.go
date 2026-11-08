@@ -235,12 +235,24 @@ func (s *Server) personOf(p *Principal) string {
 	return ""
 }
 
-// The two sentences a principal is refused with. They are constants because
+// The sentences a principal is refused with. They are constants because
 // they are part of what this server answers, and a test reads them.
+// watchOnly is for a sign-in — a token, a page's user, an invite — and
+// callerWatchOnly for the local principal on the control socket, which is a
+// process of this machine's user and signed in to nothing.
 const (
-	watchOnly   = "this sign-in may only watch; nothing here can be changed from it"
-	crossSiteNo = "a request from another site cannot use this session"
+	watchOnly       = "this sign-in may only watch; nothing here can be changed from it"
+	callerWatchOnly = "this caller may only watch; nothing here can be changed from it"
+	crossSiteNo     = "a request from another site cannot use this session"
 )
+
+// watchOnlyFor is the sentence p is refused a change in.
+func watchOnlyFor(p *Principal) string {
+	if p != nil && p.Via == "local" {
+		return callerWatchOnly
+	}
+	return watchOnly
+}
 
 /* --------------------------------------------------- resolving a request --- */
 
@@ -398,5 +410,5 @@ func crossSiteWrite(r *http.Request) bool {
 func (s *Server) refuseRole(w http.ResponseWriter, r *http.Request, p *Principal, need Role) {
 	s.log.Warn("refused by role", "name", p.Name, "role", p.Role, "needed", need,
 		"method", r.Method, "path", r.URL.Path, "ip", clientIP(r))
-	fail(w, http.StatusForbidden, watchOnly)
+	fail(w, http.StatusForbidden, watchOnlyFor(p))
 }
