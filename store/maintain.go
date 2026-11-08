@@ -106,7 +106,7 @@ func (s *Store) Maintain(ctx context.Context) []error {
 			// home of an account signed in and never run since, unstaged or
 			// holding the previous login's file, would not be. A store that
 			// cannot be saved spends no token this sweep.
-			if rota.Flavor(a.Provider) == "codex" && a.Expired() {
+			if codexDue(a) {
 				if _, err = rota.Stage(a, home); err != nil {
 					return
 				}

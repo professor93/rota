@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -251,4 +253,133 @@ func TestAKeychainItemWrittenMeanwhileIsNotDeleted(t *testing.T) {
 			t.Fatal("and the file is as it was")
 		}
 	})
+}
+
+// A launch that cannot save the store around a refresh of a login kept in its
+// home never loses what it refreshed, so no refresh token is presented twice.
+// Before it refreshes, the launch writes the login into the home if the home
+// does not hold it — an account signed in and never run since — and saves the
+// store, and when that save fails it refreshes nothing. When the save after
+// the refresh fails, the new login still goes into the home, which the store on
+// disk says holds the login the refresh replaced, so the next look reads the
+// new one back as a rotation.
+func TestALaunchThatCannotSaveARefreshedLoginLosesNothing(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	for _, c := range []struct {
+		what   string
+		file   string // the refresh token the home holds: "" none
+		staged string // what the store records of the home: "keep" its own login there
+	}{
+		{"a home holding the login", "R-u1", "keep"},
+		{"a home holding the login, record unknown", "R-u1", ""},
+		{"signed in, never run, empty home", "", "-"},
+		{"signed in, never run, the previous login's file", "R-prev", "-"},
+	} {
+		// good is how many saves the launch gets through before every one
+		// fails: none, the one before the refresh, that and the one after it.
+		for _, good := range []int{0, 1, 2} {
+			what := fmt.Sprintf("%s, %d good saves", c.what, good)
+			f := fakeAnthropic(t)
+			f.set(func(f *anthropic) { f.refresh, f.singleUse = refreshesTo("A-new", "R-new"), true })
+			m := &memBackend{home: t.TempDir()}
+			left := -1
+			s, err := NewStore(savesThenFails{Backend: m, left: &left})
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := livingClaude(s, "u1")
+			if c.file != "" {
+				writeFile(t, filepath.Join(s.Home(a), ".credentials.json"),
+					storeLogin("A-"+c.file, c.file, later(-time.Hour), "1999999999000"))
+				a.StagedWritten()
+			}
+			if c.staged != "keep" {
+				a.Staged = c.staged
+			}
+			expire(a)
+			if err := s.Save(); err != nil {
+				t.Fatal(err)
+			}
+
+			left = good
+			if _, err := launchEnv(t, s, a); err == nil {
+				t.Fatalf("%s: a launch whose store cannot be saved does not start", what)
+			}
+			if got, want := f.grants(), []string{"R-u1"}[:min(good, 1)]; !slices.Equal(got, want) {
+				t.Fatalf("%s: a launch that cannot save before refreshing spends nothing, "+
+					"and one that can spends the login once: presented %v", what, got)
+			}
+			s.Close() // the launch's process ends
+			left = -1
+
+			again, err := NewStore(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := again.Find(a.ID)
+			if _, err := launchEnv(t, again, b); err != nil {
+				t.Fatalf("%s: the next launch: %v (presented %v)", what, err, f.grants())
+			}
+			again.Close()
+			if got := f.grants(); !slices.Equal(got, []string{"R-u1"}) || b.Dead || b.Token.Refresh != "R-new" {
+				t.Fatalf("%s: presented %v, dead=%v %q, token %q", what, got, b.Dead, b.DeadReason, b.Token.Refresh)
+			}
+			if r, _ := readLogin(t, again.Home(b)); r != "R-new" {
+				t.Fatalf("%s: the home holds %q", what, r)
+			}
+		}
+	}
+}
+
+// A rescue whose every save fails still puts the login it refreshed into the
+// home, where the next look reads it back, rather than nowhere: the login it
+// replaced is spent, and presenting that one again is refused for good.
+func TestARescueThatCannotSaveLosesNothing(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	for _, c := range []struct {
+		what string
+		make func(t *testing.T, s *Store, a *rota.Account) string
+	}{
+		{"a blanked home", cleared},
+		{"a stranded home", stranded},
+	} {
+		f := fakeAnthropic(t)
+		f.set(func(f *anthropic) { f.refresh, f.singleUse = refreshesTo("A-new", "R-new"), true })
+		m := &memBackend{home: t.TempDir()}
+		left := -1
+		s, err := NewStore(savesThenFails{Backend: m, left: &left})
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := livingClaude(s, "u1")
+		home := c.make(t, s, a)
+		if err := s.Save(); err != nil {
+			t.Fatal(err)
+		}
+
+		left = 0
+		if errs := s.Rescue(context.Background(), a); len(errs) == 0 {
+			t.Fatalf("%s: a store that cannot be saved is said", c.what)
+		}
+		s.Close()
+		left = -1
+
+		again, err := NewStore(m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := again.Find(a.ID)
+		if errs := again.Rescue(context.Background(), b); len(errs) != 0 {
+			t.Fatalf("%s: the next look: %v (presented %v)", c.what, errs, f.grants())
+		}
+		again.Close()
+		if got := f.grants(); !slices.Equal(got, []string{"R-u1"}) || b.Dead || b.Token.Refresh != "R-new" {
+			t.Fatalf("%s: presented %v, dead=%v %q, token %q", c.what, got, b.Dead, b.DeadReason, b.Token.Refresh)
+		}
+		if r, _ := readLogin(t, home); r != "R-new" {
+			t.Fatalf("%s: the home holds %q", c.what, r)
+		}
+	}
 }

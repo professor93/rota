@@ -67,6 +67,13 @@ func codexDaemon(home string) (string, bool) {
 	return "", false
 }
 
+// codexDue reports whether a is a codex login due for a refresh, which goes
+// into its home and is saved before it is refreshed: by Maintain, and by a
+// run.
+func codexDue(a *rota.Account) bool {
+	return rota.Flavor(a.Provider) == "codex" && a.Expired()
+}
+
 // heldByDaemon reports whether the account's login is held by a daemon its
 // CLI left running in its home, which then refreshes it in rota's place.
 func (s *Store) heldByDaemon(a *rota.Account) bool {

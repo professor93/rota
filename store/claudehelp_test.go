@@ -236,13 +236,25 @@ func stopsClean(home string) {
 const hangUp = -1
 
 // anthropic stands in for the provider: its token, profile and usage
-// endpoints, each counted.
+// endpoints, each counted, and the refresh tokens presented to the first, in
+// order.
 type anthropic struct {
 	refreshes, profiles, usages atomic.Int64
 	mu                          sync.Mutex
 	refresh                     func() (int, any)
 	profile                     func(auth string) (int, any)
 	usage                       func(auth string) (int, any)
+	presented                   []string
+	// singleUse refuses a refresh token presented before, for good, as the
+	// provider does, without asking refresh.
+	singleUse bool
+}
+
+// grants are the refresh tokens presented so far, in order.
+func (f *anthropic) grants() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.presented)
 }
 
 func (f *anthropic) set(fn func(f *anthropic)) {
@@ -262,7 +274,20 @@ func fakeAnthropic(t *testing.T) *anthropic {
 		switch r.URL.Path {
 		case "/token":
 			f.refreshes.Add(1)
-			if refresh != nil {
+			var req struct {
+				Refresh string `json:"refresh_token"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&req)
+			f.mu.Lock()
+			spent := f.singleUse && req.Refresh != "" && slices.Contains(f.presented, req.Refresh)
+			if req.Refresh != "" {
+				f.presented = append(f.presented, req.Refresh)
+			}
+			f.mu.Unlock()
+			switch {
+			case spent:
+				status, body = 400, map[string]string{"error": "invalid_grant"}
+			case refresh != nil:
 				status, body = refresh()
 			}
 		case "/profile":

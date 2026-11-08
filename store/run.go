@@ -360,10 +360,31 @@ func (s *Store) prepareAlone(ctx context.Context, a *rota.Account, mirror bool) 
 		err     error
 	)
 	if !s.heldByDaemon(a) {
+		// Before a codex login that is due is refreshed, the home holds it
+		// and the store says so on disk, as Maintain leaves them, so a token
+		// refreshed after that and saved nowhere but the home is read back by
+		// the next run's adoption. A store that cannot be saved spends no
+		// token, and runs nothing.
+		if codexDue(a) && !a.LongValid() {
+			_, err = rota.Stage(a, s.Home(a))
+			if serr := s.Save(); serr != nil {
+				return nil, nil, errors.Join(err, fmt.Errorf("refusing to run: not refreshed, the store could not be saved: %w", serr))
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+		}
 		changed, err = refreshForLaunch(ctx, a)
 	}
 	if changed {
 		if serr := s.Save(); serr != nil {
+			// The token the refresh replaced is spent. The new one goes into
+			// the home, where the next run reads it back, rather than nowhere.
+			if rota.Flavor(a.Provider) == "codex" && !a.Dead {
+				if _, werr := rota.Stage(a, s.Home(a)); werr != nil {
+					serr = errors.Join(serr, werr)
+				}
+			}
 			return nil, nil, errors.Join(err, fmt.Errorf("refusing to run: store not saved after a token change: %w", serr))
 		}
 	}
