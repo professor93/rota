@@ -2551,7 +2551,14 @@ Code blanked: see *Stranded* and *Blanked*, below.
   inside that home: rota asks the provider whose it is, with that login's own
   access token, and takes it when it is this account's (a dead account comes
   back that way); somebody else's is not taken, the account's own tokens stay
-  as they were, and rota says so, naming both. A login Claude Code blanked is
+  as they were, and rota says so, naming both. After `rota login`, until the
+  new login is in the home, the ends decide what the home holds, because a
+  login ends a fixed time after it was signed in: one ending more than a
+  minute after the new login's was made with `/login` since, and is checked
+  the same way, never written over first; one ending before it is the login
+  from before, and the new one goes in over it once nothing runs there. For
+  an account whose login's end rota has not recorded, the new login goes in
+  over whatever is there. A login Claude Code blanked is
   not taken for the end of the account when it was the account's current one:
   see *Blanked*, below. A store that is there and cannot be read is not an
   empty one: see the hold, below.
