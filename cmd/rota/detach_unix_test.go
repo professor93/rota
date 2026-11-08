@@ -20,6 +20,7 @@ import (
 
 	rotaclient "github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/pty"
 )
 
 // rota run --detach as a person types it, on the daemon rig: each command is
@@ -75,6 +76,35 @@ func TestDetachHandsTheCLIToAHolder(t *testing.T) {
 	p.waitOut("ready 120x40")
 	p.send(0x2, []byte("x\r"))
 	p.waitOut("got:x")
+}
+
+// At a terminal, the session starts at that terminal's size: the one the
+// person typing --detach is looking at, rather than 120×40.
+func TestDetachStartsAtTheTerminalsSize(t *testing.T) {
+	r := newDaemonRig(t)
+	r.start()
+	cmd := r.cmd("run", "1", "--detach", "--label", "sized")
+	master, err := pty.Start(cmd, 97, 31)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exited := make(chan struct{})
+	go func() { _ = cmd.Wait(); close(exited) }()
+	t.Cleanup(func() { _ = cmd.Process.Kill(); <-exited; master.Close() })
+	screen := watchScreen(master)
+	screen.wait(t, "lists it")
+	select {
+	case <-exited:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("--detach at a terminal never finished: %q", screen.text())
+	}
+	m := regexp.MustCompile(`held as session sized \(([0-9a-f]{16})\)`).FindStringSubmatch(screen.text())
+	if cmd.ProcessState.ExitCode() != 0 || m == nil {
+		t.Fatalf("--detach at a terminal: exit %d %q\nlog:\n%s", cmd.ProcessState.ExitCode(), screen.text(), r.log())
+	}
+	p := r.attach(m[1])
+	p.waitDoc("hello")
+	p.waitOut("ready 97x31")
 }
 
 // A label with an escape in it is the session's name as it was given, and
