@@ -596,10 +596,14 @@ func (c *cli) list(args []string) error {
 		return nil
 	}
 	var errs []error
-	if short {
-		errs = s.Rescue(context.Background(), shown...)
-	} else {
-		errs = s.Refresh(context.Background(), force, shown...)
+	if interruptedDuring(func(ctx context.Context) {
+		if short {
+			errs = s.Rescue(ctx, shown...)
+		} else {
+			errs = s.Refresh(ctx, force, shown...)
+		}
+	}) {
+		return errInterrupted
 	}
 
 	if c.json {
@@ -1055,7 +1059,13 @@ func (c *cli) run(args []string) error {
 // which means the rotation's choice — and adds the one hint that only a
 // terminal can act on.
 func account(s *store.Store, id int) (*rota.Account, error) {
-	a, err := rotation.Choose(context.Background(), s, id)
+	var (
+		a   *rota.Account
+		err error
+	)
+	if interruptedDuring(func(ctx context.Context) { a, err = rotation.Choose(ctx, s, id) }) {
+		return nil, errInterrupted
+	}
 	if errors.Is(err, rota.ErrNoAccount) {
 		return nil, fmt.Errorf("%w; see `rota list`", err)
 	}
@@ -1137,7 +1147,17 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 	// to become the CLI, and the CLI is what must hold it. It goes only if
 	// the handover does not happen — or, when the terminal is shared, when
 	// the CLI this process is holding has ended.
-	path, env, release, err := s.Prepare(context.Background(), a)
+	var (
+		path    string
+		env     []string
+		release func()
+	)
+	if interruptedDuring(func(ctx context.Context) { path, env, release, err = s.Prepare(ctx, a) }) {
+		if err == nil {
+			release()
+		}
+		return errInterrupted
+	}
 	if err != nil {
 		return err
 	}
