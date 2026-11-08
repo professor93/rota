@@ -2006,7 +2006,10 @@ server runs itself does not have:
   as `this session's size changes only when a viewer asks to fit it`; one
   with it is taken from whoever holds the keyboard, as ever, at most
   1000×1000, with a 0 meaning 80 columns or 24 rows, and everyone is told
-  the new size once the session has taken it.
+  the new size once the session has taken it. A fit the holder has no room
+  for, with 64 frames already waiting for its screen, is dropped and not
+  answered — no `error` and no `resized` — and the session keeps its size:
+  go by the last `resized` or `hello`, never by the size you asked for.
 - **A viewer's terminal never answers twice.** What a connection sends first
   has its own terminal's answers taken out — to the colour, cursor and
   device queries it sees replayed, which the holder answered when the CLI
@@ -2123,7 +2126,7 @@ Out:
 | `keyboard{holder}` | who holds it now, `null` for nobody; a held session's also has `holder_conn`, the `conn` of the connection holding it, since one person may be attached from several devices |
 | `repaint{offset,cols,rows}` | a held session's viewer that fell behind: the next binary frame is the screen at that size, standing for `offset`, and output goes on from there |
 | `claim_request{by,id}` | somebody is asking the holder for it |
-| `resized{cols,rows}` | the terminal is a different size now |
+| `resized{cols,rows}` | the terminal is a different size now; a held session's fit that was dropped is not answered at all (*Only a fit resizes*, above) |
 | `viewers{list}` | who is attached: name, role and since — never an address |
 | `gap{from,to,bytes}` | bytes you will never be sent: `since` was older than the scrollback (`from` to `to`, before any output), or, mid-stream, `bytes` of output that never reached this server — a shared terminal's queue that overflowed, or a held session's holder that printed past what its link carried; the offsets go on from `to`. A held session's viewer that is behind is not sent a mid-stream one, since its repaint goes on from past it; one repainted without a screen is sent one after the reset, for the scrollback it is not replayed |
 | `exit{code}` | the CLI ended |
@@ -2162,14 +2165,21 @@ it is now as the next binary frame, and the output after `offset`. The
 screen is asked for twice; a holder with none to give gets the viewer a
 reset (`ESC c`) as that frame, a `gap` for the scrollback before the last
 64 KiB, and those 64 KiB. A holder has none while its screen is further
-behind its CLI than it can draw in a moment, and never for a session larger
-than 200,000 cells, such as 500×400. What a held session's viewer is replayed — on
-attaching, or after a repaint — comes in frames of at most 64 KiB, each
-with its own write deadline, and one viewer is repainted at most four
-times a second. Documents still arrive, and the ones that came while it
-was behind arrive after the repaint; a viewer owed more documents than it
-has room for (64 waiting to be written, or 1024 waiting for its repaint) is
-closed with `1013` after all, since a repaint does not say them again.
+behind its CLI than it can draw in a moment, and none again, for the rest of
+the session, once its screen is retired: when the CLI prints a whole
+`scrollback_bytes` beyond what the screen has drawn, as one burst of output
+can, when the session is, or is made, larger than 200,000 cells, such as
+500×400, even if it is made smaller again, or when the screen fails. From
+then on `hello` has no `repaint`, every viewer is replayed the scrollback
+instead, and a cursor-position query is answered with the top left corner;
+the holder's log says which of the three it was. What a held session's
+viewer is replayed — on attaching, or after a repaint — comes in frames of
+at most 64 KiB, each with its own write deadline, and one viewer is
+repainted at most four times a second. Documents still arrive, and the ones
+that came while it was behind arrive after the repaint; a viewer owed more
+documents than it has room for (64 waiting to be written, or 1024 waiting
+for its repaint) is closed with `1013` after all, since a repaint does not
+say them again.
 
 ```js
 const ws = new WebSocket(`wss://host/v1/terminals/${id}/ws`);
@@ -2512,7 +2522,7 @@ whoever is attached:
 | secondary attributes, DA2 | `ESC[>1;10;0c` |
 | XTVERSION | `xterm(390)` |
 | status report, DSR 5 | `ESC[0n` |
-| cursor position, DSR 6 | where the cursor is on the holder's own screen at that point in the output; the top left corner when it has no screen |
+| cursor position, DSR 6 | where the cursor is on the holder's own screen at that point in the output; the top left corner when it has no screen, as for the rest of the session once the screen is retired (*Falling behind*) |
 | OSC 10 and 11 | light grey on black, `rgb:d0d0/d0d0/d0d0` and `rgb:0000/0000/0000` |
 | OSC 4 | xterm's default palette |
 | XTGETTCAP | `TN` is `xterm-256color`, `Co` and `colors` are `256`; any other name is said to be unknown |
