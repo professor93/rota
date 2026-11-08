@@ -25,7 +25,6 @@ import (
 	rotaclient "github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/cmd/rota/hold"
 	"github.com/professor93/rota/internal/holdwire"
-	"github.com/professor93/rota/internal/termenv"
 	"github.com/professor93/rota/wire"
 )
 
@@ -66,7 +65,8 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 
 // spawnDaemon starts the daemon in a session of its own, in /, on the store
 // this command names, written down by absolute path, with nothing of this
-// terminal's, and waits until it answers on its control socket as the
+// terminal's or of an account a CLI rota launched runs as (daemonEnv), and
+// waits until it answers on its control socket as the
 // process this started. It says which daemon serves the store then: the one
 // it started, or one found already running — before anything started, or
 // having won the store from the one this started, which then stops.
@@ -122,7 +122,7 @@ func (c *cli) spawnDaemon(ctlOnly bool, conf string) (*daemonStart, error) {
 	// The daemon runs in /, so every directory its environment names is
 	// named absolutely, as the store is: the person's own Claude Code
 	// directory too, which every claude account's home is made from.
-	env, err := absoluteDirs(termenv.Set(os.Environ(), "ROTA_HOME", home))
+	env, err := absoluteDirs(daemonEnv(home))
 	if err != nil {
 		return nil, err
 	}

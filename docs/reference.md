@@ -793,7 +793,15 @@ the two differ like this:
 session of its own, in `/`, with its standard streams on `/dev/null` and
 `ROTA_HOME` set to the store's absolute path, and `CLAUDE_CONFIG_DIR` and
 `ROTA_CLAUDE_HOME` made absolute when they name a directory relatively, so a
-store or a Claude Code directory named relatively is still the one meant. It reads the configuration first, as the daemon
+store or a Claude Code directory named relatively is still the one meant.
+The daemon outlives the terminal it was started at, and keeps none of the
+variables that describe it, the ones a held session never inherits.
+Started inside a CLI rota launched, by hand or by `rota run --detach`, it
+keeps nothing that CLI carries for its account either: `ROTA_ACCOUNT_ID`,
+`ROTA_ACCOUNT`, `ROTA_PROVIDER`, the account's `CODEX_HOME`, `GROK_HOME` or
+`KIMI_CODE_HOME`, and the token or key it was handed. Its
+`CLAUDE_CONFIG_DIR` is the person's own, by the rule `install` uses, so a
+shell it holds does not run as that account. It reads the configuration first, as the daemon
 will, so a configuration the daemon would refuse is refused at the terminal;
 a certificate or token file it names is opened by the daemon alone, and one
 it cannot open is in the log lines a failed start quotes. Then it
