@@ -533,7 +533,8 @@ func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 		// Nothing has changed: the home is as it was, and the next look tries again.
 		return changed, notThrough{fmt.Errorf("%s: %s, and rota could not refresh it just now, so the next look tries again: %w", a, what, err)}
 	}
-	if cleared && a.Dead && h.hold == "" {
+	// A login past its end was never presented, and its reason says so whole.
+	if cleared && a.Dead && h.hold == "" && !a.LoginEnded() {
 		a.DeadReason = fmt.Sprintf("Claude Code cleared the login in its home, and the provider refused rota's own refresh token too (%s)", a.DeadReason)
 	}
 	if !changed {

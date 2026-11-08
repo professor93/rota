@@ -2,11 +2,14 @@ package rota
 
 import (
 	"context"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Claude (Anthropic) — OAuth2 with PKCE. Constants come from the production
@@ -86,7 +89,12 @@ func claudeBegin(scopes []string) (string, map[string]string, error) {
 
 type claudeTokenResp struct {
 	oauthTokenResp
-	Account *struct {
+	// RefreshLife is refresh_token_expires_in: how many seconds the login's
+	// refresh token has left. Kept raw and read by refreshEnd, because it may
+	// come as a number or as a numeric string, and a value of any other shape
+	// must cost only itself, never the reply around it.
+	RefreshLife jsontext.Value `json:"refresh_token_expires_in"`
+	Account     *struct {
 		UUID  string `json:"uuid"`
 		Email string `json:"email_address"`
 	} `json:"account"`
@@ -106,6 +114,59 @@ func (r *claudeTokenResp) token() *Token {
 	return t
 }
 
+// A Claude login has a hard end: its refresh token works until a moment the
+// provider fixes at sign-in, and after that nobody can refresh it — Claude Code
+// checks it before every refresh of its own — and only a new sign-in brings the
+// account back. Claude Code reckons it the way rota does here, read from its
+// own code: at sign-in, now plus the reply's refresh_token_expires_in, or
+// thirty days when the reply has none; at each refresh, the earlier of what it
+// had and what the reply says, so it never moves later.
+const (
+	// claudeLoginLife is the life a sign-in is given when the reply says
+	// nothing: Claude Code's own default.
+	claudeLoginLife = 30 * 24 * time.Hour
+	// claudeLifeCeiling is the longest life a reply is believed for. Past it
+	// the number is not a life at all, and the milliseconds would not fit.
+	claudeLifeCeiling = 100 * 365 * 24 * 3600
+	// claudeEndNoise is how much earlier a refresh's end must be before rota
+	// moves the end it holds. The reply counts whole seconds and this machine
+	// adds its own milliseconds, so one end reads a moment apart from one
+	// refresh to the next; moving by that would make the login look like
+	// another one to everything that compares ends (AdoptFS) and gain nothing.
+	claudeEndNoise = time.Minute
+)
+
+// refreshEnd is when the reply says the login's refresh token ends, in unix
+// ms, and whether it said: refresh_token_expires_in as a positive number of
+// seconds, written as a JSON number or as a string holding one. Anything else
+// is not an answer.
+func (r *claudeTokenResp) refreshEnd() (int64, bool) {
+	v := r.RefreshLife
+	if v.Kind() == '"' {
+		var s string
+		if decodeLenient(v, &s) != nil {
+			return 0, false
+		}
+		v = jsontext.Value(strings.TrimSpace(s))
+	}
+	if !v.IsValid() || v.Kind() != '0' {
+		return 0, false
+	}
+	secs, err := strconv.ParseFloat(string(v), 64)
+	if err != nil || secs <= 0 || secs > claudeLifeCeiling {
+		return 0, false
+	}
+	return nowMS() + int64(secs*1000), true
+}
+
+// claudeEnded is the refusal a login past its end gets before anything is
+// sent: the provider would refuse it anyway, and Claude Code would not ask.
+// It is the dead-token verdict, so the account is dead with this as its reason.
+func claudeEnded(a *Account) error {
+	return failf(ErrDeadToken, "its login ended on %s: a Claude login lasts 30 days from sign-in; rota login %d makes a new one",
+		a.LoginUntil().UTC().Format("2006-01-02 15:04 UTC"), a.ID)
+}
+
 // Complete finishes an ordinary login, and then asks the profile once what
 // the account's plan is.
 //
@@ -115,22 +176,27 @@ func (r *claudeTokenResp) token() *Token {
 // Remote Control looks for. A profile that cannot be read never fails the
 // login — the token is good either way, and Claude Code asks for itself.
 func (p claudeProvider) Complete(ctx context.Context, code string, state map[string]string) (*Token, error) {
-	t, err := p.exchange(ctx, code, state, nil)
+	r, err := p.exchange(ctx, code, state, nil)
 	if err != nil {
 		return nil, err
 	}
+	t := r.token()
 	if prof, err := readClaudeProfile(ctx, t.Access); err == nil {
 		prof.into(t)
 	}
-	// A fresh login is a new lineage, and when its refresh token ends is
-	// not something the exchange says. Whatever the account remembers is the
-	// last login's, and carried over it would both be written into Claude
-	// Code's store as this login's and make a rotation of this login look
-	// like somebody else's. An empty value is how a token says "forget it".
+	// A fresh login is a new lineage, and it ends when the exchange says, or
+	// thirty days from now, as Claude Code reckons a sign-in of its own. It
+	// replaces whatever the account remembers, which is the last login's: it
+	// goes into Claude Code's store with this login, and it is what tells a
+	// rotation of this login from somebody else's.
+	end, ok := r.refreshEnd()
+	if !ok {
+		end = nowMS() + claudeLoginLife.Milliseconds()
+	}
 	if t.Extra == nil {
 		t.Extra = map[string]string{}
 	}
-	t.Extra[claudeRefreshUntil] = ""
+	t.Extra[claudeRefreshUntil] = strconv.FormatInt(end, 10)
 	return t, nil
 }
 
@@ -210,10 +276,11 @@ func (p *claudeProfile) into(t *Token) {
 // exchange — the life asked for — and what comes back is a token good for
 // that long with no refresh anyone should keep.
 func (p claudeProvider) CompleteLong(ctx context.Context, code string, state map[string]string) (*Token, error) {
-	t, err := p.exchange(ctx, code, state, map[string]any{"expires_in": claudeLongSeconds})
+	r, err := p.exchange(ctx, code, state, map[string]any{"expires_in": claudeLongSeconds})
 	if err != nil {
 		return nil, err
 	}
+	t := r.token()
 	// The reply need not echo the life it granted. What was asked for is the
 	// honest fallback: it is what the token was issued as, and an expiry
 	// guessed too early only costs a token that still worked.
@@ -222,7 +289,8 @@ func (p claudeProvider) CompleteLong(ctx context.Context, code string, state map
 	}
 	// Dropped rather than stored: a refresh here belongs to a lineage
 	// nothing will ever rotate, and a secret kept for no reason is a secret
-	// that can leak for no reason.
+	// that can leak for no reason. When that refresh would have ended goes
+	// with it, unread: it is not when the account's own login ends.
 	t.Refresh = ""
 	return t, nil
 }
@@ -231,7 +299,7 @@ func (p claudeProvider) CompleteLong(ctx context.Context, code string, state map
 // map[string]any only because one caller adds a number to it; everything a
 // provider sends is still written out in one place, where the shape of the
 // request can be read at a glance.
-func (claudeProvider) exchange(ctx context.Context, code string, state map[string]string, extra map[string]any) (*Token, error) {
+func (claudeProvider) exchange(ctx context.Context, code string, state map[string]string, extra map[string]any) (*claudeTokenResp, error) {
 	st := state["state"]
 	// The callback page renders the code as "code#state"; accept either.
 	if c, s, ok := strings.Cut(code, "#"); ok {
@@ -249,10 +317,20 @@ func (claudeProvider) exchange(ctx context.Context, code string, state map[strin
 	if err := r.verdict(err, grantCode); err != nil {
 		return nil, err
 	}
-	return r.token(), nil
+	return &r, nil
 }
 
+// Refresh presents the account's refresh token, unless its login has ended.
+// Every refresh of a claude account comes through here, whatever asked for it,
+// so this is where a login past its end is refused: nothing is sent, and the
+// account is dead with the reason claudeEnded gives.
+//
+// A reply that says when the login ends moves the account's end earlier when
+// it is earlier, and never later; one that says nothing leaves it as it was.
 func (claudeProvider) Refresh(ctx context.Context, a *Account) (*Token, error) {
+	if a.LoginEnded() {
+		return nil, claudeEnded(a)
+	}
 	var r claudeTokenResp
 	err := postJSON(ctx, ClaudeEndpoints.Token, map[string]string{
 		"grant_type": "refresh_token", "refresh_token": a.Token.Refresh, "client_id": claudeClientID,
@@ -260,7 +338,16 @@ func (claudeProvider) Refresh(ctx context.Context, a *Account) (*Token, error) {
 	if err := r.verdict(err, grantRefresh); err != nil {
 		return nil, err
 	}
-	return r.token(), nil
+	t := r.token()
+	if end, ok := r.refreshEnd(); ok {
+		if had := a.LoginUntil(); had.IsZero() || end < had.UnixMilli()-claudeEndNoise.Milliseconds() {
+			if t.Extra == nil {
+				t.Extra = map[string]string{}
+			}
+			t.Extra[claudeRefreshUntil] = strconv.FormatInt(end, 10)
+		}
+	}
+	return t, nil
 }
 
 func (claudeProvider) Identify(ctx context.Context, access string) (*Identity, error) {

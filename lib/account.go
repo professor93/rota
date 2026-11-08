@@ -257,14 +257,24 @@ func (a *Account) LongUntil() time.Time {
 
 // LoginUntil is when the login itself ends — not the access token, which is
 // refreshed, but the refresh token behind it — or the zero time when the
-// provider has not said. Claude Code records it in the login it keeps, and
-// rota learns it from there.
+// provider has not said. A claude login learns it at sign-in, keeps the
+// earliest end any refresh reports, and takes the one Claude Code records in
+// the login it keeps.
 func (a *Account) LoginUntil() time.Time {
 	ms, err := strconv.ParseInt(a.Extra[claudeRefreshUntil], 10, 64)
 	if err != nil || ms <= 0 {
 		return time.Time{}
 	}
 	return time.UnixMilli(ms)
+}
+
+// LoginEnded reports whether the login has reached the end LoginUntil gives.
+// From then on nobody can refresh it, and nothing here presents its refresh
+// token: only a new sign-in brings the account back. A login whose end is not
+// known has not ended.
+func (a *Account) LoginEnded() bool {
+	t := a.LoginUntil()
+	return !t.IsZero() && !Now().Before(t)
 }
 
 // ApplyLong stores a long-lived credential beside the ordinary one, which it
