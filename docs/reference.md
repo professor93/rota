@@ -2530,7 +2530,8 @@ Code blanked: see *Stranded* and *Blanked*, below.
 
 - **Reading.** Before anything uses the account's tokens, the home's store
   is read. A rotation by Claude Code keeps the login's own
-  `refreshTokenExpiresAt` and is taken with no network call — whatever the
+  `refreshTokenExpiresAt` — to within a minute, since its refresh may set it
+  a second short — and is taken with no network call, whatever the
   look before it found there (no login, a blanked or older one, one without
   an expiry, a store it could not read), as long as rota knows when the
   account's login ends and the rotation expires after the account's own
@@ -2544,7 +2545,8 @@ Code blanked: see *Stranded* and *Blanked*, below.
   wrote before a refresh of its own — which rota goes on remembering as its
   own write, however often the home is looked at, because that is what
   proves it spent (*Writing*): the account's current login goes in on the
-  next launch that may write. A login with another `refreshTokenExpiresAt` — or any living
+  next launch that may write. A login whose `refreshTokenExpiresAt` is more than a minute from the
+  account's, or that only one of them knows — or any living
   login in the home of an account marked dead — is somebody running `/login`
   inside that home: rota asks the provider whose it is, with that login's own
   access token, and takes it when it is this account's (a dead account comes

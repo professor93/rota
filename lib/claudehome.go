@@ -320,9 +320,11 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //     call, made before AdoptFS: see claudeCleared;
 //   - the account's own refresh token: in sync;
 //   - another refresh token of the same login: a rotation by Claude Code,
-//     taken when it is newer than what the account has. A refresh carries
-//     the login's refreshTokenExpiresAt through unchanged, so that is how a
-//     rotation is told apart, with no network call. One that is not newer is
+//     taken when it is newer than what the account has. A refresh keeps the
+//     login's refreshTokenExpiresAt, give or take the second a reply in
+//     whole seconds may take off it (sameGrant), so a value within a minute
+//     of the account's is how a rotation is told apart, with no network
+//     call. One that is not newer is
 //     behind: the home does not hold the account's current login, and the
 //     next staging writes it. What this package itself wrote there before a
 //     refresh of its own stays recorded as that write — it is what proves
@@ -335,14 +337,15 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //     what Claude Code wrote there after it, and an account that passed over
 //     its own login rotated would go on to present the refresh token that
 //     rotation replaced;
-//   - a new login — another refreshTokenExpiresAt, or any living login in
+//   - a new login — a refreshTokenExpiresAt more than a minute from the
+//     account's, one where only one side has any, or any living login in
 //     the home of a dead account — which somebody made by running /login
 //     inside that home. Nothing of it is taken here, because the home says
 //     nothing trustworthy about whose it is: it comes back as a *NewLogin
 //     for the application to check (NewLogin.Identify) and then Accept or
 //     Refuse. In a home recorded as holding nothing of the account's, a
-//     login of another refreshTokenExpiresAt is instead the one from before
-//     the account's current login — it was logged in again with rota since,
+//     login of another grant is instead the one from before the account's
+//     current login — it was logged in again with rota since,
 //     and a fresh login never carries the last one's refreshTokenExpiresAt
 //     (see Complete) — so it is older whatever it says, and the next staging
 //     writes over it.
@@ -402,12 +405,12 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 		// having refreshed the account's own login since that look, whatever
 		// the look found: it is the newest there is, and the account's token
 		// is spent.
-		if until := l.refreshUntil(); until != "" && until == a.Extra[claudeRefreshUntil] &&
+		if until := l.refreshUntil(); until != "" && sameGrant(until, a.Extra[claudeRefreshUntil]) &&
 			int64(l.ExpiresAt) > a.Token.ExpiresAt {
 			l.adopt(a)
 		}
 		return nil
-	case l.refreshUntil() != a.Extra[claudeRefreshUntil]:
+	case !sameGrant(l.refreshUntil(), a.Extra[claudeRefreshUntil]):
 		return &NewLogin{Access: l.AccessToken, login: l}
 	}
 	if fingerprint(l.RefreshToken) == a.Staged {
@@ -530,6 +533,30 @@ type claudeLogin struct {
 }
 
 func (l *claudeLogin) usable() bool { return l.RefreshToken != "" && l.ExpiresAt != 0 }
+
+// grantSlack is how far apart two refreshTokenExpiresAt values may be and
+// still be one grant's, in milliseconds. On a refresh Claude Code keeps the
+// earlier of the one it had and now plus the reply's refresh_token_expires_in,
+// and a reply in whole remaining seconds lands up to a second short of the
+// real end — never further, since each refresh starts from the real end
+// again. A sign-in ends a fixed time after it was made, so two of them this
+// close together were made within the same minute.
+const grantSlack = 60_000
+
+// sameGrant reports whether two refreshTokenExpiresAt values, as the account
+// keeps them, say one grant: neither is known, or both are and lie within
+// grantSlack of each other. One known and one not is two grants.
+func sameGrant(a, b string) bool {
+	if a == b {
+		return true
+	}
+	x, errA := strconv.ParseInt(a, 10, 64)
+	y, errB := strconv.ParseInt(b, 10, 64)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return x-y <= grantSlack && y-x <= grantSlack
+}
 
 // refreshUntil is the login's refreshTokenExpiresAt as the account keeps it:
 // decimal milliseconds, or "" when the login carries none.
