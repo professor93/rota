@@ -2761,7 +2761,10 @@ Code blanked: see *Stranded* and *Blanked*, below.
   nor when, with something running in the home, it reads the file only
   because the keychain item was not there although rota last found the login
   in the item: an item being rewritten can read as none, so such a read
-  records no blank either. Where rota last found the login in its own file —
+  records no blank either. Under rota's own refresh lock it counts, as
+  *Reading* says: nothing is rewriting the item then, so an item twice not
+  there is not there, the look records the home in sync, and a blank it finds
+  is a blank. Where rota last found the login in its own file —
   its write took the item away — one read finding no item is taken as it
   comes: a Claude Code that has since moved the login into an item no look
   has seen yet, and that is blanked within the ten minutes after such a read,
