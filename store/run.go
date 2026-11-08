@@ -296,7 +296,7 @@ func answered(res *rota.Result) bool {
 // A hermetic run is given a throwaway configuration directory instead, so
 // building one for it would be work nobody reads.
 func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
-	cmd, release, err := s.prepare(ctx, a, mirror)
+	cmd, release, err := s.launching(ctx, a, mirror)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -309,6 +309,33 @@ func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.
 	cmd.BaseEnv = HostEnv()
 	handed = true
 	return cmd, release, nil
+}
+
+// launching is prepare, made inside Preparing when there is one. A launch it
+// says was cut short is let go of, however far it got, and returns an error
+// Left reports as such; one that failed on its own says why, cut or not.
+func (s *Store) launching(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
+	if s.Preparing == nil {
+		return s.prepare(ctx, a, mirror)
+	}
+	var (
+		cmd     *rota.Command
+		release func()
+		err     error
+		made    bool
+	)
+	cut := s.Preparing(func(prep context.Context) {
+		made = true
+		cmd, release, err = s.prepare(prep, a, mirror)
+	})
+	switch {
+	case !made:
+		return nil, nil, fmt.Errorf("%s: not launched: Preparing never made the launch", a)
+	case cut && err == nil:
+		release()
+		return nil, nil, fmt.Errorf("%s: not launched: %w", a, leftError{context.Canceled})
+	}
+	return cmd, release, err
 }
 
 // prepare claims the account, brings its credential up to date, stages it,
@@ -408,6 +435,14 @@ func (s *Store) prepareAlone(ctx context.Context, a *rota.Account, mirror bool) 
 	}
 	if err != nil {
 		return nil, nil, err
+	}
+	// A codex login short of its id_token or access token is refreshed by the
+	// staging itself (lib's codex Plan), and nothing is sent once whoever
+	// asked has gone.
+	if codexRepairs(a) {
+		if err := stopped(ctx); err != nil {
+			return nil, nil, err
+		}
 	}
 	// Staging is the last thing that needs the store: it may adopt a token
 	// the CLI rotated, and that must be on disk before anything runs.

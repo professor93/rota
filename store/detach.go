@@ -132,7 +132,51 @@ func stopped(ctx context.Context) error {
 	if asker.Err() == nil {
 		return nil
 	}
-	return fmt.Errorf("%w: %w", errLeft, context.Cause(asker))
+	return leftError{context.Cause(asker)}
+}
+
+// leftError is errLeft with why whoever asked went away: a context cancelled,
+// a deadline, a signal.
+type leftError struct{ cause error }
+
+func (e leftError) Error() string   { return errLeft.Error() + ": " + e.cause.Error() }
+func (e leftError) Unwrap() []error { return []error{errLeft, e.cause} }
+
+// Left reports whether err says only that whoever asked went away before the
+// work it names was under way — what Refresh, Rescue, Maintain and a launch
+// return for what they left to the next look. A caller that went away on
+// purpose, a command line that was interrupted, passes over these and still
+// shows the rest: a refresh that was answered but could not be saved, above
+// all. An error that carries anything else beside it is not Left.
+func Left(err error) bool {
+	return errors.Is(err, errLeft) && onlyLeft(err)
+}
+
+// onlyLeft reports whether every error at the end of err's chain says
+// whoever asked went away, and nothing else.
+func onlyLeft(err error) bool {
+	switch e := err.(type) {
+	case leftError:
+		return true
+	case interface{ Unwrap() []error }:
+		for _, inner := range e.Unwrap() {
+			if !onlyLeft(inner) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return onlyLeft(e.Unwrap())
+	}
+	return err == errLeft
+}
+
+// codexRepairs reports whether staging a codex account will refresh it first:
+// lib's codex Plan does when the login is short of its id_token or access
+// token and has a refresh token to get them with.
+func codexRepairs(a *rota.Account) bool {
+	return rota.Flavor(a.Provider) == "codex" && a.Token.Refresh != "" &&
+		(a.Extra["id_token"] == "" || a.Token.Access == "")
 }
 
 // beforeRefresh is stopped at the last moment before a's token would be sent
@@ -147,14 +191,14 @@ func beforeRefresh(ctx context.Context, a *rota.Account) error {
 	return stopped(ctx)
 }
 
-// onceLeft keeps the first error that says whoever asked went away (errLeft)
-// and drops the others: however many places of one look find it, it is said
-// once.
+// onceLeft keeps the first error that says only that whoever asked went away
+// (Left) and drops the others like it: however many places of one look find
+// it, it is said once. One that carries anything else is always kept.
 func onceLeft(errs []error) []error {
 	var out []error
 	said := false
 	for _, err := range errs {
-		if errors.Is(err, errLeft) {
+		if Left(err) {
 			if said {
 				continue
 			}

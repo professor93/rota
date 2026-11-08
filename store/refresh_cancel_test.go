@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	rota "github.com/professor93/rota/lib"
 )
 
 // cancelLook is one of rota's looks that refreshes an expired login in a
@@ -276,5 +279,60 @@ func TestSettleWaitsForTheWorkUnderWay(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Settle did not return once the work was done")
+	}
+}
+
+// Left is what a caller that went away on purpose passes over: an error that
+// says only that, whatever the reason it went — a cancelled context, a
+// signal. One carrying anything else beside it is shown.
+func TestLeftIsOnlyTheCallerGoingAway(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	left := stopped(ctx)
+	signalled := leftError{errors.New("interrupt signal received")}
+	failed := errors.New("the store could not be saved")
+	for _, c := range []struct {
+		what string
+		err  error
+		want bool
+	}{
+		{"left", left, true},
+		{"left by a signal", signalled, true},
+		{"left, wrapped", fmt.Errorf("account 1: not launched: %w", left), true},
+		{"two of them", errors.Join(left, signalled), true},
+		{"left beside a failure", errors.Join(left, failed), false},
+		{"a failure", failed, false},
+		{"a bare cancellation", context.Canceled, false},
+		{"nothing", nil, false},
+	} {
+		if got := Left(c.err); got != c.want {
+			t.Errorf("%s: Left(%v) = %v", c.what, c.err, got)
+		}
+	}
+	if got := onceLeft([]error{left, failed, signalled, errors.Join(left, failed)}); len(got) != 3 {
+		t.Errorf("onceLeft keeps one Left and everything else: %v", got)
+	}
+}
+
+// A codex login short of its id_token is refreshed by its own staging, inside
+// a launch. Once whoever asked has gone, that refresh is not sent either.
+func TestACodexRepairIsNotSentOnceTheCallerHasGone(t *testing.T) {
+	e := codexRefreshes(t)
+	s := openTemp(t)
+	a := s.add("codex")
+	a.Token = rota.Token{Access: codexJWT(time.Now().Add(time.Hour)), Refresh: "r-old",
+		ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}
+	a.Extra = map[string]string{"account_id": "acct"} // no id_token
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, release, err := s.prepareAlone(ctx, a, false)
+	if release != nil {
+		release()
+	}
+	if got := e.grants(); len(got) != 0 {
+		t.Fatalf("the staging's repair was sent after the caller had gone: %v", got)
+	}
+	if !Left(err) {
+		t.Fatalf("the launch should say only that the caller had gone: %v", err)
 	}
 }
