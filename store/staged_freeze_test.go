@@ -639,19 +639,260 @@ func TestARefusedLoginLapsingOvernightIsStillWrittenOver(t *testing.T) {
 	}
 }
 
-// Where the home's login lives belongs to the home: moving the account to
-// another configuration directory forgets it, whatever route it was on.
+// Where the home's login lives belongs to the home, and so does a login in it
+// the provider refused: moving the account to another configuration directory
+// forgets both, whatever route it was on.
 func TestMovingTheAccountForgetsWhereItsLoginLived(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
 	s := openTemp(t)
 	a := livingClaude(s, "u1")
 	a.ConfigDir = t.TempDir() // a directory the person chose: rota keeps no login there
-	a.Extra[inItemKey] = "1"
+	a.Extra[inItemKey], a.Extra[refusedGrantKey] = "1", "2000086399000 u2"
 	if err := s.MoveHome(context.Background(), a, ""); err != nil {
 		t.Fatal(err)
 	}
-	if a.ConfigDir != "" || a.Extra[inItemKey] != "" {
-		t.Fatalf("forgotten with the move: %q %v", a.ConfigDir, a.Extra)
+	if a.ConfigDir != "" || a.Extra[inItemKey] != "" || a.Extra[refusedGrantKey] != "" {
+		t.Fatalf("forgotten with the move, and the refusal with it: %q %v", a.ConfigDir, a.Extra)
+	}
+}
+
+// "Wrong account, /login again": another account's /login in the live home is
+// refused, and within the minute the person signs in again as this account.
+// That login ends within a minute of the refused one, but Claude Code records
+// it as this account's, so it is not taken for the refused grant: the provider
+// is asked, it is taken, and nothing writes over it once the home is quiet.
+// (The review's TestReviewOwnLoginInTheMinuteAfterARefusal.)
+func TestThisAccountsLoginInTheMinuteAfterARefusalIsTaken(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) {
+		f.profile = func(auth string) (int, any) {
+			switch auth {
+			case "Bearer A-u2login":
+				return 200, map[string]any{"account": map[string]string{"uuid": "u2", "email": "u2@x"}}
+			case "Bearer A-u1login":
+				return 200, map[string]any{"account": map[string]string{"uuid": "u1", "email": "u1@x"}}
+			}
+			return 401, nil
+		}
+	})
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	if _, err := launchEnv(t, s, a); err != nil || !a.StagedCurrent() {
+		t.Fatalf("setup: %v", err)
+	}
+	home := s.Home(a)
+	file := filepath.Join(home, ".credentials.json")
+	alive(t, home, "daemon.lock", os.Getpid())
+	put := func(access, refresh, until, uuid string) {
+		writeFile(t, file, `{"claudeAiOauth":{"accessToken":"`+access+`","refreshToken":"`+refresh+`","expiresAt":`+
+			itoa(int(later(8*time.Hour)))+`,"refreshTokenExpiresAt":`+until+`,"scopes":["user:inference"],`+
+			`"tokenAccount":{"uuid":"`+uuid+`","emailAddress":"`+uuid+`@x"}}}`)
+	}
+	put("A-u2login", "R-u2login", "2000086399000", "u2")
+	s.Refresh(context.Background(), false, a)
+	if a.Extra[refusedGrantKey] != "2000086399000 u2" || f.profiles.Load() != 1 {
+		t.Fatalf("refused, and remembered with whose it is: %v, %d profile reads", a.Extra, f.profiles.Load())
+	}
+	put("A-u1login", "R-u1login", "2000086429000", "u1") // thirty seconds later, as this account
+	s.Refresh(context.Background(), false, a)
+	if a.Token.Refresh != "R-u1login" || !a.StagedCurrent() || f.profiles.Load() != 2 {
+		t.Fatalf("asked about and taken: holds %s, staged-current=%v, %d profile reads",
+			a.Token.Refresh, a.StagedCurrent(), f.profiles.Load())
+	}
+	_ = os.Remove(filepath.Join(home, "daemon.lock"))
+	if _, err := launchEnv(t, s, a); err != nil {
+		t.Fatal(err)
+	}
+	if got := refreshOf(readFile(file)); got != "R-u1login" {
+		t.Fatalf("and never written over: home %s", got)
+	}
+}
+
+// Claude Code falls back to the file for good — the keychain refuses its
+// writes — and clears its item itself, so rota never takes an item away there.
+// Once a quiet look finds no item, the account forgets the item: from then on a
+// login in the file is read as the home's store, and another account's /login
+// in it while Claude Code runs is asked about and refused at once.
+// (The review's TestReviewPlaintextHomeKeepsTheKey.)
+func TestAHomeWhoseItemClaudeCodeClearedIsReadFromItsFile(t *testing.T) {
+	w := freezeWorld(t, "keychain")
+	w.cc.start()
+	w.clock.pass(freezeEvery)
+	t.Logf("daemon: %s", w.cc.refresh("claude-code daemon")) // item R1
+	lineageLooks()[1].do(t, w)
+	file := filepath.Join(w.cc.home, ".credentials.json")
+	writeFile(t, file, w.cc.store()) // the login goes to the file
+	_ = freezeHideItem(w)            // Claude Code clears its item...
+	w.cc.k = nil                     // ...and keeps the login in the file from now on
+	w.clock.pass(freezeEvery)
+	t.Logf("daemon: %s", w.cc.refresh("claude-code daemon")) // file R2
+	lineageLooks()[1].do(t, w)
+	if w.a.Token.Refresh != "R2" || !w.a.StagedCurrent() {
+		t.Fatalf("a newer login of the account's own in the file is taken: holds %s", w.a.Token.Refresh)
+	}
+	w.cc.stop()
+	w.clock.pass(9 * time.Hour)
+	lineageLooks()[0].do(t, w) // quiet: rota renews and writes its refreshed login into the file
+	if w.a.Extra[inItemKey] != "" || refreshOf(readFile(file)) != w.a.Token.Refresh {
+		t.Fatalf("a quiet look with no item forgets it: %v, file %s", w.a.Extra, refreshOf(readFile(file)))
+	}
+	w.cc.start()
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) { f.profile = profileOf("A-x", "u2") })
+	writeFile(t, file, storeLogin("A-x", "R-x", w.clock.at.Add(8*time.Hour).UnixMilli(), "2000086399000"))
+	words := said(w.s)
+	w.s.Refresh(context.Background(), false, w.a)
+	if f.profiles.Load() != 1 || len(*words) != 1 || !strings.Contains((*words)[0], "u2@x") || w.a.Staged != stagedNoneForTest {
+		t.Fatalf("another account's /login is asked about and refused: %d profile reads, said %q, staged %q",
+			f.profiles.Load(), *words, w.a.Staged)
+	}
+}
+
+// A newer login of the account's own taken from a file read in place of the
+// item is recorded as what the home holds: the record follows the token rather
+// than going back to the one it replaced.
+func TestANewerLoginTakenFromTheFileInPlaceOfTheItemIsRecordedAsHeld(t *testing.T) {
+	w := freezeWorld(t, "keychain")
+	w.cc.start()
+	w.clock.pass(freezeEvery)
+	t.Logf("daemon: %s", w.cc.refresh("claude-code daemon")) // item R1
+	lineageLooks()[1].do(t, w)
+	writeFile(t, filepath.Join(w.cc.home, ".credentials.json"), w.cc.store())
+	_ = freezeHideItem(w)
+	w.cc.k = nil // Claude Code keeps the login in the file from here on
+	w.clock.pass(freezeEvery)
+	t.Logf("daemon: %s", w.cc.refresh("claude-code daemon")) // file R2, while alive
+	lineageLooks()[1].do(t, w)
+	if w.a.Token.Refresh != "R2" || !w.a.StagedCurrent() {
+		t.Fatalf("taken, and recorded as held: holds %s, staged %q", w.a.Token.Refresh, w.a.Staged)
+	}
+	freezeFollows(t, w, 2)
+}
+
+// When rota itself takes an item away, the home's login lives in the file: a
+// quiet launch's tidy, removing an item older than the file beside it, says so
+// at once, as does removing the account's login from its home.
+func TestRotaTakingTheItemAwayForgetsIt(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	k := fakeKeychain(t)
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	if _, err := launchEnv(t, s, a); err != nil || !a.StagedCurrent() {
+		t.Fatalf("setup: %v", err)
+	}
+	home := s.Home(a)
+	svc := service(t, home)
+	k.mu.Lock()
+	k.items[svc] = storeLogin("A-old", "R-old", later(-time.Hour), "1999999999000")
+	k.mu.Unlock()
+	if _, err := launchEnv(t, s, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := k.item(svc); ok || a.Extra[inItemKey] != "" {
+		t.Fatalf("tidy took the older item away, and forgot it: item there %v, %v", ok, a.Extra)
+	}
+
+	k.mu.Lock()
+	k.items[svc] = storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000")
+	k.mu.Unlock()
+	a.Extra[inItemKey] = "1"
+	if err := s.claudeHome(a, false).dropOwnLogin(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := k.item(svc); ok || a.Extra[inItemKey] != "" {
+		t.Fatalf("removing the account's login forgets the item: item there %v, %v", ok, a.Extra)
+	}
+}
+
+// A listing that takes a blanked item out of the way of the login in the file
+// (uncover) forgets the item, and that is saved, not left for some later save.
+func TestUncoveringALoginForgetsTheItemOnDisk(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	k := fakeKeychain(t)
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	if _, err := launchEnv(t, s, a); err != nil || !a.StagedCurrent() {
+		t.Fatalf("setup: %v", err)
+	}
+	home := s.Home(a)
+	svc := service(t, home)
+	alive(t, home, "daemon.lock", os.Getpid())
+	k.mu.Lock()
+	k.items[svc] = clearedLogin
+	k.mu.Unlock()
+	a.Extra[inItemKey] = "1"
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	s.Refresh(context.Background(), false, a)
+	if _, ok := k.item(svc); ok || a.Extra[inItemKey] != "" {
+		t.Fatalf("setup: the blanked item is taken out of the way and forgotten: item there %v, %v", ok, a.Extra)
+	}
+	s.Close()
+	s2, err := Open(storeDir(s))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	if b := s2.Find(a.ID); b.Extra[inItemKey] != "" {
+		t.Fatalf("and that is on disk: %v", b.Extra)
+	}
+}
+
+// A dead account whose home holds another account's /login asks once, says so
+// once, and passes that login over after, instead of asking at every look.
+func TestADeadAccountsRefusedLoginIsNotAskedAboutAgain(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) { f.profile = profileOf("A-login", "u2") })
+	s := openTemp(t)
+	words := said(s)
+	a := livingClaude(s, "u1")
+	a.Dead, a.DeadReason = true, "invalid_grant"
+	home := s.Home(a)
+	alive(t, home, "daemon.lock", os.Getpid())
+	writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-login", "R-login", later(2*time.Hour), "2000086399000"))
+	for i := 0; i < 3; i++ {
+		s.Refresh(context.Background(), false, a)
+	}
+	if f.profiles.Load() != 1 || len(*words) != 1 || !a.Dead || a.Token.Refresh != "R-u1" {
+		t.Fatalf("asked once, said once, still dead: %d profile reads, %q, dead=%v", f.profiles.Load(), *words, a.Dead)
+	}
+}
+
+// Whether anything runs is asked before the keychain is read as well as after:
+// a Claude Code that is running when the read finds no item — rewriting it, say
+// — and exits before the read is done still counts, so the read records
+// nothing and the item is not forgotten.
+func TestAClaudeCodeThatExitsDuringTheReadStillCounts(t *testing.T) {
+	w := freezeWorld(t, "keychain")
+	w.cc.start()
+	w.clock.pass(freezeEvery)
+	t.Logf("daemon: %s", w.cc.refresh("claude-code daemon")) // item R1, file R0
+	lineageLooks()[1].do(t, w)
+	if !w.a.StagedCurrent() || w.a.Extra[inItemKey] == "" {
+		t.Fatalf("setup: staged-current=%v %v", w.a.StagedCurrent(), w.a.Extra)
+	}
+	var stash string
+	w.k.onFind = func(svc string) { // with the keychain's lock held
+		if v, ok := w.k.items[svc]; ok {
+			stash = v
+			delete(w.k.items, svc)
+		}
+		w.cc.stop() // Claude Code exits while the item is missing
+	}
+	lineageLooks()[1].do(t, w)
+	w.k.mu.Lock()
+	w.k.onFind = nil
+	w.k.items[w.cc.svc] = stash
+	w.k.mu.Unlock()
+	if !w.a.StagedCurrent() || w.a.Extra[inItemKey] == "" {
+		t.Fatalf("the read records nothing, and the item is not forgotten: staged %q, %v", w.a.Staged, w.a.Extra)
 	}
 }

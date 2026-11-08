@@ -118,15 +118,17 @@ const (
 // home took, so the next launch can tell when the home's daemon was started
 // on the other one. seedOwedKey is where it remembers that its home is owed the
 // login rota refreshed (see owesWrite). inItemKey is where it remembers that
-// the home's login was last found in its macOS keychain item (see adopt). All
-// three belong to the home, and are forgotten when the account is given
-// another (MoveHome).
+// the home's login was last found in its macOS keychain item (see adopt), and
+// refusedGrantKey is lib's record of a login in the home the provider said is
+// somebody else's (rota.NewLogin.Refuse). All four belong to the home, and are
+// forgotten when the account is given another (MoveHome).
 const (
-	routeKey    = "route"
-	routeStored = "stored"
-	routeEnv    = "env"
-	seedOwedKey = "seed_owed"
-	inItemKey   = "login_in_item"
+	routeKey        = "route"
+	routeStored     = "stored"
+	routeEnv        = "env"
+	seedOwedKey     = "seed_owed"
+	inItemKey       = "login_in_item"
+	refusedGrantKey = "refused_grant"
 )
 
 // How long the things this file waits for may take. Variables so a test
@@ -523,7 +525,8 @@ func (h *claudeHome) mend(ctx context.Context) (changed bool, err error) {
 		did, err := h.rescue(ctx)
 		return changed || did, err
 	}
-	return changed, h.uncover()
+	err = h.uncover()
+	return changed || before.differs(h.a), err // the item uncover took away is forgotten, and saved so
 }
 
 // rescue presents the account's own refresh token for a home mend found stranded
@@ -910,14 +913,27 @@ func fileIsNewer(file, item []byte) bool {
 // by readStore. ok is false when the keychain could not be read, which puts
 // the home in the hold.
 func (h *claudeHome) read() (fsys storeFS, ok bool) {
+	// Whether anything runs in the home is asked before the keychain is read
+	// as well as after, and either answer that something does counts: a
+	// Claude Code that rewrote the item during the read and exited before the
+	// second question was still running then.
+	_, kept := h.service()
+	inItem := kept && h.a.Extra[inItemKey] != ""
+	alive := inItem && !h.quiet()
 	raw, _, err := h.readStore()
 	if errors.Is(err, errKeychain) {
 		h.hold = fmt.Sprintf("the macOS keychain could not be read (%v); unlock the login keychain for this session, "+
 			"or keep a long-lived token for this account (`rota login --long`)", err)
 		return storeFS{}, false
 	}
-	_, kept := h.service()
-	gone := kept && h.item == nil && h.a.Extra[inItemKey] != "" && !h.quiet()
+	gone := false
+	if inItem && h.item == nil {
+		if alive || !h.quiet() {
+			gone = true
+		} else {
+			h.forgetItem() // nothing runs, so nothing is rewriting it: the item is gone, the login is in the file
+		}
+	}
 	return storeFS{FS: os.DirFS(h.home), store: raw, err: err, itemGone: gone}, true
 }
 
@@ -943,8 +959,9 @@ func (h *claudeHome) read() (fsys storeFS, ok bool) {
 // over the newest one and present a token Claude Code has replaced. A login of
 // the account's own in that file newer than its token is still taken, as from
 // any store. In a quiet home nothing can be rewriting the item, so an item
-// that is not there is gone, and the file is the home's store; and where the
-// login lives in the file, the file is read as the store, as ever.
+// that is not there is gone — the account forgets it — and the file is the
+// home's store; and where the login lives in the file, the file is read as the
+// store, as ever.
 func (h *claudeHome) adopt(ctx context.Context) error {
 	h.hold, h.usable, h.spent, h.blanked = "", false, false, false
 	if err := h.s.oneHomeOneAccount(h.a); err != nil {
@@ -2092,6 +2109,7 @@ func (s *Store) MoveHome(ctx context.Context, a *rota.Account, configDir string)
 	delete(a.Extra, routeKey)
 	delete(a.Extra, seedOwedKey)
 	delete(a.Extra, inItemKey)
+	delete(a.Extra, refusedGrantKey)
 	a.ConfigDir = configDir
 	return s.Save()
 }
