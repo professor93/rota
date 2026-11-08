@@ -45,9 +45,22 @@ func TestTheScrubbedListIsTheMultiplexersTerminalsAndCLIs(t *testing.T) {
 	want := []string{"TMUX", "TMUX_PANE", "STY", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERM_SESSION_ID",
 		"ITERM_SESSION_ID", "KITTY_WINDOW_ID", "KITTY_PID", "WEZTERM_PANE", "WEZTERM_UNIX_SOCKET",
 		"ALACRITTY_WINDOW_ID", "ALACRITTY_SOCKET", "WT_SESSION", "WINDOWID", "VTE_VERSION", "KONSOLE_VERSION",
-		"COLUMNS", "LINES", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CODEX_THREAD_ID"}
+		"COLUMNS", "LINES", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CODEX_THREAD_ID",
+		"CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ATTENDED", "CODEX_SESSION_ID", "CODEX_TOOL_CALL_ID"}
 	if !slices.Equal(Scrubbed, want) {
 		t.Fatalf("Scrubbed = %q", Scrubbed)
+	}
+}
+
+// An agent inside Claude Code or Codex that starts a held session hands it
+// the markers of the session it runs in. None of them reaches the child, so
+// it never takes itself for another session's child, attended or not, or
+// for one of Codex's tool calls.
+func TestScrubDropsTheMarkersOfTheSessionThatAskedForIt(t *testing.T) {
+	in := []string{"CLAUDE_CODE_CHILD_SESSION=1", "CLAUDE_CODE_SESSION_ATTENDED=1",
+		"CODEX_SESSION_ID=0199a2b4", "CODEX_TOOL_CALL_ID=call_7", "PATH=/bin"}
+	if got := Scrub(in); !slices.Equal(got, []string{"PATH=/bin"}) {
+		t.Fatalf("Scrub kept %q; only PATH should be left", got)
 	}
 }
 
