@@ -14,6 +14,9 @@ func TestHeldQuestionsAreRefusedHere(t *testing.T) {
 	if _, err := StartTime(os.Getpid()); !errors.Is(err, ErrPlatform) {
 		t.Errorf("StartTime: %v", err)
 	}
+	if _, err := Parent(os.Getpid()); !errors.Is(err, ErrPlatform) {
+		t.Errorf("Parent: %v", err)
+	}
 	if _, err := BootID(); !errors.Is(err, ErrPlatform) {
 		t.Errorf("BootID: %v", err)
 	}

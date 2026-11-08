@@ -181,16 +181,29 @@ func mayControl(c *net.UnixConn, terminals string, log *slog.Logger) bool {
 	return true
 }
 
+// maxAncestry is how many of a process's parents heldSessionOf looks at.
+// A chain of processes is seldom more than a few dozen long; one longer
+// than this cannot be placed.
+const maxAncestry = 64
+
+// parentOf is proc.Parent, a variable so a test can make a chain of its own.
+var parentOf = proc.Parent
+
 // heldSessionOf is the held session a process runs inside, or "" for none:
-// the one whose holder or CLI leads the session getsid says the process is
-// in, since a held session's processes are in one of those two sessions.
-// Any record whose lock is held counts — one this rota cannot read included,
-// since its holder is running all the same — and one nobody holds is a
-// session that has stopped. A process whose session cannot be had, or a
-// store whose records cannot be listed, is an error, which every caller
-// takes as inside: ctl.sock lets such a caller only watch, and serve stop
-// refuses it. It is a guard against accidents, not a wall: a process that
-// calls setsid leaves the session it was in.
+// the one whose holder or CLI is the process itself or one of its
+// ancestors, or leads the session getsid says it is in. Ancestry is what
+// tells most: Claude Code starts every command its Bash tool runs in a
+// session of its own, and a session started so keeps its parent. The walk
+// goes up the parents to pid 1, maxAncestry of them at most.
+//
+// Any record whose lock is held counts — one this rota cannot read
+// included, since its holder is running all the same — and one nobody holds
+// is a session that has stopped. A process whose session or parent cannot
+// be had, or a store whose records cannot be listed, is an error, which
+// every caller takes as inside: ctl.sock lets such a caller only watch, and
+// serve stop refuses it. It is a guard against accidents, not a wall: a
+// process that leaves its parent as well as its session, as a daemon does
+// by forking twice, is handed to init and is no longer told apart.
 func heldSessionOf(pid int, terminals string) (string, error) {
 	sid, err := sessionOf(pid)
 	if err == nil && sid <= 0 {
@@ -199,18 +212,50 @@ func heldSessionOf(pid int, terminals string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("the session of pid %d: %w", pid, err)
 	}
+	held, err := heldProcesses(terminals)
+	if err != nil {
+		return "", err
+	}
+	if id := held[sid]; id != "" {
+		return id, nil
+	}
+	for p, depth := pid, 0; p > 1; depth++ {
+		if id := held[p]; id != "" {
+			return id, nil
+		}
+		if depth == maxAncestry {
+			return "", fmt.Errorf("pid %d has more than %d ancestors", pid, maxAncestry)
+		}
+		parent, err := parentOf(p)
+		if err != nil {
+			return "", fmt.Errorf("the parent of pid %d: %w", p, err)
+		}
+		p = parent
+	}
+	return "", nil
+}
+
+// heldProcesses is every running held session's holder and CLI, by pid,
+// each naming its session's id.
+func heldProcesses(terminals string) (map[int]string, error) {
 	entries, err := os.ReadDir(terminals)
 	if err != nil {
-		return "", fmt.Errorf("the held sessions could not be listed: %w", err)
+		return nil, fmt.Errorf("the held sessions could not be listed: %w", err)
 	}
+	held := map[int]string{}
 	for _, e := range entries {
 		if !e.IsDir() || !holdwire.IsID(e.Name()) {
 			continue
 		}
 		r := holdwire.Judge(terminals, e.Name())
-		if r.Locked && r.Meta != nil && (r.Meta.HolderPID == sid || r.Meta.ChildPID == sid) {
-			return r.ID, nil
+		if !r.Locked || r.Meta == nil {
+			continue
+		}
+		for _, pid := range []int{r.Meta.HolderPID, r.Meta.ChildPID} {
+			if pid > 0 {
+				held[pid] = r.ID
+			}
 		}
 	}
-	return "", nil
+	return held, nil
 }
