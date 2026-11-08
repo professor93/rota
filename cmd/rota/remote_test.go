@@ -375,3 +375,17 @@ func TestAStatelessRunWithQuotaRotatesNothing(t *testing.T) {
 		t.Fatalf("the refresh token is the one it was: %s", raw)
 	}
 }
+
+// --remote-control on an account of another provider is a usage error, in
+// the words it has always been said in.
+func TestRunWithRemoteControlRefusesAnotherProvidersAccount(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	writeStore(t, home, `{"ordered":true,"nextId":2,"accounts":[
+		{"id":1,"provider":"codex","email":"c@x","order":1,"token":{"accessToken":"x"},"extra":{"id_token":"h.p.s"}}]}`)
+	handedTo := handover(t)
+	out, errOut, code := call(t, "run", "1", "--remote-control")
+	if want := "error: --remote-control is Claude Code's, and codex/c@x is a codex account\nsee `rota help` for usage\n"; code != 2 || out != "" || errOut != want || len(*handedTo) != 0 {
+		t.Fatalf("exit %d %q %q, want 2 and %q", code, out, errOut, want)
+	}
+}

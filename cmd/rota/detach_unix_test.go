@@ -177,20 +177,27 @@ func TestDetachThatLosesTheRaceNamesTheDaemonThatServes(t *testing.T) {
 }
 
 // What the daemon refuses when it readies the account it chose for Remote
-// Control, it refuses in the words the command line uses for an account it
-// was named: another provider's account, and one on a token, which Remote
-// Control refuses and whose reason is said rather than hidden.
+// Control, it refuses as the command line does an account it was named:
+// another provider's account, and one on a token, which Remote Control
+// refuses and whose reason is said rather than hidden. An account named
+// with --remote-control is refused in the flag's own words, as rota run
+// without --detach refuses it.
 func TestDetachRemoteControlRefusals(t *testing.T) {
 	t.Run("another provider", func(t *testing.T) {
 		r := newDaemonRig(t)
 		writeStore(t, r.home, `{"ordered":true,"nextId":2,"accounts":[
 			{"id":1,"provider":"codex","email":"c@x","order":1,"token":{"accessToken":"x"},"extra":{"id_token":"h.p.s"}}]}`)
 		r.start()
-		want := "error: Remote Control is Claude Code's, and codex/c@x is a codex account\n"
-		for args, code := range map[string]int{"run --detach --remote-control": 1, "run 1 --detach --remote-control": 2} {
+		for args, c := range map[string]struct {
+			code int
+			want string
+		}{
+			"run --detach --remote-control":   {1, "error: Remote Control is Claude Code's, and codex/c@x is a codex account\n"},
+			"run 1 --detach --remote-control": {2, "error: --remote-control is Claude Code's, and codex/c@x is a codex account\n"},
+		} {
 			out, errb, got := r.rota(strings.Fields(args)...)
-			if got != code || out != "" || !strings.HasPrefix(errb, want) {
-				t.Errorf("rota %s: exit %d %q %q; want %d and %q", args, got, out, errb, code, want)
+			if got != c.code || out != "" || !strings.HasPrefix(errb, c.want) {
+				t.Errorf("rota %s: exit %d %q %q; want %d and %q", args, got, out, errb, c.code, c.want)
 			}
 		}
 	})

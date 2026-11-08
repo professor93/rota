@@ -60,16 +60,17 @@ func (c *cli) remoteControl(s *store.Store, a *rota.Account, ask remoteAsk) ([]s
 	if !ask.on {
 		return nil, nil
 	}
+	// A flag this account cannot take at all, which is a usage error, said
+	// in the words it has always been said in.
+	if rota.Flavor(a.Provider) != "claude" {
+		return nil, usageErr("--remote-control is Claude Code's, and %s is a %s account", a, a.Provider)
+	}
 	turnedOn, err := s.ReadyRemoteControl(a)
 	if turnedOn {
 		fmt.Fprintf(c.err, "rota: remote control is on for %s from now on; `rota set %d --remote-control off` turns it off\n",
 			nameOf(a), a.ID)
 	}
-	switch {
-	case err != nil && rota.Flavor(a.Provider) != "claude":
-		// A flag this account cannot take at all, which is a usage error.
-		return nil, usageError(err.Error())
-	case err != nil:
+	if err != nil {
 		return nil, err
 	}
 	// Last, so nothing in the arguments before it can be read as its name.
