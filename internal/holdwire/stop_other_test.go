@@ -17,7 +17,7 @@ func TestStopHolderRefusesHere(t *testing.T) {
 	if _, err := StopHolder(&Record{ID: "0123456789abcdef", Dir: t.TempDir(), Meta: m}, time.Second); !errors.Is(err, ErrPlatform) {
 		t.Fatalf("StopHolder answers %v, want ErrPlatform", err)
 	}
-	if err := Signal(m.HolderPID, m.HolderStart, m.BootID, syscall.SIGKILL); !errors.Is(err, ErrPlatform) {
+	if err := Signal(m.HolderPID, m.HolderStart, m.HolderStartTicks, m.BootID, syscall.SIGKILL); !errors.Is(err, ErrPlatform) {
 		t.Fatalf("Signal answers %v, want ErrPlatform", err)
 	}
 }

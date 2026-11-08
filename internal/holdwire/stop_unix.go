@@ -28,7 +28,7 @@ func StopHolder(r *Record, after time.Duration) (kill func(), err error) {
 	if m == nil {
 		return nil, ErrNotSameProcess
 	}
-	if err := Signal(m.HolderPID, m.HolderStart, m.BootID, syscall.SIGHUP); err != nil {
+	if err := Signal(m.HolderPID, m.HolderStart, m.HolderStartTicks, m.BootID, syscall.SIGHUP); err != nil {
 		return nil, err
 	}
 	lock := LockPath(r.Dir)
@@ -39,17 +39,17 @@ func StopHolder(r *Record, after time.Duration) (kill func(), err error) {
 			}
 		}
 		if Locked(lock) {
-			_ = Signal(m.HolderPID, m.HolderStart, m.BootID, syscall.SIGKILL)
+			_ = Signal(m.HolderPID, m.HolderStart, m.HolderStartTicks, m.BootID, syscall.SIGKILL)
 		}
 	}, nil
 }
 
 // Signal sends sig to pid while it is still the process recorded with that
-// start time in that boot, and to nothing otherwise: ErrNotSameProcess. A
-// process that went between the check and the signal has done what any
-// signal here asks of it, and is not an error.
-func Signal(pid int, start time.Time, boot string, sig syscall.Signal) error {
-	if !SameProcess(pid, start, boot) {
+// start in that boot (SameProcess), and to nothing otherwise:
+// ErrNotSameProcess. A process that went between the check and the signal
+// has done what any signal here asks of it, and is not an error.
+func Signal(pid int, start time.Time, ticks int64, boot string, sig syscall.Signal) error {
+	if !SameProcess(pid, start, ticks, boot) {
 		return ErrNotSameProcess
 	}
 	if err := syscall.Kill(pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {

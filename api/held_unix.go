@@ -27,5 +27,5 @@ func (h *heldTerm) signal(sig syscall.Signal) {
 		_ = h.proc.Signal(sig)
 		return
 	}
-	_ = holdwire.Signal(h.pid, h.start, h.boot, sig)
+	_ = holdwire.Signal(h.pid, h.start, h.ticks, h.boot, sig)
 }

@@ -119,7 +119,9 @@ func TestAStaleDaemonPIDNamesNobody(t *testing.T) {
 			}
 			defer release()
 			got, ok = RunningDaemon(terminals)
-			if !ok || got.PID != pid || got.Version != "1.4.0-test" || !got.ProcStart.Equal(start) || got.BootID != boot {
+			ticks, _ := proc.StartTicks(pid)
+			if !ok || got.PID != pid || got.Version != "1.4.0-test" || !got.ProcStart.Equal(start) ||
+				got.ProcStartTicks != ticks || got.BootID != boot {
 				t.Fatalf("the claim left daemon.pid as %+v (%v)", got, ok)
 			}
 		})
@@ -174,19 +176,26 @@ func TestSameProcessIsAboutThisProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !SameProcess(pid, start, boot) {
+	ticks, err := proc.StartTicks(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !SameProcess(pid, start, ticks, boot) || !SameProcess(pid, start, 0, boot) {
 		t.Fatal("this process is not itself")
 	}
-	if !SameProcess(pid, start.Add(time.Second), boot) {
+	if !SameProcess(pid, start.Add(time.Second), 0, boot) {
 		t.Fatal("a second's slack is not allowed")
 	}
-	if SameProcess(pid, start.Add(5*time.Second), boot) {
+	if SameProcess(pid, start.Add(5*time.Second), 0, boot) {
 		t.Fatal("a process five seconds younger is this one")
 	}
-	if SameProcess(pid, start, boot+"-another") {
+	if ticks != 0 && SameProcess(pid, start, ticks+500, boot) {
+		t.Fatal("a process five seconds younger by its ticks is this one")
+	}
+	if SameProcess(pid, start, ticks, boot+"-another") {
 		t.Fatal("a process from another boot is this one")
 	}
-	if SameProcess(pid, time.Time{}, boot) || SameProcess(0, start, boot) || SameProcess(pid, start, "") {
+	if SameProcess(pid, time.Time{}, 0, boot) || SameProcess(0, start, ticks, boot) || SameProcess(pid, start, ticks, "") {
 		t.Fatal("a record with something missing is trusted")
 	}
 }

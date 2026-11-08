@@ -66,7 +66,7 @@ func heldPIDs(dir string) []int {
 		if m == nil || m.HolderPID <= 0 || m.HolderPID == os.Getpid() {
 			continue
 		}
-		if r.State == holdwire.StateLive || holdwire.SameProcess(m.HolderPID, m.HolderStart, m.BootID) {
+		if r.State == holdwire.StateLive || holdwire.SameProcess(m.HolderPID, m.HolderStart, m.HolderStartTicks, m.BootID) {
 			out = append(out, m.HolderPID)
 		}
 	}

@@ -43,6 +43,11 @@ func StartTime(pid int) (time.Time, error) {
 	return time.Unix(sec, 0), nil
 }
 
+// StartTicks is 0 on macOS, which counts no start in ticks and needs none:
+// its StartTime is a time the kernel wrote down once, at fork, and setting
+// the clock later does not move it.
+func StartTicks(pid int) (int64, error) { return 0, nil }
+
 // BootID names this boot of the machine: a pid and a start time recorded
 // before a reboot say nothing about the processes after it. On macOS it is
 // kern.bootsessionuuid, a UUID the kernel makes once per boot. The boot time

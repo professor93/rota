@@ -174,6 +174,9 @@ func (h *holder) start(in io.Reader, open func() (*store.Store, error)) error {
 	if m.HolderStart, err = proc.StartTime(m.HolderPID); err != nil {
 		h.log("the holder's own start time could not be read: the daemon cannot tell it from another process with its pid", "err", err)
 	}
+	if m.HolderStartTicks, err = proc.StartTicks(m.HolderPID); err != nil {
+		h.log("the holder's own start in ticks could not be read: once the clock is set, the daemon may not tell it from another process with its pid", "err", err)
+	}
 	if m.BootID, err = proc.BootID(); err != nil {
 		h.log("the boot id could not be read: the daemon cannot tell this session's processes from another boot's", "err", err)
 	}
