@@ -707,9 +707,13 @@ func TestAResizeNeverWaitsForTheScreen(t *testing.T) {
 	r.c.reads()
 	p := r.link(t)
 	p.since(0)
-	r.c.print(t, "the flood begins\r\n")
+	first, query := "the flood begins\r\n", "\x1b[999C\x1b[6n"
+	r.c.print(t, first)
 	waitClosed(t, entered, "the screen taking the flood")
-	r.c.print(t, "\x1b[999C\x1b[6n")
+	r.c.print(t, query)
+	// The resize comes after the query: the CLI has printed it, and the
+	// session has taken it.
+	r.grounded(t, int64(len(first)+len(query)))
 	p.json(holdwire.Resize, holdwire.SizeMsg{Cols: 40, Rows: 30})
 	var got holdwire.SizeMsg
 	p.decode(holdwire.Resized, &got)
