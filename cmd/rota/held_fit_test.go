@@ -45,7 +45,7 @@ func wideHeld() []rotaclient.Session {
 func heldAt(held []rotaclient.Session, width int) string {
 	var out bytes.Buffer
 	c := &cli{out: &out, err: &out, cols: width}
-	c.showHeld(held, width)
+	c.showHeld(held, "", width)
 	return out.String()
 }
 

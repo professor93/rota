@@ -500,7 +500,8 @@ const noRunOrSession = "no run or session %s; rota list --sessions shows what is
 // running session is said to want a daemon, and a stopped one, which only
 // an id finds, has ended.
 func (c *cli) sendUnserved(terminals, target string, runOnly bool) error {
-	sess, err := rotaclient.Match(heldSessions(terminals, nil), target)
+	held, _ := heldSessions(terminals, nil)
+	sess, err := rotaclient.Match(held, target)
 	switch {
 	case errors.Is(err, rotaclient.ErrNoSession):
 		return c.sendFailed(noRunOrSession, target)

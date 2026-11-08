@@ -636,10 +636,14 @@ func (c *cli) list(args []string) error {
 			if rep.Shared != nil {
 				doc["shared"] = rep.Shared
 			}
+			held, note := listHeld(s)
+			if note != "" {
+				rep.Notes = append(rep.Notes, note)
+			}
 			if len(rep.Notes) > 0 {
 				doc["notes"] = rep.Notes
 			}
-			if held := listHeld(s); len(held) > 0 {
+			if len(held) > 0 {
 				doc["held"] = held
 			}
 		}
@@ -656,7 +660,8 @@ func (c *cli) list(args []string) error {
 		c.sayLongNotes(shown, width)
 		if withSessions {
 			c.showSessions(sessions.Scan(s, recent), width)
-			c.showHeld(listHeld(s), width)
+			held, note := listHeld(s)
+			c.showHeld(held, note, width)
 		}
 		for _, e := range errs {
 			warn(c.err, "%v", e)
@@ -699,7 +704,8 @@ func (c *cli) list(args []string) error {
 	c.sayLongNotes(shown, width)
 	if withSessions {
 		c.showSessions(sessions.Scan(s, recent), width)
-		c.showHeld(listHeld(s), width)
+		held, note := listHeld(s)
+		c.showHeld(held, note, width)
 	}
 	for _, e := range errs {
 		warn(c.err, "%v", e)

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"slices"
 	"strings"
 
 	rotaclient "github.com/professor93/rota/cmd/rota/client"
@@ -32,11 +34,13 @@ func heldCell(s string) string { return oneLine(s) }
 // in the same document, so --json prints what GET /v1/terminals lists. Its
 // account's label comes from labels. A directory with no record in it — a
 // holder on its way, or one that never got there — is no session yet, and
-// is left out.
-func heldSessions(terminals string, labels map[int]string) []rotaclient.Session {
-	var out []rotaclient.Session
+// is left out. So is a record that cannot be read, whose id is in unread.
+func heldSessions(terminals string, labels map[int]string) (out []rotaclient.Session, unread []string) {
 	for _, r := range holdwire.Scan(terminals) {
 		if r.State == holdwire.StateBroken {
+			if !errors.Is(r.Err, fs.ErrNotExist) {
+				unread = append(unread, r.ID)
+			}
 			continue
 		}
 		// Strings, numbers and their maps, which encoding/json always
@@ -47,21 +51,32 @@ func heldSessions(terminals string, labels map[int]string) []rotaclient.Session 
 			out = append(out, s)
 		}
 	}
-	return out
+	slices.Sort(unread)
+	return out, unread
 }
 
 // listHeld is the held sessions for `rota list --sessions`, labelled by the
-// store's accounts.
-func listHeld(s *store.Store) []rotaclient.Session {
+// store's accounts, and the line that says which records it left out for
+// being unreadable, "" when it left out none.
+func listHeld(s *store.Store) (held []rotaclient.Session, note string) {
 	terminals, err := s.TerminalDir()
 	if err != nil {
-		return nil
+		return nil, ""
 	}
 	labels := map[int]string{}
 	for _, a := range s.Accounts {
 		labels[a.ID] = a.Label()
 	}
-	return heldSessions(terminals, labels)
+	held, unread := heldSessions(terminals, labels)
+	switch len(unread) {
+	case 0:
+	case 1:
+		note = "1 held session is not listed, since its record cannot be read: " + unread[0]
+	default:
+		note = fmt.Sprintf("%d held sessions are not listed, since their records cannot be read: %s",
+			len(unread), strings.Join(unread, ", "))
+	}
+	return held, note
 }
 
 // showHeld prints the held sessions, when there are any: ● for one that is
@@ -74,8 +89,11 @@ func listHeld(s *store.Store) []rotaclient.Session {
 // end, each eight columns wide until the account has given way as far, then
 // the account, the CLI and how the session is, and the start of its id,
 // which rota send takes, never. Anywhere else nothing changes.
-func (c *cli) showHeld(held []rotaclient.Session, width int) {
-	if len(held) == 0 {
+//
+// note, when there is one, says which records were left out, on a line of
+// its own under the rows, as the sessions' notes are said.
+func (c *cli) showHeld(held []rotaclient.Session, note string, width int) {
+	if len(held) == 0 && note == "" {
 		return
 	}
 	fmt.Fprintln(c.out, "\nHeld sessions:")
@@ -100,6 +118,9 @@ func (c *cli) showHeld(held []rotaclient.Session, width int) {
 			orDash(heldCell(h.Cwd)), heldCell(short(h.ID)))
 	}
 	g.render(c.out)
+	if note != "" {
+		sayIn(c.out, width, "note: "+note)
+	}
 }
 
 // heldMark is the columns the dot and the space after it take before a

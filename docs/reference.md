@@ -1790,6 +1790,12 @@ Held sessions:
   ○ old  #3 me@example.com   codex   interrupted  /home/me/src/old  4567ef01
 ```
 
+A record that cannot be read is left out with one line under the rows, as
+`Sessions:` says a directory it could not read — *note: 1 held session is
+not listed, since its record cannot be read: 89abcdef01234567* — and
+`--json` adds that line to `notes`. `GET /v1/terminals` lists it as
+`broken`.
+
 On a terminal narrower than a row, a held session's row is fitted the way
 the sessions' are: it stays one line, and the name, which keeps its start,
 and the folder, which keeps its end, are each cut to eight columns before

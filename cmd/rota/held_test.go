@@ -324,6 +324,49 @@ func TestListShowsHeldSessionsOnlyWhenThereAreSome(t *testing.T) {
 	}
 }
 
+// A record that cannot be read is left out of the listing with one line
+// saying so, as Sessions: says a directory it could not read, and --json
+// carries the line among its notes. A directory with no record in it yet —
+// a holder on its way — is no session, and is passed over without a word.
+func TestListSaysWhenItLeavesABrokenRecordOut(t *testing.T) {
+	shortHome(t)
+	terminals := terminalsOf(t)
+	const broken, other, empty = "badbadbadbadbad1", "badbadbadbadbad2", "0000000000000001"
+	for _, id := range []string{broken, other, empty} {
+		if err := os.MkdirAll(holdwire.Dir(terminals, id), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(holdwire.MetaPath(holdwire.Dir(terminals, broken)), []byte("not a record"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const line = "  note: 1 held session is not listed, since its record cannot be read: " + broken + "\n"
+	out, errb, code := call(t, "list", "--short", "--sessions")
+	if code != 0 || !strings.HasSuffix(out, "\nHeld sessions:\n"+line) {
+		t.Fatalf("with one broken record: exit %d %q\n%s", code, errb, out)
+	}
+
+	if err := os.WriteFile(holdwire.MetaPath(holdwire.Dir(terminals, other)), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plantRecord(t, terminals, holdwire.Meta{ID: "a1b2c3d4e5f60718", Name: "api", Kind: holdwire.KindAccount, Account: 1,
+		Provider: "claude", Cwd: "/src/api", Started: time.Now(), HolderPID: os.Getpid()}, true)
+	const two = "note: 2 held sessions are not listed, since their records cannot be read: " + broken + ", " + other
+	out, errb, code = call(t, "list", "--short", "--sessions")
+	if code != 0 || !regexp.MustCompile(`(?m)^Held sessions:\n  ● api .*a1b2c3d4\n  `+two+`\n\z`).MatchString(out) {
+		t.Fatalf("with two broken records and a live one: exit %d %q\n%s", code, errb, out)
+	}
+	out, errb, code = call(t, "--json", "list", "--short", "--sessions")
+	var doc struct {
+		Notes []string         `json:"notes"`
+		Held  []map[string]any `json:"held"`
+	}
+	if code != 0 || json.Unmarshal([]byte(out), &doc) != nil || len(doc.Held) != 1 ||
+		len(doc.Notes) == 0 || doc.Notes[len(doc.Notes)-1] != strings.TrimPrefix(two, "note: ") {
+		t.Fatalf("--json: exit %d %q\n%s", code, errb, out)
+	}
+}
+
 // A held session's name, or its folder, with an escape, a bell or a newline
 // in it is drawn with each a space wherever rota prints it: in the listing,
 // and in what a send says. --json carries the name and the folder as they
