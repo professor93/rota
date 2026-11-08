@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -237,12 +239,15 @@ func TestDetachCarriesTheCallersEnvironment(t *testing.T) {
 	cmd.Env = append(cmd.Env, "FOO=bar", "TMUX=x", "CLAUDE_CONFIG_DIR=cc")
 	out, errb, code := r.run(cmd)
 	var s struct {
-		ID, Name, State, Provider string
-		Account                   int
-		Ended                     *time.Time `json:"ended_at"`
+		ID, Name, State string
+		Account         struct {
+			ID       int
+			Provider string
+		}
+		Ended bool
 	}
 	if err := json.Unmarshal([]byte(out), &s); err != nil || code != 0 || errb != "" ||
-		!holdwire.IsID(s.ID) || s.State != "live" || s.Account != 1 || s.Provider != "claude" || s.Ended != nil {
+		!holdwire.IsID(s.ID) || s.State != "live" || s.Account.ID != 1 || s.Account.Provider != "claude" || s.Ended {
 		t.Fatalf("--json run --detach: exit %d %q %q (%v)\nlog:\n%s", code, out, errb, err, r.log())
 	}
 	p := r.attach(s.ID)
@@ -257,6 +262,42 @@ func TestDetachCarriesTheCallersEnvironment(t *testing.T) {
 	real, _ := filepath.EvalSymlinks(filepath.Join(work, "cc"))
 	p.send(0x2, []byte("envhas "+real+"\r"))
 	p.waitOut("envhas yes")
+}
+
+// --json prints the session as the daemon describes it, in the shape GET
+// /v1/terminals lists it in — the account an object, ended a bool — so one
+// reader reads both.
+func TestDetachJSONIsTheSessionAsTheAPIDescribesIt(t *testing.T) {
+	r := newDaemonRig(t)
+	r.start()
+	out, errb, code := r.rota("--json", "run", "1", "--detach", "--label", "shape")
+	var cli map[string]any
+	if err := json.Unmarshal([]byte(out), &cli); err != nil || code != 0 || errb != "" {
+		t.Fatalf("--json run --detach: exit %d %q %q (%v)", code, out, errb, err)
+	}
+	id, _ := cli["id"].(string)
+	_, doc := ctlGet(t, r.sock, "/v1/terminals")
+	var api map[string]any
+	list, _ := doc["terminals"].([]any)
+	for _, d := range list {
+		if m, _ := d.(map[string]any); m["id"] == id {
+			api = m
+		}
+	}
+	if api == nil {
+		t.Fatalf("GET /v1/terminals lists no %s: %v", id, doc)
+	}
+	if !slices.Equal(slices.Sorted(maps.Keys(cli)), slices.Sorted(maps.Keys(api))) {
+		t.Fatalf("--json says %v\nGET /v1/terminals says %v", slices.Sorted(maps.Keys(cli)), slices.Sorted(maps.Keys(api)))
+	}
+	for _, key := range []string{"id", "name", "label", "kind", "cwd", "started", "held", "ended", "account", "pid"} {
+		if !reflect.DeepEqual(cli[key], api[key]) {
+			t.Errorf("%s: --json says %v, GET /v1/terminals %v", key, cli[key], api[key])
+		}
+	}
+	if acct, _ := cli["account"].(map[string]any); acct["id"] != 1.0 || acct["label"] != "a@x" || acct["provider"] != "claude" || cli["ended"] != false {
+		t.Errorf("--json: account %v, ended %v", cli["account"], cli["ended"])
+	}
 }
 
 // --remote-control with no account leaves the choice to the daemon, which

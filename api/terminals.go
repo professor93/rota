@@ -117,7 +117,7 @@ func (s *Server) listTerminals(w http.ResponseWriter, _ *http.Request) {
 	if len(records) > 0 {
 		labels := s.accountLabels()
 		for i := range records {
-			out = append(out, describeRecord(&records[i], labels))
+			out = append(out, records[i].Describe(labels))
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"terminals": out})
@@ -140,7 +140,7 @@ func (s *Server) describeTerminal(w http.ResponseWriter, r *http.Request) {
 	case ts != nil:
 		writeJSON(w, http.StatusOK, ts.view())
 	case rec != nil:
-		writeJSON(w, http.StatusOK, describeRecord(rec, s.accountLabels()))
+		writeJSON(w, http.StatusOK, rec.Describe(s.accountLabels()))
 	}
 }
 

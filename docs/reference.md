@@ -1006,10 +1006,10 @@ its id instead, since the name as shown matches nothing. A daemon another
 start got to first, between this one's look
 and its start, is named instead of the first line — *rota: a rota daemon is
 already running for /home/me/.rota (pid 4242)* — since it may serve a port as
-well. `--json` prints the session instead of the line about it:
-`id`, `name`, `label`, `kind`, `state`, `status`, `provider`, `account`,
-`account_label`, `cwd`, `conversation`, `pid`, `attachable`, `resumable`,
-`started`, `ended_at` and `exit`. `--remote-control` with an account named
+well. `--json` prints the session instead of the line about it, as the
+daemon describes it: the document `GET /v1/terminals` lists, with the
+account an object and `ended` a bool (*[A terminal on the
+server](#a-terminal-on-the-server)*). `--remote-control` with an account named
 readies it here, as a run that opens the CLI does; with none named the
 daemon readies whichever it chooses. A daemon that holds the store and
 does not answer within five seconds is an error, and no second daemon is
@@ -1827,10 +1827,11 @@ the name, which is never more than 44 columns anywhere.
 A tab, a newline, an escape or any other control character in a name, a
 label or a folder is shown as a space, here and in every line `rota run
 --detach` and `rota send` say about a held session. `--json` carries them as
-`"held"`, only when there are any, each as `rota run --detach --json` prints
-one, with `exit` and `ended_at` once it has stopped and `resumable` for one
-interrupted on a conversation that is known; its fields keep a name as it
-was given.
+`"held"`, only when there are any, each as `GET /v1/terminals` describes a
+session from its record, which is the shape `rota run --detach --json`
+prints, with `exit` and `ended_at` once it has stopped and `resumable` for
+one interrupted on a conversation that is known; its fields keep a name as
+it was given.
 
 ### Where an account belongs
 
