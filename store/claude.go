@@ -1426,8 +1426,11 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 	case !a.Dead:
 		return true, nil
 	case h.hold != "" && h.usable:
-		a.DeadReason = fmt.Sprintf("its own refresh token was refused (%s); a login made inside Claude Code in its home "+
-			"is waiting to be confirmed", refused)
+		// A login past its end was never presented, and its reason says so whole.
+		if !a.LoginEnded() {
+			a.DeadReason = fmt.Sprintf("its own refresh token was refused (%s); a login made inside Claude Code in its home "+
+				"is waiting to be confirmed", refused)
+		}
 		return true, nil
 	}
 	return true, err

@@ -117,10 +117,22 @@ func (r *claudeTokenResp) token() *Token {
 // A Claude login has a hard end: its refresh token works until a moment the
 // provider fixes at sign-in, and after that nobody can refresh it — Claude Code
 // checks it before every refresh of its own — and only a new sign-in brings the
-// account back. Claude Code reckons it the way rota does here, read from its
-// own code: at sign-in, now plus the reply's refresh_token_expires_in, or
-// thirty days when the reply has none; at each refresh, the earlier of what it
-// had and what the reply says, so it never moves later.
+// account back. Claude Code reckons it, read from its own code, as now plus the
+// reply's refresh_token_expires_in at sign-in, or thirty days when the reply
+// has none, and at each refresh of its own as the earlier of what it had and
+// what the reply says, so it never moves later.
+//
+// The account keeps that end twice, because it means two things:
+//   - claudeRefreshUntil is the end as the grant was signed in with, and it is
+//     the grant's identity: it is written into the home as Claude Code's
+//     refreshTokenExpiresAt, and AdoptFS tells a rotation of this login from
+//     a new one by it. rota sets it at sign-in and takes it from the home, and
+//     a refresh of rota's own never changes it;
+//   - claudeLoginEnds is the end in effect, the earliest anything has said:
+//     the sign-in, a refresh's reply, the home. It never moves later until a
+//     new sign-in starts a new grant, it is never written into a home, and it
+//     is what the guard, the dead reason and a listing read (LoginUntil).
+//     Absent while it says no more than claudeRefreshUntil.
 const (
 	// claudeLoginLife is the life a sign-in is given when the reply says
 	// nothing: Claude Code's own default.
@@ -129,10 +141,9 @@ const (
 	// the number is not a life at all, and the milliseconds would not fit.
 	claudeLifeCeiling = 100 * 365 * 24 * 3600
 	// claudeEndNoise is how much earlier a refresh's end must be before rota
-	// moves the end it holds. The reply counts whole seconds and this machine
+	// moves the end in effect. The reply counts whole seconds and this machine
 	// adds its own milliseconds, so one end reads a moment apart from one
-	// refresh to the next; moving by that would make the login look like
-	// another one to everything that compares ends (AdoptFS) and gain nothing.
+	// refresh to the next, and a moment is nothing to plan around.
 	claudeEndNoise = time.Minute
 )
 
@@ -184,11 +195,12 @@ func (p claudeProvider) Complete(ctx context.Context, code string, state map[str
 	if prof, err := readClaudeProfile(ctx, t.Access); err == nil {
 		prof.into(t)
 	}
-	// A fresh login is a new lineage, and it ends when the exchange says, or
-	// thirty days from now, as Claude Code reckons a sign-in of its own. It
-	// replaces whatever the account remembers, which is the last login's: it
+	// A fresh login is a new grant, and it ends when the exchange says, or
+	// thirty days from now, as Claude Code reckons a sign-in of its own. That
+	// replaces the end the account remembers, which is the last grant's: it
 	// goes into Claude Code's store with this login, and it is what tells a
-	// rotation of this login from somebody else's.
+	// rotation of this login from somebody else's. The last grant's end in
+	// effect is forgotten with it (an empty value is how a token says so).
 	end, ok := r.refreshEnd()
 	if !ok {
 		end = nowMS() + claudeLoginLife.Milliseconds()
@@ -197,6 +209,7 @@ func (p claudeProvider) Complete(ctx context.Context, code string, state map[str
 		t.Extra = map[string]string{}
 	}
 	t.Extra[claudeRefreshUntil] = strconv.FormatInt(end, 10)
+	t.Extra[claudeLoginEnds] = ""
 	return t, nil
 }
 
@@ -238,6 +251,7 @@ const (
 	claudeSubscription  = "subscription_type"
 	claudeRateLimitTier = "rate_limit_tier"
 	claudeRefreshUntil  = "refresh_token_expires_at"
+	claudeLoginEnds     = "login_ends_at"
 	claudeClient        = "client_id"
 	claudeOrgName       = "organization_name"
 	claudeDisplayName   = "display_name"
@@ -325,8 +339,9 @@ func (claudeProvider) exchange(ctx context.Context, code string, state map[strin
 // so this is where a login past its end is refused: nothing is sent, and the
 // account is dead with the reason claudeEnded gives.
 //
-// A reply that says when the login ends moves the account's end earlier when
+// A reply that says when the login ends moves the end in effect earlier when
 // it is earlier, and never later; one that says nothing leaves it as it was.
+// The grant's own end, its identity, is never touched here.
 func (claudeProvider) Refresh(ctx context.Context, a *Account) (*Token, error) {
 	if a.LoginEnded() {
 		return nil, claudeEnded(a)
@@ -344,7 +359,7 @@ func (claudeProvider) Refresh(ctx context.Context, a *Account) (*Token, error) {
 			if t.Extra == nil {
 				t.Extra = map[string]string{}
 			}
-			t.Extra[claudeRefreshUntil] = strconv.FormatInt(end, 10)
+			t.Extra[claudeLoginEnds] = strconv.FormatInt(end, 10)
 		}
 	}
 	return t, nil

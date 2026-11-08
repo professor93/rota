@@ -257,15 +257,40 @@ func (a *Account) LongUntil() time.Time {
 
 // LoginUntil is when the login itself ends — not the access token, which is
 // refreshed, but the refresh token behind it — or the zero time when the
-// provider has not said. A claude login learns it at sign-in, keeps the
-// earliest end any refresh reports, and takes the one Claude Code records in
-// the login it keeps.
+// provider has not said. For a claude login it is the end in effect: the
+// earliest of what the sign-in, every refresh's reply and the login Claude
+// Code keeps in the home have said, which only a new sign-in moves later.
 func (a *Account) LoginUntil() time.Time {
-	ms, err := strconv.ParseInt(a.Extra[claudeRefreshUntil], 10, 64)
-	if err != nil || ms <= 0 {
-		return time.Time{}
+	if ms, ok := a.loginEnd(); ok {
+		return time.UnixMilli(ms)
 	}
-	return time.UnixMilli(ms)
+	return time.Time{}
+}
+
+// loginEnd is LoginUntil in unix ms: the end in effect when one is recorded,
+// else the grant's own end, which is the end in effect until something says
+// an earlier one.
+func (a *Account) loginEnd() (int64, bool) {
+	if ms, ok := extraMS(a.Extra[claudeLoginEnds]); ok {
+		return ms, true
+	}
+	return extraMS(a.Extra[claudeRefreshUntil])
+}
+
+// setLoginEnd records the end in effect, and no key at all while the grant's
+// own end says the same.
+func (a *Account) setLoginEnd(ms int64) {
+	if own, ok := extraMS(a.Extra[claudeRefreshUntil]); ok && own == ms {
+		delete(a.Extra, claudeLoginEnds)
+		return
+	}
+	a.setExtra(claudeLoginEnds, strconv.FormatInt(ms, 10))
+}
+
+// extraMS reads a time kept in Extra as decimal unix ms.
+func extraMS(v string) (int64, bool) {
+	ms, err := strconv.ParseInt(v, 10, 64)
+	return ms, err == nil && ms > 0
 }
 
 // LoginEnded reports whether the login has reached the end LoginUntil gives.

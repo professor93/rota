@@ -84,7 +84,8 @@ func TestALoginsEndIsReadFromTheTokenReply(t *testing.T) {
 
 // rota login records when the login ends: now plus what the exchange says, or
 // thirty days from now when it says nothing usable, as Claude Code reckons its
-// own sign-in. It replaces the end the account had, which was the last login's.
+// own sign-in. It replaces the end the account had, which was the last login's,
+// and forgets the last grant's end in effect.
 // The long-lived login's refresh token is dropped, and when it would have
 // ended goes with it: the account's own login keeps its end.
 func TestRotaLoginRecordsWhenTheLoginEnds(t *testing.T) {
@@ -118,9 +119,13 @@ func TestRotaLoginRecordsWhenTheLoginEnds(t *testing.T) {
 			t.Fatal(err)
 		}
 		a := livingClaude()
+		a.Extra[claudeLoginEnds] = strconv.FormatInt(now+60_000, 10) // the last grant's, nearly over
 		a.Apply(tok)
-		if got := a.Extra[claudeRefreshUntil]; got != strconv.FormatInt(c.end, 10) {
-			t.Errorf("life %#v: the account's end is %q, want %d", c.life, got, c.end)
+		if got := a.Extra[claudeRefreshUntil]; got != strconv.FormatInt(c.end, 10) || a.LoginUntil().UnixMilli() != c.end {
+			t.Errorf("life %#v: the account's end is %q, in effect %v, want %d", c.life, got, a.LoginUntil(), c.end)
+		}
+		if _, ok := a.Extra[claudeLoginEnds]; ok {
+			t.Errorf("life %#v: the last grant's end in effect is forgotten: %v", c.life, a.Extra)
 		}
 	}
 
@@ -142,11 +147,12 @@ func TestRotaLoginRecordsWhenTheLoginEnds(t *testing.T) {
 	}
 }
 
-// Every refresh rota makes keeps the earlier of the end the account has and
-// the end the reply says, so the end never moves later; a reply that says
+// Every refresh rota makes keeps the earlier of the end in effect and the end
+// the reply says, so the end in effect never moves later; a reply that says
 // nothing leaves it as it was, and an account that had none learns it. A
 // difference smaller than claudeEndNoise is the reply's whole seconds against
-// this machine's milliseconds, and moves nothing.
+// this machine's milliseconds, and moves nothing. The grant's own end, which
+// is its identity, is never touched: an account that had none still has none.
 func TestARefreshNeverMovesTheEndLater(t *testing.T) {
 	now := lifeNow(t).UnixMilli()
 	f := newFakeServer(t, false)
@@ -185,6 +191,10 @@ func TestARefreshNeverMovesTheEndLater(t *testing.T) {
 			}
 			if got := a.LoginUntil(); (c.want == 0) != got.IsZero() || (c.want != 0 && got.UnixMilli() != c.want) {
 				t.Fatalf("end %v, want %d", got, c.want)
+			}
+			own, had := a.Extra[claudeRefreshUntil]
+			if had != (c.had != 0) || (c.had != 0 && own != strconv.FormatInt(c.had, 10)) {
+				t.Fatalf("the grant's own end is never a refresh's to change: %v", a.Extra)
 			}
 		})
 	}
@@ -249,8 +259,10 @@ func TestNothingIsPresentedOnceTheLoginHasEnded(t *testing.T) {
 	}
 }
 
-// What rota learns of the end, at sign-in or from a refresh, is what goes into
-// the home with the login, as Claude Code's refreshTokenExpiresAt.
+// The end rota learns at sign-in is the grant's own, and it goes into the home
+// with the login, as Claude Code's refreshTokenExpiresAt. A refresh's earlier
+// end is the end in effect, and stays out of the home: the home goes on being
+// given the grant's own end, which is how its login is told from a new one.
 func TestTheEndRotaLearnsReachesTheHome(t *testing.T) {
 	onDisk(t)
 	now := lifeNow(t).UnixMilli()
@@ -295,7 +307,105 @@ func TestTheEndRotaLearnsReachesTheHome(t *testing.T) {
 	if _, err := Refresh(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}
-	if got := planned(); got != now+int64(life)*1000 || a.LoginUntil().UnixMilli() != got {
-		t.Fatalf("after a refresh the home is given %d, want %d", got, now+int64(life)*1000)
+	if got := planned(); got != now+1_000_000_000 || a.LoginUntil().UnixMilli() != now+int64(life)*1000 {
+		t.Fatalf("after a refresh the home is given %d, want %d; in effect %v", got, now+1_000_000_000, a.LoginUntil())
+	}
+}
+
+// A refresh that keeps the refresh token writes nothing into the home, which
+// still holds the login in sync. The end in effect it learned survives the next
+// adoption of that home: a home whose end is later, or which names none, takes
+// nothing away from it, and one whose end is earlier still brings it earlier.
+func TestAnEndARefreshLearnedSurvivesTheHome(t *testing.T) {
+	onDisk(t)
+	now := lifeNow(t).UnixMilli()
+	f := newFakeServer(t, false)
+	setURL(t, &ClaudeEndpoints.Token, f.URL+"/token")
+	f.reply["/token"] = func(*http.Request, map[string]any) (int, any) {
+		return 200, map[string]any{"access_token": "A2", "expires_in": 28800, "refresh_token_expires_in": 3 * 24 * 3600}
+	}
+	learned := now + 3*24*3600*1000
+	for _, c := range []struct {
+		name, until string // the home's refreshTokenExpiresAt
+		own         string // the grant's own end afterwards ("" for none)
+		want        int64  // the end in effect afterwards
+	}{
+		{"the home says the grant's own, later, end", "1999999999000", "1999999999000", learned},
+		{"the home names no end", "null", "", learned},
+		{"the home says an end earlier still", strconv.FormatInt(learned-3600_000, 10), strconv.FormatInt(learned-3600_000, 10), learned - 3600_000},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			a := livingClaude()
+			a.Token.ExpiresAt = now - 1
+			a.StagedWritten() // the home holds R1, as rota wrote it
+			if _, err := Refresh(context.Background(), a); err != nil || a.Token.Refresh != "R1" {
+				t.Fatalf("refresh: %v %+v", err, a.Token)
+			}
+			if a.LoginUntil().UnixMilli() != learned || a.Extra[claudeRefreshUntil] != "1999999999000" {
+				t.Fatalf("the refresh's end is in effect, the grant's own untouched: %v", a.Extra)
+			}
+			if _, files, err := StagePlan(context.Background(), a, t.TempDir()); err != nil || len(files) != 0 {
+				t.Fatalf("the home holds the login already, so nothing is written: %v %v", files, err)
+			}
+			home := homeWith(`{"accessToken":"A1","refreshToken":"R1","expiresAt":` + strconv.FormatInt(now-1, 10) +
+				`,"refreshTokenExpiresAt":` + c.until + `}`)
+			if err := AdoptFrom(a, home); err != nil {
+				t.Fatal(err)
+			}
+			if a.LoginUntil().UnixMilli() != c.want || a.Extra[claudeRefreshUntil] != c.own || !a.StagedCurrent() {
+				t.Fatalf("after adoption: in effect %v want %d, the grant's own %q want %q", a.LoginUntil(), c.want,
+					a.Extra[claudeRefreshUntil], c.own)
+			}
+		})
+	}
+}
+
+// A login somebody made inside the home and the application found to be this
+// account's is a new grant: it ends when it says, and nothing the last grant
+// said about its end, the end that killed the account included, counts.
+func TestALoginAcceptedFromTheHomeStartsANewEnd(t *testing.T) {
+	now := lifeNow(t)
+	a := livingClaude()
+	a.Extra[claudeLoginEnds] = strconv.FormatInt(now.Add(-time.Hour).UnixMilli(), 10)
+	a.Dead, a.DeadReason = true, "its login ended"
+	a.StagedWritten()
+	next := now.Add(30 * 24 * time.Hour).UnixMilli()
+	home := homeWith(`{"accessToken":"A9","refreshToken":"R9","expiresAt":` + strconv.FormatInt(now.Add(8*time.Hour).UnixMilli(), 10) +
+		`,"refreshTokenExpiresAt":` + strconv.FormatInt(next, 10) + `}`)
+	var nl *NewLogin
+	if err := AdoptFrom(a, home); !errors.As(err, &nl) {
+		t.Fatalf("a new login: %v", err)
+	}
+	nl.Accept(a)
+	if a.Dead || a.LoginEnded() || a.LoginUntil().UnixMilli() != next || a.Extra[claudeRefreshUntil] != strconv.FormatInt(next, 10) {
+		t.Fatalf("the new grant's end: dead=%v in effect %v, %v", a.Dead, a.LoginUntil(), a.Extra)
+	}
+	if _, ok := a.Extra[claudeLoginEnds]; ok {
+		t.Fatalf("nothing of the last grant's end in effect is left: %v", a.Extra)
+	}
+}
+
+// The login this package wrote into the home, and the account has refreshed
+// past since, is behind whatever end it carries, and whatever became of the
+// account: it is never offered as a new login, because taking it back would
+// take a spent token.
+func TestTheLoginRotaWroteIsNeverANewLogin(t *testing.T) {
+	now := lifeNow(t)
+	for _, dead := range []bool{false, true} {
+		a := livingClaude()
+		a.Token.Refresh = "R0"
+		a.StagedWritten() // rota wrote R0 into the home
+		a.Token.Refresh, a.Token.Access = "R1", "A1-new"
+		a.Token.ExpiresAt = now.Add(8 * time.Hour).UnixMilli()
+		a.Dead = dead
+		home := homeWith(`{"accessToken":"A0","refreshToken":"R0","expiresAt":` + strconv.FormatInt(now.Add(7*time.Hour).UnixMilli(), 10) +
+			`,"refreshTokenExpiresAt":1888888888000}`)
+		staged := a.Staged
+		if err := AdoptFrom(a, home); err != nil {
+			t.Fatalf("dead=%v: behind, not a new login: %v", dead, err)
+		}
+		if a.Token.Refresh != "R1" || a.Staged != staged || a.Dead != dead || !ClaudeHomeSpent(a, home) {
+			t.Fatalf("dead=%v: nothing taken, still recorded as rota's write: %+v", dead, a)
+		}
 	}
 }
