@@ -310,9 +310,6 @@ func TestARefreshTheStoreCannotSaveLosesNothing(t *testing.T) {
 			{"held as a refresh token alone, signed in, never run, an inference-only login there", "", "alone", false,
 				`{"mcpOAuth":{"srv":{"accessToken":"mcp-secret"}},"claudeAiOauth":{"accessToken":"A-x","refreshToken":"R-x","expiresAt":0}}`},
 		} {
-			if look.what == "maintenance" && c.kept {
-				continue // the sweep pays the write it owes over a login rota cannot place
-			}
 			// good is how many saves the look gets through before every one
 			// fails: none, the one before the refresh, that and the one after.
 			for _, good := range []int{0, 1, 2} {

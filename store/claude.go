@@ -1150,6 +1150,12 @@ func (h *claudeHome) renew(ctx context.Context) (bool, error) {
 	h.owe()
 	if err := h.s.Save(); err != nil {
 		err = fmt.Errorf("refusing to go on: the store could not be saved after a token change: %w", err)
+		if !h.readBack {
+			// Nothing is owed to a home whose login rota cannot place: the
+			// write writeRefreshed declines is not made later in this process
+			// either, by a sweep paying what it owes.
+			delete(a.Extra, seedOwedKey)
+		}
 		return true, errors.Join(err, h.writeRefreshed(ctx, false))
 	}
 	return true, h.writeRefreshed(ctx, true)
