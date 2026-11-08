@@ -187,7 +187,7 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 	defer release()
 	h.others = false
 	did, err := h.renew(ctx)
-	return changed || did, wrapAccount(a, err)
+	return changed || did, wrapAccount(a, unlessHeld(err))
 }
 
 func wrapAccount(a *rota.Account, err error) error {

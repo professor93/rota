@@ -167,6 +167,27 @@ var errKeychain = errors.New("the keychain could not be read")
 // refresh lock, and a fresh login there is not rota's to delete.
 var errItemChanged = errors.New("the keychain item changed while rota was writing the login, so it was left alone and nothing was written")
 
+// errLockHeld marks Claude Code's refresh lock held by somebody else, which is
+// Claude Code refreshing the login in the home right now. To a look that is
+// nothing to report and says nothing about the account, and the next look tries
+// again (unlessHeld); a run that needed the refreshed token is told to try again
+// in a moment (lockHeldBusy).
+var errLockHeld = errors.New("Claude Code is refreshing the login in its home right now")
+
+// unlessHeld is err, except that a lock somebody holds is nothing to report.
+func unlessHeld(err error) error {
+	if errors.Is(err, errLockHeld) {
+		return nil
+	}
+	return err
+}
+
+// lockHeldBusy is what a run that needs the account's token refreshed is told
+// while Claude Code holds the refresh lock in the home.
+func lockHeldBusy(a *rota.Account) error {
+	return fmt.Errorf("%w: %s's token has expired, and %w; try again in a moment", rota.ErrBusy, a, errLockHeld)
+}
+
 // dropItemAsJudged deletes the home's keychain item, after reading it once more
 // and finding it is still what rota judged; an item that has gone needs no delete.
 func dropItemAsJudged(svc string, judged []byte) error {
@@ -467,33 +488,27 @@ func (e notThrough) Unwrap() error { return e.error }
 
 // mend does what wanting says this look owes the home, as one sequence for this
 // account: the lock is taken, the home read again, the login refreshed, saved
-// and written, and the lock let go, so that a slow account holds nobody else's
+// and written, and the lock let go, so that a slow rescue holds nobody else's
 // home open. Every look comes through here straight after it reads the home,
-// whatever it came for, and one at a time, because a save reads every account.
-// changed says something on the account changed that the caller has yet to save.
+// whatever it came for, and one at a time, because a save reads every account,
+// so rescues hold the lock one account at a time. (A listing's renews are not
+// rescues: each holds its own account's lock from its plan until its login is in
+// its home, several at once; see Store.refresh.) changed says something on the
+// account changed that the caller has yet to save.
 //
 // Something in the home may go on trying to refresh by itself all this while:
 // the daemon's re-check does, silently, every thirty seconds, and any window
-// that starts there will. All of them take one lock around a refresh, a
-// directory beside the store, so rota takes the same one, and nothing of Claude
-// Code's can present the refresh token beside it. A lock somebody holds means
-// Claude Code is refreshing right now, and the look leaves it to them. Once it is
-// held the home is read again, as Claude Code does, because a refresh may have
-// finished a moment ago.
+// that starts there will. So the sequence runs under Claude Code's own refresh
+// lock, with the home read again once it is held (lockAndRead).
 func (h *claudeHome) mend(ctx context.Context) (changed bool, err error) {
 	if !h.wanting() {
 		return false, nil
 	}
-	lock, ok := takeRefreshLock(h.home)
-	if !ok {
-		return false, nil
+	lock, changed, err := h.lockAndRead(ctx)
+	if lock == nil {
+		return false, unlessHeld(err)
 	}
 	defer lock.release()
-	before := snapshot(h.a)
-	if err := h.adopt(ctx); err != nil {
-		return false, err
-	}
-	changed = before.differs(h.a)
 	switch {
 	case !h.wanting():
 		return changed, nil
@@ -505,6 +520,53 @@ func (h *claudeHome) mend(ctx context.Context) (changed bool, err error) {
 		return changed || did, err
 	}
 	return changed, h.uncover()
+}
+
+// lockAndRead takes Claude Code's own refresh lock in the home and reads the
+// home again under it. Every refresh of a login kept in a home comes through
+// here before it presents the refresh token, and every write that goes with
+// one: mend's, renew's, a listing's renews and tokenNow's.
+//
+// Claude Code's processes take the same lock, a directory beside the store,
+// around each refresh of theirs, and read the store again once they hold it.
+// So with it held nothing of Claude Code's can present the token beside rota's,
+// one that starts meanwhile waits and then finds the login rota wrote in, and a
+// rotation that finished a moment before is read now and taken, instead of the
+// token it replaced being presented again. A refresh whose answer never came — a
+// failure on the provider's side, a timeout, a code nobody knows — has spent
+// nothing anybody can tell, so the same holds before its token is presented the
+// next time: the home is read first.
+//
+// lock is nil, with errLockHeld, when somebody else holds the lock, which means
+// Claude Code is refreshing right now: nothing is read, and the look leaves the
+// login to them. That is no error to a look and says nothing about the account
+// (unlessHeld); the next look tries again. lock is nil with any other error when
+// the lock could not be made at all, in a home rota may not write in, say, or
+// the home could not be read, and that is reported as any unreadable home is.
+// Otherwise the caller lets go of it (release) once whatever it refreshed is in
+// the home; until it is handed over it goes on every path, a panic included,
+// or its beat would keep Claude Code out for as long as the process lives.
+// changed says the reading changed something on the account.
+func (h *claudeHome) lockAndRead(ctx context.Context) (*refreshLock, bool, error) {
+	lock, err := takeRefreshLock(h.home)
+	if err != nil {
+		if !errors.Is(err, errLockHeld) {
+			err = fmt.Errorf("%s: %w", h.a, err)
+		}
+		return nil, false, err
+	}
+	handed := false
+	defer func() {
+		if !handed {
+			lock.release()
+		}
+	}()
+	before := snapshot(h.a)
+	if err := h.adopt(ctx); err != nil {
+		return nil, false, err
+	}
+	handed = true
+	return lock, before.differs(h.a), nil
 }
 
 // rescue presents the account's own refresh token for a home mend found stranded
@@ -616,23 +678,37 @@ type refreshLock struct {
 }
 
 // takeRefreshLock takes the lock as Claude Code would: one left behind by a dead
-// holder is cleared, and one somebody holds is not rota's to have.
-func takeRefreshLock(home string) (*refreshLock, bool) {
+// holder is cleared, and one somebody holds is not rota's to have (errLockHeld).
+// Only a lock that is there is somebody's: a lock that cannot be made for any
+// other reason — a home rota may not write in, a disk that is full — is that
+// error, never taken for a holder, or such a home would go unrefreshed with
+// nobody told. A home not made yet has nothing running in it, and is made, as
+// the write that follows would make it.
+func takeRefreshLock(home string) (*refreshLock, error) {
 	path := filepath.Join(home, claudeRefreshLock)
 	if fi, err := os.Stat(path); err == nil && time.Since(fi.ModTime()) > refreshLockStale {
 		_ = os.Remove(path)
 	}
-	if os.Mkdir(path, 0o700) != nil {
-		return nil, false
+	err := os.Mkdir(path, 0o700)
+	if errors.Is(err, fs.ErrNotExist) {
+		if err = os.MkdirAll(home, 0o700); err == nil {
+			err = os.Mkdir(path, 0o700)
+		}
+	}
+	switch {
+	case errors.Is(err, fs.ErrExist):
+		return nil, errLockHeld
+	case err != nil:
+		return nil, fmt.Errorf("Claude Code's refresh lock could not be made in its home, so nothing there is refreshed: %w", err)
 	}
 	fi, err := os.Lstat(path)
 	if err != nil {
 		_ = os.Remove(path) // made a moment ago, and not to be left in Claude Code's way
-		return nil, false
+		return nil, fmt.Errorf("Claude Code's refresh lock in its home could not be read back, so nothing there is refreshed: %w", err)
 	}
 	l := &refreshLock{path: path, held: fi, stop: make(chan struct{}), done: make(chan struct{})}
 	go l.beat()
-	return l, true
+	return l, nil
 }
 
 func (l *refreshLock) beat() {
@@ -1133,11 +1209,41 @@ func (h *claudeHome) stopDaemon() error {
 // new login still goes into the home, where the next look reads it back as a
 // rotation, rather than nowhere — unless the home holds a login rota cannot
 // place, which is left as it is.
+//
+// All of it happens under Claude Code's refresh lock, with the home read again
+// once that is held and the whole question asked again of what it says now
+// (lockAndRead): a Claude Code that started or rotated the login since the look
+// began is left to, and a lock somebody holds leaves the login to the next look,
+// which renew says with errLockHeld: a look drops it, a run that needed the token
+// says to try again in a moment.
 func (h *claudeHome) renew(ctx context.Context) (bool, error) {
-	a := h.a
-	if !a.Expired() || a.Dead || h.hold != "" || h.blanked || !h.quiet() {
+	if !h.renewable() {
 		return false, nil
 	}
+	lock, changed, err := h.lockAndRead(ctx)
+	if lock == nil {
+		return changed, err
+	}
+	defer lock.release()
+	if !h.renewable() {
+		return changed, nil
+	}
+	did, err := h.renewHeld(ctx)
+	return changed || did, err
+}
+
+// renewable reports whether renew may refresh the account's login, as the home
+// was last read: it has expired, the account is not dead, the home is out of
+// the hold, its store is not blanked, and nothing at all is alive there.
+func (h *claudeHome) renewable() bool {
+	a := h.a
+	return a.Expired() && !a.Dead && h.hold == "" && !h.blanked && h.quiet()
+}
+
+// renewHeld is renew once the lock is held and the home read under it: the
+// login written in, saved, refreshed, saved again and written in.
+func (h *claudeHome) renewHeld(ctx context.Context) (bool, error) {
+	a := h.a
 	if err := h.writeDue(ctx); err != nil {
 		return true, err
 	}
@@ -1710,7 +1816,9 @@ func (h *claudeHome) launchStored(ctx context.Context) (*rota.Command, error) {
 	if route == routeEnv {
 		return h.launchBeside(ctx)
 	}
-	if _, err := h.renew(ctx); err != nil {
+	// A lock somebody holds is Claude Code refreshing the login there, and the
+	// launch joins the home as it is: whatever starts there waits for it.
+	if _, err := h.renew(ctx); unlessHeld(err) != nil {
 		// A login that died just now is dead like any other, with the one
 		// exception mayLaunch allows: a long-lived token owes it nothing.
 		if !a.Dead || !a.LongValid() {
@@ -1787,15 +1895,35 @@ func (h *claudeHome) launchBeside(ctx context.Context) (*rota.Command, error) {
 // or while what runs there was never on the account's stored login, so that
 // nothing alive can hold the refresh token being presented. The refresh goes
 // through refresh, which reads the home again before it believes a refusal.
+//
+// For a login rota keeps in the home the refresh is made under Claude Code's
+// refresh lock, with the home read again once that is held and asked the same
+// again (lockAndRead): a rotation found there is the good token, and nothing is
+// presented. A lock somebody holds means Claude Code is refreshing right now,
+// and the run is told to try again in a moment; the account is not dead.
 func (h *claudeHome) tokenNow(ctx context.Context) error {
 	a := h.a
 	if a.LongValid() || !a.Expired() {
 		return nil
 	}
-	if !h.quiet() && h.lastRoute() != routeEnv {
-		return fmt.Errorf("%w: %s's token has expired, and Claude Code runs in its home (%s), which was signed in on the "+
-			"account's own login; nothing may refresh it while that runs — a long-lived token (`rota login --long`) "+
-			"runs it meanwhile", rota.ErrBusy, a, strings.Join(h.live(), ", "))
+	if err := h.tokenBusy(); err != nil {
+		return err
+	}
+	if h.s.loginInHome(a) {
+		lock, _, err := h.lockAndRead(ctx)
+		if lock == nil {
+			if errors.Is(err, errLockHeld) {
+				return lockHeldBusy(a)
+			}
+			return err
+		}
+		defer lock.release()
+		if a.LongValid() || !a.Expired() {
+			return nil
+		}
+		if err := h.tokenBusy(); err != nil {
+			return err
+		}
 	}
 	changed, err := h.refresh(ctx)
 	if changed {
@@ -1807,6 +1935,27 @@ func (h *claudeHome) tokenNow(ctx context.Context) error {
 		return fmt.Errorf("%w: %s: %s, and its own token has expired", rota.ErrBusy, a, h.hold)
 	}
 	return err
+}
+
+// tokenBusy says why tokenNow may not present the account's refresh token now,
+// as the home was last read, or is nil when it may. Something alive in the home
+// may hold that token when the home was signed in on the account's own login, or
+// holds it now; and a store Claude Code blanked is a rescue's to present, never
+// a run's.
+func (h *claudeHome) tokenBusy() error {
+	a := h.a
+	switch {
+	case h.blanked:
+		return fmt.Errorf("%w: %s's token has expired, and Claude Code cleared the login in its home a moment ago; "+
+			"try again in a moment, or a long-lived token (`rota login --long`) runs it meanwhile", rota.ErrBusy, a)
+	case h.quiet():
+		return nil
+	case h.lastRoute() != routeEnv || (h.usable && a.StagedCurrent()):
+		return fmt.Errorf("%w: %s's token has expired, and Claude Code runs in its home (%s), which was signed in on the "+
+			"account's own login; nothing may refresh it while that runs — a long-lived token (`rota login --long`) "+
+			"runs it meanwhile", rota.ErrBusy, a, strings.Join(h.live(), ", "))
+	}
+	return nil
 }
 
 // launchOnToken launches in the home on the environment route: a token rota
@@ -1873,7 +2022,9 @@ func (h *claudeHome) envRun(ctx context.Context) (*rota.Command, error) {
 			"a fresh one until that is settled — a long-lived token (`rota login --long`) is what such runs are for",
 			rota.ErrBusy, a, h.hold)
 	case h.quiet():
-		if _, err := h.renew(ctx); err != nil {
+		if _, err := h.renew(ctx); errors.Is(err, errLockHeld) {
+			return nil, lockHeldBusy(a)
+		} else if err != nil {
 			return nil, err
 		}
 		if a.Expired() {
