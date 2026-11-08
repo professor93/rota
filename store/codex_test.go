@@ -288,6 +288,28 @@ func TestASweepLeavesARefreshTokenAloneToTheDaemonInItsHome(t *testing.T) {
 	}
 }
 
+// A codex record with no token at all has nothing a sweep could refresh, and
+// its home is left as it is.
+func TestASweepLeavesTheHomeOfACodexRecordWithNoToken(t *testing.T) {
+	codexRefreshes(t)
+	s := openTemp(t)
+	a := s.add("codex")
+	a.Extra = map[string]string{"id_token": "i", "account_id": "acct"}
+	a.Token = rota.Token{Access: "a-prev", Refresh: "r-prev", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}
+	if _, err := rota.Stage(a, s.Home(a)); err != nil {
+		t.Fatal(err)
+	}
+	a.Token = rota.Token{ExpiresAt: 1}
+	a.Staged = "-"
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	s.Maintain(context.Background())
+	if got := homeHolds(t, s.Home(a)); got != "r-prev" {
+		t.Fatalf("the home holds %q", got)
+	}
+}
+
 // A home whose auth.json holds the account's own refresh token gives the
 // store what it lacks of that login: the access token of a record held as a
 // refresh token alone, the id_token of one stored before rota captured it.

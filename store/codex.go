@@ -90,7 +90,7 @@ func (s *Store) holdDue(a *rota.Account) error {
 	case a.Token.Access != "":
 		_, err := rota.Stage(a, home)
 		return err
-	case !a.StagedCurrent() && !s.heldByDaemon(a):
+	case a.Token.Refresh != "" && !a.StagedCurrent() && !s.heldByDaemon(a):
 		if err := os.Remove(filepath.Join(home, "auth.json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
