@@ -1030,9 +1030,11 @@ error: *— held by session api (0123456789abcdef)*.
 **Sending into a held session.** `rota send <session> "text"` types the text
 into a held session, and Enter 100 ms later, the way a person would: as a
 paste where the CLI has bracketed paste on. The session is named by its id,
-the start of one four characters or longer, or the name of a running one —
-an id it begins before a name, and two of either an error that names their
-ids. A run started with `--input` of that id is tried first, as it always
+the start of one four characters or longer, or the label, the name or the
+folder of a running one — an id it begins before a name, and two of either
+an error that names their ids. So the word `--detach` said, the folder for
+a session nobody labelled, goes on finding it once its CLI names the
+conversation; the title the CLI sets finds nothing. A run started with `--input` of that id is tried first, as it always
 was; a target with a path in it is never a run's. It waits until the CLI
 is ready for a message — idle, by Claude Code's own record of the session,
 or 1.5 seconds without output where there is none — for up to 30
@@ -2024,12 +2026,14 @@ is measured in.
 A held session — one the rota daemon runs in a holder process of its own,
 which outlives the daemon — adds `"held": true`; `state`, which is `live`,
 `ended`, or `interrupted` for a holder that went without recording an exit;
-`attachable`; `pid`, the holder's; `title`, the one the CLI set;
-`conversation`, the CLI's own session id when it reports one; `status`,
-which is `running`, `needs_you` while the CLI waits on a permission or a
-question, `quiet` after 30 seconds with no output, or `stopped`; and `name`,
-the first there is of the label, the title without its spinner, the CLI's
-own name for the conversation, and the folder. A held session is never
+`attachable`; `pid`, the holder's; `title`, the one the CLI set, without
+its spinner, which changes as the CLI works; `conversation`, the CLI's own
+session id when it reports one; `status`, which is `running`, `needs_you`
+while the CLI waits on a permission or a question, `quiet` after 30 seconds
+with no output, or `stopped`; and `name`, the first there is of the label,
+the CLI's own name for the conversation, and the folder — what its record
+calls it too, so `rota list --sessions` and `rota send` use the same name,
+and the title never changes it. A held session is never
 ended for being idle. `reachable` is whether the daemon's link to its
 holder is up; `conversation_cwd` is the folder the conversation is in,
 which for a worktree is not `cwd`; `resumable` is an interrupted session

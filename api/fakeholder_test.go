@@ -54,6 +54,7 @@ import (
 //	FAKE_HOLDER_MAJOR=<n>         speak protocol n alone, and record it
 //	FAKE_HOLDER_VERSION=<v>       the rota version meta.json names
 //	FAKE_HOLDER_CONVERSATION_CWD  the folder the conversation is in
+//	FAKE_HOLDER_CONVERSATION_NAME the name the CLI gave the conversation
 //	FAKE_HOLDER_RECORD=<path>     write down each input, resize, send and
 //	                              screen asked for there
 //	FAKE_HOLDER_SEND=waiting      answer a send that the session waits on its
@@ -172,7 +173,8 @@ func (f *fake) open(req *holdwire.Request) error {
 	f.meta = &holdwire.Meta{ID: req.ID, Name: req.Name, Kind: req.Kind, Account: req.Account,
 		Provider: "claude", HolderPID: os.Getpid(), HolderStart: start, BootID: boot,
 		Protocol: fakeMajor(), Version: version, Cwd: req.Cwd, Args: req.Args, Started: time.Now(),
-		Conversation: os.Getenv("FAKE_HOLDER_CONVERSATION"), ConversationCwd: os.Getenv("FAKE_HOLDER_CONVERSATION_CWD")}
+		Conversation: os.Getenv("FAKE_HOLDER_CONVERSATION"), ConversationCwd: os.Getenv("FAKE_HOLDER_CONVERSATION_CWD"),
+		ConversationName: os.Getenv("FAKE_HOLDER_CONVERSATION_NAME")}
 	return holdwire.WriteMeta(f.dir, f.meta)
 }
 
@@ -300,8 +302,9 @@ func (f *fake) unlink(conn *share.Conn) {
 
 func (f *fake) state() holdwire.StateMsg {
 	st := holdwire.StateMsg{Title: os.Getenv("FAKE_HOLDER_TITLE")}
-	if conv, wait := os.Getenv("FAKE_HOLDER_CONVERSATION"), os.Getenv("FAKE_HOLDER_WAITING"); conv != "" || wait != "" {
-		st.Registry = &holdwire.Registry{SessionID: conv, Status: "idle", WaitingFor: wait,
+	conv, wait, name := os.Getenv("FAKE_HOLDER_CONVERSATION"), os.Getenv("FAKE_HOLDER_WAITING"), os.Getenv("FAKE_HOLDER_CONVERSATION_NAME")
+	if conv != "" || wait != "" || name != "" {
+		st.Registry = &holdwire.Registry{SessionID: conv, Name: name, Status: "idle", WaitingFor: wait,
 			Cwd: os.Getenv("FAKE_HOLDER_CONVERSATION_CWD")}
 	}
 	return st
