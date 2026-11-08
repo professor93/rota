@@ -134,8 +134,10 @@ const (
 // found the account's current login gone from the home since — blanked there,
 // or behind a blanked keychain item — the times in decimal milliseconds (see
 // newest). seedFPKey is the fingerprint of the login rota last wrote into the
-// home's file on a platform with a keychain (see dropSeed). All of them belong
-// to the home, and are forgotten when the account is given another (MoveHome).
+// home's file on a platform with a keychain (see dropSeed). inItemKey is where
+// it remembers that the home's login was last found in its macOS keychain item
+// (noteItem, forgetItem). All of them belong to the home, and are forgotten when
+// the account is given another (MoveHome).
 const (
 	routeKey        = "route"
 	routeStored     = "stored"
@@ -145,6 +147,7 @@ const (
 	homeSyncedFPKey = "home_synced_fp"
 	homeLostKey     = "home_lost_at"
 	seedFPKey       = "seed_fp"
+	inItemKey       = "login_in_item"
 )
 
 // syncedAgain is how old the record of the last look in sync may grow before a
@@ -200,7 +203,8 @@ var errItemChanged = errors.New("the keychain item changed while rota was writin
 
 // dropItemAsJudged deletes the home's keychain item, after reading it once more
 // and finding it is still what rota judged; an item that has gone needs no delete.
-func dropItemAsJudged(svc string, judged []byte) error {
+// Once rota has deleted it, the home's login lives in the file (forgetItem).
+func (h *claudeHome) dropItemAsJudged(svc string, judged []byte) error {
 	ctx, cancel := keychainContext()
 	defer cancel()
 	now, found, err := claudecode.Read(ctx, svc)
@@ -212,7 +216,11 @@ func dropItemAsJudged(svc string, judged []byte) error {
 	case !bytes.Equal(now, judged):
 		return errItemChanged
 	}
-	return claudecode.Delete(ctx, svc)
+	if err := claudecode.Delete(ctx, svc); err != nil {
+		return err
+	}
+	h.forgetItem()
+	return nil
 }
 
 // claudeHome is one look at a claude account's home, for the length of one
@@ -691,7 +699,7 @@ func (h *claudeHome) uncover() error {
 	svc, _ := h.service()
 	judged := h.blankItem
 	err = writeAtomicThen(filepath.Join(h.home, claudeCredentials), merged, func() error {
-		return dropItemAsJudged(svc, judged)
+		return h.dropItemAsJudged(svc, judged)
 	})
 	if err != nil {
 		return fmt.Errorf("%s: could not take the keychain item Claude Code blanked out of the way of its login: %w", h.a, err)
@@ -1041,6 +1049,13 @@ func fileIsNewer(file, item []byte) bool {
 // read is the home as adoption sees it: its files, with the store answered
 // by readStore. ok is false when the keychain could not be read, which puts
 // the home in the hold.
+//
+// itemGone marks a read whose store is the file only because the keychain item
+// was not there, where the home's login was last found in the item and
+// something runs in the home: an item being rewritten may read as none, and the
+// file beside it then says nothing about what Claude Code holds (see synced).
+// In a quiet home nothing can be rewriting the item. A read that finds the item
+// records that the login lives there (noteItem).
 func (h *claudeHome) read() (fsys storeFS, ok bool) {
 	raw, _, err := h.readStore()
 	if errors.Is(err, errKeychain) {
@@ -1048,8 +1063,25 @@ func (h *claudeHome) read() (fsys storeFS, ok bool) {
 			"or keep a long-lived token for this account (`rota login --long`)", err)
 		return storeFS{}, false
 	}
-	return storeFS{FS: os.DirFS(h.home), store: raw, err: err}, true
+	_, kept := h.service()
+	gone := kept && h.item == nil && h.a.Extra[inItemKey] != "" && !h.quiet()
+	h.noteItem()
+	return storeFS{FS: os.DirFS(h.home), store: raw, err: err, itemGone: gone}, true
 }
+
+// noteItem records that the home's login lives in its keychain item, once a
+// read has found one. Only rota taking the item away says it has moved into the
+// file (forgetItem): a read that finds none may have been made while Claude
+// Code rewrote it.
+func (h *claudeHome) noteItem() {
+	if h.item != nil {
+		setExtra(h.a, inItemKey, "1")
+	}
+}
+
+// forgetItem records that rota itself took the home's keychain item away, so
+// the home's login lives in the file now.
+func (h *claudeHome) forgetItem() { delete(h.a.Extra, inItemKey) }
 
 // adopt reads the home's login into the account, and works out what the
 // home holds. A new login found there is settled by asking the provider
@@ -1131,11 +1163,20 @@ func (h *claudeHome) clearedOwn(fsys storeFS) bool {
 // (see newest). A record of the same token less than syncedAgain old is left as
 // it is. A file read beside a blanked keychain item is not the store Claude Code
 // reads, and shows nothing — unless this look has just taken the new login in it
-// (taken), which rota then holds exactly as the home does.
+// (taken), which rota then holds exactly as the home does. Nor does a file read
+// only because the item was not there, where the login was last found in it
+// (itemGone), nor a read made while somebody else holds Claude Code's refresh
+// lock (refreshing): between a refresh's request and its write the store still
+// shows the token just spent.
+//
+// What this lets through, knowingly: rota writes its file and removes the item;
+// Claude Code then moves the login into a new item rota never sees; a read then
+// finds no item, twice; and the home is blanked within the window. The file
+// then reads as the home's store, as it was when rota wrote it.
 func (h *claudeHome) synced(fsys storeFS, taken bool) {
 	l, ok := storedLogin(fsys.store)
-	if !ok || l.Refresh == "" || (h.blankItem != nil && !taken) || h.hold != "" || !h.a.StagedCurrent() ||
-		fingerprint(l.Refresh) != h.a.Staged {
+	if !ok || l.Refresh == "" || (h.blankItem != nil && !taken) || fsys.itemGone || h.hold != "" ||
+		!h.a.StagedCurrent() || fingerprint(l.Refresh) != h.a.Staged || h.refreshing() {
 		return
 	}
 	delete(h.a.Extra, homeLostKey)
@@ -1146,6 +1187,17 @@ func (h *claudeHome) synced(fsys storeFS, taken bool) {
 	}
 	setExtra(h.a, homeSyncedKey, strconv.FormatInt(rota.NowMS(), 10))
 	setExtra(h.a, homeSyncedFPKey, h.a.Staged)
+}
+
+// refreshing reports whether somebody other than this look holds Claude Code's
+// refresh lock in the home: a lock that is there, not this look's own (locked),
+// and not one Claude Code itself would take for a dead holder's.
+func (h *claudeHome) refreshing() bool {
+	if h.locked {
+		return false
+	}
+	fi, err := os.Stat(filepath.Join(h.home, claudeRefreshLock))
+	return err == nil && time.Since(fi.ModTime()) <= refreshLockStale
 }
 
 // lost records when a look first found the account's current login gone from
@@ -1251,6 +1303,9 @@ type storeFS struct {
 	fs.FS
 	store []byte
 	err   error
+	// itemGone says the store is the file only because the keychain item was
+	// not there, where the login was last found in it (see read).
+	itemGone bool
 }
 
 func (f storeFS) ReadFile(name string) ([]byte, error) {
@@ -1530,7 +1585,7 @@ func (h *claudeHome) dropBlank() error {
 		if !named || !inKeychain {
 			return nil
 		}
-		return dropItemAsJudged(svc, judged)
+		return h.dropItemAsJudged(svc, judged)
 	})
 }
 
@@ -1767,7 +1822,7 @@ func (h *claudeHome) seed(files []rota.StagedFile) error {
 			if !named || !inKeychain {
 				return nil
 			}
-			if err := dropItemAsJudged(svc, judged); err != nil {
+			if err := h.dropItemAsJudged(svc, judged); err != nil {
 				return fmt.Errorf("%s: could not remove the keychain item %q before writing its login: %w", h.a, svc, err)
 			}
 			return nil
@@ -1827,7 +1882,9 @@ func (h *claudeHome) tidy() {
 			}
 			return
 		}
-		_ = claudecode.Delete(ctx, svc)
+		if claudecode.Delete(ctx, svc) == nil {
+			h.forgetItem()
+		}
 		return
 	}
 	_ = os.Remove(path)
@@ -2192,6 +2249,7 @@ func (h *claudeHome) dropOwnLogin() error {
 		if err != nil {
 			return fmt.Errorf("%s: could not remove the keychain item %q that holds its login: %w", h.a, svc, err)
 		}
+		h.forgetItem()
 	}
 	if err := os.Remove(filepath.Join(h.home, claudeCredentials)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -2287,7 +2345,7 @@ func (s *Store) MoveHome(ctx context.Context, a *rota.Account, configDir string)
 		}
 	}
 	a.StagedSuperseded()
-	for _, k := range []string{routeKey, seedOwedKey, homeSyncedKey, homeSyncedFPKey, homeLostKey, seedFPKey} {
+	for _, k := range []string{routeKey, seedOwedKey, homeSyncedKey, homeSyncedFPKey, homeLostKey, seedFPKey, inItemKey} {
 		delete(a.Extra, k)
 	}
 	a.ConfigDir = configDir

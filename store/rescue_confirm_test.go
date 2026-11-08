@@ -852,6 +852,183 @@ func TestRotasSeedFileGoesUnderTheLockMendHolds(t *testing.T) {
 	}
 }
 
+// A look made while Claude Code holds its refresh lock — between its request
+// and its write — finds the store still holding the token it has just spent,
+// so it records no look in sync. Were it to, a blank a few minutes later would
+// have rota present that spent token: here Claude Code is cut short after its
+// request, the home is blanked, and rota presents nothing, while the process
+// that got the new token goes on working.
+func TestALookWhileClaudeCodeRefreshesRecordsNoSync(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := newLineageWorld(t, m.keychain)
+			w.cc.start()
+			lineageLooks()[1].do(t, w) // in sync on R0
+			stamp := w.a.Extra[homeSyncedKey]
+			w.clock.pass(7*time.Hour + 56*time.Minute)
+			lock := filepath.Join(w.cc.home, claudeRefreshLock)
+			if err := os.Mkdir(lock, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if st, _ := w.p.present("claude-code daemon", "R0"); st != 200 { // its request: R0 spent, R1 issued
+				t.Fatalf("setup: http %d", st)
+			}
+			lineageLooks()[1].do(t, w) // the store still says R0
+			if w.a.Extra[homeSyncedKey] != stamp {
+				t.Fatalf("no look in sync recorded while Claude Code refreshes: %q, was %q", w.a.Extra[homeSyncedKey], stamp)
+			}
+			w.cc.write(clearedLogin) // cut short: never writes R1, and the home is blanked
+			if err := os.Remove(lock); err != nil {
+				t.Fatal(err)
+			}
+			w.clock.pass(5 * time.Minute)
+			lineageLooks()[1].do(t, w)
+			nothingPresented(t, w)
+			deadForAnOlderCopy(t, w)
+			if st, _ := w.p.present("claude-code holding R1 in memory", "R1"); st != 200 {
+				t.Fatalf("the lineage lives: http %d", st)
+			}
+		})
+	}
+}
+
+// Only somebody else's refresh lock stops the record: one this look holds
+// itself (mend's) does not, nor one Claude Code would take for a dead holder's.
+func TestOnlySomebodyElsesLiveRefreshLockStopsTheRecord(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	clock := useLineageClock(t)
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	home := s.Home(a)
+	writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000"))
+	a.StagedWritten()
+	lock, ok := takeRefreshLock(home)
+	if !ok {
+		t.Fatal("the lock")
+	}
+	defer lock.release()
+	h := s.claudeHome(a, false)
+	stamped := func() bool {
+		t.Helper()
+		clock.pass(2 * syncedAgain)
+		before := a.Extra[homeSyncedKey]
+		if err := h.adopt(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		return a.Extra[homeSyncedKey] != before
+	}
+	if stamped() {
+		t.Fatal("somebody else's lock: no record")
+	}
+	h.locked = true
+	if !stamped() {
+		t.Fatal("this look's own lock: recorded")
+	}
+	h.locked = false
+	lock.release()
+	if err := os.Mkdir(filepath.Join(home, claudeRefreshLock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * refreshLockStale)
+	if err := os.Chtimes(filepath.Join(home, claudeRefreshLock), old, old); err != nil {
+		t.Fatal(err)
+	}
+	if !stamped() {
+		t.Fatal("a dead holder's lock: recorded")
+	}
+}
+
+// A file read only because the keychain item was not there, where rota last
+// found the home's login in the item and something runs in the home, is no
+// proof of what Claude Code holds — the item may be being rewritten — so it
+// records no look in sync. In a quiet home an item that is not there is gone,
+// and where rota never found the login in an item, or took the item away
+// itself, the file is the home's store: those look in sync as ever.
+func TestAFileReadForAMissingItemRecordsNoSync(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	for _, c := range []struct {
+		what     string
+		inItem   bool // the login was found in the item at the first look
+		alive    bool
+		recorded bool // the second look, with no item, records a look in sync
+	}{
+		{"last found in the item, something runs there", true, true, false},
+		{"last found in the item, a quiet home", true, false, true},
+		{"never found in an item", false, true, true},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			clock := useLineageClock(t)
+			k := fakeKeychain(t)
+			s := openTemp(t)
+			a := livingClaude(s, "u1")
+			home := s.Home(a)
+			svc := service(t, home)
+			login := storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000")
+			writeFile(t, filepath.Join(home, ".credentials.json"), login)
+			a.StagedWritten()
+			if c.inItem {
+				k.items[svc] = login
+			}
+			if c.alive {
+				alive(t, home, "sessions/1.json", os.Getpid())
+			}
+			looked(t, s, a)
+			first := a.Extra[homeSyncedKey]
+			if first == "" || (a.Extra[inItemKey] != "") != c.inItem {
+				t.Fatalf("the first look is in sync, and knows where the login was: %q %q", first, a.Extra[inItemKey])
+			}
+			clock.pass(2 * syncedAgain)
+			delete(k.items, svc)
+			looked(t, s, a)
+			if recorded := a.Extra[homeSyncedKey] != first; recorded != c.recorded {
+				t.Fatalf("recorded=%v: %q, was %q", recorded, a.Extra[homeSyncedKey], first)
+			}
+		})
+	}
+	t.Run("rota took the item away itself", func(t *testing.T) {
+		clock := useLineageClock(t)
+		k := fakeKeychain(t)
+		fakeAnthropic(t)
+		s := openTemp(t)
+		a := livingClaude(s, "u1")
+		home := s.Home(a)
+		svc := service(t, home)
+		k.items[svc] = storeLogin("A-old", "R-old", later(-time.Hour), "1999999999000")
+		if _, err := launchEnv(t, s, a); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := k.item(svc); ok || a.Extra[inItemKey] != "" {
+			t.Fatalf("the launch wrote the login in and took the item away, and knows it: %v %q", ok, a.Extra[inItemKey])
+		}
+		alive(t, home, "sessions/1.json", os.Getpid())
+		clock.pass(2 * syncedAgain)
+		before := a.Extra[homeSyncedKey]
+		looked(t, s, a)
+		if a.Extra[homeSyncedKey] == before || a.Extra[homeSyncedFPKey] != fingerprint("R-u1") {
+			t.Fatalf("its own file is the home's store: %q, was %q", a.Extra[homeSyncedKey], before)
+		}
+	})
+	t.Run("rota tidied an older item away", func(t *testing.T) {
+		k := fakeKeychain(t)
+		fakeAnthropic(t)
+		s := openTemp(t)
+		a := livingClaude(s, "u1")
+		home := s.Home(a)
+		svc := service(t, home)
+		a.StagedWritten()
+		writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000"))
+		k.items[svc] = storeLogin("A-old", "R-old", later(-time.Hour), "1999999999000")
+		if _, err := launchEnv(t, s, a); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := k.item(svc); ok || a.Extra[inItemKey] != "" {
+			t.Fatalf("the older item is gone, and the login is known to be in the file: %v %q", ok, a.Extra[inItemKey])
+		}
+	})
+}
+
 // The store's fingerprint is the one lib records in Staged, or nothing a look
 // compares would ever match.
 func TestTheFingerprintIsTheOneStagedRecords(t *testing.T) {
