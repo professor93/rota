@@ -306,6 +306,41 @@ func TestWithRemoteControlOnTheAccountsOwnFileIsNotReported(t *testing.T) {
 	}
 }
 
+// A setting that could not be saved is not on: ReadyRemoteControl turns it
+// back off in memory, so a store that lives on, a daemon's, never claims
+// Remote Control the file does not record.
+func TestReadyRemoteControlThatCannotBeSavedLeavesItOff(t *testing.T) {
+	if os.Getuid() == 0 || runtime.GOOS == "windows" {
+		t.Skip("needs an unwritable directory")
+	}
+	personWorld(t)
+	dir := t.TempDir()
+	until := time.Now().Add(time.Hour).UnixMilli()
+	writeAccounts(t, dir, `{"accounts":[
+		{"id":1,"provider":"claude","uuid":"c1","token":{"accessToken":"tok","refreshToken":"r","expiresAt":`+itoa(int(until))+`}}],"nextId":2}`)
+	s, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	before, err := os.ReadFile(filepath.Join(dir, "accounts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	a := s.Find(1)
+	on, err := s.ReadyRemoteControl(a)
+	if on || err == nil || a.RemoteControl {
+		t.Fatalf("a setting that could not be saved: turned on %v, err %v, in memory %v; want it off and the error", on, err, a.RemoteControl)
+	}
+	if after, _ := os.ReadFile(filepath.Join(dir, "accounts.json")); string(after) != string(before) {
+		t.Fatalf("accounts.json changed:\n%s", after)
+	}
+}
+
 // ReadyRemoteControl is the one place a session with Remote Control is
 // readied, for the command line and the daemon alike. Another provider's
 // account is refused and left as it was. A claude account has the setting
