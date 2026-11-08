@@ -16,14 +16,14 @@ import (
 	"time"
 )
 
-// These are about POST /v1/terminals/{id}/send: a message typed into a held
+// These are about POST /v1/terminals/{id}/messages: a message typed into a held
 // session the way a person would, once the session is ready for one, and
 // under the same keyboard rules as a person typing.
 
 // send asks for one send with a bearer token, and reads the answer.
 func (p *terms) send(token, id string, body map[string]any) (int, map[string]any) {
 	p.tt.Helper()
-	resp, raw := p.as(token, "POST", "/v1/terminals/"+id+"/send", body)
+	resp, raw := p.as(token, "POST", "/v1/terminals/"+id+"/messages", body)
 	return resp.StatusCode, answerOf(p.tt, raw)
 }
 
@@ -31,7 +31,7 @@ func (p *terms) send(token, id string, body map[string]any) (int, map[string]any
 func (p *terms) sendAs(cookie, id string, body map[string]any) (int, map[string]any) {
 	p.tt.Helper()
 	raw, _ := json.Marshal(body)
-	req, _ := http.NewRequest("POST", p.srv.URL+"/v1/terminals/"+id+"/send", bytes.NewReader(raw))
+	req, _ := http.NewRequest("POST", p.srv.URL+"/v1/terminals/"+id+"/messages", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Origin", p.srv.URL)
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: cookie})
@@ -116,10 +116,14 @@ func TestSendTypesUnderTheKeyboardRules(t *testing.T) {
 	if code, doc := l.send(l.alice, local, map[string]any{"text": "x"}); code != 409 || doc["reason"] != "not_held" {
 		t.Fatalf("a send to a terminal that is not held answered %d %v", code, doc)
 	}
-	if resp, _ := l.as(l.alice, "POST", "/v1/terminals/nope/send", map[string]any{"text": "x"}); resp.StatusCode != 404 {
+	if resp, _ := l.as(l.alice, "POST", "/v1/terminals/nope/messages", map[string]any{"text": "x"}); resp.StatusCode != 404 {
 		t.Fatalf("a send to nobody answered %d", resp.StatusCode)
 	}
-	if resp, _ := p.as(p.alice, "POST", "/v1/terminals/"+id+"/send", map[string]any{"txt": "x"}); resp.StatusCode != 400 {
+	// It is messages, as a run's is: there is no second name for it.
+	if resp, _ := p.as(p.alice, "POST", "/v1/terminals/"+id+"/send", map[string]any{"text": "x"}); resp.StatusCode != 404 {
+		t.Fatalf("POST /v1/terminals/{id}/send answered %d; the route is messages", resp.StatusCode)
+	}
+	if resp, _ := p.as(p.alice, "POST", "/v1/terminals/"+id+"/messages", map[string]any{"txt": "x"}); resp.StatusCode != 400 {
 		t.Fatalf("a send with a misspelled field answered %d", resp.StatusCode)
 	}
 	// Enter alone may approve something, so a send with nothing to type is
@@ -135,7 +139,7 @@ func TestSendTypesUnderTheKeyboardRules(t *testing.T) {
 			t.Fatalf("a refused send reached the holder: %.40q", line)
 		}
 	}
-	if resp, _ := p.as(p.watch, "POST", "/v1/terminals/"+id+"/send", map[string]any{"text": "x"}); resp.StatusCode != 403 {
+	if resp, _ := p.as(p.watch, "POST", "/v1/terminals/"+id+"/messages", map[string]any{"text": "x"}); resp.StatusCode != 403 {
 		t.Fatalf("a watcher's send answered %d", resp.StatusCode)
 	}
 }
@@ -264,7 +268,7 @@ func becomeReady(t *testing.T, ready string) {
 // set, else by the bearer token.
 func (p *terms) sendLater(id, cookie, token, text string) <-chan int {
 	body, _ := json.Marshal(map[string]any{"text": text})
-	req, _ := http.NewRequest("POST", p.srv.URL+"/v1/terminals/"+id+"/send", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", p.srv.URL+"/v1/terminals/"+id+"/messages", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	if cookie != "" {
 		req.Header.Set("Origin", p.srv.URL)

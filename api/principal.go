@@ -118,7 +118,7 @@ var roleFor = map[string]Role{
 	"POST /v1/terminals":        RoleControl,
 	"DELETE /v1/terminals/{id}": RoleControl,
 	// Typing a message into a held session is typing.
-	"POST /v1/terminals/{id}/send": RoleControl,
+	"POST /v1/terminals/{id}/messages": RoleControl,
 	// The sockets. Attaching is reading a run; starting one is running it.
 	"GET /v1/runs/{id}/ws":     RoleWatch,
 	"GET /v1/accounts/{id}/ws": RoleControl,
