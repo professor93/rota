@@ -1976,7 +1976,8 @@ server runs itself does not have:
   A `resize` without `"fit":true` is ignored, and said once per connection
   as `this session's size changes only when a viewer asks to fit it`; one
   with it is the holder's, as ever, at most 1000×1000, with a 0 meaning 80
-  columns or 24 rows.
+  columns or 24 rows, and everyone is told the new size once the session
+  has taken it.
 - **A viewer's terminal never answers twice.** What a connection sends first
   has its own terminal's answers taken out — to the colour, cursor and
   device queries it sees replayed, which the holder answered when the CLI
