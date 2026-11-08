@@ -2546,12 +2546,15 @@ Code blanked: see *Stranded* and *Blanked*, below.
   home's login was last found in its keychain item, a keychain read that
   says there is no item is asked once more before the file is read in its
   place; and while anything runs in the home, such a file read changes
-  nothing rota believes about the home, and no login in that file is
-  settled from it: an item being rewritten can read as none, and the file
-  beside it is then an older login. A newer login of the account's own in
-  that file is still taken. In a quiet home nothing can be rewriting the
-  item, so one that is not there is gone, and from then on the file is the
-  home's store.
+  nothing rota believes about the home — it starts no rescue, and a blank in
+  that file kills nothing — and no login in that file is settled from it: an
+  item being rewritten can read as none, and the file beside it is then an
+  older login. A newer login of the account's own in that file is still
+  taken. In a quiet home nothing can be rewriting the item, so one that is
+  not there is gone, and from then on the file is the home's store; and the
+  same holds for a read rota makes under Claude Code's refresh lock (*The
+  refresh lock*), since Claude Code rewrites the item only while it holds
+  that lock, and in place.
   A login that expires before the account's own token is behind, and so is
   the one rota wrote before a refresh of its own, whatever end it carries —
   which rota goes on remembering as its own write, however often the home is
@@ -2566,10 +2569,12 @@ Code blanked: see *Stranded* and *Blanked*, below.
   else's is not taken, the account's own tokens stay as they were, and rota
   says so, naming both. It is not asked about again — rotated, or with its
   access token lapsed, and in the home of an account marked dead too — and
-  the account's own login goes in over it once nothing runs there. A login
-  Claude Code records as this account's is never mistaken for the refused
-  one; where Claude Code records nobody, a `/login` of this account made
-  within a minute of it is, and is written over with it. After `rota login`,
+  the account's own login goes in over it once nothing runs there; an
+  account marked dead has none to put there. A login Claude Code records as
+  this account's is never mistaken for the refused one; where Claude Code
+  records nobody, a `/login` of this account made within a minute of it is:
+  the account's own login is written over it, and an account marked dead,
+  which has none to write, stays dead until `rota login`. After `rota login`,
   until the new login is in the home, the ends decide what the home holds,
   because a login ends a fixed time after it was signed in: one ending more
   than a minute after the new login's, or in the same minute but recorded as
@@ -2691,7 +2696,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
   look that confirms that login keeps and says the refusal as if it had come
   at once. Should the account die meanwhile of Claude Code clearing its
   login, its reason ends `(rota had presented a replaced token at <HH:MM>
-  UTC)`. A store whose lock a run has released — the
+  UTC)`. A login past its end is presented to nobody (see
+  [Token lifetimes](#token-lifetimes)), so nothing of this is kept or said
+  for it. A store whose lock a run has released — the
   reading `--with quota` takes after a run — rotates nothing at all, and does
   not so much as try an account's claim. Before it asks, it reads the store's
   reading and wait again, and afterwards writes its reading, or the wait the
@@ -2749,7 +2756,13 @@ Code blanked: see *Stranded* and *Blanked*, below.
   request and its write the store still shows the token it has just spent —
   nor when, with something running in the home, it reads the file only
   because the keychain item was not there although rota last found the login
-  in the item: an item being rewritten can read as none. A watched home
+  in the item: an item being rewritten can read as none, so such a read
+  records no blank either. Where rota last found the login in its own file —
+  its write took the item away — one read finding no item is taken as it
+  comes: a Claude Code that has since moved the login into an item no look
+  has seen yet, and that is blanked within the ten minutes after such a read,
+  has rota's own file put back in front of it. That case, too, is let
+  through knowingly. A watched home
   (*Watched*) is looked at every five minutes. Otherwise rota presents nothing
   and the account is dead:
   `Claude Code's refresh was refused and rota's copy is older than the home's
@@ -3263,7 +3276,9 @@ refreshes' replies and the home's. It never moves later until a new sign-in,
 never goes into the home. Once the end in effect has passed, nothing of
 rota's presents the refresh token: no listing, rescue, maintenance, launch or
 HTTP request. An access token still good runs until it expires, and the first
-refresh due after that leaves the account `re-auth needed` with this reason:
+refresh due after that — or a rescue, which would present the token at once —
+leaves the account `re-auth needed` with this reason, in place of any other a
+look would give:
 
 ```
 its login ended on 2026-11-06 23:57 UTC: a Claude login lasts 30 days from sign-in; rota login 13 makes a new one

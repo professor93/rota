@@ -1346,9 +1346,11 @@ func (h *claudeHome) clearedOwn(fsys storeFS) bool {
 // store still shows the token just spent.
 //
 // What this lets through, knowingly: rota writes its file and removes the item;
-// Claude Code then moves the login into a new item rota never sees; a read then
-// finds no item, twice; and the home is blanked within the window. The file
-// then reads as the home's store, as it was when rota wrote it.
+// Claude Code then moves the login into a new item rota never sees; a single
+// read then finds no item — rota last found the login in its own file, so the
+// item is not asked for twice (readItem) — and the home is blanked within the
+// window. The file then reads as the home's store, as it was when rota wrote
+// it.
 func (h *claudeHome) synced(fsys storeFS, taken bool) {
 	l, ok := storedLogin(fsys.store)
 	if !ok || l.Refresh == "" || (h.blankItem != nil && !taken) || fsys.itemGone || h.hold != "" ||
