@@ -695,7 +695,10 @@ func (s *Store) Removable(a *rota.Account) error {
 				rota.ErrBusy, a, strings.Join(open, ", "))
 		}
 		if _, daemon := daemonAlive(home); daemon {
-			return nil // what holds the claim may be the daemon, which Remove stops
+			// What holds the claim may be the daemon, which Remove stops: a
+			// claim kept across a handover's exec, where no holder could be
+			// started for it, is held by what the CLI starts as well.
+			return nil
 		}
 	}
 	if s.claimed(a) {

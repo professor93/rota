@@ -3,12 +3,16 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -20,15 +24,17 @@ import (
 //     because the exec did not happen. Its end closes, with nothing said,
 //     when the exec does, since the run's copy is close-on-exec — and when
 //     the run dies; either way the holder goes on watching the pid.
-//   - fd 4, the answer: a pipe to the run. "ready\n" once the holder has the
-//     claims and is watching the pid. Its end closes when the holder has let
-//     go, which is what a run whose exec failed waits for.
+//   - fd 4, the answer: a pipe to the run, and one line on it. "ready <pid>"
+//     once the holder, pid, has the claims and is watching the pid it was
+//     given; "none" where nothing here can watch it, and the run keeps the
+//     claims across its exec without a word; "fail <why>" for anything else,
+//     which the run says. Its end closes when the holder has let go, which is
+//     what a run whose exec failed waits for.
 //   - fd 5 on, the claims, as many as the count says.
 const (
 	wordFD   = 3
 	answerFD = 4
 	claimFD  = 5
-	ready    = "ready\n"
 )
 
 // holderWait is how long a run waits for its holder to say it is ready, and,
@@ -79,21 +85,41 @@ func holdInBackground(files []*os.File) (claimHolder, error) {
 		return nil, fmt.Errorf("serve claim: %w", err)
 	}
 	_ = answerR.SetReadDeadline(deadline)
-	got := make([]byte, len(ready))
-	if _, err := io.ReadFull(answerR, got); err != nil || string(got) != ready {
+	line, err := bufio.NewReaderSize(answerR, 512).ReadSlice('\n')
+	if err != nil {
 		h.close()
-		if err == nil {
-			err = fmt.Errorf("it said %q", got)
-		}
 		return nil, fmt.Errorf("the holder never said it was ready: %w", err)
 	}
+	if h.pid, err = heard(string(line)); err != nil {
+		h.close()
+		return nil, err
+	}
 	return h, nil
+}
+
+// heard reads the holder's answer: its pid when it is ready, errNoHolder when
+// nothing here can watch the run, or what went wrong.
+func heard(line string) (pid int, err error) {
+	said := strings.TrimSuffix(line, "\n")
+	word, rest, _ := strings.Cut(said, " ")
+	switch {
+	case word == "ready":
+		if pid, err := strconv.Atoi(rest); err == nil && pid > 0 {
+			return pid, nil
+		}
+	case said == "none":
+		return 0, errNoHolder
+	case word == "fail" && rest != "":
+		return 0, errors.New(rest)
+	}
+	return 0, fmt.Errorf("the holder said %q", said)
 }
 
 // holder is the run's side of a holder that is ready.
 type holder struct {
 	word   *os.File
 	answer *os.File
+	pid    int
 	once   sync.Once
 }
 
@@ -143,15 +169,26 @@ func holdLent(pid, n int) error {
 		}
 		return cmd.Process.Release()
 	}
+	// Only the CLI's exit lets go, or the run saying so: a signal sent to
+	// every process called rota — `pkill rota` to stop a server — must not
+	// free a running session's account. It has no terminal to hang up, and
+	// at a logout or a shutdown the CLI it holds for ends as well. SIGKILL
+	// still ends it, and lets go early.
+	signal.Ignore(syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT)
 	for _, f := range files {
 		syscall.CloseOnExec(int(f.Fd()))
 	}
 	word, answer, claims := files[0], files[1], files[2:]
 	wait, err := exitOf(pid)
 	if err != nil {
-		return err
+		say := "fail " + strings.Join(strings.Fields(err.Error()), " ")
+		if errors.Is(err, errNoHolder) {
+			say = "none"
+		}
+		_, _ = io.WriteString(answer, say+"\n")
+		return nil
 	}
-	if _, err := answer.Write([]byte(ready)); err != nil {
+	if _, err := fmt.Fprintf(answer, "ready %d\n", os.Getpid()); err != nil {
 		// The run stopped waiting and kept its claims across the exec
 		// itself, or has gone: nobody needs these from here.
 		return nil

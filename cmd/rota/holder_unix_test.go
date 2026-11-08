@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -256,6 +257,175 @@ func TestServeClaimTakesAPidAndACount(t *testing.T) {
 	for _, args := range [][]string{{"serve", "claim"}, {"serve", "claim", "1"}, {"serve", "claim", "x", "1"}, {"serve", "claim", "1", "0"}, {"serve", "claim", "1", "1", "2"}} {
 		if _, errOut, code := call(t, args...); code != 2 || !strings.Contains(errOut, "serve claim") {
 			t.Fatalf("%v: %d %q", args, code, errOut)
+		}
+	}
+}
+
+// lend takes the codex account's claim in this process, lends it to a real
+// holder watching this process, and lets go of this process's own copy: the
+// holder alone holds it then.
+func lend(t *testing.T, lock string) *holder {
+	t.Helper()
+	s, err := store.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	release, ok := s.Hold(s.Find(1))
+	_ = s.Close()
+	if !ok {
+		t.Fatal("the account was claimed already")
+	}
+	defer release()
+	var files []*os.File
+	for _, f := range store.ClaimFiles() {
+		if f.Name() == lock {
+			files = append(files, f)
+		}
+	}
+	got, err := holdInBackground(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := got.(*holder)
+	t.Cleanup(func() { _ = syscall.Kill(h.pid, syscall.SIGKILL); h.close() })
+	return h
+}
+
+// A holder lets go when the CLI it holds for exits, or when the run says so,
+// and for nothing else short of SIGKILL: the signals that ask a process to
+// end — what `pkill rota` sends to stop a server — leave every running
+// session's account claimed. SIGKILL frees it early, as it did the CLI that
+// held it before.
+func TestOnlySIGKILLEndsAHolderEarly(t *testing.T) {
+	lock := seedCodex(t)
+	t.Setenv("ROTA_AS_RUN", "1")
+	h := lend(t, lock)
+	if !inUse(t) {
+		t.Fatal("the holder holds the claim")
+	}
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP, syscall.SIGQUIT} {
+		if err := syscall.Kill(h.pid, sig); err != nil {
+			t.Fatalf("%v: %v", sig, err)
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+	if !proc.Alive(h.pid) || !inUse(t) {
+		t.Fatal("asked to end, the holder goes on holding the claim")
+	}
+	h.letGo()
+	if inUse(t) {
+		t.Fatal("told to by the run, it has let go")
+	}
+
+	h = lend(t, lock)
+	if err := syscall.Kill(h.pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	within(t, "SIGKILL ends the holder, and the claim with it", 10*time.Second, func() bool { return !inUse(t) })
+}
+
+// A holder typed by hand, without what a run lends it at fds 3 on — two
+// pipes and the claims — refuses to run.
+func TestAHolderLentNothingRefuses(t *testing.T) {
+	t.Setenv("ROTA_HOME", t.TempDir())
+	plain := make([]*os.File, 3)
+	for i := range plain {
+		f, err := os.CreateTemp(t.TempDir(), "plain")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		plain[i] = f
+	}
+	for _, c := range []struct {
+		what  string
+		extra []*os.File
+	}{{"nothing at all", nil}, {"files where the pipes go", plain}} {
+		cmd := exec.Command(os.Args[0], "serve", "claim", strconv.Itoa(os.Getpid()), "1")
+		cmd.Env = append(os.Environ(), "ROTA_AS_RUN=1")
+		cmd.ExtraFiles = c.extra
+		out, err := cmd.CombinedOutput()
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) || ee.ExitCode() != 2 || !strings.Contains(string(out), "serve claim is internal") {
+			t.Fatalf("%s: %v %q", c.what, err, out)
+		}
+	}
+}
+
+// A claude account's claim is shared, and goes to a holder the same way:
+// a second run of it starts while the first runs, and once the first CLI
+// has exited the account is free, although what it left running is not.
+func TestAFinishedClaudeSessionLeavesItsAccountFree(t *testing.T) {
+	seedLiving(t, "")
+	bin, tmp := t.TempDir(), t.TempDir()
+	daemonUp, cliUp := filepath.Join(tmp, "daemon.pid"), filepath.Join(tmp, "cli.pid")
+	daemon := fakecli.Install(t, bin, "claude-daemon", fakecli.Spec{KeepStdin: true, Sleep: "60s", Ready: daemonUp})
+	fakecli.Install(t, bin, "claude", fakecli.Spec{
+		Detach: daemon, KeepStdin: true, Sleep: "60s", Ready: cliUp,
+		Term: "exit", TermTouch: filepath.Join(tmp, "cli.done"),
+	})
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, err := os.Create(filepath.Join(tmp, "out"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	cmd := exec.Command(os.Args[0], "run", "1")
+	cmd.Env = append(os.Environ(), "ROTA_AS_RUN=1")
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	cli := fakecli.WaitReady(t, cliUp)
+	daemonPID := fakecli.WaitReady(t, daemonUp)
+	t.Cleanup(func() { _ = syscall.Kill(daemonPID, syscall.SIGKILL) })
+	if cli != cmd.Process.Pid {
+		t.Fatalf("rota became the CLI, keeping its pid: rota %d, the CLI %d", cmd.Process.Pid, cli)
+	}
+	if !inUse(t) {
+		t.Fatal("the account is claimed while the CLI runs")
+	}
+	argv := handover(t)
+	if _, errOut, code := call(t, "run", "1"); code != 0 || len(*argv) == 0 {
+		t.Fatalf("a second run of a claude account starts while the first runs: %d %q", code, errOut)
+	}
+	if err := syscall.Kill(cli, syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		raw, _ := os.ReadFile(out.Name())
+		t.Fatalf("the CLI exits as it was asked to: %v\n%s", err, raw)
+	}
+	within(t, "the account is free once the CLI has exited", 10*time.Second, func() bool { return !inUse(t) })
+	if !proc.Alive(daemonPID) {
+		t.Fatal("while what it left behind is still running")
+	}
+}
+
+// What a holder answers is read for its pid, for a holder that cannot be
+// had here, which is no failure, or for why it failed.
+func TestTheHoldersAnswerIsRead(t *testing.T) {
+	for _, c := range []struct {
+		said string
+		pid  int
+		none bool
+		why  string
+	}{
+		{said: "ready 4242\n", pid: 4242},
+		{said: "none\n", none: true},
+		{said: "fail kqueue: too many open files\n", why: "kqueue: too many open files"},
+		{said: "ready\n", why: `the holder said "ready"`},
+		{said: "ready -1\n", why: `the holder said "ready -1"`},
+		{said: "fail\n", why: `the holder said "fail"`},
+		{said: "what\n", why: `the holder said "what"`},
+	} {
+		pid, err := heard(c.said)
+		switch {
+		case c.none && !errors.Is(err, errNoHolder),
+			c.why != "" && (err == nil || err.Error() != c.why),
+			c.pid != pid:
+			t.Errorf("%q: %d %v", c.said, pid, err)
 		}
 	}
 }
