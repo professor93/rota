@@ -174,7 +174,7 @@ func TestALockedRecordThatCannotBeReadIsUnreadable(t *testing.T) {
 	terminals := t.TempDir()
 	start := time.Now().Add(-time.Minute).Truncate(time.Second)
 	later := `{"id":"%s","account":{"id":1},"holder_pid":42,"holder_start":"` + start.Format(time.RFC3339) +
-		`","boot_id":"b-1","protocol":3,"version":"10.0.0"}`
+		`","holder_start_ticks":12345,"boot_id":"b-1","protocol":3,"version":"10.0.0"}`
 	cases := []struct {
 		id, raw string
 		locked  bool
@@ -212,7 +212,7 @@ func TestALockedRecordThatCannotBeReadIsUnreadable(t *testing.T) {
 		}
 		if m := r.Meta; m == nil || m.ID != c.id || m.HolderPID != c.pid || m.Version != c.version || !r.Stopped.IsZero() {
 			t.Errorf("%s: what could be read is %+v, stopped %v", c.id, m, r.Stopped)
-		} else if c.pid != 0 && (!m.HolderStart.Equal(start) || m.BootID != "b-1" || m.Protocol != 3) {
+		} else if c.pid != 0 && (!m.HolderStart.Equal(start) || m.HolderStartTicks != 12345 || m.BootID != "b-1" || m.Protocol != 3) {
 			t.Errorf("%s: the holder is %+v", c.id, m)
 		}
 	}
