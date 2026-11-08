@@ -9,6 +9,7 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -1147,5 +1148,79 @@ func TestTheFingerprintIsTheOneStagedRecords(t *testing.T) {
 	a.StagedWritten()
 	if fingerprint(a.Token.Refresh) != a.Staged || fingerprint("") != "" {
 		t.Fatalf("%q %q", fingerprint(a.Token.Refresh), a.Staged)
+	}
+}
+
+// A /login signed in within the same minute as the account's grant, kept in the
+// file because the keychain refused it, beside a blanked item. Claude Code
+// recording it as another account's makes it another lineage whatever it says of
+// its end, so it is read as the new login it is: nothing is presented, the
+// account is not called dead over it, and it is not written over. One recorded
+// as this account's, or as nobody, is the account's own grant: later than rota's
+// copy it shows that copy spent, and earlier it is the older login rota replaces.
+func TestALoginSignedInWithinTheMinuteBesideABlankedItem(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		who    string
+		later  bool
+		issued bool
+	}{
+		{"another account's, later", "u2", true, false},
+		{"another account's, earlier", "u2", false, false},
+		{"this account's, later", "u1", true, true},
+		{"recorded as nobody's, later", "", true, true},
+		{"recorded as nobody's, earlier", "", false, true},
+	} {
+		for _, look := range lineageLooks() {
+			t.Run(c.name+"/"+look.what, func(t *testing.T) {
+				w := newLineageWorld(t, true)
+				w.cc.start()
+				lineageLooks()[0].do(t, w)
+				w.clock.pass(7*time.Hour + 56*time.Minute)
+				t.Logf("daemon: %s", w.cc.refresh("claude-code daemon")) // the item holds R1
+				lineageLooks()[1].do(t, w)                               // rota holds R1, in sync
+				expires := rota.Now().Add(9 * time.Hour).UnixMilli()
+				if !c.later {
+					expires = rota.Now().Add(-time.Hour).UnixMilli()
+				}
+				if c.issued {
+					w.p.mu.Lock()
+					w.p.issued["AL"] = true
+					w.p.mu.Unlock()
+				}
+				login := map[string]any{"accessToken": "AL", "refreshToken": "RL", "expiresAt": expires,
+					"refreshTokenExpiresAt": 1999999979000, "scopes": []string{"user:inference"}} // 20 s before the grant's end
+				if c.who != "" {
+					login["tokenAccount"] = map[string]string{"uuid": c.who}
+				}
+				doc, _ := json.Marshal(map[string]any{"claudeAiOauth": login})
+				writeFile(t, filepath.Join(w.cc.home, claudeCredentials), string(doc))
+				w.k.mu.Lock()
+				w.k.items[w.cc.svc] = clearedLogin
+				w.k.mu.Unlock()
+				w.clock.pass(2 * time.Minute)
+				look.do(t, w)
+				file, _ := readLogin(t, w.cc.home)
+				switch {
+				case c.who == "u2":
+					nothingPresented(t, w)
+					if w.a.Dead || w.a.Token.Refresh != "R1" || file != "RL" {
+						t.Fatalf("read as the new login it is: dead=%v %q holds %q file %q", w.a.Dead, w.a.WhyDead(), w.a.Token.Refresh, file)
+					}
+				case c.later:
+					nothingPresented(t, w)
+					deadForAnOlderCopy(t, w)
+					if file != "RL" {
+						t.Fatalf("not written over: the file holds %q", file)
+					}
+				default:
+					got := w.p.rotaPresented()
+					if len(got) != 1 || got[0].rt != "R1" || got[0].wasSpent || !got[0].lockHeld || w.a.Dead || w.a.Token.Refresh != "R2" || file != "R2" {
+						w.p.dump(t)
+						t.Fatalf("the older login is replaced: %+v dead=%v holds %q file %q", got, w.a.Dead, w.a.Token.Refresh, file)
+					}
+				}
+			})
+		}
 	}
 }

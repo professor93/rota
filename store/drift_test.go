@@ -63,22 +63,32 @@ func (d *drifting) until() string {
 	return strconv.FormatInt(end-int64(d.n)*driftStep.Milliseconds(), 10)
 }
 
-// One end is one grant within a minute, the same rule in the store and in lib:
-// for each pair, lib takes a later login in the home as a rotation exactly when
-// the store's sameGrant says the two ends are one grant.
-func TestTheStoreTellsAGrantByItsEndAsLibDoes(t *testing.T) {
-	for _, c := range []struct{ home, own string }{
-		{"", ""},
-		{lineageUntil, lineageUntil},
-		{"1999999998700", lineageUntil},
-		{"1999999939000", lineageUntil},
-		{"2000000059000", lineageUntil},
-		{"1999999938999", lineageUntil},
-		{"2000000059001", lineageUntil},
-		{lineageUntil, ""},
-		{"", lineageUntil},
+// One grant is told the same way in the store and in lib: ends within a minute,
+// and not recorded as another account's. For each case, lib takes a later login
+// in the home as a rotation exactly when the store's ofGrant says it is the
+// account's own grant.
+func TestTheStoreTellsAGrantAsLibDoes(t *testing.T) {
+	for _, c := range []struct{ home, own, who, uuid string }{
+		{"", "", "", "u1"},
+		{lineageUntil, lineageUntil, "", "u1"},
+		{"1999999998700", lineageUntil, "", "u1"},
+		{"1999999939000", lineageUntil, "", "u1"},
+		{"2000000059000", lineageUntil, "", "u1"},
+		{"1999999938999", lineageUntil, "", "u1"},
+		{"2000000059001", lineageUntil, "", "u1"},
+		{lineageUntil, "", "", "u1"},
+		{"", lineageUntil, "", "u1"},
+		{"1999999998700", lineageUntil, `{"uuid":"u1"}`, "u1"},
+		{"1999999998700", lineageUntil, `{"uuid":"U1"}`, "u1"},
+		{"1999999998700", lineageUntil, `{"uuid":"u2"}`, "u1"},
+		{lineageUntil, lineageUntil, `{"uuid":"u2"}`, "u1"},
+		{"1999999998700", lineageUntil, `{"uuid":"u2"}`, ""},
+		{"1999999998700", lineageUntil, `{"emailAddress":"x@y"}`, "u1"},
+		{"1999999998700", lineageUntil, `null`, "u1"},
+		{"1999999998700", lineageUntil, `"u2"`, "u1"},
+		{"1999999998700", lineageUntil, `[1]`, "u1"},
 	} {
-		a := &rota.Account{ID: 1, Provider: "claude", Token: rota.Token{Access: "A1", Refresh: "R1",
+		a := &rota.Account{ID: 1, Provider: "claude", UUID: c.uuid, Token: rota.Token{Access: "A1", Refresh: "R1",
 			ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}, Extra: map[string]string{}}
 		if c.own != "" {
 			a.Extra[refreshUntilKey] = c.own
@@ -89,10 +99,18 @@ func TestTheStoreTellsAGrantByItsEndAsLibDoes(t *testing.T) {
 		if c.home != "" {
 			doc += `,"refreshTokenExpiresAt":` + c.home
 		}
-		err := rota.AdoptFrom(a, storeFS{store: []byte(doc + `}}`)})
-		lib := err == nil && a.Token.Refresh == "R2"
-		if store := sameGrant(c.home, c.own); store != lib {
-			t.Errorf("home %q, account %q: the store says one grant=%v, lib %v (%v)", c.home, c.own, store, lib, err)
+		if c.who != "" {
+			doc += `,"tokenAccount":` + c.who
+		}
+		doc += `}}`
+		l, ok := storedLogin([]byte(doc))
+		if !ok {
+			t.Fatalf("%s: unreadable", doc)
+		}
+		store := l.ofGrant(a)
+		err := rota.AdoptFrom(a, storeFS{store: []byte(doc)})
+		if lib := err == nil && a.Token.Refresh == "R2"; store != lib {
+			t.Errorf("home %q, account %q, recorded %s, uuid %q: the store says one grant=%v, lib %v (%v)", c.home, c.own, c.who, c.uuid, store, lib, err)
 		}
 	}
 }

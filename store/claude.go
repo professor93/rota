@@ -1111,10 +1111,12 @@ func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
 //   - The account's own refresh token counts only when rota saw it in the home a
 //     moment ago (newest).
 //   - A login of another lineage — its refreshTokenExpiresAt and the account's
-//     both known, and more than a minute apart (sameGrant) — is somebody's
-//     /login there. It counts, and is read as the new login it is (adopt), so it
-//     is never written over. Within the minute it is the account's own grant,
-//     whose end Claude Code's refresh may set a second short of rota's.
+//     both known, and more than a minute apart (sameGrant), or Claude Code
+//     recording it as another account's, whatever its end (otherAccount) — is
+//     somebody's /login there. It counts, and is read as the new login it is
+//     (adopt), so it is never written over. Within the minute, and not recorded
+//     as anybody else's, it is the account's own grant, whose end Claude Code's
+//     refresh may set a second short of rota's.
 //   - Another refresh token no later than rota's copy is older than the item
 //     Claude Code blanked, or cannot be shown not to be: passed over. "rota's
 //     copy" is when it truly expires, not the past a rescue forces on it.
@@ -1133,7 +1135,7 @@ func (h *claudeHome) judgeFile(file []byte) (counts, superseded bool) {
 	}
 	theirs, ours := l.until(), h.a.Extra[refreshUntilKey]
 	switch {
-	case theirs != "" && ours != "" && !sameGrant(theirs, ours):
+	case l.otherAccount(h.a), theirs != "" && ours != "" && !l.ofGrant(h.a):
 		return true, false
 	case int64(l.Expires) <= max(h.copyExpires, h.a.Token.ExpiresAt):
 		return false, false
@@ -1151,6 +1153,9 @@ type loginEntry struct {
 	Refresh string  `json:"refreshToken"`
 	Expires float64 `json:"expiresAt"`
 	Until   float64 `json:"refreshTokenExpiresAt"`
+	// Account is whose login Claude Code says this is, when it says: kept as it
+	// came, so that a shape nobody expects never makes the login unreadable.
+	Account jsontext.Value `json:"tokenAccount"`
 }
 
 // until is the login's refreshTokenExpiresAt as an account keeps it: decimal
@@ -1160,6 +1165,29 @@ func (l loginEntry) until() string {
 		return ""
 	}
 	return strconv.FormatInt(int64(l.Until), 10)
+}
+
+// otherAccount reports whether Claude Code recorded the login as another
+// account's: the uuid it records and the account's are both known, and differ.
+// Nothing recorded, or a record of a shape this file does not read, says nothing.
+func (l loginEntry) otherAccount(a *rota.Account) bool {
+	if len(l.Account) == 0 {
+		return false
+	}
+	var who struct {
+		UUID string `json:"uuid"`
+	}
+	if rota.UnmarshalLenient(l.Account, &who) != nil {
+		return false
+	}
+	return who.UUID != "" && a.UUID != "" && !strings.EqualFold(who.UUID, a.UUID)
+}
+
+// ofGrant is lib's rule for whether a login is of the account's own grant
+// (AdoptFS), which a test pins this to: its end is within a minute of the
+// account's (sameGrant), and Claude Code does not record it as another account's.
+func (l loginEntry) ofGrant(a *rota.Account) bool {
+	return sameGrant(l.until(), a.Extra[refreshUntilKey]) && !l.otherAccount(a)
 }
 
 // grantSlack is how far apart two refreshTokenExpiresAt values may lie and

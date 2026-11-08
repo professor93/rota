@@ -2644,7 +2644,8 @@ Code blanked: see *Stranded* and *Blanked*, below.
   never the file while an item exists, the blanked item goes even with
   something alive, once what it kept beside the login is in the file. A login
   of another lineage there (a `refreshTokenExpiresAt` more than a minute from
-  the account's) is somebody's `/login`, kept in the file because the keychain
+  the account's, or one Claude Code records as another account's, whatever its
+  end) is somebody's `/login`, kept in the file because the keychain
   refused it, and is read as the new login it is; so is a login later than the
   account's when the lineage of one or the other is not known, and neither is
   ever written over. A later login of the account's own lineage there is a
