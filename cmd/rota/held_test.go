@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -284,6 +285,32 @@ func TestListShowsHeldSessionsOnlyWhenThereAreSome(t *testing.T) {
 	}
 	if code != 0 || json.Unmarshal([]byte(out), &got) != nil || len(got.Held) != 2 {
 		t.Fatalf("--json with two records: exit %d %q\n%s", code, errb, out)
+	}
+	// Each in the shape GET /v1/terminals lists a session in: the account
+	// an object, ended a bool with ended_at beside it once it has stopped.
+	var shapes struct {
+		Held []map[string]any `json:"held"`
+	}
+	_ = json.Unmarshal([]byte(out), &shapes)
+	for i, want := range []map[string]any{
+		{"id": live, "held": true, "ended": false, "state": "live",
+			"account": map[string]any{"id": 1.0, "label": "a@x", "provider": "claude"}},
+		{"id": old, "held": true, "ended": true, "state": "interrupted", "exit": -1.0, "resumable": true,
+			"account": map[string]any{"id": 1.0, "label": "a@x", "provider": "claude"}},
+	} {
+		for key, v := range want {
+			if !reflect.DeepEqual(shapes.Held[i][key], v) {
+				t.Errorf("held[%d].%s is %v, want %v", i, key, shapes.Held[i][key], v)
+			}
+		}
+		for _, key := range []string{"account_label", "provider"} {
+			if _, ok := shapes.Held[i][key]; ok {
+				t.Errorf("held[%d] has %s, which GET /v1/terminals has inside account", i, key)
+			}
+		}
+	}
+	if _, ok := shapes.Held[1]["ended_at"].(string); !ok {
+		t.Errorf("the stopped one has no ended_at: %v", shapes.Held[1])
 	}
 	h, s := got.Held[0], got.Held[1]
 	if h.ID != live || h.Name != "api" || h.Label != "api" || h.State != "live" || h.Status != "running" ||
