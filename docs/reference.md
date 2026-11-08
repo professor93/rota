@@ -2690,13 +2690,22 @@ Code blanked: see *Stranded* and *Blanked*, below.
   starts the same watcher; a question, a hermetic run, the HTTP API and Windows
   start none, and `rota serve` maintains accounts as it always did beside it.
   No watcher has yet been seen rescuing a home under a live Claude Code.
-- **The refresh lock.** Through all of that rota holds Claude Code's own
-  refresh lock (`.oauth_refresh.lock` in the home), for one account at a time,
-  from reading the home again until the login is in it, and touches it every
-  five seconds as Claude Code's own holders do, because Claude Code takes a
-  lock for dead after a minute untouched. A lock somebody holds leaves this look
-  to them. A lock somebody took meanwhile is theirs, and is neither touched nor
-  removed.
+- **The refresh lock.** Every refresh rota makes of a login kept in a home — a
+  launch's, a listing's, maintenance's, a run's on a token, and the rescues
+  above, one account at a time — holds Claude Code's own refresh lock
+  (`.oauth_refresh.lock` in the home), from reading the home again until the
+  login is in it, and touches it every five seconds as Claude Code's own
+  holders do, because Claude Code takes a lock for dead after a minute
+  untouched. A Claude Code that starts meanwhile waits for it, and then finds
+  the new login. Once the lock is held the home is read again and the question
+  asked again: a rotation Claude Code finished a moment before is taken and
+  nothing is presented, and anything alive there by then leaves the login to
+  it. That read also comes before a token is presented again after a refresh
+  whose answer never came — a failure on the provider's side, a timeout. A lock
+  somebody holds is Claude Code refreshing right now, and leaves the look to
+  them: no error, nothing marked dead, and the next look tries again; a run that
+  needs a fresh token in its environment is told to try again in a moment. A
+  lock somebody took meanwhile is theirs, and is neither touched nor removed.
 - **Changing route.** A launch remembers which route the account's last one
   in the home took, and decides its own before anything else. When it is
   another, and the home's daemon is running with nothing beside it but the
