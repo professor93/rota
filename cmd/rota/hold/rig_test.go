@@ -245,6 +245,22 @@ func (r *rig) logLines() []string {
 	return slices.Clone(r.logs)
 }
 
+// grounded waits until the session has taken its CLI's output up to off.
+func (r *rig) grounded(t *testing.T, off int64) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		r.s.mu.Lock()
+		at := r.s.ground
+		r.s.mu.Unlock()
+		if at >= off {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the session has taken output to %d, never %d", at, off)
+		}
+	}
+}
+
 // claim makes this test process the store's daemon, the one process a
 // holder links to.
 func claim(t *testing.T, terminals string) {
