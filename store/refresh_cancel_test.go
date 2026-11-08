@@ -394,6 +394,7 @@ func TestPreparingIsHeededBesideTheCallersContextByEveryLaunch(t *testing.T) {
 			}
 		})
 		t.Run(prep.what+" inside the hook", func(t *testing.T) {
+			onPath(t, "claude") // Prepare looks the CLI up; a fake, never whatever is installed here
 			w := newLineageWorld(t, false)
 			w.clock.pass(9 * time.Hour)
 			calls := 0
