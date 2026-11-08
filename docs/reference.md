@@ -1232,13 +1232,16 @@ its place before handing the link on.
 anything that agent started. Then it is `local` with `watch`: it may list,
 describe and attach, every change is `403` *this sign-in may only watch;
 nothing here can be changed from it*, its typing is refused in the same
-words, and it never holds a keyboard. The daemon tells by the caller's
-session, which the caller cannot say for itself: the kernel gives the pid at
-the other end of the socket, `getsid` the session that pid is in, and a
-session led by the holder or the CLI of any session whose lock is held is
-inside one. A caller the daemon cannot place is given `watch` as well. The
-watch-only rule is a guard against accidents, not a wall: a process that
-calls `setsid` leaves its session and escapes it.
+words, and it never holds a keyboard. The daemon tells by what the caller
+cannot say for itself: the kernel gives the pid at the other end of the
+socket, and that process is inside a held session when it is the holder or
+the CLI of any session whose lock is held, descends from one, up to 64
+parents and pid 1, or is in a session one of them leads (`getsid`). So a
+command the agent runs is inside, though Claude Code starts each in a
+session of its own. A caller the daemon cannot place is given `watch` as
+well. The watch-only rule is a guard against accidents, not a wall: a
+process that leaves both its parent and its session, as a daemon does by
+forking twice, escapes it.
 
 **At the keyboard** `local` is a person, as a user signed in on the page is
 (*[Roles, and the keyboard](#roles-and-the-keyboard)*): two clients of the
@@ -2452,8 +2455,8 @@ session*, under *[The daemon](#the-daemon)*.
   `Interactive`, which runs them as a daemon started by hand runs (*Under a
   supervisor*, in *[The daemon](#the-daemon)*).
 - **Watch-only on `ctl.sock` is a guard against accidents, not a wall.** A
-  process inside a held session that calls `setsid` leaves its session, and
-  the rule with it.
+  process inside a held session that leaves both its parent and its
+  session, as a daemon does by forking twice, leaves the rule with it.
 - **Windows has none of this.** Every command that needs the daemon refuses
   there with *held sessions and the rota daemon run on linux and macOS*, and
   foreground `rota serve` is the server it always was.

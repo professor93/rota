@@ -58,6 +58,9 @@ func TestAClockStepMovesTheStartTimeButNotTheTicks(t *testing.T) {
 	if again, err := p.StartTicks(4242); err != nil || again != ticks {
 		t.Fatalf("after the step the start is tick %d (%v), want %d", again, err, ticks)
 	}
+	if ppid, err := p.Parent(4242); err != nil || ppid != 7 {
+		t.Fatalf("the parent is %d (%v), want 7", ppid, err)
+	}
 	if id, err := p.BootID(); err != nil || id != "b0b0b0b0-0000-4000-8000-000000000001" {
 		t.Fatalf("boot id %q, %v", id, err)
 	}
