@@ -12,8 +12,14 @@ import (
 	"testing"
 )
 
-// specArgv is argv on a copy, so tests can pass composite literals.
-func specArgv(s Spec, flavor string, lim *Limits) ([]string, error) { return s.argv(flavor, lim) }
+// specArgv is argv on a copy, so tests can pass composite literals. What
+// the command line staged — a grok prompt, a codex schema — is removed when
+// the test ends, as Run removes it when the CLI exits: left behind, it piles
+// up in the shared temp directory with every run of the package.
+func specArgv(t testing.TB, s Spec, flavor string, lim *Limits) ([]string, error) {
+	t.Cleanup(s.cleanup)
+	return s.argv(flavor, lim)
+}
 
 func TestSpecBuildsClaudeArgv(t *testing.T) {
 	pluginDir := resolved(t, t.TempDir()) // paths reach argv resolved
@@ -25,7 +31,7 @@ func TestSpecBuildsClaudeArgv(t *testing.T) {
 		PluginDirs: []string{pluginDir}, MCPConfig: []json.RawMessage{jsonPath(t, mcp)}, Restricted: true,
 		Worktree: "wt", Debug: "api", Extra: []string{"--x", "1"},
 	}
-	argv, err := specArgv(spec, "claude", nil)
+	argv, err := specArgv(t, spec, "claude", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +49,7 @@ func TestSpecBuildsClaudeArgv(t *testing.T) {
 	}
 	spec.Stream = true
 	spec.IncludePartialMessages = true
-	argv, _ = specArgv(spec, "claude", nil)
+	argv, _ = specArgv(t, spec, "claude", nil)
 	if got = strings.Join(argv, " "); !strings.Contains(got, "--output-format stream-json --verbose") || !strings.Contains(got, "--include-partial-messages") {
 		t.Fatalf("stream: %q", got)
 	}
@@ -53,7 +59,7 @@ func TestSpecBuildsCodexArgv(t *testing.T) {
 	img := filepath.Join(resolved(t, t.TempDir()), "a.png") // paths reach argv resolved
 	spec := Spec{Prompt: "p", Model: "gpt-5.6-sol", Effort: "high", Sandbox: "read-only", Config: map[string]string{"a": "1"},
 		Enable: []string{"f"}, Images: []string{img}, Ephemeral: true, Resume: "t-1"}
-	argv, err := specArgv(spec, "codex", nil)
+	argv, err := specArgv(t, spec, "codex", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,12 +71,12 @@ func TestSpecBuildsCodexArgv(t *testing.T) {
 		}
 	}
 	spec.Resume, spec.ForkSession = "last", true
-	argv, _ = specArgv(spec, "codex", nil)
+	argv, _ = specArgv(t, spec, "codex", nil)
 	if got = strings.Join(argv, " "); !strings.Contains(got, "exec fork --last -") {
 		t.Fatalf("fork: %q", got)
 	}
 	spec.Resume, spec.ForkSession, spec.Stream = "", false, false
-	argv, _ = specArgv(spec, "codex", nil)
+	argv, _ = specArgv(t, spec, "codex", nil)
 	if got = strings.Join(argv, " "); !strings.Contains(got, "exec -") {
 		t.Fatalf("plain: %q", got)
 	}
@@ -98,13 +104,13 @@ func TestSpecRejectsWhatItCannotHonour(t *testing.T) {
 		{Spec{Prompt: "p"}, "t-nocli", "t-nocli"},
 	}
 	for _, c := range cases {
-		_, err := specArgv(c.spec, c.flav, nil)
+		_, err := specArgv(t, c.spec, c.flav, nil)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Fatalf("%+v: got %v, want mention of %q", c.spec, err, c.want)
 		}
 	}
 	ok := Spec{Prompt: "p", PermissionMode: "bypassPermissions", DangerouslySkipPermissions: true}
-	if _, err := specArgv(ok, "claude", &Limits{AllowDangerous: true}); err != nil {
+	if _, err := specArgv(t, ok, "claude", &Limits{AllowDangerous: true}); err != nil {
 		t.Fatalf("allowed by policy: %v", err)
 	}
 }
@@ -113,19 +119,19 @@ func TestSpecConfinesPathsWhenRootsAreSet(t *testing.T) {
 	root := t.TempDir()
 	os.MkdirAll(filepath.Join(root, "sub"), 0o755)
 	lim := &Limits{Roots: []string{root}}
-	if _, err := specArgv(Spec{Prompt: "p", Cwd: t.TempDir()}, "claude", lim); err == nil {
+	if _, err := specArgv(t, Spec{Prompt: "p", Cwd: t.TempDir()}, "claude", lim); err == nil {
 		t.Fatal("cwd outside a root must be refused")
 	}
-	if _, err := specArgv(Spec{Prompt: "p", AddDirs: []string{t.TempDir()}}, "claude", lim); err == nil {
+	if _, err := specArgv(t, Spec{Prompt: "p", AddDirs: []string{t.TempDir()}}, "claude", lim); err == nil {
 		t.Fatal("add_dirs outside a root must be refused")
 	}
-	if _, err := specArgv(Spec{Prompt: "p", Cwd: filepath.Join(root, "nope")}, "claude", lim); err == nil {
+	if _, err := specArgv(t, Spec{Prompt: "p", Cwd: filepath.Join(root, "nope")}, "claude", lim); err == nil {
 		t.Fatal("a missing cwd must be refused")
 	}
-	if _, err := specArgv(Spec{Prompt: "p", Cwd: filepath.Join(root, "sub")}, "claude", lim); err != nil {
+	if _, err := specArgv(t, Spec{Prompt: "p", Cwd: filepath.Join(root, "sub")}, "claude", lim); err != nil {
 		t.Fatalf("inside a root: %v", err)
 	}
-	if _, err := specArgv(Spec{Prompt: "p", Cwd: t.TempDir()}, "claude", nil); err != nil {
+	if _, err := specArgv(t, Spec{Prompt: "p", Cwd: t.TempDir()}, "claude", nil); err != nil {
 		t.Fatalf("without roots any cwd goes: %v", err)
 	}
 }
@@ -160,7 +166,7 @@ func TestSpecBuildsGrokArgv(t *testing.T) {
 		IncludePartialMessages: true, Worktree: "wt", Agent: "rev", Debug: "true",
 		Extra: []string{"--leader-socket", "/tmp/s"},
 	}
-	argv, err := specArgv(spec, "grok", nil)
+	argv, err := specArgv(t, spec, "grok", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,19 +192,19 @@ func TestSpecBuildsGrokArgv(t *testing.T) {
 		t.Fatalf("the prompt must travel in a file: %q", got)
 	}
 	spec.Stream, spec.IncludePartialMessages = false, false // fragments belong to a stream
-	argv, _ = specArgv(spec, "grok", nil)
+	argv, _ = specArgv(t, spec, "grok", nil)
 	if got = strings.Join(argv, " "); !strings.Contains(got, "--output-format json") {
 		t.Fatalf("buffered runs ask for json: %q", got)
 	}
 	// grok has no --continue-plus-resume oddity, but it does refuse what it
 	// cannot do.
-	if _, err := specArgv(Spec{Prompt: "p", Model: "gpt-5.6-sol"}, "grok", nil); err == nil {
+	if _, err := specArgv(t, Spec{Prompt: "p", Model: "gpt-5.6-sol"}, "grok", nil); err == nil {
 		t.Fatal("a model from another provider must be refused")
 	}
-	if _, err := specArgv(Spec{Prompt: "p", PermissionMode: "bypassPermissions"}, "grok", nil); !errors.Is(err, ErrDangerous) {
+	if _, err := specArgv(t, Spec{Prompt: "p", PermissionMode: "bypassPermissions"}, "grok", nil); !errors.Is(err, ErrDangerous) {
 		t.Fatal("bypassing permissions needs the caller's consent")
 	}
-	if _, err := specArgv(Spec{Prompt: "p", Sandbox: "danger-full-access"}, "grok", nil); !errors.Is(err, ErrDangerous) {
+	if _, err := specArgv(t, Spec{Prompt: "p", Sandbox: "danger-full-access"}, "grok", nil); !errors.Is(err, ErrDangerous) {
 		t.Fatal("full access needs the caller's consent")
 	}
 }
@@ -280,8 +286,30 @@ func TestSpacedJSONStillCarriesTheResult(t *testing.T) {
 }
 
 func TestCheckLeavesNoPromptOnDisk(t *testing.T) {
-	pattern := filepath.Join(os.TempDir(), "prompt-*.txt")
-	before, _ := filepath.Glob(pattern)
+	// A temp directory of this test's own, so what it counts is its own: the
+	// shared one is written to by every other test process on the machine.
+	// os.TempDir reads TMPDIR on unix and TMP or TEMP on Windows.
+	dir := t.TempDir()
+	for _, k := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(k, dir)
+	}
+	// Building these command lines does stage files there, so an empty
+	// directory below means they were removed, not that they went elsewhere.
+	for _, c := range []struct {
+		provider string
+		spec     Spec
+	}{
+		{"grok", Spec{Prompt: "a private prompt"}},
+		{"codex", Spec{Prompt: "p", JSONSchema: json.RawMessage(`{}`)}},
+	} {
+		if _, err := c.spec.argv(c.provider, nil); err != nil {
+			t.Fatal(err)
+		}
+		if left, _ := os.ReadDir(dir); len(left) != 1 {
+			t.Fatalf("%s stages one file in the temp directory, found %d", c.provider, len(left))
+		}
+		c.spec.cleanup()
+	}
 	for range 3 {
 		if err := (Spec{Prompt: "a private prompt"}).Check("grok", nil); err != nil {
 			t.Fatal(err)
@@ -290,9 +318,12 @@ func TestCheckLeavesNoPromptOnDisk(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	after, _ := filepath.Glob(pattern)
-	if len(after) != len(before) {
-		t.Fatalf("checking a spec must write nothing: %d temp files became %d", len(before), len(after))
+	if left, _ := os.ReadDir(dir); len(left) != 0 {
+		names := make([]string, 0, len(left))
+		for _, e := range left {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("checking a spec must write nothing, and left %v", names)
 	}
 }
 
@@ -528,7 +559,7 @@ func TestBufferedOutputIsReadAsAWholeDocument(t *testing.T) {
 // protects an interactive user from an agent editing files they cannot undo.
 // A read-only run has nothing to undo, so the check has nothing to guard.
 func TestAskDefaultsAreReadOnlyWhereThatIsAThing(t *testing.T) {
-	argv, err := specArgv(Spec{Prompt: "p", OneShot: true}, "codex", nil)
+	argv, err := specArgv(t, Spec{Prompt: "p", OneShot: true}, "codex", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,12 +570,12 @@ func TestAskDefaultsAreReadOnlyWhereThatIsAThing(t *testing.T) {
 		}
 	}
 	// An explicit choice still wins.
-	argv, _ = specArgv(Spec{Prompt: "p", OneShot: true, Sandbox: "workspace-write"}, "codex", nil)
+	argv, _ = specArgv(t, Spec{Prompt: "p", OneShot: true, Sandbox: "workspace-write"}, "codex", nil)
 	if got = strings.Join(argv, " "); !strings.Contains(got, "-s workspace-write") || strings.Contains(got, "read-only") {
 		t.Fatalf("an explicit sandbox must win: %q", got)
 	}
 	// And a plain run is untouched.
-	argv, _ = specArgv(Spec{Prompt: "p"}, "codex", nil)
+	argv, _ = specArgv(t, Spec{Prompt: "p"}, "codex", nil)
 	if got = strings.Join(argv, " "); strings.Contains(got, "--skip-git-repo-check") {
 		t.Fatalf("only a one-shot gets the defaults: %q", got)
 	}
@@ -558,11 +589,11 @@ func TestSpecBuildsKimiArgv(t *testing.T) {
 	}
 	// auto approves everything, so it rides the dangerous gate now; raw
 	// flags are on because the table carries Extra.
-	argv, err := specArgv(spec, "kimi", &Limits{AllowDangerous: true, AllowRawFlags: true})
+	argv, err := specArgv(t, spec, "kimi", &Limits{AllowDangerous: true, AllowRawFlags: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := specArgv(Spec{Prompt: "p", PermissionMode: "auto"}, "kimi", &Limits{}); !errors.Is(err, ErrDangerous) {
+	if _, err := specArgv(t, Spec{Prompt: "p", PermissionMode: "auto"}, "kimi", &Limits{}); !errors.Is(err, ErrDangerous) {
 		t.Fatalf("kimi --auto approves everything and needs the caller's consent: %v", err)
 	}
 	got := strings.Join(argv, " ")
@@ -576,7 +607,7 @@ func TestSpecBuildsKimiArgv(t *testing.T) {
 	}
 	// Buffered runs ask for text, which is what this CLI prints.
 	spec.Stream = false
-	argv, _ = specArgv(spec, "kimi", &Limits{AllowDangerous: true, AllowRawFlags: true})
+	argv, _ = specArgv(t, spec, "kimi", &Limits{AllowDangerous: true, AllowRawFlags: true})
 	if got = strings.Join(argv, " "); !strings.Contains(got, "--output-format text") {
 		t.Fatalf("buffered: %q", got)
 	}
@@ -584,7 +615,7 @@ func TestSpecBuildsKimiArgv(t *testing.T) {
 	for mode, flag := range map[string]string{"auto": "--auto", "acceptEdits": "-y", "plan": "--plan"} {
 		// auto rides the dangerous gate; consenting here keeps the
 		// vocabulary check about vocabulary.
-		argv, err := specArgv(Spec{Prompt: "p", PermissionMode: mode}, "kimi", &Limits{AllowDangerous: true})
+		argv, err := specArgv(t, Spec{Prompt: "p", PermissionMode: mode}, "kimi", &Limits{AllowDangerous: true})
 		if err != nil {
 			t.Fatalf("%s: %v", mode, err)
 		}
@@ -592,7 +623,7 @@ func TestSpecBuildsKimiArgv(t *testing.T) {
 			t.Fatalf("%s should become %s: %v", mode, flag, argv)
 		}
 	}
-	if _, err := specArgv(Spec{Prompt: "p", PermissionMode: "bypassPermissions"}, "kimi", nil); !errors.Is(err, ErrDangerous) {
+	if _, err := specArgv(t, Spec{Prompt: "p", PermissionMode: "bypassPermissions"}, "kimi", nil); !errors.Is(err, ErrDangerous) {
 		t.Fatal("bypassing permissions needs consent here too")
 	}
 	// Fields this CLI has no answer for are refused, not dropped.

@@ -34,7 +34,7 @@ func TestSuppliedConfigOutsideRootsIsRefusedUnread(t *testing.T) {
 		{"missing mcp config", Spec{Prompt: "p", MCPConfig: []json.RawMessage{quote(missing)}}},
 		{"mcp config with a denied key", Spec{Prompt: "p", MCPConfig: []json.RawMessage{quote(denied)}}},
 	} {
-		_, err := specArgv(tc.spec, "claude", lim)
+		_, err := specArgv(t, tc.spec, "claude", lim)
 		if !errors.Is(err, ErrOutsideRoots) {
 			t.Fatalf("%s: want the roots' refusal and nothing more, got %v", tc.name, err)
 		}
@@ -44,7 +44,7 @@ func TestSuppliedConfigOutsideRootsIsRefusedUnread(t *testing.T) {
 	if err := os.WriteFile(inside, []byte(`{"env":{"X":"1"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := specArgv(Spec{Prompt: "p", Settings: quote(inside)}, "claude", lim); !errors.Is(err, ErrInvalidRequest) {
+	if _, err := specArgv(t, Spec{Prompt: "p", Settings: quote(inside)}, "claude", lim); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("a denied key inside the roots is still refused as invalid: %v", err)
 	}
 }

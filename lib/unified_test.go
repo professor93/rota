@@ -21,7 +21,7 @@ func TestOneSchemaFieldServesEveryProvider(t *testing.T) {
 		if err := spec.Check(flavor, nil); err != nil {
 			t.Fatalf("%s: %v", flavor, err)
 		}
-		argv, err := specArgv(spec, flavor, nil)
+		argv, err := specArgv(t, spec, flavor, nil)
 		if err != nil {
 			t.Fatalf("%s: %v", flavor, err)
 		}
@@ -35,7 +35,7 @@ func TestOneSchemaFieldServesEveryProvider(t *testing.T) {
 	if err := spec.Check("codex", nil); err != nil {
 		t.Fatalf("codex: %v", err)
 	}
-	argv, err := specArgv(spec, "codex", nil)
+	argv, err := specArgv(t, spec, "codex", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,6 @@ func TestOneSchemaFieldServesEveryProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("codex: schema file: %v", err)
 	}
-	defer os.Remove(argv[i+1])
 	if string(body) != schema {
 		t.Fatalf("codex: schema file holds %q, want %q", body, schema)
 	}
@@ -57,7 +56,7 @@ func TestOneForkFieldServesEveryProvider(t *testing.T) {
 	spec := Spec{Prompt: "p", Resume: "sid", ForkSession: true}
 
 	for _, flavor := range []string{"claude", "grok"} {
-		argv, err := specArgv(spec, flavor, nil)
+		argv, err := specArgv(t, spec, flavor, nil)
 		if err != nil {
 			t.Fatalf("%s: %v", flavor, err)
 		}
@@ -66,7 +65,7 @@ func TestOneForkFieldServesEveryProvider(t *testing.T) {
 		}
 	}
 
-	argv, err := specArgv(spec, "codex", nil)
+	argv, err := specArgv(t, spec, "codex", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +77,7 @@ func TestOneForkFieldServesEveryProvider(t *testing.T) {
 func TestOneEphemeralFieldServesEveryProvider(t *testing.T) {
 	spec := Spec{Prompt: "p", Ephemeral: true}
 
-	argv, err := specArgv(spec, "claude", nil)
+	argv, err := specArgv(t, spec, "claude", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +85,7 @@ func TestOneEphemeralFieldServesEveryProvider(t *testing.T) {
 		t.Fatalf("claude: no --no-session-persistence in %v", argv)
 	}
 
-	argv, err = specArgv(spec, "codex", nil)
+	argv, err = specArgv(t, spec, "codex", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +105,7 @@ func TestCarryingOnWorksOnEveryProvider(t *testing.T) {
 		{"grok", "--continue"},
 		{"kimi", "-c"},
 	} {
-		argv, err := specArgv(spec, want.flavor, nil)
+		argv, err := specArgv(t, spec, want.flavor, nil)
 		if err != nil {
 			t.Fatalf("%s: %v", want.flavor, err)
 		}
@@ -116,7 +115,7 @@ func TestCarryingOnWorksOnEveryProvider(t *testing.T) {
 	}
 
 	// codex has no flag for it: the most recent session is a subcommand.
-	argv, err := specArgv(spec, "codex", nil)
+	argv, err := specArgv(t, spec, "codex", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +126,7 @@ func TestCarryingOnWorksOnEveryProvider(t *testing.T) {
 
 // Forking the most recent one is the same question with a different answer.
 func TestCarryingOnCanForkOnCodexToo(t *testing.T) {
-	argv, err := specArgv(Spec{Prompt: "p", Continue: true, ForkSession: true}, "codex", nil)
+	argv, err := specArgv(t, Spec{Prompt: "p", Continue: true, ForkSession: true}, "codex", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,7 +146,7 @@ func TestResumingTheLastSessionMeansTheSameEverywhere(t *testing.T) {
 		{"grok", "--continue"},
 		{"kimi", "-c"},
 	} {
-		argv, err := specArgv(spec, want.flavor, nil)
+		argv, err := specArgv(t, spec, want.flavor, nil)
 		if err != nil {
 			t.Fatalf("%s: %v", want.flavor, err)
 		}
@@ -159,7 +158,7 @@ func TestResumingTheLastSessionMeansTheSameEverywhere(t *testing.T) {
 		}
 	}
 
-	argv, err := specArgv(spec, "codex", nil)
+	argv, err := specArgv(t, spec, "codex", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

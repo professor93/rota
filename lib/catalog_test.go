@@ -92,7 +92,7 @@ func TestEffortIsCheckedAndDisabledWhereUnsupported(t *testing.T) {
 }
 
 func TestSpecUsesTheProviderCatalog(t *testing.T) {
-	argv, err := specArgv(Spec{Prompt: "p"}, "claude", nil)
+	argv, err := specArgv(t, Spec{Prompt: "p"}, "claude", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,13 +104,13 @@ func TestSpecUsesTheProviderCatalog(t *testing.T) {
 	if !strings.Contains(got, "--model "+dm) || !strings.Contains(got, "--effort "+de) {
 		t.Fatalf("defaults must be sent explicitly: %q", got)
 	}
-	if _, err := specArgv(Spec{Prompt: "p", Model: "gpt-5"}, "claude", nil); err == nil {
+	if _, err := specArgv(t, Spec{Prompt: "p", Model: "gpt-5"}, "claude", nil); err == nil {
 		t.Fatal("a codex model must be refused for a claude account")
 	}
-	if _, err := specArgv(Spec{Prompt: "p", Model: "definitely-not-a-model"}, "codex", nil); err == nil {
+	if _, err := specArgv(t, Spec{Prompt: "p", Model: "definitely-not-a-model"}, "codex", nil); err == nil {
 		t.Fatal("an invented model must be refused")
 	}
-	argv, err = specArgv(Spec{Prompt: "p", Model: "opus"}, "claude", nil)
+	argv, err = specArgv(t, Spec{Prompt: "p", Model: "opus"}, "claude", nil)
 	if err != nil || !strings.Contains(strings.Join(argv, " "), "--model claude-opus-5") {
 		t.Fatalf("an alias must reach the CLI as a full id: %v %v", argv, err)
 	}
@@ -209,7 +209,7 @@ func TestCodexReadsTheModelsItsOwnAccountMayUse(t *testing.T) {
 }
 
 func TestCodexSendsNoModelUnlessAsked(t *testing.T) {
-	argv, err := specArgv(Spec{Prompt: "p"}, "codex", nil)
+	argv, err := specArgv(t, Spec{Prompt: "p"}, "codex", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

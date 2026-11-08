@@ -109,13 +109,13 @@ func TestAPermissionFieldTheListAllowsReachesTheCommandLine(t *testing.T) {
 		{"no_subagents", func(s *Spec) { s.NoSubagents = true }},
 	} {
 		for _, flavor := range FlavorsOf(c.field) {
-			bare, err := specArgv(Spec{Prompt: "p"}, flavor, nil)
+			bare, err := specArgv(t, Spec{Prompt: "p"}, flavor, nil)
 			if err != nil {
 				t.Fatalf("%s: %v", flavor, err)
 			}
 			spec := Spec{Prompt: "p"}
 			c.set(&spec)
-			with, err := specArgv(spec, flavor, nil)
+			with, err := specArgv(t, spec, flavor, nil)
 			if err != nil {
 				t.Errorf("%s says it understands %q but refused it: %v", flavor, c.field, err)
 				continue

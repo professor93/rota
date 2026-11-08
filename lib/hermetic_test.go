@@ -46,7 +46,7 @@ func TestHermeticIsolatesTheConfigDirectoryAndCleansItUp(t *testing.T) {
 // Hermetic is claude vocabulary; a provider with no shared home to hide is
 // refused by name rather than silently ignored.
 func TestHermeticIsClaudeVocabulary(t *testing.T) {
-	if _, err := specArgv(Spec{Prompt: "p", Hermetic: true}, "grok", nil); err == nil {
+	if _, err := specArgv(t, Spec{Prompt: "p", Hermetic: true}, "grok", nil); err == nil {
 		t.Fatal("grok must refuse a field it cannot honour")
 	}
 }

@@ -47,7 +47,7 @@ func TestRelativePathsAreResolvedAgainstTheRunsCwd(t *testing.T) {
 	lim := &Limits{Roots: []string{root}}
 	// From the server's cwd "../.." is the root itself; from the run's cwd
 	// it is the root's parent, which is what the CLI would open.
-	_, err := specArgv(Spec{Prompt: "p", Cwd: root, AddDirs: []string{"../.."}}, "claude", lim)
+	_, err := specArgv(t, Spec{Prompt: "p", Cwd: root, AddDirs: []string{"../.."}}, "claude", lim)
 	if !errors.Is(err, ErrOutsideRoots) {
 		t.Fatalf("an add_dir that escapes the roots from the run's cwd must be refused: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestCheckedPathsReachArgvResolved(t *testing.T) {
 	t.Chdir(root)
 
 	// claude: cwd, add_dirs, plugin_dirs, mcp_config and settings files.
-	argv, err := specArgv(Spec{Prompt: "p", Cwd: root, AddDirs: []string{"sub"}, PluginDirs: []string{"plug"},
+	argv, err := specArgv(t, Spec{Prompt: "p", Cwd: root, AddDirs: []string{"sub"}, PluginDirs: []string{"plug"},
 		MCPConfig: []json.RawMessage{json.RawMessage(`"m.json"`)}, Settings: json.RawMessage(`"s.json"`)}, "claude", nil)
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func TestCheckedPathsReachArgvResolved(t *testing.T) {
 		}
 	}
 	// codex: images, and a relative cwd resolved against the server's cwd.
-	argv, err = specArgv(Spec{Prompt: "p", Cwd: "sub", Images: []string{"../shot/a.png"}}, "codex", lim)
+	argv, err = specArgv(t, Spec{Prompt: "p", Cwd: "sub", Images: []string{"../shot/a.png"}}, "codex", lim)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestCheckedPathsReachArgvResolved(t *testing.T) {
 		t.Fatalf("-i must carry the checked path: %v", argv)
 	}
 	// grok: --cwd is the resolved directory, and a debug log path too.
-	argv, err = specArgv(Spec{Prompt: "p", Cwd: "sub", Debug: "grok.log"}, "grok", lim)
+	argv, err = specArgv(t, Spec{Prompt: "p", Cwd: "sub", Debug: "grok.log"}, "grok", lim)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestCheckedPathsReachArgvResolved(t *testing.T) {
 		t.Fatalf("--debug-file must be resolved against the run's cwd: %v", argv)
 	}
 	// kimi: add_dirs.
-	argv, err = specArgv(Spec{Prompt: "p", Cwd: root, AddDirs: []string{"sub"}}, "kimi", lim)
+	argv, err = specArgv(t, Spec{Prompt: "p", Cwd: root, AddDirs: []string{"sub"}}, "kimi", lim)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestASymlinkedAddDirReachesArgvAsItsTarget(t *testing.T) {
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("cannot create a symlink here: %v", err)
 	}
-	argv, err := specArgv(Spec{Prompt: "p", Cwd: root, AddDirs: []string{"link"}}, "claude", &Limits{Roots: []string{root}})
+	argv, err := specArgv(t, Spec{Prompt: "p", Cwd: root, AddDirs: []string{"link"}}, "claude", &Limits{Roots: []string{root}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +159,7 @@ func TestVettedConfigFilesReachTheCLIInline(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := Spec{Prompt: "p", Settings: jsonPath(t, settings), MCPConfig: []json.RawMessage{jsonPath(t, mcp)}}
-	argv, err := specArgv(spec, "claude", lim)
+	argv, err := specArgv(t, spec, "claude", lim)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -181,11 +181,11 @@ func TestVettedConfigFilesReachTheCLIInline(t *testing.T) {
 	if !hasPair(argv, "--settings", `{"model":"sonnet"}`) {
 		t.Fatal("what was vetted is what runs")
 	}
-	if _, err := specArgv(spec, "claude", lim); !errors.Is(err, ErrInvalidRequest) {
+	if _, err := specArgv(t, spec, "claude", lim); !errors.Is(err, ErrInvalidRequest) {
 		t.Fatalf("the rewritten file must be refused on its own merits: %v", err)
 	}
 	// Without limits the caller is trusted, and the path passes as a path.
-	argv, err = specArgv(Spec{Prompt: "p", Settings: jsonPath(t, settings)}, "claude", nil)
+	argv, err = specArgv(t, Spec{Prompt: "p", Settings: jsonPath(t, settings)}, "claude", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,12 +200,12 @@ func TestVettedConfigFilesReachTheCLIInline(t *testing.T) {
 func TestWorktreeIsANameNotAPath(t *testing.T) {
 	for _, flavor := range []string{"claude", "grok"} {
 		for _, ok := range []string{"feature-x", "true"} {
-			if _, err := specArgv(Spec{Prompt: "p", Worktree: ok}, flavor, nil); err != nil {
+			if _, err := specArgv(t, Spec{Prompt: "p", Worktree: ok}, flavor, nil); err != nil {
 				t.Fatalf("%s must accept worktree %q: %v", flavor, ok, err)
 			}
 		}
 		for _, bad := range []string{"../x", "a/b", `a\b`, ".", "..", "..x"} {
-			if _, err := specArgv(Spec{Prompt: "p", Worktree: bad}, flavor, nil); !errors.Is(err, ErrInvalidRequest) {
+			if _, err := specArgv(t, Spec{Prompt: "p", Worktree: bad}, flavor, nil); !errors.Is(err, ErrInvalidRequest) {
 				t.Fatalf("%s must refuse worktree %q, got %v", flavor, bad, err)
 			}
 		}
