@@ -269,6 +269,10 @@ func TestAKeychainItemWrittenMeanwhileIsNotDeleted(t *testing.T) {
 // Claude Code there is what the account falls back on should its own be
 // refused — and nothing is written over it, before the refresh or after a
 // save that failed. Such a refresh, alone, the next look cannot read back.
+//
+// A login held as a refresh token alone has nothing to write before the
+// refresh; a home with no login at all is recorded as holding it, so what the
+// refresh writes there after a failed save is read back all the same.
 func TestARefreshTheStoreCannotSaveLosesNothing(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
@@ -294,6 +298,8 @@ func TestARefreshTheStoreCannotSaveLosesNothing(t *testing.T) {
 			{"a home holding the login, record unknown", "R-u1", "", false},
 			{"signed in, never run, empty home", "", "-", false},
 			{"signed in, never run, another login there", "R-prev", "-", true},
+			{"held as a refresh token alone, signed in, never run, empty home", "", "alone", false},
+			{"held as a refresh token alone, signed in, never run, another login there", "R-prev", "alone", true},
 		} {
 			// good is how many saves the look gets through before every one
 			// fails: none, the one before the refresh, that and the one after.
@@ -313,7 +319,12 @@ func TestARefreshTheStoreCannotSaveLosesNothing(t *testing.T) {
 						storeLogin("A-"+c.file, c.file, later(-time.Hour), "1999999999000"))
 					a.StagedWritten()
 				}
-				if c.staged != "keep" {
+				switch c.staged {
+				case "keep":
+				case "alone":
+					a.Token.Access = ""
+					a.Staged = "-"
+				default:
 					a.Staged = c.staged
 				}
 				expire(a)

@@ -1176,9 +1176,37 @@ func (h *claudeHome) writeDue(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("%s: not refreshed, its login could not be written into its home first: %w", a, err)
 		}
+		// A login held as a refresh token alone has no access token to write,
+		// so nothing was planned. A home with no login at all is then
+		// recorded as holding it, as a write would have left the record, so a
+		// refreshed login written there is read back even if no save after
+		// the refresh succeeds. A home holding anything else is left as the
+		// record says.
+		if len(files) == 0 && a.Token.Access == "" && h.holdsNoLogin() {
+			a.StagedWritten()
+		}
 	}
 	h.readBack = a.StagedCurrent()
 	return nil
+}
+
+// holdsNoLogin reports whether the home's credential store holds no login at
+// all: there is none, or it reads and has no login entry. A blanked login is
+// one, and so is a store that cannot be read.
+func (h *claudeHome) holdsNoLogin() bool {
+	raw, _, err := h.readStore()
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false
+	}
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return true
+	}
+	var doc map[string]any
+	if rota.UnmarshalLenient(raw, &doc) != nil {
+		return false
+	}
+	_, ok := storedLogin(raw)
+	return !ok
 }
 
 // writeRefreshed puts a login rota has refreshed into the home, when it may.
