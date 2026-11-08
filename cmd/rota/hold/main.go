@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/lend"
 	"github.com/professor93/rota/internal/proc"
 	"github.com/professor93/rota/internal/termenv"
 	rota "github.com/professor93/rota/lib"
@@ -94,7 +95,7 @@ type holder struct {
 	logs           *logFile
 	log            func(msg string, args ...any)
 
-	release    func() // the account's claim, which the CLI holds too
+	release    func() // the account's claim, which a CLI given it holds too
 	child      *ptyChild
 	ln         *net.UnixListener
 	rec        *metaFile
@@ -150,9 +151,17 @@ func (h *holder) start(in io.Reader, open func() (*store.Store, error)) error {
 			return err
 		}
 	}
-	// The claim is close-on-exec, and must not be: a holder killed outright
-	// would otherwise free it while its CLI still runs on the account.
-	store.KeepClaimsAcrossExec()
+	// The claim is close-on-exec. A CLI given its claim holds it itself, so a
+	// holder killed outright does not free an account its CLI still works on,
+	// and a claude CLI is given it, as an interactive claude run's CLI is. A
+	// codex CLI is not (lend.Lends): Codex leaves its app-server daemon
+	// running when the CLI ends, holding whatever the CLI inherited, and the
+	// account would stay claimed. This holder, which lives exactly as long as
+	// the CLI, keeps that claim itself, as `rota serve claim` does for an
+	// interactive codex run.
+	if p.account != nil && !lend.Lends(p.account.Provider) {
+		store.KeepClaimsAcrossExec()
+	}
 	cols, rows := holdwire.BoundSize(h.req.Cols, h.req.Rows)
 	if h.child, err = startChild(p.path, p.args, env, cwd, cols, rows); err != nil {
 		return err

@@ -2396,8 +2396,15 @@ two things:
 
 The holder is asked for an account, never handed a credential: it prepares
 the account itself, as `rota run` does, so no token passes between
-processes, and the account stays claimed for as long as the CLI runs, its
-holder killed or not. Its own argument list is `rota serve hold` and
+processes, and the account stays claimed for as long as the CLI runs. A
+claude CLI is given the claim, as an interactive run's is, and keeps it
+with its holder killed or not. A codex CLI is not, since Codex's app-server
+daemon would hold it on after the session ended: its holder keeps the claim
+and lets go once the CLI has exited, or early when the holder is killed
+outright, as `rota serve claim` does for an interactive run (see *[One run
+at a time, where the CLI owns the
+credential](#one-run-at-a-time-where-the-cli-owns-the-credential)*). Its
+own argument list is `rota serve hold` and
 nothing more; what it is to run, which may hold a prompt, comes on its
 standard input. A person who types `rota serve hold` is told *rota serve
 hold is started by the rota daemon (rota serve start), never by hand*, and
@@ -3579,7 +3586,10 @@ and the run ends with the account free. The holder ignores SIGTERM, SIGINT,
 SIGHUP and SIGQUIT, so `pkill rota` leaves it holding; only SIGKILL makes it
 let go early, while the CLI still runs. Where no holder can be started —
 another unix, or a failure, which is said along with why — a codex account's
-claim is kept across the exec, as a claude account's is. Everywhere rota
+claim is kept across the exec, as a claude account's is. A held session's
+holder does the same for its CLI: a claude CLI is given the claim, and a
+codex session's holder, which lives exactly as long as its CLI, keeps it
+itself. Everywhere rota
 stays the parent — a run, an open session, a terminal on the server,
 `--share`, and Windows, which has no exec — the claim keeps the flag and rota
 holds it until the run ends, so a child started meanwhile, another account's

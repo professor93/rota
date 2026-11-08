@@ -31,7 +31,7 @@ import (
 // the exec as before.
 //
 // Every other provider keeps the claim across the exec, as it always did
-// (see lendsClaim).
+// (see lend.Lends, which a held session's holder asks too).
 
 // errNoHolder says a holder is not to be had here, rather than that starting
 // one went wrong: the claim is kept across the exec, and nothing is said.
@@ -56,17 +56,8 @@ func (keptAcrossExec) letGo() {}
 // this test binary again.
 var startHolder = holdInBackground
 
-// lendsClaim reports whether a run of a provider lends its claim to a holder
-// rather than keeping it across the exec: one whose CLI is known to leave a
-// daemon running that holds what the CLI inherited. Codex's does, and so
-// does any provider that drives Codex's CLI. Claude Code's daemon was seen
-// holding no claim of rota's, and a claude account reads in use while any
-// claude process lives in its home besides, so a claude run keeps its claim
-// across the exec, with no process beside it, as it always has.
-func lendsClaim(provider string) bool { return rota.Flavor(provider) == "codex" }
-
 // holdClaims gives the claims this process holds to a holder, where the
-// account's provider lends its claim (lendsClaim), or keeps them across the
+// account's provider lends its claim (lend.Lends), or keeps them across the
 // exec, where it does not or a holder cannot be started. It is called
 // immediately before the exec, after every other process the handover
 // starts, so none of those is given a claim either.
@@ -75,7 +66,7 @@ func lendsClaim(provider string) bool { return rota.Flavor(provider) == "codex" 
 // whatever happens: the holder has its own by the time startHolder returns,
 // and the store's own are what is kept across the exec otherwise.
 func (c *cli) holdClaims(a *rota.Account) claimHolder {
-	if !lendsClaim(a.Provider) {
+	if !lend.Lends(a.Provider) {
 		store.KeepClaimsAcrossExec()
 		return keptAcrossExec{}
 	}

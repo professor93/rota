@@ -31,9 +31,9 @@ import (
 // with the CLI calls KeepClaimsAcrossExec immediately before, or lends the
 // claim to a process of its own that holds it until the CLI exits
 // (lentClaims), as the program does for codex, so the claim outlives the
-// replacing; a holder keeps it across its CLI's start as well, so the claim
-// outlives the holder too while its CLI runs; and a caller that does not go
-// through with any of them calls release.
+// replacing; a holder keeps it across its CLI's start as well where the CLI is
+// given its claim, so the claim outlives the holder too while its CLI runs;
+// and a caller that does not go through with any of them calls release.
 //
 // The CLI is taken to start where this process is, which is where the
 // handover starts it; one started anywhere else is prepared with PrepareIn.
@@ -533,7 +533,7 @@ var (
 
 // heldClaims are the claim files this process holds right now, so that the
 // one moment they must outlive it — the handover, or a holder starting its
-// CLI — can find them.
+// CLI — can find them, and a handover can lend them.
 var (
 	heldMu     sync.Mutex
 	heldClaims = map[*os.File]bool{}
@@ -546,9 +546,10 @@ var (
 //   - a handover that does not lend its claims (lentClaims), immediately
 //     before it replaces this process with the vendor CLI;
 //   - `rota serve hold`, immediately before it starts the CLI it holds on a
-//     pseudo-terminal. The holder keeps running, and every process it starts
-//     from then on would inherit the claim too, so it starts nothing else:
-//     the CLI is its one child.
+//     pseudo-terminal, where that CLI is given its claim (a codex CLI is not:
+//     the holder keeps a codex account's claim itself). The holder keeps
+//     running, and every process it starts from then on would inherit the
+//     claim too, so it starts nothing else: the CLI is its one child.
 //
 // Go opens every file close-on-exec, which is right for every other moment:
 // a child started while a claim is held — another account's CLI, a shell on
@@ -559,8 +560,9 @@ var (
 // killed outright must not free an account its CLI still works on. The
 // kernel releases it when the last process holding it exits — the CLI, and
 // anything the CLI started that inherited it, a daemon it leaves behind
-// included; that is why a codex handover lends its claims instead, Codex's
-// CLI leaving its app-server daemon running.
+// included; that is why a codex handover lends its claims instead, and a
+// codex session's holder keeps its own, Codex's CLI leaving its app-server
+// daemon running.
 func KeepClaimsAcrossExec() {
 	heldMu.Lock()
 	defer heldMu.Unlock()

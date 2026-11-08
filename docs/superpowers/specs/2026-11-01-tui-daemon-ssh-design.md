@@ -163,9 +163,13 @@ screen, a scrollback ring and a socket. It:
   the account's run claim lives with it. Like `terminals.go:225-238`, it calls
   `Launchable` first and closes the store after. rota cannot rewrite a login
   under a running session.
-- calls `store.KeepClaimsAcrossExec()` before starting the child, because the
-  claim is close-on-exec: without this a killed holder would free the claim while
-  the CLI lives, and a codex token could burn. The claim ends when the CLI does.
+- calls `store.KeepClaimsAcrossExec()` before starting a claude child, because
+  the claim is close-on-exec: without this a killed holder would free the claim
+  while the CLI lives. A codex child is kept from the claim (`lend.Lends`), as
+  an interactive codex run's CLI is: Codex's app-server daemon would inherit it
+  and keep the account claimed after the session ended. The holder, which lives
+  exactly as long as the CLI, keeps that claim itself. The claim ends when the
+  CLI does.
 - listens on `<store>/terminals/<id>/sock`, directory 0700, socket 0600.
   It accepts one daemon link, and a new link replaces the old only when it
   comes from the process that holds the daemon lock; anything else is refused.

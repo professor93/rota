@@ -273,28 +273,35 @@ func TestTheConversationComesFromTheRegistry(t *testing.T) {
 	}
 }
 
-// Review Focus 1: the account's claim is the CLI's, not the holder's.
+// heldInUse says whether account id of the store at home is in use: its
+// claim held, or for a claude account a Claude Code process alive in its
+// home besides.
+func heldInUse(t *testing.T, home string, id int) bool {
+	t.Helper()
+	st, err := store.Open(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	return st.InUse(st.Find(id))
+}
+
+// Review Focus 1: the account's claim is the CLI's, not the holder's, where
+// the CLI is given its claim, as a claude CLI is by an interactive run too
+// (lend.Lends).
 func TestTheClaimLivesWithTheCLI(t *testing.T) {
 	home, terminals := holdStore(t)
-	// A codex that takes no notice of its hang-up and stays a few seconds
+	// A claude that takes no notice of its hang-up and stays a few seconds
 	// after its terminal goes, as one finishing its work does.
-	bin := holdFake(t, "codex", fakecli.Spec{Linger: "3s"})
+	bin := holdFake(t, "claude", fakecli.Spec{Linger: "3s"})
 	req := holdRequest(t)
-	req.Account, req.Args = 2, nil
+	req.Args = nil
 	h := startHolderProc(t, terminals, bin, req)
 	if !h.ready.OK {
 		t.Fatalf("%+v", h.ready)
 	}
-	busy := func() bool {
-		st, err := store.Open(home)
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer st.Close()
-		return st.Busy(st.Find(2))
-	}
-	if !busy() {
-		t.Fatal("an account held by a session is busy")
+	if !heldInUse(t, home, 1) {
+		t.Fatal("an account held by a session is in use")
 	}
 	child := h.meta().ChildPID
 	// The fake takes no notice of a hang-up only once it runs: by the time
@@ -308,7 +315,7 @@ func TestTheClaimLivesWithTheCLI(t *testing.T) {
 	if !proc.Alive(child) {
 		t.Fatal("the CLI was meant to outlive its holder for a moment")
 	}
-	if !busy() {
+	if !heldInUse(t, home, 1) {
 		t.Fatal("a killed holder freed the claim while its CLI lives")
 	}
 	recs := holdwire.Scan(terminals)
@@ -317,7 +324,45 @@ func TestTheClaimLivesWithTheCLI(t *testing.T) {
 	}
 
 	within(t, "the CLI goes", 15*time.Second, func() bool { return gone(child) })
-	within(t, "the claim goes with the CLI", 5*time.Second, func() bool { return !busy() })
+	within(t, "the claim goes with the CLI", 5*time.Second, func() bool { return !heldInUse(t, home, 1) })
+}
+
+// A codex CLI is kept from its account's claim, which its holder keeps
+// instead, as `rota serve claim` does for an interactive codex run
+// (lend.Lends). Codex leaves its app-server daemon running when the CLI
+// ends, and a claim the CLI had inherited would go on to the daemon and keep
+// the account claimed after the session had ended. Here the fake codex
+// leaves behind a daemon of its own, which keeps whatever it inherited.
+// While the CLI runs the account is claimed and busy; once the session has
+// ended it is free, although the daemon is still there.
+func TestAHeldCodexSessionLeavesItsAccountFreeWhileItsDaemonRuns(t *testing.T) {
+	home, terminals := holdStore(t)
+	daemonUp := filepath.Join(t.TempDir(), "daemon.pid")
+	daemon := fakecli.Install(t, t.TempDir(), "codex-daemon",
+		fakecli.Spec{KeepStdin: true, Sleep: "60s", Linger: "60s", Ready: daemonUp})
+	bin := holdFake(t, "codex", fakecli.Spec{Detach: daemon})
+	req := holdRequest(t)
+	req.Account, req.Args = 2, nil
+	h := startHolderProc(t, terminals, bin, req)
+	if !h.ready.OK {
+		t.Fatalf("%+v", h.ready)
+	}
+	l := h.link()
+	l.wait("ready")
+	daemonPID := fakecli.WaitReady(t, daemonUp)
+	t.Cleanup(func() { _ = syscall.Kill(daemonPID, syscall.SIGKILL) })
+	if !heldInUse(t, home, 2) {
+		t.Fatal("the account is claimed while its CLI runs")
+	}
+
+	l.typed("bye\r")
+	if code := h.code(); code != 0 {
+		t.Fatalf("the holder of a session that ended exits 0, not %d", code)
+	}
+	within(t, "the account is free once its session has ended", 10*time.Second, func() bool { return !heldInUse(t, home, 2) })
+	if !proc.Alive(daemonPID) {
+		t.Fatal("while the daemon its CLI left behind still runs")
+	}
 }
 
 func TestAFailedPrepareSaysWhyAndLeavesNothing(t *testing.T) {
