@@ -79,7 +79,7 @@ func TestLocalHandlerHasEveryGroup(t *testing.T) {
 	if code, body := ask(local, "GET", "/v1/ws", ""); code != http.StatusBadRequest || errorOf(body) == "" {
 		t.Errorf("GET /v1/ws on LocalHandler answers %d %s, want the socket's own 400", code, body)
 	}
-	if code, body := ask(local, "GET", "/v1/terminals/0123456789abcdef/send", ""); code != http.StatusMethodNotAllowed {
+	if code, body := ask(local, "GET", "/v1/terminals/0123456789abcdef/messages", ""); code != http.StatusMethodNotAllowed {
 		t.Errorf("the send route is missing from LocalHandler: GET on it answers %d %s, want 405", code, body)
 	}
 	code, body := ask(local, "GET", "/v1/session", "")
@@ -167,7 +167,7 @@ func TestLocalWatchCannotChange(t *testing.T) {
 	}
 	for _, c := range []struct{ method, path, body string }{
 		{"POST", "/v1/terminals", `{"account":1}`},
-		{"POST", "/v1/terminals/0123456789abcdef/send", `{"text":"hi"}`},
+		{"POST", "/v1/terminals/0123456789abcdef/messages", `{"text":"hi"}`},
 		{"DELETE", "/v1/terminals/0123456789abcdef", ""},
 		{"POST", "/v1/run", `{"prompt":"hi"}`},
 		{"POST", "/v1/invites", `{}`},

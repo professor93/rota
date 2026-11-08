@@ -12,7 +12,7 @@ import (
 // Sending is typing a message into a held session the way a person would:
 // the holder waits until the CLI is ready for one, types it, and presses
 // Enter. This is the daemon's half — the frame out, and the one answer back
-// to whoever asked — and POST /v1/terminals/{id}/send is its door.
+// to whoever asked — and POST /v1/terminals/{id}/messages is its door.
 //
 // A send is let in under the keyboard's rule, and the holder may wait up to
 // heldSendWaitMS before it types. From the moment it is let in until it is

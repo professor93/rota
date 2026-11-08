@@ -422,7 +422,7 @@ type SendReq struct {
 // refusal is a *Refusal whose Reason says why: waiting, keyboard, ended,
 // not_held or timeout.
 func (c *Client) Send(id string, r SendReq) error {
-	return c.do(http.MethodPost, "/v1/terminals/"+url.PathEscape(id)+"/send", r, nil)
+	return c.do(http.MethodPost, "/v1/terminals/"+url.PathEscape(id)+"/messages", r, nil)
 }
 
 // Stop ends a session: its CLI is hung up, and killed if it is still there
