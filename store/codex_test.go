@@ -255,6 +255,60 @@ func TestARunLeavesACodexLoginToItsDaemon(t *testing.T) {
 	}
 }
 
+// A home whose auth.json holds the account's own refresh token gives the
+// store what it lacks of that login: the access token of a record held as a
+// refresh token alone, the id_token of one stored before rota captured it.
+// Staging would otherwise refresh to get them, presenting the refresh token
+// a daemon Codex left in the home holds too, and that daemon would be
+// refused for good the next time it refreshed. Nothing is presented, with the
+// daemon alive or not, and the home keeps the login it holds.
+func TestARunTakesWhatItsRecordLacksFromAHomeHoldingItsOwnLogin(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no codex: Prepare stops at finding it, after the part watched here
+	for _, c := range []struct {
+		what   string
+		strip  func(*rota.Account)
+		daemon bool
+	}{
+		{"a refresh token alone, the daemon alive", func(a *rota.Account) { a.Token.Access, a.Token.ExpiresAt = "", 0 }, true},
+		{"a refresh token alone, no daemon", func(a *rota.Account) { a.Token.Access, a.Token.ExpiresAt = "", 0 }, false},
+		{"no id_token, the daemon alive", func(a *rota.Account) { delete(a.Extra, "id_token") }, true},
+		{"no id_token, no daemon", func(a *rota.Account) { delete(a.Extra, "id_token") }, false},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			e := codexRefreshes(t)
+			s := openTemp(t)
+			a := s.add("codex")
+			access := codexJWT(time.Now().Add(time.Hour))
+			a.Token = rota.Token{Access: access, Refresh: "r-old", ExpiresAt: time.Now().Add(time.Hour).UnixMilli()}
+			a.Extra = map[string]string{"id_token": "i", "account_id": "acct"}
+			if _, err := rota.Stage(a, s.Home(a)); err != nil {
+				t.Fatal(err)
+			}
+			c.strip(a)
+			if err := s.Save(); err != nil {
+				t.Fatal(err)
+			}
+			if c.daemon {
+				codexDaemonAt(t, s.Home(a), "app-server.pid", os.Getpid())
+			}
+			_, _, release, _ := s.Prepare(context.Background(), a)
+			if release != nil {
+				release()
+			}
+			if got := e.grants(); len(got) != 0 {
+				t.Fatalf("nothing is presented, presented %v", got)
+			}
+			if a.Token.Access != access || a.Token.Refresh != "r-old" || a.Extra["id_token"] != "i" {
+				t.Fatalf("the record takes the home's login: access %q, refresh %q, id_token %q",
+					a.Token.Access, a.Token.Refresh, a.Extra["id_token"])
+			}
+			if got := homeHolds(t, s.Home(a)); got != "r-old" {
+				t.Fatalf("the home keeps its login: %q", got)
+			}
+		})
+	}
+}
+
 // Maintenance writes what it refreshed into the home through a launch, which
 // reads the home back first. The home still holds the token the refresh has
 // just spent, and that file must be known to be the store's own, or it would

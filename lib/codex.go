@@ -281,8 +281,21 @@ func adoptCodex(a *Account, doc codexAuth) {
 	// store from before rota kept one, or an older write, after a run whose
 	// last save failed. Recorded, so that a refresh rota makes next leaves a
 	// file that lags behind it rather than one read back as a rotation.
+	//
+	// What the account lacks of this very login is taken from the file: the
+	// access token of a record held as a refresh token alone, the id_token of
+	// one stored before rota captured it. Staging would otherwise refresh to
+	// get them, presenting a refresh token a daemon Codex left in the home
+	// holds too.
 	if tok.RefreshToken != "" && tok.RefreshToken == a.Token.Refresh {
 		a.Staged = fingerprint(tok.RefreshToken)
+		if a.Token.Access == "" && tok.AccessToken != "" {
+			a.Token.Access = tok.AccessToken
+			a.Token.ExpiresAt = jwtExpiryMS(tok.AccessToken) // the CLI records no expiry
+		}
+		if a.Extra["id_token"] == "" && tok.IDToken != "" {
+			a.setExtra("id_token", tok.IDToken)
+		}
 		return
 	}
 	if !a.cliRotated(tok.RefreshToken) {
