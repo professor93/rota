@@ -903,8 +903,9 @@ func TestAWriteRemovesTheItemEvenWhenTheFileWasTheNewerCopy(t *testing.T) {
 	a := livingClaude(s, "u1")
 	home := s.Home(a)
 	svc := service(t, home)
-	k.items[svc] = storeLogin("A-item", "R-item", later(-2*time.Hour), "1999999999000")
-	writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-file", "R-file", later(time.Hour), "1999999999000"))
+	// The login from before: its grant ended before the account's own login's.
+	k.items[svc] = storeLogin("A-item", "R-item", later(-2*time.Hour), "1999913599000")
+	writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-file", "R-file", later(time.Hour), "1999913599000"))
 	a.StagedSuperseded() // a fresh login with rota, say: whatever is there is older
 	if _, err := launchEnv(t, s, a); err != nil {
 		t.Fatal(err)

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 )
 
 // A claude account reaches Claude Code by one of two routes, and this file
@@ -327,16 +328,41 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //     taken when it is newer than what the account has. The login's
 //     refreshTokenExpiresAt is its grant's own end, which a refresh of
 //     rota's never changes and one of Claude Code's moves only when the
-//     provider shortens the grant, so that is how a rotation is told apart,
-//     with no network call. One that is not newer is behind: the home does
-//     not hold the account's current login, the next staging writes it, and
-//     it is recorded as nothing of the account's;
-//   - a new login — another refreshTokenExpiresAt, or any living login in
-//     the home of a dead account but the one it wrote — which somebody made
-//     by running /login inside that home. Nothing of it is taken here,
-//     because the home says nothing trustworthy about whose it is: it comes
-//     back as a *NewLogin for the application to check (NewLogin.Identify)
-//     and then Accept or Refuse.
+//     provider shortens the grant, give or take the second a reply in whole
+//     seconds may take off it (sameGrant), so a value within a minute of the
+//     account's is how a rotation is told apart, with no network call —
+//     unless Claude Code records the login as another account's
+//     (tokenAccount), which no rotation of this one can be. One that is not
+//     newer is behind: the home does not hold the account's current login,
+//     the next staging writes it, and it is recorded as nothing of the
+//     account's. A rotation is taken even when the home is recorded as
+//     holding nothing of the account's, provided the account knows its
+//     login's refreshTokenExpiresAt and the rotation expires later than its
+//     own token: a look that found the store empty, blanked, without an
+//     expiry, behind or unreadable says nothing about what Claude Code wrote
+//     there after it, and an account that passed over its own login rotated
+//     would go on to present the refresh token that rotation replaced;
+//   - a new login — a refreshTokenExpiresAt more than a minute from the
+//     account's, one where only one side has any, a login Claude Code
+//     records as another account's, or any living login in the home of a
+//     dead account but the one it wrote — which somebody made by running
+//     /login inside that home. Nothing of it is taken here, because the home
+//     says nothing trustworthy about whose it is: it comes back as a
+//     *NewLogin for the application to check (NewLogin.Identify) and then
+//     Accept or Refuse. In a home recorded as holding nothing of the
+//     account's — it was logged in again with rota since, say — the ends
+//     tell the two apart, because a login ends a fixed time after it was
+//     signed in: one ending more than a minute after the account's login was
+//     signed in after it, with /login inside the home, and comes back as a
+//     *NewLogin like any other, so nothing writes over it before it is
+//     checked — as does one Claude Code records as another account's; one
+//     ending more than a minute before is the login from before the
+//     account's current one, older whatever else it says, and the next
+//     staging writes over it. So is any login there when either end is
+//     unknown, and one of a grant already refused (Refuse), which is not
+//     asked about again unless Claude Code records it as this account's or
+//     as a third: one that records nothing, within a minute of the refused
+//     grant, is taken for it.
 func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 	if a.APIKey() {
 		// A key account keeps no login in its home, so nothing found there is
@@ -392,14 +418,42 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 	switch {
 	case a.Dead:
 		// The login this account had is over, so a living one in its home
-		// is somebody signing in again there — whatever it says about itself.
+		// is somebody signing in again there — whatever it says about itself
+		// — unless the provider has already said it is somebody else's.
+		if l.refusedBefore(a) {
+			return nil
+		}
 		return &NewLogin{Access: l.AccessToken, login: l}
 	case a.Staged == stagedNone:
-		// The home predates the account's current login — it was logged in
-		// again with rota since — so whatever is there is older, rotated or
-		// not, and the next write replaces it.
+		// The last look found the home not holding the account's current
+		// login, and what is there now is told by when it ends. The account's
+		// own grant, expiring later than the account's token, is Claude Code
+		// having refreshed the account's own login since that look, whatever
+		// the look found: it is the newest there is, and the account's token
+		// is spent. A grant the provider already said is somebody else's
+		// (Refuse) is passed over without asking again, rotated or not, and the
+		// next write replaces it — unless Claude Code records the login as
+		// this account's (refusedBefore). One ending earlier predates the account's
+		// login — it was logged in again with rota since — so it is older
+		// whoever's it says it is, and the next write replaces it too; and so,
+		// as ever, is anything when either end is unknown. A grant ending later
+		// was signed in after the account's login, with /login in the home, and
+		// is checked like any new login rather than written over; so is one
+		// Claude Code records as another account's.
+		home, own := l.refreshUntil(), a.Extra[claudeRefreshUntil]
+		switch {
+		case home == "" || own == "":
+		case l.ofGrant(a):
+			if int64(l.ExpiresAt) > a.Token.ExpiresAt {
+				l.adopt(a)
+			}
+		case l.refusedBefore(a):
+		case endsAfter(own, home):
+		case endsAfter(home, own) || l.otherAccount(a):
+			return &NewLogin{Access: l.AccessToken, login: l}
+		}
 		return nil
-	case l.refreshUntil() != a.Extra[claudeRefreshUntil]:
+	case !l.ofGrant(a):
 		return &NewLogin{Access: l.AccessToken, login: l}
 	}
 	if int64(l.ExpiresAt) < a.Token.ExpiresAt {
@@ -441,6 +495,11 @@ func (l *claudeLogin) adopt(a *Account) {
 	a.Dead, a.DeadReason = false, ""
 }
 
+// claudeRefusedGrant is where an account remembers the grant of the last login
+// in its home the provider said is somebody else's (Refuse): when it ends, and
+// whose it is when that is known, as "<ms>" or "<ms> <uuid>".
+const claudeRefusedGrant = "refused_grant"
+
 // NewLogin is a login found in an account's home that is not a rotation of
 // the one the account holds: somebody ran /login inside that home. It is
 // what AdoptFS returns instead of taking it, because nothing in the home can
@@ -475,21 +534,37 @@ func (n *NewLogin) Identify(ctx context.Context) (*Identity, error) {
 // Accept takes the login into the account — the application has found it
 // is this account's. A dead account is alive again: someone signed it in.
 // That sign-in is a new grant, so it ends when it says and nothing the last
-// one said about its own end counts any more.
+// one said about its own end counts any more, nor what the home held that
+// was refused.
 func (n *NewLogin) Accept(a *Account) {
 	delete(a.Extra, claudeRefreshUntil)
 	delete(a.Extra, claudeLoginEnds)
 	n.login.adopt(a)
+	delete(a.Extra, claudeRefusedGrant)
 }
 
 // Refuse records that the home holds somebody else's login. Nothing of it is
 // taken and the account's tokens stay exactly as they were; the home is
 // marked as holding nothing of this account's, so the account's own login
-// goes back in the first time nothing runs there. The error says so, naming
-// both, and is an ErrForeignLogin for an application to show rather than
-// fail on.
+// goes back in the first time nothing runs there. Which grant was refused is
+// remembered — when it ends, and whose the provider said it is — so that later
+// looks pass it over without asking again, rotated or with its access token
+// lapsed, until the account's own login is written in or the account signs in
+// afresh (see refusedBefore). The error says so,
+// naming both, and is an ErrForeignLogin for an application to show rather
+// than fail on.
 func (n *NewLogin) Refuse(a *Account, found *Identity) error {
 	a.Staged = stagedNone
+	if v := n.login.refreshUntil(); v != "" {
+		who := n.login.recordedUUID()
+		if found != nil && found.UUID != "" {
+			who = found.UUID
+		}
+		if who != "" {
+			v += " " + who
+		}
+		a.setExtra(claudeRefusedGrant, v)
+	}
 	who := "another account"
 	if found != nil {
 		switch {
@@ -517,9 +592,103 @@ type claudeLogin struct {
 	RateLimitTier         string   `json:"rateLimitTier"`
 	RefreshTokenExpiresAt float64  `json:"refreshTokenExpiresAt"`
 	ClientID              string   `json:"clientId"`
+	// TokenAccount is whose login Claude Code says this is, when it says —
+	// {"uuid": …, "emailAddress": …} — kept as it came, so that a shape this
+	// package does not expect never makes the whole login unreadable.
+	TokenAccount jsontext.Value `json:"tokenAccount"`
 }
 
 func (l *claudeLogin) usable() bool { return l.RefreshToken != "" && l.ExpiresAt != 0 }
+
+// grantSlack is how far apart two refreshTokenExpiresAt values may be and
+// still be one grant's, in milliseconds. On a refresh Claude Code keeps the
+// earlier of the one it had and now plus the reply's refresh_token_expires_in,
+// and a reply in whole remaining seconds lands up to a second short of the
+// real end — never further, since each refresh starts from the real end
+// again. A sign-in ends a fixed time after it was made, so two of them this
+// close together were made within the same minute.
+const grantSlack = 60_000
+
+// sameGrant reports whether two refreshTokenExpiresAt values, as the account
+// keeps them, say one grant: neither is known, or both are and lie within
+// grantSlack of each other. One known and one not is two grants.
+func sameGrant(a, b string) bool {
+	if a == b {
+		return true
+	}
+	x, errA := strconv.ParseInt(a, 10, 64)
+	y, errB := strconv.ParseInt(b, 10, 64)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return x-y <= grantSlack && y-x <= grantSlack
+}
+
+// ofGrant reports whether a login found in a home is of the account's own
+// grant: it ends within a minute of the account's login (sameGrant), and
+// Claude Code does not record it as another account's (otherAccount). A login
+// that is not is never taken as a rotation, however close its end.
+func (l *claudeLogin) ofGrant(a *Account) bool {
+	return sameGrant(l.refreshUntil(), a.Extra[claudeRefreshUntil]) && !l.otherAccount(a)
+}
+
+// otherAccount reports whether Claude Code recorded the login as another
+// account's (tokenAccount): its uuid and the account's are both known, and
+// differ. Nothing recorded, nothing to compare it with, or a record of a shape
+// this package does not read says nothing, and costs no network call.
+func (l *claudeLogin) otherAccount(a *Account) bool {
+	who := l.recordedUUID()
+	return who != "" && a.UUID != "" && !strings.EqualFold(who, a.UUID)
+}
+
+// recordedAs reports whether Claude Code recorded the login as this account's
+// (tokenAccount): its uuid and the account's are both known, and the same. The
+// mirror of otherAccount.
+func (l *claudeLogin) recordedAs(a *Account) bool {
+	who := l.recordedUUID()
+	return who != "" && a.UUID != "" && strings.EqualFold(who, a.UUID)
+}
+
+// recordedUUID is the account uuid Claude Code recorded the login as
+// (tokenAccount), or "" when it recorded none or one of a shape this package
+// does not read.
+func (l *claudeLogin) recordedUUID() string {
+	if len(l.TokenAccount) == 0 {
+		return ""
+	}
+	var who struct {
+		UUID string `json:"uuid"`
+	}
+	if decodeLenient(l.TokenAccount, &who) != nil {
+		return ""
+	}
+	return who.UUID
+}
+
+// refusedBefore reports whether a login found in the home is of the grant the
+// account last refused (Refuse): it ends within a minute of that grant, and
+// Claude Code records it as the very account refused, or as nobody — never as
+// this account, which a refused login was not, nor as a third. One that
+// records nothing is taken for the refused grant, so a /login of this account
+// made within a minute of the refused one, by a Claude Code that keeps no
+// record, is passed over with it.
+func (l *claudeLogin) refusedBefore(a *Account) bool {
+	end, who, _ := strings.Cut(a.Extra[claudeRefusedGrant], " ")
+	if end == "" || !sameGrant(l.refreshUntil(), end) || l.recordedAs(a) {
+		return false
+	}
+	rec := l.recordedUUID()
+	return rec == "" || (who != "" && strings.EqualFold(rec, who))
+}
+
+// endsAfter reports whether the grant ending at a, as the account keeps such
+// a value, ends more than grantSlack after the one ending at b: that it was
+// signed in after it. Either end unknown says nothing.
+func endsAfter(a, b string) bool {
+	x, errA := strconv.ParseInt(a, 10, 64)
+	y, errB := strconv.ParseInt(b, 10, 64)
+	return errA == nil && errB == nil && x-y > grantSlack
+}
 
 // refreshUntil is the login's refreshTokenExpiresAt as the account keeps it:
 // decimal milliseconds, or "" when the login carries none.
@@ -740,6 +909,7 @@ func stageMerged(a *Account, home string, f StagedFile) error {
 		return err
 	}
 	a.Staged = fingerprint(a.Token.Refresh)
+	delete(a.Extra, claudeRefusedGrant) // the account's own login is in, over whatever was refused
 	return nil
 }
 

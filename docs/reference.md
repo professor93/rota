@@ -2532,19 +2532,51 @@ Code blanked: see *Stranded* and *Blanked*, below.
   is read. A rotation by Claude Code keeps the login's own
   `refreshTokenExpiresAt` — the end its grant was signed in with, which a
   refresh of rota's never changes and one of Claude Code's moves only when the
-  provider shortens the grant — and is taken with no network call. A login that
-  expires before the account's own token is behind, and so is the one rota
-  wrote before a refresh of its own, whatever end it carries — which rota goes
-  on remembering as its own write, however often the home is looked at,
-  because that is what proves it spent (*Writing*): the account's current
-  login goes in on the next launch that may write. Any other login with another `refreshTokenExpiresAt` — or any living
-  login in the home of an account marked dead but rota's own write — is somebody running `/login`
-  inside that home: rota asks the provider whose it is, with that login's own
-  access token, and takes it when it is this account's (a dead account comes
-  back that way); somebody else's is not taken, the account's own tokens stay
-  as they were, and rota says so, naming both. A login Claude Code blanked is
-  not taken for the end of the account when it was the account's current one:
-  see *Blanked*, below. A store that is there and cannot be read is not an
+  provider shortens the grant — to within a minute, since its refresh may set
+  it a second short, and is taken with no network call, whatever the look
+  before it found there (no login, a blanked or older one, one without an
+  expiry, a store it could not read), as long as rota knows when the
+  account's login ends and the rotation expires after the account's own
+  token. A login Claude Code records as another account's (`tokenAccount`)
+  is never taken as a rotation, however close its end. On macOS, while the
+  home's login was last found in its keychain item, a keychain read that
+  says there is no item is asked once more before the file is read in its
+  place; and while anything runs in the home, such a file read changes
+  nothing rota believes about the home, and no login in that file is
+  settled from it: an item being rewritten can read as none, and the file
+  beside it is then an older login. A newer login of the account's own in
+  that file is still taken. In a quiet home nothing can be rewriting the
+  item, so one that is not there is gone, and from then on the file is the
+  home's store.
+  A login that expires before the account's own token is behind, and so is
+  the one rota wrote before a refresh of its own, whatever end it carries —
+  which rota goes on remembering as its own write, however often the home is
+  looked at, because that is what proves it spent (*Writing*): the account's
+  current login goes in on the next launch that may write. A login whose
+  `refreshTokenExpiresAt` is more than a minute from the account's, or that
+  only one of them knows, or that Claude Code records as another account's
+  — or any living login in the home of an account marked dead but rota's own
+  write — is somebody running `/login` inside that home: rota asks the
+  provider whose it is, with that login's own access token, and takes it
+  when it is this account's (a dead account comes back that way); somebody
+  else's is not taken, the account's own tokens stay as they were, and rota
+  says so, naming both. It is not asked about again — rotated, or with its
+  access token lapsed, and in the home of an account marked dead too — and
+  the account's own login goes in over it once nothing runs there. A login
+  Claude Code records as this account's is never mistaken for the refused
+  one; where Claude Code records nobody, a `/login` of this account made
+  within a minute of it is, and is written over with it. After `rota login`,
+  until the new login is in the home, the ends decide what the home holds,
+  because a login ends a fixed time after it was signed in: one ending more
+  than a minute after the new login's, or in the same minute but recorded as
+  another account's, was made with `/login` since, and is checked the same
+  way, never written over first; one ending before it, or carrying no end at
+  all, is the login from before, and the new one goes in over it once
+  nothing runs there. For an account whose login's end rota has not
+  recorded, the new login goes in over whatever is there. A login Claude
+  Code blanked is not taken for the end of the account when it was the
+  account's current one: see *Blanked*, below. A store that is there and
+  cannot be read is not an
   empty one: see the hold, below.
 - **The hold.** Sometimes the home holds something rota cannot place: a
   login made inside Claude Code that the provider cannot be asked about right

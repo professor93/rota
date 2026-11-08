@@ -48,7 +48,10 @@ func (a *Account) StagedSuperseded() { a.Staged = stagedNone }
 // now holds — for an application that took the files from StagePlan and
 // wrote them itself. The next adoption then knows a different login found
 // there as a rotation by the CLI rather than as its own write.
-func (a *Account) StagedWritten() { a.Staged = fingerprint(a.Token.Refresh) }
+func (a *Account) StagedWritten() {
+	a.Staged = fingerprint(a.Token.Refresh)
+	delete(a.Extra, claudeRefusedGrant) // the account's own login is in, over whatever was refused
+}
 
 // StagedCurrent reports whether the account's current login is what its home
 // holds, as the last adoption or write recorded.
