@@ -21,13 +21,15 @@ import (
 const clearedLogin = `{"mcpOAuth":{"srv":{"accessToken":"mcp-secret"}},"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,` +
 	`"scopes":["user:inference"],"subscriptionType":"max","clientId":"client"}}`
 
-// cleared leaves a home whose current login Claude Code has blanked.
+// cleared leaves a home whose current login Claude Code has blanked a moment
+// after rota last saw it there.
 func cleared(t *testing.T, s *Store, a *rota.Account) string {
 	t.Helper()
 	home := s.Home(a)
 	a.Token.ExpiresAt = later(-time.Hour)
 	writeFile(t, filepath.Join(home, ".credentials.json"), clearedLogin)
 	a.StagedWritten()
+	seenInSync(a)
 	return home
 }
 
@@ -914,6 +916,7 @@ func TestABlankedItemBesideAGoodFileIsTakenOutOfTheWay(t *testing.T) {
 			home := s.Home(a)
 			svc := service(t, home)
 			a.StagedWritten()
+			seenInSync(a)
 			k.items[svc] = clearedLogin
 			writeFile(t, filepath.Join(home, ".credentials.json"), strings.Replace(
 				storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000"), "mcp-secret", "file-mcp", 1))
@@ -934,7 +937,8 @@ func TestABlankedItemBesideAGoodFileIsTakenOutOfTheWay(t *testing.T) {
 }
 
 // A file older than the account's own login is a leftover, not a login: the
-// store is as blanked as it looks, and the account's own token is presented.
+// store is as blanked as it looks, and the account's own token, which rota saw
+// in the home a moment ago, is presented.
 func TestAnOldFileBesideABlankedItemDoesNotStopARescue(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
@@ -947,6 +951,7 @@ func TestAnOldFileBesideABlankedItemDoesNotStopARescue(t *testing.T) {
 	svc := service(t, home)
 	a.Token.ExpiresAt = later(-time.Hour)
 	a.StagedWritten()
+	seenInSync(a)
 	k.items[svc] = clearedLogin
 	writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-old", "R-old", later(-48*time.Hour), "1999999999000"))
 	alive(t, home, "sessions/1.json", os.Getpid())

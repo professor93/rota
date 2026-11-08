@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -44,6 +45,8 @@ func TestAShortListingStillRescuesAHomeAndSaysWhenItCannot(t *testing.T) {
 	a := &rota.Account{ID: 1, Provider: "claude", Email: "a@x"}
 	a.Token = rota.Token{Access: "A", Refresh: "R", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
 	a.StagedWritten()
+	// rota saw that login in the home a moment before Claude Code blanked it
+	a.Extra = map[string]string{"home_synced_at": strconv.FormatInt(time.Now().UnixMilli(), 10)}
 	raw, err := json.Marshal(a)
 	if err != nil {
 		t.Fatal(err)

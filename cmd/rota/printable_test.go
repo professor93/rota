@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -304,6 +305,8 @@ func TestStoreWarningsSayAControlCharacterAsASpace(t *testing.T) {
 	a := &rota.Account{ID: 1, Provider: "claude", Email: "a\x1b]0;owned\x07@x"}
 	a.Token = rota.Token{Access: "A", Refresh: "R", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
 	a.StagedWritten()
+	// rota saw that login in the home a moment before Claude Code blanked it
+	a.Extra = map[string]string{"home_synced_at": strconv.FormatInt(time.Now().UnixMilli(), 10)}
 	raw, err := json.Marshal(a)
 	if err != nil {
 		t.Fatal(err)
