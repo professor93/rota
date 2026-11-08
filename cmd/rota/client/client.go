@@ -22,11 +22,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/proc"
 )
 
 // ErrNoDaemon is a store nobody serves: its daemon lock is free.
@@ -102,10 +104,17 @@ func dial(terminals string, wait time.Duration) (*Client, error) {
 		if !running {
 			return nil, ErrNoDaemon
 		}
-		conn, err := net.DialTimeout("unix", sock, time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		conn, err := dialOwn(ctx, sock)
+		cancel()
 		if err == nil {
 			conn.Close()
 			return newClient(sock), nil
+		}
+		var stranger notOwn
+		if errors.As(err, &stranger) {
+			// Asking again would find the same listener.
+			return nil, err
 		}
 		if !time.Now().Before(deadline) {
 			// A daemon.pid that names no process this rota can check names
@@ -125,11 +134,49 @@ func newClient(sock string) *Client {
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				var d net.Dialer
-				return d.DialContext(ctx, "unix", sock)
+				return dialOwn(ctx, sock)
 			},
 		},
 	}}
+}
+
+// owner is the user whose daemon a control socket must be: the one this
+// process runs as. A variable so a test can make the daemon a stranger.
+var owner = os.Geteuid
+
+// notOwn is a control socket that answered and is not this user's daemon's
+// as far as the kernel can say: another user listens on it, or who does
+// cannot be told.
+type notOwn struct{ why string }
+
+func (e notOwn) Error() string { return e.why }
+
+// dialOwn connects to the control socket at sock and keeps the connection
+// only when the process listening there runs as this user, as the kernel
+// says, before a byte is sent: a request carries what only this user's
+// daemon may have, a session's environment and its typing. The socket's
+// directory is closed to everybody else, but a store in a directory another
+// user can write to would let that user's socket, and a lock file this user
+// cannot open, stand where the daemon's are.
+func dialOwn(ctx context.Context, sock string) (net.Conn, error) {
+	var d net.Dialer
+	c, err := d.DialContext(ctx, "unix", sock)
+	if err != nil {
+		return nil, err
+	}
+	uid, err := -1, errors.New("not a unix socket")
+	if uc, ok := c.(*net.UnixConn); ok {
+		uid, err = proc.PeerUID(uc)
+	}
+	switch {
+	case err != nil:
+		c.Close()
+		return nil, notOwn{fmt.Sprintf("who listens on %s cannot be told (%v), so nothing was sent to it", sock, err)}
+	case uid != owner():
+		c.Close()
+		return nil, notOwn{fmt.Sprintf("%s is listened on by user %d, not by this one (%d), so nothing was sent to it", sock, uid, owner())}
+	}
+	return c, nil
 }
 
 // Health asks the daemon whether it is serving.
