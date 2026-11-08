@@ -340,10 +340,11 @@ anything; see *The principals*.
 account's login alive while its CLI runs (see *Watched*). It is not meant to be
 typed.
 
-**`rota serve claim <pid> <count>`** is internal too: started by an
-interactive `rota run` of a codex account, it holds the account's claim until
-the CLI exits (see *One run at a time, where the CLI owns the credential*). It
-is not meant to be typed, and refuses to run without what the run hands it.
+**`rota serve claim <pid> <count>`** is internal too, the *claim helper*:
+started by an interactive `rota run` of a codex account, it holds the
+account's claim until the CLI exits (see *One run at a time, where the CLI
+owns the credential*). It is not meant to be typed, and refuses to run
+without what the run hands it.
 
 Held sessions run on Linux and macOS:
 
@@ -2003,9 +2004,9 @@ server runs itself does not have:
 - **Only a fit resizes.** Attaching never resizes, and neither does typing.
   A `resize` without `"fit":true` is ignored, and said once per connection
   as `this session's size changes only when a viewer asks to fit it`; one
-  with it is the holder's, as ever, at most 1000×1000, with a 0 meaning 80
-  columns or 24 rows, and everyone is told the new size once the session
-  has taken it.
+  with it is taken from whoever holds the keyboard, as ever, at most
+  1000×1000, with a 0 meaning 80 columns or 24 rows, and everyone is told
+  the new size once the session has taken it.
 - **A viewer's terminal never answers twice.** What a connection sends first
   has its own terminal's answers taken out — to the colour, cursor and
   device queries it sees replayed, which the holder answered when the CLI
@@ -2432,14 +2433,13 @@ claude CLI is given the claim, as an interactive run's is, and keeps it
 with its holder killed or not. A codex CLI is not, since Codex's app-server
 daemon would hold it on after the session ended: its holder keeps the claim
 and lets go once the CLI has exited, or early when the holder is killed
-outright, as `rota serve claim` does for an interactive run (see *[One run
-at a time, where the CLI owns the
-credential](#one-run-at-a-time-where-the-cli-owns-the-credential)*). Its
-own argument list is `rota serve hold` and
-nothing more; what it is to run, which may hold a prompt, comes on its
-standard input. A person who types `rota serve hold` is told *rota serve
-hold is started by the rota daemon (rota serve start), never by hand*, and
-it exits `2`.
+outright, as the claim helper, `rota serve claim`, does for an interactive
+run (see *[One run at a time, where the CLI owns the
+credential](#one-run-at-a-time-where-the-cli-owns-the-credential)*). Its own
+argument list is `rota serve hold` and nothing more; what it is to run,
+which may hold a prompt, comes on its standard input. A person who types
+`rota serve hold` is told *rota serve hold is started by the rota daemon
+(rota serve start), never by hand*, and it exits `2`.
 
 Every terminal a daemon starts is a held session: `rota run --detach`
 starts one, and so does `POST /v1/terminals` on a daemon. `rota list
@@ -3602,29 +3602,30 @@ first, and that is codex's trouble: Codex's app-server daemon, which its TUI
 starts and leaves running, or on macOS a tool a codex agent left running in
 the background, would keep the account busy long after the session ended. So
 for a codex account — and any provider that drives Codex's CLI — immediately
-before the exec the handover lends the claim to a holder, `rota serve claim`:
-a process in a session of its own, at `/`, with stdin, stdout and stderr on
-`/dev/null`, not the CLI's child nor its parent, holding the claim
-close-on-exec and nothing else of the run's. It lets go the moment the CLI
-exits, however it exits, which it learns from the kernel: a pidfd on Linux,
-and kqueue on macOS and the BSDs. On a Linux kernel without pidfds it reads
-`/proc` ten times a second instead, and believes a zombie there only once it
-has stayed one for 50 ms, because an exec from a thread other than the main
-one shows the process as a zombie for a moment. Nothing the CLI starts holds
-the claim, and its process, pid, terminal, signals, job control and exit
-status are what they were. If the exec fails the holder is told to let go,
-and the run ends with the account free. The holder ignores SIGTERM, SIGINT,
-SIGHUP and SIGQUIT, so `pkill rota` leaves it holding; only SIGKILL makes it
-let go early, while the CLI still runs. Where no holder can be started —
-another unix, or a failure, which is said along with why — a codex account's
-claim is kept across the exec, as a claude account's is. A held session's
-holder does the same for its CLI: a claude CLI is given the claim, and a
-codex session's holder, which lives exactly as long as its CLI, keeps it
-itself. Everywhere rota
-stays the parent — a run, an open session, a terminal on the server,
-`--share`, and Windows, which has no exec — the claim keeps the flag and rota
-holds it until the run ends, so a child started meanwhile, another account's
-CLI or a shell, never inherits it and never keeps an account looking busy.
+before the exec the handover lends the claim to the claim helper,
+`rota serve claim`: a process in a session of its own, at `/`, with stdin,
+stdout and stderr on `/dev/null`, not the CLI's child nor its parent, holding
+the claim close-on-exec and nothing else of the run's. It lets go the moment
+the CLI exits, however it exits, which it learns from the kernel: a pidfd on
+Linux, and kqueue on macOS and the BSDs. On a Linux kernel without pidfds it
+reads `/proc` ten times a second instead, and believes a zombie there only
+once it has stayed one for 50 ms, because an exec from a thread other than the
+main one shows the process as a zombie for a moment. Nothing the CLI starts
+holds the claim, and its process, pid, terminal, signals, job control and exit
+status are what they were. If the exec fails the claim helper is told to let
+go, and the run ends with the account free. The claim helper ignores SIGTERM,
+SIGINT, SIGHUP and SIGQUIT, so `pkill rota` leaves it holding; only SIGKILL
+makes it let go early, while the CLI still runs. Where no claim helper can be
+started — another unix, or a failure, which is said along with why — a codex
+account's claim is kept across the exec, as a claude account's is. A held
+session's holder, `rota serve hold`, gives a claude CLI its claim the same way
+and keeps a codex CLI's claim itself, for as long as the CLI lives. Unlike the
+claim helper, it takes SIGTERM or SIGHUP as a stop that hangs its CLI up, so
+`pkill rota` ends every held session. Everywhere rota stays the parent — a
+run, an open session, a terminal of a foreground `rota serve`, `--share`, and
+Windows, which has no exec — the claim keeps the flag and rota holds it until
+the run ends, so a child started meanwhile, another account's CLI or a shell,
+never inherits it and never keeps an account looking busy.
 
 The same lock holds the background maintenance off. A running server renews
 tokens and reads usage every two minutes, and both of those rotate a refresh
