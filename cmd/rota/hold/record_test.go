@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -96,4 +97,57 @@ func TestTheRegistryIsLookedForWhereTheCLILooks(t *testing.T) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// holder.log is opened as the daemon's log is: never through a link, never
+// waiting on a FIFO, and only as a plain file nobody but its owner may read
+// or write. Anything else there costs the log, and nothing else.
+func TestTheHolderLogIsItsOwnersPlainFileAlone(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "credential")
+	if err := os.WriteFile(secret, []byte("secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name  string
+		plant func(path string) error
+	}{
+		{"a link to a file of the owner's", func(path string) error { return os.Symlink(secret, path) }},
+		{"a file others may read", func(path string) error { return os.WriteFile(path, nil, 0o644) }},
+		{"a FIFO", func(path string) error { return syscall.Mkfifo(path, 0o600) }},
+	}
+	for i, c := range cases {
+		path := filepath.Join(dir, "holder.log."+string(rune('a'+i)))
+		if err := c.plant(path); err != nil {
+			t.Fatal(err)
+		}
+		l := &logFile{path: path}
+		logged := make(chan struct{})
+		go func() {
+			defer close(logged)
+			l.logger()("a line that must go nowhere")
+		}()
+		select {
+		case <-logged:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s: logging waited on it", c.name)
+		}
+		l.close()
+		if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
+			if raw, _ := os.ReadFile(path); len(raw) != 0 {
+				t.Fatalf("%s: the log was written: %q", c.name, raw)
+			}
+		}
+	}
+	if raw, _ := os.ReadFile(secret); string(raw) != "secret\n" {
+		t.Fatalf("the log was written through the link: %q", raw)
+	}
+
+	path := filepath.Join(dir, "holder.log")
+	l := &logFile{path: path}
+	l.logger()("a line")
+	l.close()
+	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), "a line") {
+		t.Fatalf("a plain file of its own was not written: %q", raw)
+	}
 }
