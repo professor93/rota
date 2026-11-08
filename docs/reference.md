@@ -1224,7 +1224,10 @@ request is read to find out who is asking — no token, no cookie, no
 a guess. The `Origin` rule is not applied there at all, whoever the
 principal is: it protects a cookie from a page, and no page can open a unix
 socket. Every request is the principal `local`, `"via":"local"`, and the
-role table decides what it may do, as for anyone.
+role table decides what it may do, as for anyone. The other way round, a
+command asks the kernel who listens there before it sends a thing, and
+refuses a socket another user listens on: *<path> is listened on by user N,
+not by this one (M), so nothing was sent to it*.
 
 **What it serves.** Every route that takes a principal — the API, the
 WebSockets, and the terminals with their `send` — whatever `[routes]` says:
