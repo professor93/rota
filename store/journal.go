@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	rota "github.com/professor93/rota/lib"
@@ -132,8 +133,8 @@ type journalEntry struct {
 	s *Store
 	a *rota.Account
 	// skip says why the refresh about to be made cannot reach the provider —
-	// not due, no refresh token to present, a provider that cannot refresh —
-	// and is "" when it can.
+	// not due, no refresh token to present, a provider that cannot refresh, a
+	// login past its end — and is "" when it can.
 	skip string
 	// accepted is whether the provider refused the token presented and the
 	// home's login was taken by profile after it (keepRefusal).
@@ -190,6 +191,8 @@ func (s *Store) journalStart(path string, a *rota.Account) *journalEntry {
 		e.skip = "no-refresh-token"
 	case !a.Expired():
 		e.skip = "not-due"
+	case a.LoginEnded():
+		e.skip = "login-ended" // rota.Refresh presents it to no one
 	}
 	return e
 }
@@ -202,6 +205,33 @@ func (h *claudeHome) journalStart(path string) *journalEntry {
 	e.Alive = h.live()
 	_, e.Lock = heldLocks.Load(filepath.Join(h.home, claudeRefreshLock))
 	return e
+}
+
+// refreshStart is journalStart for a refresh of the account's own login in a
+// claude home, or a skip in its place. A rescue forces its copy's expiry into
+// the past to present it, and its line says when the copy truly expires.
+func (h *claudeHome) refreshStart(rescue bool) *journalEntry {
+	e := h.journalStart(h.refreshPath(rescue))
+	if h.copyExpires != 0 {
+		e.ExpBefore = journalTime(h.copyExpires)
+	}
+	return e
+}
+
+// lockSkipped is the code for a look Claude Code's refresh lock left out:
+// somebody holds it, or it could not be made at all, and why.
+func lockSkipped(err error) string {
+	switch {
+	case errors.Is(err, errLockHeld):
+		return "lock-held"
+	case errors.Is(err, fs.ErrPermission):
+		return "lock-denied"
+	case errors.Is(err, syscall.EROFS):
+		return "lock-read-only"
+	case errors.Is(err, syscall.ENOSPC):
+		return "lock-no-space"
+	}
+	return "lock-failed"
 }
 
 func (h *claudeHome) seenHome() *journalHome {
@@ -454,16 +484,31 @@ func transientWhy(err error) string {
 // token in its environment, and <caller>.renew for any other provider's. A
 // refresh that had nothing to do writes nothing.
 func (s *Store) refreshLogged(ctx context.Context, caller string, a *rota.Account) (bool, error) {
-	path := caller + ".renew"
-	if rota.SharedHome(a.Provider) {
-		path = "token.env"
-	}
-	e := s.journalStart(path, a).presenting()
+	e := s.journalStart(refreshedAs(caller, a), a).presenting()
 	changed, err := rota.Refresh(ctx, a)
 	if changed || err != nil {
 		e.finish(refreshOutcome(e, changed, err))
 	}
 	return changed, err
+}
+
+// refreshGate is beforeRefresh, the last look at whether whoever asked is still
+// there before refreshLogged presents a's token, with a line in the journal when
+// the token stays where it is because they have gone.
+func (s *Store) refreshGate(ctx context.Context, caller string, a *rota.Account) error {
+	if err := beforeRefresh(ctx, a); err != nil {
+		s.journalStart(refreshedAs(caller, a), a).finish("skipped:caller-left")
+		return err
+	}
+	return nil
+}
+
+// refreshedAs is the path refreshLogged journals a's refresh under.
+func refreshedAs(caller string, a *rota.Account) string {
+	if rota.SharedHome(a.Provider) {
+		return "token.env"
+	}
+	return caller + ".renew"
 }
 
 /* ------------------------------------------------- looking and writing --- */

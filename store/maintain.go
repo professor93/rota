@@ -135,7 +135,7 @@ func (s *Store) Maintain(ctx context.Context) (out []error) {
 				}
 				since = snapshot(a)
 			}
-			if err = beforeRefresh(ctx, a); err != nil {
+			if err = s.refreshGate(ctx, callerOf(ctx), a); err != nil {
 				return
 			}
 			if did, err = s.refreshLogged(ctx, callerOf(ctx), a); err != nil || !did || a.Dead {
@@ -190,7 +190,7 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 		if a.Dead {
 			return false, nil
 		}
-		if err := beforeRefresh(ctx, a); err != nil {
+		if err := s.refreshGate(ctx, callerOf(ctx), a); err != nil {
 			return false, err
 		}
 		did, err := s.refreshLogged(ctx, callerOf(ctx), a)
@@ -206,7 +206,7 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 		return changed, nil
 	}
 	if !rota.StoresLogin(a, h.home) && !unrefreshed(a) {
-		if err := beforeRefresh(ctx, a); err != nil {
+		if err := s.refreshGate(ctx, callerOf(ctx), a); err != nil {
 			return changed, err
 		}
 		did, err := s.refreshLogged(ctx, callerOf(ctx), a)

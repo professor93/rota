@@ -619,7 +619,7 @@ func (h *claudeHome) mend(ctx context.Context) (changed bool, err error) {
 	if !h.wanting() {
 		return false, nil
 	}
-	lock, changed, err := h.lockAndRead(ctx)
+	lock, changed, err := h.lockAndRead(ctx, h.mendPath())
 	if lock == nil {
 		return false, unlessHeld(err)
 	}
@@ -637,6 +637,18 @@ func (h *claudeHome) mend(ctx context.Context) (changed bool, err error) {
 	before := snapshot(h.a)
 	err = h.uncover()
 	return changed || before.differs(h.a), err // the item uncover took away is forgotten, and saved so
+}
+
+// mendPath names in the journal what mend is about to do, as wanting found it:
+// write a login left owed, rescue a blanked or stranded home, or uncover one.
+func (h *claudeHome) mendPath() string {
+	switch {
+	case h.owesWrite():
+		return "seed"
+	case h.blanked, h.stranded():
+		return h.refreshPath(true)
+	}
+	return "uncover"
 }
 
 // lockAndRead takes Claude Code's own refresh lock in the home and reads the
@@ -660,6 +672,7 @@ func (h *claudeHome) mend(ctx context.Context) (changed bool, err error) {
 // (unlessHeld); the next look tries again. lock is nil with any other error when
 // the lock could not be made at all, in a home rota may not write in, say, or
 // the home could not be read, and that is reported as any unreadable home is.
+// Either way the journal has a line under path saying so (lockSkipped).
 // Otherwise the caller lets go of it (release) once whatever it refreshed is in
 // the home; until it is handed over it goes on every path, a panic included,
 // or its beat would keep Claude Code out for as long as the process lives.
@@ -667,9 +680,10 @@ func (h *claudeHome) mend(ctx context.Context) (changed bool, err error) {
 // the lock is taken until it is let go the look knows it holds it (locked), so
 // what it reads under it is not taken for a read made while somebody else
 // refreshes, and what it does under it takes no lock of its own.
-func (h *claudeHome) lockAndRead(ctx context.Context) (*refreshLock, bool, error) {
+func (h *claudeHome) lockAndRead(ctx context.Context, path string) (*refreshLock, bool, error) {
 	lock, err := takeRefreshLock(h.home)
 	if err != nil {
+		h.journalStart(path).finish("skipped:" + lockSkipped(err))
 		if !errors.Is(err, errLockHeld) {
 			err = fmt.Errorf("%s: %w", h.a, err)
 		}
@@ -706,7 +720,9 @@ func (h *claudeHome) lockAndRead(ctx context.Context) (*refreshLock, bool, error
 func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 	a := h.a
 	if !a.LoginEnded() && (h.superseded || !h.newest()) {
+		j := h.refreshStart(true)
 		a.Dead, a.DeadReason = true, fmt.Sprintf(olderCopy, a.ID)
+		j.finish("skipped:older-copy")
 		if err := h.s.saveFirmly(); err != nil {
 			return true, fmt.Errorf("%s: %s, and the store could not be saved: %w", a, a.DeadReason, err)
 		}
@@ -1638,7 +1654,7 @@ func (h *claudeHome) renew(ctx context.Context) (bool, error) {
 	if !h.renewable() {
 		return false, nil
 	}
-	lock, changed, err := h.lockAndRead(ctx)
+	lock, changed, err := h.lockAndRead(ctx, h.refreshPath(false))
 	if lock == nil {
 		return changed, err
 	}
@@ -1927,15 +1943,16 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 		// Refused earlier in this process, and not on disk yet: it is not
 		// presented again.
 		a.Dead, a.DeadReason = true, why.(string)
-		h.journalStart(h.refreshPath(h.rescuing)).finish("skipped:refused-before")
+		h.refreshStart(h.rescuing).finish("skipped:refused-before")
 		return true, rota.WrapReauth(a)
 	}
 	if err := beforeRefresh(ctx, a); err != nil {
+		h.refreshStart(h.rescuing).finish("skipped:caller-left")
 		return false, err
 	}
 	rescue := h.rescuing
 	h.rescuing = false
-	j := h.journalStart(h.refreshPath(rescue)).presenting()
+	j := h.refreshStart(rescue).presenting()
 	ended := a.LoginEnded() // then rota.Refresh presents nothing, and nothing is refused
 	changed, err = rota.Refresh(ctx, a)
 	defer j.finish(refreshOutcome(j, changed, err))
@@ -2361,7 +2378,7 @@ func (h *claudeHome) tokenNow(ctx context.Context) error {
 		return err
 	}
 	if h.s.loginInHome(a) {
-		lock, _, err := h.lockAndRead(ctx)
+		lock, _, err := h.lockAndRead(ctx, h.refreshPath(false))
 		if lock == nil {
 			if errors.Is(err, errLockHeld) {
 				return lockHeldBusy(a)
@@ -2498,7 +2515,7 @@ func (h *claudeHome) envRun(ctx context.Context) (*rota.Command, error) {
 // keep in one: refreshed as it always was — never a dead one.
 func (s *Store) tokenRun(ctx context.Context, a *rota.Account) (*rota.Command, error) {
 	if !a.Dead && !a.LongValid() && a.Expired() {
-		if err := beforeRefresh(ctx, a); err != nil {
+		if err := s.refreshGate(ctx, "launch", a); err != nil {
 			return nil, err
 		}
 		if _, err := s.refreshLogged(ctx, "launch", a); err != nil {

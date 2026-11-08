@@ -225,7 +225,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			held = append(held, letGo)
 			h.others = false
 			h.via = callerOf(ctx) + ".renew"
-			lock, changed, err := h.lockAndRead(ctx)
+			lock, changed, err := h.lockAndRead(ctx, h.refreshPath(false))
 			report(changed, unlessHeld(err))
 			if lock == nil {
 				letGo()
@@ -286,7 +286,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			}
 			held = append(held, release)
 			plain = append(plain, work{a, func() {
-				if err := beforeRefresh(ctx, a); err != nil {
+				if err := s.refreshGate(ctx, callerOf(ctx), a); err != nil {
 					report(false, err)
 					return
 				}
@@ -316,6 +316,11 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 	// the store says so on disk.
 	if err := stopped(ctx); err != nil && len(plain)+len(renews) > 0 {
 		report(false, err)
+		for _, w := range renews {
+			if h := homes[w.a]; h != nil {
+				h.refreshStart(false).finish("skipped:caller-left")
+			}
+		}
 		plain, renews = nil, nil
 	}
 	run := func(ws []work) {

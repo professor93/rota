@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -997,6 +998,175 @@ func TestAWaitingRefusalIsForgottenWhenClaudeCodeRotatedTheLoginMeanwhile(t *tes
 			if journalLine(journalOf(t, w.s), "adopt", "accepted-after-refusal") != nil {
 				t.Fatal("not accepted after the refusal")
 			}
+		})
+	}
+}
+
+// noPresenting fails when the journal says a token went out.
+func noPresenting(t *testing.T, s *Store) {
+	t.Helper()
+	for _, l := range journalOf(t, s) {
+		if l["outcome"] == "presenting" {
+			t.Fatalf("the journal says a token went out: %v", l)
+		}
+	}
+}
+
+// A refresh rota does not make says why in the journal, in one line and a code,
+// and no line says a token went out: a login past its end, which nobody may
+// present; Claude Code's refresh lock held in the home, or one that cannot be
+// made there; a rescue of a copy older than the home's last look; and whoever
+// asked having gone before the token went out.
+func TestARefreshRotaDoesNotMakeSaysWhyInTheJournal(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	ctx := context.Background()
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) {
+		f.refresh = refreshesTo(jNewAccess, jNewRefr)
+		f.profile = profileOf(jNewAccess, "u1")
+	})
+	ended := func(a *rota.Account) {
+		a.Extra["refresh_token_expires_at"] = strconv.FormatInt(rota.Now().Add(-time.Hour).UnixMilli(), 10)
+	}
+	for _, c := range []struct {
+		what          string
+		do            func(t *testing.T, s *Store, a *rota.Account)
+		path, outcome string
+	}{
+		{"a listing of a login past its end", func(t *testing.T, s *Store, a *rota.Account) {
+			ended(a)
+			expire(a)
+			s.Refresh(WithCaller(ctx, "list"), true, a)
+		}, "list.renew", "skipped:login-ended"},
+		{"a rescue of a login past its end", func(t *testing.T, s *Store, a *rota.Account) {
+			cleared(t, s, a)
+			ended(a)
+			s.Rescue(ctx)
+		}, "rescue.blank", "skipped:login-ended"},
+		{"a listing while Claude Code holds its refresh lock", func(t *testing.T, s *Store, a *rota.Account) {
+			expire(a)
+			if err := os.MkdirAll(filepath.Join(s.Home(a), claudeRefreshLock), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			s.Refresh(WithCaller(ctx, "list"), true, a)
+		}, "list.renew", "skipped:lock-held"},
+		{"a rescue while Claude Code holds its refresh lock", func(t *testing.T, s *Store, a *rota.Account) {
+			stranded(t, s, a)
+			if err := os.MkdirAll(filepath.Join(s.Home(a), claudeRefreshLock), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			s.Rescue(ctx)
+		}, "rescue.stranded", "skipped:lock-held"},
+		{"a rescue of a copy older than the home's last look", func(t *testing.T, s *Store, a *rota.Account) {
+			cleared(t, s, a)
+			delete(a.Extra, homeSyncedKey)
+			s.Rescue(ctx)
+		}, "rescue.blank", "skipped:older-copy"},
+		{"a launch whose caller left before the token went out", func(t *testing.T, s *Store, a *rota.Account) {
+			expire(a)
+			left, cancel := context.WithCancel(ctx)
+			cancel()
+			if err := s.refreshGate(left, "launch", a); !Left(err) {
+				t.Fatalf("the gate says the caller left: %v", err)
+			}
+		}, "token.env", "skipped:caller-left"},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			s := openTemp(t)
+			a := journalClaude(s)
+			if err := s.Save(); err != nil {
+				t.Fatal(err)
+			}
+			before := f.refreshes.Load()
+			c.do(t, s, a)
+			if f.refreshes.Load() != before {
+				t.Fatalf("a token went out: %d", f.refreshes.Load()-before)
+			}
+			journalSays(t, s, c.path, c.outcome)
+			noPresenting(t, s)
+			journalClean(t, s, jTokens...)
+		})
+	}
+	t.Run("a home where the lock cannot be made", func(t *testing.T) {
+		if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+			t.Skip("a directory's mode keeps nobody out here")
+		}
+		w := newLineageWorld(t, false)
+		w.clock.pass(9 * time.Hour)
+		home := w.s.Home(w.a)
+		// The run claim's file is there before the home is locked down.
+		if f, err := os.OpenFile(filepath.Join(home, runLock), os.O_CREATE|os.O_RDWR, 0o600); err == nil {
+			f.Close()
+		}
+		if err := os.Chmod(home, 0o500); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
+		w.s.Refresh(WithCaller(ctx, "list"), false, w.a)
+		journalSays(t, w.s, "list.renew", "skipped:lock-denied")
+		noPresenting(t, w.s)
+	})
+}
+
+// A rescue presents its copy as expired whatever it says, and its lines say
+// when the copy truly expires.
+func TestARescuesLineSaysWhenTheCopyTrulyExpires(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) {
+		f.refresh = refreshesTo(jNewAccess, jNewRefr)
+		f.profile = profileOf(jNewAccess, "u1")
+	})
+	s := openTemp(t)
+	a := journalClaude(s)
+	cleared(t, s, a)
+	a.Token.ExpiresAt = later(2 * time.Hour)
+	truly := journalTime(a.Token.ExpiresAt)
+	if errs := s.Rescue(context.Background()); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	for _, outcome := range []string{"presenting", "rotated"} {
+		if e := journalSays(t, s, "rescue.blank", outcome); e["exp_before"] != truly {
+			t.Fatalf("%s: exp_before %v, the copy truly expires %v", outcome, e["exp_before"], truly)
+		}
+	}
+}
+
+// A look whose caller leaves while it reads the home under Claude Code's
+// refresh lock presents nothing, and says so in the journal: a listing's
+// renew that was planned and not set going, a maintenance renew and a launch's
+// refresh, each stopped at the last moment.
+func TestALookWhoseCallerLeftMidwaySaysSoInTheJournal(t *testing.T) {
+	storedRouteHere(t)
+	for _, c := range []struct {
+		look cancelLook
+		path string
+	}{
+		{cancelLooks()[0], "refresh.renew"},
+		{cancelLooks()[1], "serve.renew"},
+		{cancelLooks()[2], "launch.renew"},
+	} {
+		t.Run(c.look.what, func(t *testing.T) {
+			w := newLineageWorld(t, true)
+			w.clock.pass(9 * time.Hour)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			w.k.onFind = func(string) {
+				if _, err := os.Stat(filepath.Join(w.cc.home, claudeRefreshLock)); err == nil {
+					cancel() // under rota's lock, after the look began
+				}
+			}
+			c.look.do(ctx, w)
+			if n := len(w.p.entries()); n != 0 {
+				w.p.dump(t)
+				t.Fatalf("rota sent a refresh after whoever asked had gone: %d", n)
+			}
+			if e := journalSays(t, w.s, c.path, "skipped:caller-left"); e["lock"] != true {
+				t.Fatalf("stopped under the lock: %v", e)
+			}
+			noPresenting(t, w.s)
 		})
 	}
 }

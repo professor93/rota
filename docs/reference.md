@@ -2858,14 +2858,24 @@ Code blanked: see *Stranded* and *Blanked*, below.
     dies waiting leaves word of what it presented), then `rotated`,
     `refused:<OAuth code>` (`unknown` for a refusal without one),
     `transient:<HTTP status | OAuth code | timeout | canceled | network |
-    decode | error>`, `skipped:<not-due | no-refresh-token | cannot-refresh |
-    refused-before>` or `accepted-after-refusal` (refused, and the home's
-    login taken by profile after it); for `adopt`, `rotation`, `new-login`,
-    `blanked`, `demoted` or `accepted-after-refusal` (the login a refusal left
-    waiting, confirmed); for `seed` and `uncover`, `written`. A blanked home is
-    written once for as long as it stays as it is;
-  - `exp_before` and `exp_after`, when the access token expires; a rescue
-    counts it expired before it presents;
+    decode | error>`, `skipped:<why>` or `accepted-after-refusal` (refused,
+    and the home's login taken by profile after it); for `adopt`, `rotation`,
+    `new-login`, `blanked`, `demoted` or `accepted-after-refusal` (the login a
+    refusal left waiting, confirmed); for `seed` and `uncover`, `written`. A
+    blanked home is written once for as long as it stays as it is. A skip
+    presents nothing, and its line is the only one: `not-due`,
+    `no-refresh-token`, `cannot-refresh` (a provider that does not refresh),
+    `refused-before` (refused earlier in this process), `login-ended` (a login
+    past its end, see [Token lifetimes](#token-lifetimes)), `older-copy` (a
+    rescue rota would not make, see *Blanked*), `caller-left` (whoever asked
+    went away before the token went out), `lock-held` (Claude Code holds its
+    refresh lock in the home: the look leaves the login to it), or, for a lock
+    that could not be made at all, `lock-denied`, `lock-read-only`,
+    `lock-no-space` or `lock-failed`. A lock line carries the path of the look
+    it stopped: `seed` and `uncover` for the writes a look owed the home;
+  - `exp_before` and `exp_after`, when the access token expires; a rescue,
+    which presents its copy as expired whatever it says, still writes when
+    the copy truly expires;
   - `presented_at`, on a refresh's two lines, when the token went out.
 
   It is rota's own record: nothing is written into a home for it, and nothing

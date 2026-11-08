@@ -95,7 +95,7 @@ func (s *Store) refreshForLaunch(ctx context.Context, a *rota.Account) (bool, er
 	if a.LongValid() || a.Dead {
 		return false, nil
 	}
-	if err := beforeRefresh(ctx, a); err != nil {
+	if err := s.refreshGate(ctx, "launch", a); err != nil {
 		return false, err
 	}
 	return s.refreshLogged(ctx, "launch", a)
