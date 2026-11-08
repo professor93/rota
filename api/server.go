@@ -216,6 +216,10 @@ type Server struct {
 	// keeperDone closes when the background refresher has returned, so Stop
 	// can promise that nothing is still writing to the store afterwards.
 	keeperDone chan struct{}
+	// sweeps is what the background refresher sweeps under. It ends when the
+	// server stops, or earlier, when its shutdown begins (StopRefreshing).
+	sweeps     context.Context
+	stopSweeps context.CancelFunc
 	// Who may ask for what: the users and tokens the configuration named,
 	// checked once here, and the two tables of live credentials a page
 	// hands out. All of it is read-only after New but the two tables, which
@@ -302,6 +306,7 @@ func New(opts Options) (*Server, error) {
 		sessions: newSessions(opts.SessionTTL),
 		invites:  newInvites(),
 	}
+	s.sweeps, s.stopSweeps = context.WithCancel(ctx)
 	if opts.RefreshEvery > 0 {
 		s.keeperDone = make(chan struct{})
 		go s.keepFresh(opts.RefreshEvery)
@@ -388,7 +393,7 @@ func (s *Server) keepFresh(every time.Duration) {
 	defer t.Stop()
 	for {
 		select {
-		case <-s.ctx.Done():
+		case <-s.sweeps.Done():
 			return
 		case <-t.C:
 		}
@@ -442,7 +447,7 @@ func (s *Server) maintain() (reset time.Time) {
 		return time.Time{}
 	}
 	defer st.Close()
-	errs := st.Maintain(s.ctx)
+	errs := st.Maintain(s.sweeps)
 	for _, e := range errs {
 		s.log.Warn("background refresh", "err", e)
 	}
@@ -457,14 +462,16 @@ func (s *Server) maintain() (reset time.Time) {
 // a signal to rota does not reach it. Without this, exiting would leave
 // agents running: still spending, still writing to a staged credential file
 // whose store no longer holds the lock.
-// It also waits for the background refresher to return. A sweep that is
-// still running after Stop holds the store's lock and is about to write to
-// it, which is exactly the state a caller thinks it has left behind — and,
-// for a test, is a directory that will not delete. A sweep starts nothing
-// once Stop is called, but a refresh it has under way goes on to its answer
-// and the save after it (see store.Refresh), so Stop waits for that, up to
-// store.RefreshTimeout: a process that exits before the answer has lost the
-// token that replaced the one presented.
+// It also waits for the background refresher to return, and for every
+// refresh still under way in this process. A sweep that is still running
+// after Stop holds the store's lock and is about to write to it, which is
+// exactly the state a caller thinks it has left behind — and, for a test, is
+// a directory that will not delete. Nothing new is refreshed once Stop is
+// called, but a refresh under way goes on to its answer and the save after it
+// (see store.Refresh) — the sweep's, and those requests started, a WebSocket
+// one included, which http.Server.Shutdown does not wait for — so Stop waits
+// for them, up to store.RefreshTimeout and a margin: a process that exits
+// before the answer has lost the token that replaced the one presented.
 func (s *Server) Stop() {
 	// The socket first, so nothing new is offered to a server that is
 	// stopping, and the file it left behind goes with it.
@@ -474,14 +481,59 @@ func (s *Server) Stop() {
 	// The terminals then, and explicitly: each is a CLI in a session of its
 	// own, which is exactly what a signal to rota does not reach.
 	s.endTerminals()
+	s.StopRefreshing()
 	s.cancel()
-	if s.keeperDone == nil {
+	s.settle()
+}
+
+// StopRefreshing ends the background refresher's sweeps: none starts after
+// it, and the one under way starts no other refresh, though the one it has
+// under way is answered and saved. rota serve calls it as its shutdown
+// begins, before it waits for the requests in flight, which can take as long
+// as a run does: a sweep started meanwhile would be one more refresh for a
+// second interrupt to cut short. Stop calls it too; once is enough.
+func (s *Server) StopRefreshing() { s.stopSweeps() }
+
+// stopMargin is how much longer than store.RefreshTimeout Stop waits. The
+// bound ends the work that was under way; the margin is for what follows it,
+// the save and the write into the home.
+const stopMargin = 10 * time.Second
+
+// settle is Stop's wait, for the background refresher and for the refreshes
+// under way in this process. It says once that it is waiting, so that nobody
+// interrupts it blind.
+func (s *Server) settle() {
+	limit := store.RefreshTimeout() + stopMargin
+	ctx, cancel := context.WithTimeout(context.Background(), limit)
+	defer cancel()
+	said := false
+	waiting := func() {
+		if !said {
+			said = true
+			s.log.Warn("waiting for a refresh under way to be answered and saved before stopping", "at_most", limit)
+		}
+	}
+	if s.keeperDone != nil {
+		select {
+		case <-s.keeperDone:
+		default:
+			waiting()
+			select {
+			case <-s.keeperDone:
+			case <-ctx.Done():
+				s.log.Warn("background refresh did not stop in time")
+				return
+			}
+		}
+	}
+	now, nowCancel := context.WithCancel(context.Background())
+	nowCancel()
+	if store.Settle(now) == nil {
 		return
 	}
-	select {
-	case <-s.keeperDone:
-	case <-time.After(store.RefreshTimeout()):
-		s.log.Warn("background refresh did not stop in time")
+	waiting()
+	if err := store.Settle(ctx); err != nil {
+		s.log.Warn("a refresh was still under way when the server stopped", "err", err)
 	}
 }
 

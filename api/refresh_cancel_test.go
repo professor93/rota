@@ -152,7 +152,7 @@ func newCancelWorld(t *testing.T, every time.Duration, watch string, refresh ...
 		t.Fatal(err)
 	}
 	s, err := New(Options{Dir: dir, Token: "secret", Roots: []string{t.TempDir()}, RefreshEvery: every,
-		Routes: &Routes{API: true}})
+		Routes: &Routes{API: true, WebSocket: true}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +170,9 @@ func newCancelWorld(t *testing.T, every time.Duration, watch string, refresh ...
 	}))
 	t.Cleanup(s.Stop)
 	t.Cleanup(w.srv.Close)
+	// Last, so it runs first: a test that failed with an answer still held
+	// lets it go before anything waits for the request holding it.
+	t.Cleanup(w.p.letGo)
 	return w
 }
 
@@ -332,4 +335,119 @@ func TestAServerStoppingWaitsForTheRefreshUnderWayAndStartsNoOther(t *testing.T)
 	w.holds(t, firstID, first+"+")
 	w.holds(t, otherID, other)
 	w.presented(t, first)
+}
+
+// The provider's answer to a refresh a WebSocket start made is held while
+// rota serve stops: http.Server.Shutdown does not wait for a connection taken
+// over, so Stop is what must. It does not return until the answer is in, and
+// the store and the home hold the new token after it.
+func TestAWebSocketStartsRefreshIsWaitedForWhenTheServerStops(t *testing.T) {
+	w := newCancelWorld(t, -1, "", "R0")
+	c := dialRun(t, &harness{t: t, srv: w.srv, token: "secret", dir: w.dir, api: w.api}, "/v1/ws")
+	c.say(map[string]any{"type": "start", "prompt": "p"})
+	if rt := w.arrival(t); rt != "R0" {
+		t.Fatalf("presented %s", rt)
+	}
+	// rota serve's exit: the http server's shutdown, then Stop.
+	shut, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := w.srv.Config.Shutdown(shut); err != nil {
+		t.Fatal(err)
+	}
+	stopped := make(chan struct{})
+	go func() {
+		w.api.Stop()
+		close(stopped)
+	}()
+	w.notAbandoned(t)
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while the refresh a WebSocket start made was still waiting for its answer")
+	default:
+	}
+	w.p.letGo()
+	wait(t, stopped, "Stop to return once the refresh was answered")
+	w.holds(t, 1, "R0+")
+	w.presented(t, "R0")
+}
+
+// A WebSocket start that arrives once Stop was called refreshes nothing: the
+// request's own context lives as long as the socket does, so the server's
+// stopping is what says no.
+func TestAWebSocketStartAfterStopRefreshesNothing(t *testing.T) {
+	w := newCancelWorld(t, -1, "", "R0")
+	w.api.Stop()
+	c := dialRun(t, &harness{t: t, srv: w.srv, token: "secret", dir: w.dir, api: w.api}, "/v1/ws")
+	c.say(map[string]any{"type": "start", "prompt": "p"})
+	select {
+	case rt := <-w.p.arrived:
+		t.Fatalf("a start after Stop presented %s", rt)
+	case <-time.After(500 * time.Millisecond):
+	}
+	w.p.letGo()
+	w.holds(t, 1, "R0")
+	w.presented(t)
+}
+
+// rota serve stopping first stops the sweeps, then waits for the requests in
+// flight, which can take as long as a run. No sweep starts during that wait:
+// one would be a refresh for a second interrupt to cut short. The runs go on,
+// since they are what the wait is for.
+func TestNoSweepStartsWhileShutdownWaitsForTheRunsInFlight(t *testing.T) {
+	w := newCancelWorld(t, 300*time.Millisecond, "", "Ra")
+	// A run in flight, which the http server's shutdown waits for.
+	block, entered := make(chan struct{}), make(chan struct{})
+	long := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(entered)
+		<-block
+	}))
+	t.Cleanup(long.Close)
+	t.Cleanup(func() { close(block) })
+	go func() {
+		if resp, err := http.Get(long.URL); err == nil {
+			resp.Body.Close()
+		}
+	}()
+	wait(t, entered, "the run to start")
+	w.api.StopRefreshing()
+	if got := w.p.tokens(); len(got) != 0 {
+		t.Fatalf("the keeper swept before the shutdown began: %v", got)
+	}
+	shut := make(chan error, 1)
+	go func() { shut <- long.Config.Shutdown(context.Background()) }()
+	select {
+	case rt := <-w.p.arrived:
+		t.Fatalf("a sweep presented %s while the shutdown waited for a run", rt)
+	case err := <-shut:
+		t.Fatalf("the shutdown did not wait for the run: %v", err)
+	case <-time.After(1500 * time.Millisecond):
+	}
+	if w.api.ctx.Err() != nil {
+		t.Fatal("stopping the sweeps stopped the runs too")
+	}
+	w.holds(t, 1, "Ra")
+}
+
+// Stop waits for a sweep's refresh as long as that refresh may take, which
+// is longer than the five seconds it used to give up after: the provider
+// answers six seconds into the stop, and the answer is kept.
+func TestStopWaitsForARefreshLongerThanFiveSeconds(t *testing.T) {
+	w := newCancelWorld(t, 20*time.Millisecond, "", "Ra")
+	if rt := w.arrival(t); rt != "Ra" {
+		t.Fatalf("presented %s", rt)
+	}
+	stopped := make(chan struct{})
+	go func() {
+		w.api.Stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("Stop returned while the refresh was still waiting for its answer")
+	case <-time.After(6 * time.Second):
+	}
+	w.p.letGo()
+	wait(t, stopped, "Stop to return once the refresh was answered")
+	w.holds(t, 1, "Ra+")
+	w.presented(t, "Ra")
 }

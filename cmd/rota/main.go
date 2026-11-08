@@ -2422,6 +2422,8 @@ func (c *cli) serve(args []string) (err error) {
 		say("\nrota: shutting down; waiting for runs in flight (interrupt again to stop now)")
 		shutdown, cancel := context.WithTimeout(context.Background(), opts.Timeout+serveGrace)
 		defer cancel()
+		// No sweep starts while the runs in flight are waited for.
+		srv.StopRefreshing()
 		err := server.Shutdown(shutdown)
 		// Shutdown waits for handlers but cannot cancel them, and each
 		// vendor CLI is in its own process group. Stop ends the runs, so
