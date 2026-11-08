@@ -44,19 +44,21 @@ func stopAllWait() time.Duration { return holderKillAfter() + time.Second }
 // startDaemon is `rota serve start`: spawnDaemon, said. A daemon already
 // there, before this start began or by winning the store from this start's
 // own, is named, and the command is content: there is one daemon, which is
-// what was asked for.
+// what was asked for. Each path and address it says is drawn with a space
+// for each control character in it (see oneLine), as in every line the
+// daemon's commands print.
 func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 	r, err := c.spawnDaemon(ctlOnly, conf)
 	if err != nil {
 		return err
 	}
 	if r.running != nil {
-		fmt.Fprintf(c.out, "rota daemon already running for %s%s\n", r.home, pidOf(r.running))
+		fmt.Fprintf(c.out, "rota daemon already running for %s%s\n", oneLine(r.home), pidOf(r.running))
 		return nil
 	}
-	line := fmt.Sprintf("rota daemon started for %s (pid %d); control socket %s", r.home, r.started.PID, r.sock)
+	line := fmt.Sprintf("rota daemon started for %s (pid %d); control socket %s", oneLine(r.home), r.started.PID, oneLine(r.sock))
 	if r.started.HTTP != "" {
-		line += "; http on " + r.started.HTTP
+		line += "; http on " + oneLine(r.started.HTTP)
 	}
 	fmt.Fprintln(c.out, line)
 	return nil
@@ -148,9 +150,12 @@ func (c *cli) spawnDaemon(ctlOnly bool, conf string) (*daemonStart, error) {
 				return already(d)
 			}
 			if lines := logTail(logPath, from, 5); len(lines) > 0 {
-				return nil, fmt.Errorf("the rota daemon did not start; the end of %s:\n  %s", logPath, strings.Join(lines, "\n  "))
+				for i, l := range lines {
+					lines[i] = oneLine(l)
+				}
+				return nil, fmt.Errorf("the rota daemon did not start; the end of %s:\n  %s", oneLine(logPath), strings.Join(lines, "\n  "))
 			}
-			return nil, fmt.Errorf("the rota daemon did not start, and wrote nothing to %s", logPath)
+			return nil, fmt.Errorf("the rota daemon did not start, and wrote nothing to %s", oneLine(logPath))
 		case d := <-tried:
 			if d != nil && d.PID == pid {
 				return &daemonStart{home: home, sock: sock, started: d}, nil
@@ -163,7 +168,7 @@ func (c *cli) spawnDaemon(ctlOnly bool, conf string) (*daemonStart, error) {
 				return already(d)
 			}
 			return nil, fmt.Errorf("the rota daemon (pid %d) has not answered on %s within %s; rota serve status says when it does, and %s what it is doing",
-				pid, sock, daemonReady, logPath)
+				pid, oneLine(sock), daemonReady, oneLine(logPath))
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
@@ -396,9 +401,9 @@ func daemonPort(cfg *api.Config, ctlOnly bool, listener api.Listener, srv *api.S
 func refusedInsideHeldSession(command, terminals string) error {
 	switch id, err := heldSessionOf(os.Getpid(), terminals); {
 	case err != nil:
-		return fmt.Errorf("%s cannot tell whether it is inside a held session (%v), so it is refused; run it from outside the session", command, err)
+		return fmt.Errorf("%s cannot tell whether it is inside a held session (%s), so it is refused; run it from outside the session", command, oneLine(err.Error()))
 	case id != "":
-		return fmt.Errorf("%s is refused inside held session %s; run it from outside the session", command, id)
+		return fmt.Errorf("%s is refused inside held session %s; run it from outside the session", command, oneLine(id))
 	}
 	return nil
 }
@@ -417,7 +422,7 @@ func (c *cli) stopDaemon(all, yes bool) error {
 		return c.stopAll(home, terminals, yes)
 	}
 	if _, ok := holdwire.RunningDaemon(terminals); !ok {
-		fmt.Fprintf(c.out, "no rota daemon is running for %s\n", home)
+		fmt.Fprintf(c.out, "no rota daemon is running for %s\n", oneLine(home))
 		return nil
 	}
 	if err := endDaemon(terminals); err != nil {
@@ -442,14 +447,14 @@ func endDaemon(terminals string) error {
 	}
 	if d.PID == 0 {
 		return fmt.Errorf("a rota daemon holds %s, but %s names no process this rota can check; nothing was signalled",
-			holdwire.DaemonLock(terminals), holdwire.DaemonPIDFile(terminals))
+			oneLine(holdwire.DaemonLock(terminals)), oneLine(holdwire.DaemonPIDFile(terminals)))
 	}
 	err := holdwire.Signal(d.PID, d.ProcStart, d.BootID, syscall.SIGTERM)
 	switch {
 	case errors.Is(err, holdwire.ErrNotSameProcess) && !holdwire.Locked(holdwire.DaemonLock(terminals)):
 		return nil // it went on its own meanwhile
 	case errors.Is(err, holdwire.ErrNotSameProcess):
-		return fmt.Errorf("pid %d is no longer the rota daemon %s names; nothing was signalled", d.PID, holdwire.DaemonPIDFile(terminals))
+		return fmt.Errorf("pid %d is no longer the rota daemon %s names; nothing was signalled", d.PID, oneLine(holdwire.DaemonPIDFile(terminals)))
 	case err != nil:
 		return err
 	}
@@ -516,11 +521,12 @@ func (c *cli) stopAll(home, terminals string, yes bool) error {
 // signal only while its pid is still the holder its record names.
 func (c *cli) stopHolders(home, terminals string, yes bool) error {
 	live := runningRecords(terminals)
+	where := oneLine(home)
 	if len(live) == 0 {
-		fmt.Fprintf(c.out, "no rota daemon is running for %s, and no session is\n", home)
+		fmt.Fprintf(c.out, "no rota daemon is running for %s, and no session is\n", where)
 		return nil
 	}
-	if !yes && !c.confirm(fmt.Sprintf("no rota daemon is running for %s; end %s? [y/N] ", home, sessionsN(len(live)))) {
+	if !yes && !c.confirm(fmt.Sprintf("no rota daemon is running for %s; end %s? [y/N] ", where, sessionsN(len(live)))) {
 		fmt.Fprintln(c.err, "rota: nothing was stopped")
 		return exitCode(1)
 	}
@@ -539,7 +545,7 @@ func (c *cli) stopHolders(home, terminals string, yes bool) error {
 	}
 	wg.Wait()
 	left := waitEnded(terminals, ids, time.Second)
-	said := fmt.Sprintf("no rota daemon was running for %s", home)
+	said := fmt.Sprintf("no rota daemon was running for %s", where)
 	if len(left) > 0 {
 		return notEnded(said, len(ids), left, why)
 	}

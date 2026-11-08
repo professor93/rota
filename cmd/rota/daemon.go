@@ -247,7 +247,8 @@ func daemonConfig(conf, home string) (*api.Config, api.Options, api.Listener, er
 	if dir := opts.Dir; dir != "" {
 		if abs, err := filepath.Abs(dir); err != nil || abs != home {
 			return nil, api.Options{}, api.Listener{}, fmt.Errorf(
-				"store.dir names %s, but a daemon serves the store it is started for, %s; start it with ROTA_HOME=%s instead", dir, home, dir)
+				"store.dir names %s, but a daemon serves the store it is started for, %s; start it with ROTA_HOME=%s instead",
+				oneLine(dir), oneLine(home), oneLine(dir))
 		}
 	}
 	opts.Dir = home
@@ -392,31 +393,34 @@ type statusDoc struct {
 	} `json:"sessions"`
 }
 
-// sayStatus prints a status, as JSON or as lines a person reads.
+// sayStatus prints a status, as JSON or as lines a person reads. In the
+// lines each path, address and version, which the store's directory and
+// the daemon's record say, is drawn with a space for each control
+// character (see oneLine); JSON carries them as they are.
 func (c *cli) sayStatus(doc *statusDoc) error {
 	if c.json {
 		return c.emit(doc)
 	}
 	if !doc.Running {
-		fmt.Fprintf(c.out, "no rota daemon is running for %s\n", doc.Store)
+		fmt.Fprintf(c.out, "no rota daemon is running for %s\n", oneLine(doc.Store))
 	} else {
 		var about []string
 		if doc.PID != 0 {
 			about = append(about, fmt.Sprintf("pid %d", doc.PID))
 		}
 		if doc.Version != "" {
-			about = append(about, "rota "+doc.Version)
+			about = append(about, "rota "+oneLine(doc.Version))
 		}
 		if doc.Started != nil {
 			about = append(about, "since "+doc.Started.Local().Format(time.RFC3339))
 		}
-		fmt.Fprintf(c.out, "rota daemon running for %s", doc.Store)
+		fmt.Fprintf(c.out, "rota daemon running for %s", oneLine(doc.Store))
 		if len(about) > 0 {
 			fmt.Fprintf(c.out, " (%s)", strings.Join(about, ", "))
 		}
-		fmt.Fprintf(c.out, "\ncontrol socket %s\n", doc.Ctl)
+		fmt.Fprintf(c.out, "\ncontrol socket %s\n", oneLine(doc.Ctl))
 		if doc.HTTP != nil {
-			fmt.Fprintf(c.out, "http on %s\n", *doc.HTTP)
+			fmt.Fprintf(c.out, "http on %s\n", oneLine(*doc.HTTP))
 		}
 	}
 	if s := doc.Sessions; s.Live+s.Stopped > 0 || doc.Running {
@@ -452,15 +456,16 @@ func waitEnded(terminals string, ids []string, within time.Duration) []string {
 }
 
 // notEnded is the error for sessions stop --all could not end: which they
-// are, and why where it was told.
+// are, and why where it was told, each id and reason on a line of its own
+// with a space for each control character in it (see oneLine).
 func notEnded(said string, asked int, left []string, why map[string]error) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s; %s ended, and %s did not:", said, sessionsN(asked-len(left)), sessionsN(len(left)))
 	for _, id := range left {
 		if err := why[id]; err != nil {
-			fmt.Fprintf(&b, "\n  %s: %v", id, err)
+			fmt.Fprintf(&b, "\n  %s: %s", oneLine(id), oneLine(err.Error()))
 		} else {
-			fmt.Fprintf(&b, "\n  %s: still running", id)
+			fmt.Fprintf(&b, "\n  %s: still running", oneLine(id))
 		}
 	}
 	return errors.New(b.String())
