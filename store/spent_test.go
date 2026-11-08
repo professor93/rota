@@ -256,7 +256,7 @@ func TestAKeychainItemWrittenMeanwhileIsNotDeleted(t *testing.T) {
 	})
 }
 
-// A launch that cannot save the store around a refresh of a login
+// A launch or a listing that cannot save the store around a refresh of a login
 // kept in its home never loses what it refreshed, so no refresh token is
 // presented twice. Before it refreshes, it writes the login into the home if
 // the home holds no usable login — an account signed in and never run since —
@@ -279,6 +279,9 @@ func TestARefreshTheStoreCannotSaveLosesNothing(t *testing.T) {
 		{"a launch", func(t *testing.T, s *Store, a *rota.Account) error {
 			_, err := launchEnv(t, s, a)
 			return err
+		}},
+		{"a listing", func(t *testing.T, s *Store, a *rota.Account) error {
+			return errors.Join(s.Refresh(context.Background(), true, a)...)
 		}},
 	} {
 		for _, c := range []struct {
@@ -468,4 +471,43 @@ func (h hookedSaves) Save(b []byte) error {
 		return err
 	}
 	return h.Backend.Save(b)
+}
+
+// A listing that refreshes no login kept in a home saves as it always did:
+// once when something changed, a refresh of a token rota alone holds
+// included, and never when nothing did. Only a refresh of a login kept in a
+// home is saved for first.
+func TestAListingWithNoLoginInAHomeToRefreshSavesOnce(t *testing.T) {
+	rota.Register(meteredRefresher{&fakeProvider{name: "t-listing-saves"}})
+	m := &memBackend{home: t.TempDir()}
+	s, err := NewStore(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	s.Accounts = []*rota.Account{
+		{ID: 1, Provider: "t-listing-saves", Order: 1, Token: rota.Token{Access: "good", Refresh: "r1", ExpiresAt: later(time.Hour)}},
+		{ID: 2, Provider: "t-listing-saves", Order: 2, Token: rota.Token{Access: "old", Refresh: "r2", ExpiresAt: 1}},
+	}
+	if errs := s.Refresh(context.Background(), false); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	if m.saves != 1 || s.Find(2).Token.Access != "new" || s.Find(1).Quota == nil {
+		t.Fatalf("read, refreshed and saved once: saves=%d %+v", m.saves, s.Find(2).Token)
+	}
+	if errs := s.Refresh(context.Background(), false); len(errs) != 0 || m.saves != 1 {
+		t.Fatalf("nothing due, nothing saved: %v saves=%d", errs, m.saves)
+	}
+}
+
+// meteredRefresher is a provider with a usage endpoint and a refresh of its
+// own, and no home.
+type meteredRefresher struct{ *fakeProvider }
+
+func (meteredRefresher) Quota(context.Context, string) (*rota.Quota, error) {
+	return &rota.Quota{}, nil
+}
+
+func (meteredRefresher) Refresh(context.Context, *rota.Account) (*rota.Token, error) {
+	return &rota.Token{Access: "new", Refresh: "r3", ExpiresAt: later(time.Hour)}, nil
 }

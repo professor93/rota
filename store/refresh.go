@@ -31,6 +31,13 @@ import (
 // reading. What a home is owed although something is alive there comes first
 // and has nothing to do with readings: see Rescue.
 //
+// No login kept in a home is refreshed until the store is saved, each such home
+// having been given the account's login first where it held none rota could
+// lose (writeDue). A store that cannot be saved then spends none of those
+// tokens, and a login refreshed after that whose own save fails still goes
+// into its home, where the next look reads it back, rather than nowhere. A
+// listing with no such refresh to make saves no more than it did.
+//
 // A store whose lock was released — a run has started since it was opened —
 // rotates nothing at all: no refresh, no claim, nothing written into a home.
 // It reads homes into memory and reads usage with tokens that have not
@@ -126,6 +133,16 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 	// reads every account.
 	homes := s.lookIn(ctx, accounts, collect, report)
 	now := rota.Now()
+	// The work is planned first, one account at a time, and set going only
+	// once the plan is whole: the plan writes into homes and saves the store,
+	// and a save reads every account, which no worker may be changing then.
+	// renews are the refreshes of logins kept in homes, which wait for the
+	// save before them; plain is everything else.
+	type work struct {
+		a  *rota.Account
+		do func()
+	}
+	var plain, renews []work
 	for _, a := range accounts {
 		shared := rota.SharedHome(a.Provider)
 		h, kept := homes[a]
@@ -155,10 +172,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 		case shared && !a.Expired():
 			// A reading spends nothing, so for a home many processes share it
 			// is taken whatever runs there.
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer guard(a)
+			plain = append(plain, work{a, func() {
 				if h != nil {
 					q, err := h.usage(ctx)
 					reading(a, q, err)
@@ -166,22 +180,34 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 				}
 				q, err := rota.Usage(ctx, a)
 				reading(a, q, err)
-			}()
+			}})
 		case s.released, h != nil && (h.hold != "" || h.blanked):
 			// Nothing may rotate here; the account keeps its last reading.
 		case h != nil:
 			// Expired: a refresh, which only a quiet home may have. The claim
-			// is kept until the new login is in the home.
+			// is kept until the new login is in the home. The home is given
+			// the account's login first, as for a launch's refresh (see
+			// renew), and the save below says so on disk.
 			release, ok := s.holdIdle(a)
 			if !ok {
 				continue
 			}
 			held = append(held, release)
 			h.others = false
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer guard(a)
+			err := func() (err error) {
+				// The provider plans what is written: see guard.
+				defer func() {
+					if v := recover(); v != nil {
+						err = fmt.Errorf("%s: panic while writing its login into its home: %v", a, v)
+					}
+				}()
+				return h.writeDue(ctx)
+			}()
+			if err != nil {
+				report(true, err)
+				continue
+			}
+			renews = append(renews, work{a, func() {
 				changed, err := h.refresh(ctx)
 				if err != nil {
 					report(changed, err)
@@ -197,7 +223,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 				mu.Unlock()
 				q, err := rota.Usage(ctx, a)
 				reading(a, q, err)
-			}()
+			}})
 		default:
 			// A running account is left alone: refreshing rotates the token
 			// its CLI is still holding, and a reading is not worth that. A
@@ -212,10 +238,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 				continue
 			}
 			held = append(held, release)
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				defer guard(a)
+			plain = append(plain, work{a, func() {
 				changed, err := rota.Refresh(ctx, a)
 				if err != nil {
 					report(changed, err)
@@ -223,8 +246,27 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 				}
 				q, err := rota.Usage(ctx, a)
 				reading(a, q, err)
-			}()
+			}})
 		}
+	}
+	// No login kept in a home is refreshed until the store on disk says what
+	// each home holds, so that a login refreshed below and written into its
+	// home alone, when the save after it fails, is read back by the next look.
+	// A store that cannot be saved spends none of them. A listing that
+	// refreshes no such login saves nothing here.
+	if len(renews) > 0 {
+		if err := s.Save(); err != nil {
+			report(false, fmt.Errorf("no login in a home refreshed: the store could not be saved: %w", err))
+			renews = nil
+		}
+	}
+	for _, w := range slices.Concat(plain, renews) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer guard(w.a)
+			w.do()
+		}()
 	}
 	wg.Wait()
 	for _, msg := range said {
@@ -240,8 +282,16 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 		return errs
 	}
 	if err := s.Save(); err != nil {
-		// The refreshed logins are not on disk, so none goes into a home.
-		return append(errs, err)
+		// The refreshed logins are not on disk, and the ones they replaced are
+		// spent. Each still goes into its home, the one copy left that the
+		// next look can read back.
+		errs = append(errs, err)
+		for _, h := range renewed {
+			if werr := h.writeRefreshed(ctx, false); werr != nil {
+				errs = append(errs, werr)
+			}
+		}
+		return errs
 	}
 	// Each refreshed login goes into its home now that the store has it,
 	// while the home is still claimed — when rota may write there (mayWrite),
