@@ -4,6 +4,7 @@ package hold
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/owner"
 )
 
 // What a holder leaves on disk while it runs: the session's record, kept
@@ -217,7 +219,7 @@ func (l *logFile) Write(p []byte) (int, error) {
 		_ = os.Rename(l.path, l.path+".1")
 	}
 	if l.f == nil {
-		f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		f, err := openLog(l.path)
 		if err != nil {
 			return len(p), nil
 		}
@@ -229,6 +231,32 @@ func (l *logFile) Write(p []byte) (int, error) {
 	n, _ := l.f.Write(p)
 	l.size += int64(n)
 	return len(p), nil
+}
+
+// openLog opens a holder's log for appending as the daemon opens its own:
+// never through a link, never waiting on a FIFO, and only a plain file
+// nobody but its owner may read or write, so that whoever can write the
+// session's directory cannot point the log at a file of the owner's.
+func openLog(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|owner.OpenFlags, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err == nil && !fi.Mode().IsRegular() {
+		err = fmt.Errorf("%s is not a plain file", path)
+	}
+	if err == nil {
+		err = owner.Only(path, fi.Mode())
+	}
+	if err == nil {
+		err = owner.Blocking(f)
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 func (l *logFile) close() {
