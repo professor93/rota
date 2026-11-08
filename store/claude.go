@@ -1171,11 +1171,13 @@ func fileIsNewer(file, item []byte) bool {
 // the home in the hold.
 //
 // itemGone marks a read whose store is the file only because the keychain item
-// was not there, where the home's login was last found in the item and
-// something runs in the home: an item being rewritten may read as none, and the
-// file beside it then says nothing about what Claude Code holds (see synced).
-// In a quiet home nothing can be rewriting the item. A read that finds the item
-// records that the login lives there (noteItem).
+// was not there, twice (readItem), where the home's login was last found in the
+// item (inItemKey) and something runs in the home: an item being rewritten may
+// read as none, and the file beside it then says nothing about what Claude Code
+// holds (see adopt, synced). In a quiet home nothing can be rewriting the item,
+// so one that is not there is gone, and the account forgets it (forgetItem);
+// that, and rota taking the item away itself, are the only ways the record
+// goes. Adoption records it again whenever a read finds the item (noteItem).
 func (h *claudeHome) read() (fsys storeFS, ok bool) {
 	// Whether anything runs in the home is asked before the keychain is read
 	// as well as after, and either answer that something does counts: a
