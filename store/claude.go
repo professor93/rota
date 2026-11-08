@@ -222,6 +222,12 @@ type claudeHome struct {
 	// lock, which goes on deciding for the write that follows: once the refresh
 	// has answered, the token is good and the home is no longer stranded.
 	rescuing bool
+	// readBack is whether the next look would read a login rota refreshed and
+	// wrote into the home back as a rotation, from what the store says on disk
+	// before the refresh: the account's current login is what the home holds.
+	// Set before a refresh; a login whose save failed goes into the home only
+	// then, and is not written over a login rota cannot place.
+	readBack bool
 }
 
 func (s *Store) claudeHome(a *rota.Account, others bool) *claudeHome {
@@ -517,6 +523,7 @@ func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 	}
 	forced := a.Token.ExpiresAt
 	h.rescuing = true
+	h.readBack = a.StagedCurrent() // a home is rescued only on the account's current login
 	changed, err := h.refresh(ctx)
 	if !due && a.Token.ExpiresAt == forced {
 		a.Token.ExpiresAt = expires
@@ -538,7 +545,7 @@ func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 		// it back, rather than nowhere: the one it replaced is spent.
 		serr = fmt.Errorf("%s: refusing to go on: the store could not be saved after a token change: %w", a, serr)
 		if err == nil && h.rescuing {
-			serr = errors.Join(serr, h.writeRefreshed(ctx))
+			serr = errors.Join(serr, h.writeRefreshed(ctx, false))
 		}
 		return true, serr
 	}
@@ -555,7 +562,7 @@ func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 
 // writeAndSave writes what the home is owed, and saves that it has it.
 func (h *claudeHome) writeAndSave(ctx context.Context) error {
-	if err := h.writeRefreshed(ctx); err != nil {
+	if err := h.writeRefreshed(ctx, true); err != nil {
 		return err
 	}
 	return h.s.Save()
@@ -1118,10 +1125,12 @@ func (h *claudeHome) stopDaemon() error {
 // it is mend's, and a blanked store's token is presented there and nowhere else.
 //
 // Before it refreshes, the home holds the login and the store says so on disk,
-// as for a codex login (see Maintain): a home that held an older login or none
-// is written first. A store that cannot be saved then spends no token. And when
-// the save after the refresh fails, the new login still goes into the home,
-// where the next look reads it back as a rotation, rather than nowhere.
+// as for a codex login (see Maintain): a home that held no usable login, or
+// rota's own spent one, is written first (writeDue). A store that cannot be
+// saved then spends no token. And when the save after the refresh fails, the
+// new login still goes into the home, where the next look reads it back as a
+// rotation, rather than nowhere — unless the home holds a login rota cannot
+// place, which is left as it is.
 func (h *claudeHome) renew(ctx context.Context) (bool, error) {
 	a := h.a
 	if !a.Expired() || a.Dead || h.hold != "" || h.blanked || !h.quiet() {
@@ -1130,6 +1139,9 @@ func (h *claudeHome) renew(ctx context.Context) (bool, error) {
 	if err := h.writeDue(ctx); err != nil {
 		return true, err
 	}
+	if err := h.s.Save(); err != nil {
+		return true, fmt.Errorf("refusing to go on: not refreshed, the store could not be saved: %w", err)
+	}
 	changed, err := h.refresh(ctx)
 	if err != nil || !changed || a.Dead || h.hold != "" {
 		return changed, err
@@ -1137,46 +1149,69 @@ func (h *claudeHome) renew(ctx context.Context) (bool, error) {
 	h.owe()
 	if err := h.s.Save(); err != nil {
 		err = fmt.Errorf("refusing to go on: the store could not be saved after a token change: %w", err)
-		return true, errors.Join(err, h.writeRefreshed(ctx))
+		return true, errors.Join(err, h.writeRefreshed(ctx, false))
 	}
-	return true, h.writeRefreshed(ctx)
+	return true, h.writeRefreshed(ctx, true)
 }
 
 // writeDue makes the home hold the account's current login, which is due for a
-// refresh, and saves the store, before that refresh. Once the store on disk
-// says the home holds it, a refreshed login written into the home alone is read
-// back by the next look as the rotation it is; a home the store says holds an
-// older login, or none, would be passed over. Only while rota may write there.
+// refresh, before that refresh; the caller saves the store next. Once the store
+// on disk says the home holds it, a refreshed login written into the home alone
+// is read back by the next look as the rotation it is; a home the store says
+// holds an older login, or none, would be passed over. Only while rota may
+// write there.
+//
+// A home holding no login Claude Code can use, or the one rota wrote there and
+// has refreshed away since, is written. A usable login rota cannot place is
+// left as it is — one made inside Claude Code there, say, which is what the
+// account falls back on should the provider refuse its own (see refresh) —
+// and then nothing refreshed is written over it either (readBack).
 func (h *claudeHome) writeDue(ctx context.Context) error {
-	if !h.a.StagedCurrent() {
-		_, files, err := rota.StagePlan(ctx, h.a, h.home)
+	a := h.a
+	if !a.StagedCurrent() && (!h.usable || h.spent) {
+		_, files, err := rota.StagePlan(ctx, a, h.home)
 		if err == nil {
 			err = h.seed(files)
 		}
 		if err != nil {
-			return fmt.Errorf("not refreshed, the login could not be written into its home first: %w", err)
+			return fmt.Errorf("%s: not refreshed, its login could not be written into its home first: %w", a, err)
 		}
 	}
-	if err := h.s.Save(); err != nil {
-		return fmt.Errorf("refusing to go on: not refreshed, the store could not be saved: %w", err)
-	}
+	h.readBack = a.StagedCurrent()
 	return nil
 }
 
-// writeRefreshed puts a login rota has refreshed and saved into the home, when
-// it may. From here on the provider has answered and the home's login is spent,
-// so a home that cannot be read or written is an error for a person to see, and
-// the account goes on owing the write (see owesWrite). A login whose save
-// failed is written too, as the only copy left that the next look can find.
-func (h *claudeHome) writeRefreshed(ctx context.Context) error {
+// writeRefreshed puts a login rota has refreshed into the home, when it may.
+// From here on the provider has answered and the home's login is spent, so a
+// home that cannot be read or written is an error for a person to see. saved
+// says whether the store has the login on disk: then the account goes on owing
+// the write (see owesWrite), and the next look makes it. A login whose save
+// failed is written all the same, as the only copy left that the next look can
+// find; when it cannot be, it is held by this process alone, and the error says
+// that rather than promising a write nothing will make.
+func (h *claudeHome) writeRefreshed(ctx context.Context, saved bool) error {
 	a := h.a
+	// lost is what is true of the login when it cannot go into the home either.
+	lost := "the new login is held by this process alone, and the one it replaced is spent"
+	if !saved && !h.readBack {
+		return fmt.Errorf("%s: its login was refreshed but could not be saved, and its home holds a login rota cannot "+
+			"place, which is left as it is: %s", a, lost)
+	}
 	fsys, ok := h.read()
 	if !ok {
+		if !saved {
+			return fmt.Errorf("%s: its login was refreshed but could not be saved, and its home could not be read "+
+				"to write it there either (%s): %s", a, h.hold, lost)
+		}
 		return fmt.Errorf("%s: its login was refreshed and saved, but its home could not be read to write it there, "+
 			"so Claude Code there still holds the one it replaced (%s); the next look writes it", a, h.hold)
 	}
 	h.spent = rota.ClaudeHomeSpent(a, fsys)
 	if !h.mayWrite() {
+		if !saved {
+			return fmt.Errorf("%s: its login was refreshed but could not be saved, and rota may not write it into "+
+				"its home now: %s", a, lost)
+		}
 		return nil
 	}
 	_, files, err := rota.StagePlan(ctx, a, h.home)
@@ -1190,6 +1225,10 @@ func (h *claudeHome) writeRefreshed(ctx context.Context) error {
 		err = h.seed(files)
 	}
 	if err != nil {
+		if !saved {
+			return fmt.Errorf("%s: its login was refreshed but could not be saved, nor written into its home: %s: %w",
+				a, lost, err)
+		}
 		return fmt.Errorf("%s: its login was refreshed and saved, but could not be written into its home, "+
 			"so Claude Code there still holds the one it replaced; the next look writes it: %w", a, err)
 	}
