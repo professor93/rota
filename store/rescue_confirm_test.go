@@ -1098,6 +1098,48 @@ func TestUnderRotasOwnLockAnItemNotThereIsNotThere(t *testing.T) {
 	}
 }
 
+// A look holding Claude Code's refresh lock knows it holds it from the moment
+// lockAndRead takes it — so the read under it records the home in sync, and
+// nothing under it takes the lock again — until the lock is let go, however
+// that comes: by its holder, or on the way out of lockAndRead itself. After
+// that the lock in the home is somebody else's again to that look.
+func TestALookKnowsItHoldsTheRefreshLockExactlyWhileItDoes(t *testing.T) {
+	w := newLineageWorld(t, false)
+	h := w.s.claudeHome(w.a, false)
+	w.clock.pass(2 * syncedAgain)
+	lock, _, err := h.lockAndRead(context.Background(), "uncover")
+	if err != nil || lock == nil {
+		t.Fatalf("the lock: %v", err)
+	}
+	if !h.locked || h.refreshing() || w.a.Extra[homeSyncedKey] != strconv.FormatInt(rota.NowMS(), 10) {
+		t.Fatalf("held, and the read under it in sync: locked=%v refreshing=%v synced=%q", h.locked, h.refreshing(), w.a.Extra[homeSyncedKey])
+	}
+	lock.release()
+	if h.locked {
+		t.Fatal("let go, and known to be")
+	}
+	if err := os.Mkdir(filepath.Join(w.cc.home, claudeRefreshLock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !h.refreshing() {
+		t.Fatal("a lock in the home after this look let go of its own is somebody else's")
+	}
+	if err := os.Remove(filepath.Join(w.cc.home, claudeRefreshLock)); err != nil {
+		t.Fatal(err)
+	}
+	w.k = fakeKeychain(t) // a read under the lock that panics lets go of it on the way out
+	h = w.s.claudeHome(w.a, false)
+	w.k.onFind = func(string) { panic("the keychain") }
+	panicked := func() (v any) {
+		defer func() { v = recover() }()
+		_, _, _ = h.lockAndRead(context.Background(), "uncover")
+		return nil
+	}()
+	if _, err := os.Stat(filepath.Join(w.cc.home, claudeRefreshLock)); panicked == nil || h.locked || err == nil {
+		t.Fatalf("a lock let go on the way out of lockAndRead is known to be: panicked=%v locked=%v lock there=%v", panicked, h.locked, err == nil)
+	}
+}
+
 // The store's fingerprint is the one lib records in Staged, or nothing a look
 // compares would ever match.
 func TestTheFingerprintIsTheOneStagedRecords(t *testing.T) {
