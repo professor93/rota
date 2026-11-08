@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -301,9 +300,13 @@ func TestARawLineIsWrittenAsItIsAndOnlyIfItIsAnObject(t *testing.T) {
 func TestCancellingTheContextEndsTheSession(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	ready := filepath.Join(t.TempDir(), "ready")
-	s := startEcho(t, ctx, "t-session-cancel", fakecli.Spec{Sleep: "10s", Ready: ready}, Spec{Prompt: "slow"}, nil)
-	fakecli.WaitReady(t, ready)
+	// Cancelled once its CLI is up, and started again should macOS kill the
+	// CLI on its way in: one that never ran has nothing to be cancelled.
+	var s *Session
+	fakecli.Up(t, func(ready string) <-chan struct{} {
+		s = startEcho(t, ctx, "t-session-cancel", fakecli.Spec{Sleep: "10s", Ready: ready}, Spec{Prompt: "slow"}, nil)
+		return s.Done()
+	})
 	cancel()
 	select {
 	case <-s.Done():
