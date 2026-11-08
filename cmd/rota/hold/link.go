@@ -244,7 +244,10 @@ type frame struct {
 const screenQueue = 64
 
 // screens is a link's worker for the screen: its ScreenAsks and Resizes, one
-// at a time in the order they came, until the link ends.
+// at a time in the order they came, until the link ends. What is still
+// queued then is dropped: a resize from a link that has been replaced would
+// land after the new link's and undo it, the CLI at one size and the daemon
+// told another.
 func (s *Session) screens(l *link, work <-chan frame) {
 	defer s.recovered("a link's screen")
 	for {
@@ -252,6 +255,11 @@ func (s *Session) screens(l *link, work <-chan frame) {
 		case <-l.gone:
 			return
 		case f := <-work:
+			select {
+			case <-l.gone:
+				return
+			default:
+			}
 			s.safely("a frame for the screen", func() { s.screenFrame(l, f) })
 		}
 	}
