@@ -26,6 +26,7 @@ import (
 // copy is the newest the home has held.
 func seenInSync(a *rota.Account) {
 	setExtra(a, homeSyncedKey, strconv.FormatInt(rota.NowMS(), 10))
+	setExtra(a, homeSyncedFPKey, a.Staged)
 }
 
 // olderCopyWords is the reason, word for word, an account is dead whose rescue
@@ -293,25 +294,43 @@ func TestARescueIsJudgedFromTheLookThatFirstFoundTheHomeBlanked(t *testing.T) {
 }
 
 // Every look that finds the home's store holding exactly the account's refresh
-// token says when, and keeps nothing of the token for it; a file read beside a
-// blanked keychain item is not the store Claude Code reads, and says nothing.
+// token says when, and which token by its fingerprint, and keeps nothing of the
+// token itself. A record of the same token less than a minute old is left as it
+// is, so such a look saves nothing. A file read beside a blanked keychain item
+// is not the store Claude Code reads, and says nothing.
 func TestALookInSyncRecordsWhenAndNothingOfTheToken(t *testing.T) {
 	for _, m := range lineageModes() {
 		t.Run(m.name, func(t *testing.T) {
 			w := newLineageWorld(t, m.keychain)
 			w.cc.start()
-			lineageLooks()[1].do(t, w)
-			if got := w.a.Extra[homeSyncedKey]; got != strconv.FormatInt(rota.NowMS(), 10) {
-				t.Fatalf("in sync on R0, now: %q", got)
+			inSyncNow := func(what, token string) {
+				t.Helper()
+				if got := w.a.Extra[homeSyncedKey]; got != strconv.FormatInt(rota.NowMS(), 10) || w.a.Extra[homeSyncedFPKey] != fingerprint(token) {
+					t.Fatalf("%s: in sync on %s, now: %q %q", what, token, got, w.a.Extra[homeSyncedFPKey])
+				}
 			}
+			lineageLooks()[1].do(t, w)
+			inSyncNow("the first look", "R0")
+			stamp := w.a.Extra[homeSyncedKey]
+			w.clock.pass(time.Minute)
+			before := snapshot(w.a)
+			lineageLooks()[1].do(t, w)
+			if w.a.Extra[homeSyncedKey] != stamp || before.differs(w.a) {
+				t.Fatalf("a record a minute old stays, and nothing is to save: %q %q", w.a.Extra[homeSyncedKey], stamp)
+			}
+			w.clock.pass(time.Millisecond)
+			lineageLooks()[1].do(t, w)
+			inSyncNow("a look past the minute", "R0")
 			w.clock.pass(7*time.Hour + 56*time.Minute)
 			w.cc.refresh("claude-code daemon")
 			lineageLooks()[1].do(t, w)
-			if got := w.a.Extra[homeSyncedKey]; w.a.Token.Refresh != "R1" || got != strconv.FormatInt(rota.NowMS(), 10) {
-				t.Fatalf("in sync on R1, now: %q %q", w.a.Token.Refresh, got)
-			}
+			inSyncNow("the look that takes the rotation", "R1")
+			w.clock.pass(10 * time.Second)
+			w.cc.refresh("claude-code daemon")
+			lineageLooks()[1].do(t, w)
+			inSyncNow("another token, however soon", "R2")
 			for k, v := range w.a.Extra {
-				if strings.Contains(v, "R0") || strings.Contains(v, "R1") || strings.Contains(v, "A1") {
+				if strings.Contains(v, "R0") || strings.Contains(v, "R1") || strings.Contains(v, "R2") || strings.Contains(v, "A2") {
 					t.Fatalf("a token kept in %s: %q", k, v)
 				}
 			}
@@ -330,7 +349,7 @@ func TestALookInSyncRecordsWhenAndNothingOfTheToken(t *testing.T) {
 		synced := a.Extra[homeSyncedKey]
 		k.items[service(t, home)] = clearedLogin
 		writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000"))
-		clock.pass(time.Minute)
+		clock.pass(2 * time.Minute)
 		h := looked(t, s, a)
 		if !h.covered() || a.Extra[homeSyncedKey] != synced {
 			t.Fatalf("the file is taken, and proves nothing: %v %q %q", h.covered(), a.Extra[homeSyncedKey], synced)
@@ -343,29 +362,35 @@ func TestALookInSyncRecordsWhenAndNothingOfTheToken(t *testing.T) {
 // home a moment ago; then it is put in front of Claude Code and nothing is
 // presented. Otherwise the home is as blanked as the item, the file is never
 // uncovered, and the rescue decides: rota's own copy, seen a moment ago, is
-// presented and written in; one rota cannot show is current is not, and the
-// account is dead.
+// presented and written in; one seen too long ago, one the record of that look
+// does not name, or one a later login of its own lineage there shows spent, is
+// not, and the account is dead.
 func TestAFileBesideABlankedItemIsTheLoginOnlyWhenConfirmedCurrent(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
 	own := func(a *rota.Account) string {
 		return storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000")
 	}
+	older := func(a *rota.Account) string {
+		return storeLogin("A-old", "R-old", a.Token.ExpiresAt-int64(8*time.Hour/time.Millisecond), "1999999999000")
+	}
 	for _, c := range []struct {
-		what string
-		file func(a *rota.Account) string
-		seen time.Duration // how long before the look rota last saw its login in the home; 0 for never
-		then string        // uncovered, rescued or dead
+		what  string
+		file  func(a *rota.Account) string
+		seen  time.Duration // how long before the look rota last saw its login in the home; 0 for never
+		other bool          // the record of that look names another token
+		then  string        // uncovered, rescued or dead
 	}{
-		{"the account's own, seen a minute ago", own, time.Minute, "uncovered"},
-		{"the account's own, seen an hour ago", own, time.Hour, "dead"},
-		{"the account's own, never seen", own, 0, "dead"},
-		{"an older one of the lineage, seen a minute ago", func(a *rota.Account) string {
-			return storeLogin("A-old", "R-old", a.Token.ExpiresAt-int64(8*time.Hour/time.Millisecond), "1999999999000")
-		}, time.Minute, "rescued"},
-		{"an older one of the lineage, seen an hour ago", func(a *rota.Account) string {
-			return storeLogin("A-old", "R-old", a.Token.ExpiresAt-int64(8*time.Hour/time.Millisecond), "1999999999000")
-		}, time.Hour, "dead"},
+		{"the account's own, seen a minute ago", own, time.Minute, false, "uncovered"},
+		{"the account's own, seen an hour ago", own, time.Hour, false, "dead"},
+		{"the account's own, never seen", own, 0, false, "dead"},
+		{"the account's own, seen a minute ago as another token", own, time.Minute, true, "dead"},
+		{"an older one of the lineage, seen a minute ago", older, time.Minute, false, "rescued"},
+		{"an older one of the lineage, seen an hour ago", older, time.Hour, false, "dead"},
+		{"an older one of the lineage, seen a minute ago as another token", older, time.Minute, true, "dead"},
+		{"a later one of the lineage, seen a minute ago", func(a *rota.Account) string {
+			return storeLogin("A-later", "R-later", a.Token.ExpiresAt+int64(8*time.Hour/time.Millisecond), "1999999999000")
+		}, time.Minute, false, "dead"},
 	} {
 		t.Run(c.what, func(t *testing.T) {
 			clock := useLineageClock(t)
@@ -381,6 +406,9 @@ func TestAFileBesideABlankedItemIsTheLoginOnlyWhenConfirmedCurrent(t *testing.T)
 				clock.pass(-c.seen)
 				seenInSync(a)
 				clock.pass(c.seen)
+			}
+			if c.other {
+				a.Extra[homeSyncedFPKey] = fingerprint("R-before")
 			}
 			k.items[svc] = clearedLogin
 			file := c.file(a)
@@ -410,7 +438,7 @@ func TestAFileBesideABlankedItemIsTheLoginOnlyWhenConfirmedCurrent(t *testing.T)
 					t.Fatalf("dead, and says why: %v %q", a.Dead, a.WhyDead())
 				}
 				if !itemThere || item != clearedLogin || readFile(filepath.Join(home, ".credentials.json")) != file {
-					t.Fatal("nothing uncovered: the item stays in front of the file")
+					t.Fatal("nothing uncovered or written: the item stays in front of the file")
 				}
 			}
 		})
@@ -418,48 +446,101 @@ func TestAFileBesideABlankedItemIsTheLoginOnlyWhenConfirmedCurrent(t *testing.T)
 }
 
 // A login of another lineage beside a blanked item is somebody's /login there,
-// written to the file because the keychain refused it: it is read as the new
-// login it is, confirmed and taken, and put in front of Claude Code; nothing of
-// rota's is presented, and nothing is written over it.
+// written to the file because the keychain refused it, and so is a login later
+// than the account's when the lineage of either is not known — every account
+// rota has not yet seen rotate, and an account logged in before rota kept when
+// a login ends. Each is read as the new login it is: confirmed and taken, and
+// put in front of Claude Code, or found to be somebody else's and left alone.
+// rota presents nothing of its own beside it, although it saw its own login in
+// the home a moment ago, and writes nothing over it.
 func TestALoginMadeThereBesideABlankedItemIsANewLoginNotABlank(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
-	k := fakeKeychain(t)
-	f := fakeAnthropic(t)
-	f.set(func(f *anthropic) {
-		f.refresh = refreshesTo("A-new", "R-new")
-		f.profile = profileOf("A-login", "u1")
-	})
-	s := openTemp(t)
-	a := livingClaude(s, "u1")
-	home := s.Home(a)
-	svc := service(t, home)
-	a.StagedWritten()
-	k.items[svc] = clearedLogin
-	writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-login", "R-login", later(8*time.Hour), "1888888888000"))
-	alive(t, home, "sessions/1.json", os.Getpid())
-	if errs := s.Rescue(context.Background(), a); len(errs) != 0 {
-		t.Fatal(errs)
-	}
-	if a.Dead || a.Token.Refresh != "R-login" || f.refreshes.Load() != 0 {
-		t.Fatalf("taken, nothing presented: %v %q %d", a.Dead, a.Token.Refresh, f.refreshes.Load())
-	}
-	if _, ok := k.item(svc); ok {
-		t.Fatal("the blanked item is out of its way")
-	}
-	if r, _ := readLogin(t, home); r != "R-login" {
-		t.Fatalf("and the file still holds it: %q", r)
+	for _, c := range []struct {
+		what        string
+		ours, until string // the account's recorded end, the file's; "" for none
+		whose       string
+	}{
+		{"another lineage", "1999999999000", "1888888888000", "u1"},
+		{"the account keeps no end", "", "1888888888000", "u1"},
+		{"the file carries no end", "1999999999000", "", "u1"},
+		{"the account keeps no end, and the login is somebody else's", "", "1888888888000", "u2"},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			k := fakeKeychain(t)
+			f := fakeAnthropic(t)
+			f.set(func(f *anthropic) {
+				f.refresh = refreshesTo("A-new", "R-new")
+				f.profile = profileOf("A-login", c.whose)
+			})
+			s := openTemp(t)
+			a := livingClaude(s, "u1")
+			if c.ours == "" {
+				delete(a.Extra, "refresh_token_expires_at")
+			}
+			home := s.Home(a)
+			svc := service(t, home)
+			a.StagedWritten()
+			seenInSync(a)
+			k.items[svc] = clearedLogin
+			until := c.until
+			if until == "" {
+				until = "null"
+			}
+			login := storeLogin("A-login", "R-login", later(8*time.Hour), until)
+			writeFile(t, filepath.Join(home, ".credentials.json"), login)
+			alive(t, home, "sessions/1.json", os.Getpid())
+			s.Rescue(context.Background(), a)
+			if f.refreshes.Load() != 0 || a.Dead {
+				t.Fatalf("nothing of rota's presented: %d dead=%v %q", f.refreshes.Load(), a.Dead, a.WhyDead())
+			}
+			if r, _ := readLogin(t, home); r != "R-login" {
+				t.Fatalf("nothing written over the login: %q", r)
+			}
+			_, itemThere := k.item(svc)
+			if c.whose != "u1" {
+				if a.Token.Refresh != "R-u1" || readFile(filepath.Join(home, ".credentials.json")) != login || !itemThere {
+					t.Fatalf("somebody else's is not taken, and is left as it is: %q %v", a.Token.Refresh, itemThere)
+				}
+				return
+			}
+			if a.Token.Refresh != "R-login" || itemThere {
+				t.Fatalf("taken, and the blanked item out of its way: %q %v", a.Token.Refresh, itemThere)
+			}
+		})
 	}
 }
 
-// Fix C, last part: once rota has taken Claude Code's first rotation into the
-// keychain item, the file rota seeded beside it goes, with Claude Code alive,
-// from whichever look takes it: Claude Code reads the item while there is one,
-// and a blanked item would otherwise leave that file standing behind it.
+// seededByRota records that the login in the home's file is the one rota wrote
+// there, as seed does on a platform with a keychain.
+func seededByRota(a *rota.Account) { setExtra(a, seedFPKey, a.Staged) }
+
+// A seed on a platform with a keychain keeps the fingerprint of what it wrote,
+// which is what lets a later look tell rota's own file from any other.
+func TestASeedRemembersWhatItWrote(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	fakeKeychain(t)
+	fakeAnthropic(t)
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	if _, err := launchEnv(t, s, a); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := readLogin(t, s.Home(a)); r != "R-u1" || a.Extra[seedFPKey] != fingerprint("R-u1") {
+		t.Fatalf("written, and remembered: %q %q", r, a.Extra[seedFPKey])
+	}
+}
+
+// Fix C, last part: once rota has taken Claude Code's rotation into the keychain
+// item, the file rota seeded beside it goes, with Claude Code alive, from
+// whichever look takes it: Claude Code reads the item while there is one, and a
+// blanked item would otherwise leave that file standing behind it.
 func TestRotasSeedFileGoesOnceClaudeCodeMovedTheLoginIntoTheItem(t *testing.T) {
 	for _, look := range lineageLooks() {
 		t.Run(look.what, func(t *testing.T) {
 			w := newLineageWorld(t, true)
+			seededByRota(w.a)
 			w.cc.start()
 			w.clock.pass(7*time.Hour + 56*time.Minute)
 			t.Logf("daemon: %s", w.cc.refresh("claude-code daemon")) // item R1, rota's file R0 beside it
@@ -471,8 +552,8 @@ func TestRotasSeedFileGoesOnceClaudeCodeMovedTheLoginIntoTheItem(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(w.cc.home, ".credentials.json")); !os.IsNotExist(err) {
 				t.Fatalf("rota's own file goes: %v", err)
 			}
-			if v, ok := w.k.item(w.cc.svc); !ok || refreshOf(v) != "R1" {
-				t.Fatalf("and the item stays: %v %q", ok, refreshOf(v))
+			if v, ok := w.k.item(w.cc.svc); !ok || refreshOf(v) != "R1" || w.a.Extra[seedFPKey] != "" {
+				t.Fatalf("the item stays, and nothing is left to remember: %v %q %q", ok, refreshOf(v), w.a.Extra[seedFPKey])
 			}
 		})
 	}
@@ -487,17 +568,19 @@ func TestOnlyRotasOwnSeedFileGoesAndOnlyForARotation(t *testing.T) {
 	expires := time.Now().Add(time.Hour).UnixMilli()
 	newer := expires + int64(8*time.Hour/time.Millisecond)
 	for _, c := range []struct {
-		what  string
-		file  string
-		item  string
-		taken string
-		goes  bool
+		what   string
+		file   string
+		item   string
+		record bool // rota remembers writing the file
+		taken  string
+		goes   bool
 	}{
-		{"rota's file, Claude Code's rotation", storeLogin("A-u1", "R-u1", expires, until), storeLogin("A-n", "R-n", newer, until), "R-n", true},
-		{"a file rota did not write", storeLogin("A-x", "R-x", expires-1, until), storeLogin("A-n", "R-n", newer, until), "R-n", false},
-		{"a login of another lineage in the item", storeLogin("A-u1", "R-u1", expires, until), storeLogin("A-n", "R-n", newer, "1888888888000"), "R-n", false},
-		{"an item no newer than the file", storeLogin("A-u1", "R-u1", expires, until), storeLogin("A-n", "R-n", expires, until), "R-n", false},
-		{"an item rota cannot place yet", storeLogin("A-u1", "R-u1", expires, until), storeLogin("A-z", "R-z", newer, "1888888888000"), "R-u1", false},
+		{"rota's file, Claude Code's rotation", storeLogin("A-u1", "R-u1", expires, until), storeLogin("A-n", "R-n", newer, until), true, "R-n", true},
+		{"a seed rota kept no record of", storeLogin("A-u1", "R-u1", expires, until), storeLogin("A-n", "R-n", newer, until), false, "R-n", false},
+		{"a file rota did not write", storeLogin("A-x", "R-x", expires-1, until), storeLogin("A-n", "R-n", newer, until), true, "R-n", false},
+		{"a login of another lineage in the item", storeLogin("A-u1", "R-u1", expires, until), storeLogin("A-n", "R-n", newer, "1888888888000"), true, "R-n", false},
+		{"an item no newer than the file", storeLogin("A-u1", "R-u1", expires, until), storeLogin("A-n", "R-n", expires, until), true, "R-n", false},
+		{"an item rota cannot place yet", storeLogin("A-u1", "R-u1", expires, until), storeLogin("A-z", "R-z", newer, "1888888888000"), true, "R-u1", false},
 	} {
 		t.Run(c.what, func(t *testing.T) {
 			k := fakeKeychain(t)
@@ -508,6 +591,9 @@ func TestOnlyRotasOwnSeedFileGoesAndOnlyForARotation(t *testing.T) {
 			a.Token.ExpiresAt = expires
 			home := s.Home(a)
 			a.StagedWritten()
+			if c.record {
+				seededByRota(a)
+			}
 			k.items[service(t, home)] = c.item
 			writeFile(t, filepath.Join(home, ".credentials.json"), c.file)
 			alive(t, home, "daemon.lock", os.Getpid())
@@ -520,6 +606,166 @@ func TestOnlyRotasOwnSeedFileGoesAndOnlyForARotation(t *testing.T) {
 				t.Fatalf("the file gone: %v", gone)
 			}
 		})
+	}
+}
+
+// The file goes under Claude Code's refresh lock: while somebody holds it the
+// look leaves the file, and any later look that finds the same removes it, as
+// the look that took the rotation would have.
+func TestRotasSeedFileWaitsForTheRefreshLockAndGoesLater(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	k := fakeKeychain(t)
+	fakeAnthropic(t)
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	home := s.Home(a)
+	a.StagedWritten()
+	seededByRota(a)
+	k.items[service(t, home)] = storeLogin("A-n", "R-n", later(9*time.Hour), "1999999999000")
+	file := filepath.Join(home, ".credentials.json")
+	writeFile(t, file, storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000"))
+	alive(t, home, "daemon.lock", os.Getpid())
+	lock := filepath.Join(home, claudeRefreshLock)
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	looked(t, s, a)
+	if _, err := os.Stat(file); err != nil || a.Token.Refresh != "R-n" {
+		t.Fatalf("the rotation is taken and the file stays while the lock is held: %v %q", err, a.Token.Refresh)
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	looked(t, s, a)
+	if _, err := os.Stat(file); !os.IsNotExist(err) {
+		t.Fatalf("a later look removes it: %v", err)
+	}
+	if _, err := os.Stat(lock); !os.IsNotExist(err) {
+		t.Fatal("and lets go of the lock")
+	}
+}
+
+// A death for an older copy is on disk before the look that found it returns,
+// as every death is, so no other process looks again and decides otherwise.
+func TestADeathForAnOlderCopyIsSavedAtOnce(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	fakeAnthropic(t)
+	s, ob := orderedStore(t)
+	a := livingClaude(s, "u1")
+	home := cleared(t, s, a)
+	a.Extra[homeSyncedKey] = strconv.FormatInt(rota.Now().Add(-time.Hour).UnixMilli(), 10)
+	alive(t, home, "sessions/1.json", os.Getpid())
+	h := looked(t, s, a)
+	if _, err := h.mend(context.Background()); !errors.Is(err, rota.ErrReauth) || !a.Dead {
+		t.Fatalf("dead: %v %v", err, a.Dead)
+	}
+	if !ob.dead || !strings.Contains(allFiles(t, ob.FileBackend.Dir), "so rota did not present it") {
+		t.Fatal("saved before the look returned")
+	}
+}
+
+// uncover never puts a file it passes over in front of Claude Code, whoever
+// asks it to.
+func TestUncoverLeavesAFileItPassesOver(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	k := fakeKeychain(t)
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	home := s.Home(a)
+	svc := service(t, home)
+	a.StagedWritten()
+	k.items[svc] = clearedLogin
+	file := storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000")
+	writeFile(t, filepath.Join(home, ".credentials.json"), file)
+	h := looked(t, s, a)
+	if err := h.uncover(); err != nil {
+		t.Fatal(err)
+	}
+	if v, ok := k.item(svc); !ok || v != clearedLogin || readFile(filepath.Join(home, ".credentials.json")) != file {
+		t.Fatal("the blanked item stays in front of the file it passed over")
+	}
+}
+
+// A blanked item in front of the account's own file, seen a moment ago, is
+// found lost by the look that first sees it, so an uncover that has to wait —
+// here for Claude Code's refresh lock — is made by a later look, however much
+// later, on the same terms.
+func TestAnUncoverThatWaitsIsMadeLaterOnTheSameTerms(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	clock := useLineageClock(t)
+	k := fakeKeychain(t)
+	f := fakeAnthropic(t)
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	home := s.Home(a)
+	svc := service(t, home)
+	a.StagedWritten()
+	seenInSync(a)
+	k.items[svc] = clearedLogin
+	writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000"))
+	alive(t, home, "sessions/1.json", os.Getpid())
+	lock := filepath.Join(home, claudeRefreshLock)
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	clock.pass(4 * time.Minute)
+	if errs := s.Rescue(context.Background(), a); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	if _, ok := k.item(svc); !ok || a.Extra[homeLostKey] != strconv.FormatInt(rota.NowMS(), 10) {
+		t.Fatalf("left for later, and found lost now: %v %q", ok, a.Extra[homeLostKey])
+	}
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	clock.pass(26 * time.Minute)
+	if errs := s.Rescue(context.Background(), a); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	if _, ok := k.item(svc); ok || a.Dead || f.refreshes.Load() != 0 {
+		t.Fatalf("uncovered, nothing presented: %v %v %d", ok, a.Dead, f.refreshes.Load())
+	}
+	if r, _ := readLogin(t, home); r != "R-u1" {
+		t.Fatalf("the file is the login: %q", r)
+	}
+}
+
+// What the first look found survives the process that found it: another one,
+// opening the store from disk half an hour later, makes the rescue on the same
+// terms.
+func TestTheLookThatFirstFoundTheHomeBlankedOutlivesItsProcess(t *testing.T) {
+	w := newLineageWorld(t, false)
+	w.cc.start()
+	lineageLooks()[0].do(t, w)
+	w.cc.write(clearedLogin)
+	lock := filepath.Join(w.cc.home, claudeRefreshLock)
+	if err := os.Mkdir(lock, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	w.clock.pass(4 * time.Minute)
+	lineageLooks()[1].do(t, w)
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	dir := storeDir(w.s)
+	w.s.Close()
+	again, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { again.Close() })
+	w.s, w.a = again, again.Accounts[0]
+	if w.a.Extra[homeLostKey] == "" || w.a.Extra[homeSyncedKey] == "" {
+		t.Fatalf("on disk: lost=%q synced=%q", w.a.Extra[homeLostKey], w.a.Extra[homeSyncedKey])
+	}
+	w.clock.pass(26 * time.Minute)
+	lineageLooks()[0].do(t, w)
+	if got := w.p.rotaPresented(); len(got) != 1 || got[0].rt != "R0" || got[0].wasSpent || w.a.Dead {
+		t.Fatalf("presented R0 once and alive after a reopen: %+v %v %q", got, w.a.Dead, w.a.WhyDead())
 	}
 }
 

@@ -306,7 +306,7 @@ func TestStoreWarningsSayAControlCharacterAsASpace(t *testing.T) {
 	a.Token = rota.Token{Access: "A", Refresh: "R", ExpiresAt: time.Now().Add(-time.Hour).UnixMilli()}
 	a.StagedWritten()
 	// rota saw that login in the home a moment before Claude Code blanked it
-	a.Extra = map[string]string{"home_synced_at": strconv.FormatInt(time.Now().UnixMilli(), 10)}
+	a.Extra = map[string]string{"home_synced_at": strconv.FormatInt(time.Now().UnixMilli(), 10), "home_synced_fp": a.Staged}
 	raw, err := json.Marshal(a)
 	if err != nil {
 		t.Fatal(err)

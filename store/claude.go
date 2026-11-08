@@ -84,13 +84,15 @@ import (
 // account's current one is no such case: the home simply holds nothing usable.
 //
 // Both exceptions present rota's own copy of the refresh token, so both present
-// it only when rota can show it is the newest the home has held: a look found
-// the home holding exactly that token a moment before the look that first found
-// the home blanked or stranded (see newest). Claude Code's daemon refreshes on
-// its own every eight hours or so, and each refresh nobody saw spends rota's
-// copy; presenting a spent one revokes the whole lineage, under whoever still
-// holds its newest token. A copy rota cannot show is current is not presented,
-// and the account is dead.
+// it only when a look found the home holding exactly that token a moment before
+// the look that first found the home blanked or stranded (see newest), and the
+// home shows no later login of the same lineage. Claude Code's daemon refreshes
+// on its own around each token's expiry, every eight hours or so, and each
+// refresh nobody saw spends rota's copy; presenting a spent one revokes the
+// whole lineage, under whoever still holds its newest token. A copy seen that
+// recently is current unless such a refresh fell in between, which is the one
+// case this lets through. Any other copy is not presented, and the account is
+// dead.
 //
 // A refresh token the provider refused is never presented again. An account
 // whose token was refused is dead, and a dead account is never refreshed
@@ -128,18 +130,27 @@ const (
 // on the other one. seedOwedKey is where it remembers that its home is owed the
 // login rota refreshed (see owesWrite). homeSyncedKey is when a look last found
 // the home's credential store holding exactly the account's refresh token, and
-// homeLostKey when a look first found the account's current login gone from the
-// home since — blanked there, or behind a blanked keychain item — both in decimal
-// milliseconds (see newest). All of them belong to the home, and are forgotten
-// when the account is given another (MoveHome).
+// homeSyncedFPKey that token's fingerprint; homeLostKey is when a look first
+// found the account's current login gone from the home since — blanked there,
+// or behind a blanked keychain item — the times in decimal milliseconds (see
+// newest). seedFPKey is the fingerprint of the login rota last wrote into the
+// home's file on a platform with a keychain (see dropSeed). All of them belong
+// to the home, and are forgotten when the account is given another (MoveHome).
 const (
-	routeKey      = "route"
-	routeStored   = "stored"
-	routeEnv      = "env"
-	seedOwedKey   = "seed_owed"
-	homeSyncedKey = "home_synced_at"
-	homeLostKey   = "home_lost_at"
+	routeKey        = "route"
+	routeStored     = "stored"
+	routeEnv        = "env"
+	seedOwedKey     = "seed_owed"
+	homeSyncedKey   = "home_synced_at"
+	homeSyncedFPKey = "home_synced_fp"
+	homeLostKey     = "home_lost_at"
+	seedFPKey       = "seed_fp"
 )
+
+// syncedAgain is how old the record of the last look in sync may grow before a
+// look in sync writes it again: so the store is not saved at every look, at the
+// cost of counting from up to this long before.
+const syncedAgain = time.Minute
 
 // olderCopy is why an account is dead whose home was blanked or stranded while
 // rota could not show its own copy of the login is the newest the home held.
@@ -237,9 +248,11 @@ type claudeHome struct {
 	// Code blanked it and a file beside it holds a login.
 	blankItem []byte
 	// passedOver is whether readStore left that file out, because rota could
-	// not show it holds the account's current login (fileCounts): the blanked
-	// item is then the store, as Claude Code reads it.
-	passedOver bool
+	// not show it holds the account's current login (judgeFile): the blanked
+	// item is then the store, as Claude Code reads it. superseded is whether the
+	// file it left out holds a later login of the account's own lineage, which
+	// shows rota's copy spent.
+	passedOver, superseded bool
 	// item is the keychain item as readStore last found it, nil when there was
 	// none: what a write that deletes it has judged, and must find still there.
 	item []byte
@@ -473,33 +486,34 @@ func (h *claudeHome) owe() {
 // paid forgets what owe recorded, once the home holds the login.
 func (h *claudeHome) paid() {
 	delete(h.a.Extra, seedOwedKey)
-	h.usable, h.blanked, h.spent, h.blankItem, h.passedOver = true, false, false, nil, false
+	h.usable, h.blanked, h.spent, h.blankItem, h.passedOver, h.superseded = true, false, false, nil, false, false
 }
 
 // covered reports whether a blanked keychain item stands in front of a file
 // holding the account's current login: Claude Code reads the item and never the
 // file while an item exists, so the home is signed out whatever the file holds.
-// Only a file readStore takes counts (fileCounts); any other is passed over,
+// Only a file readStore takes counts (judgeFile); any other is passed over,
 // and the home is as blanked as the item says.
 func (h *claudeHome) covered() bool {
 	return h.blankItem != nil && !h.passedOver && h.usable && h.a.StagedCurrent() && h.hold == ""
 }
 
-// newest reports whether rota can show that its copy of the account's login is
-// the newest the home has held: a look found the home's store holding exactly
-// that refresh token (homeSyncedKey) no more than two watcher intervals before
-// the look that first found the home blanked or stranded (homeLostKey, or this
-// look). A watcher looks every WatchEvery, and Claude Code refreshes on its own
-// only every eight hours or so, so it had no chance to rotate the token in
-// between. Anything else — no such look, one too long before, a time rota
-// cannot order — shows nothing. A record of the home lost from before its last
-// look in sync is about another loss, and says nothing.
+// newest reports whether a look found the home's store holding exactly the
+// account's current refresh token (homeSyncedKey, for the token homeSyncedFPKey
+// names) no more than two watcher intervals before the look that first found
+// the home blanked or stranded (homeLostKey, or this look). A watcher looks
+// every WatchEvery, and Claude Code refreshes on its own only around a token's
+// expiry, so a copy seen this recently is current unless that moment fell in
+// between: the one case this cannot tell, and lets through. Anything else — no
+// such look, one about another token, one too long before, a time rota cannot
+// order — shows nothing. A record of the home lost from before its last look in
+// sync is about another loss, and says nothing.
 func (h *claudeHome) newest() bool {
 	synced, ok := extraTime(h.a, homeSyncedKey)
-	if !ok {
+	if !ok || !h.a.StagedCurrent() || h.a.Extra[homeSyncedFPKey] != h.a.Staged {
 		return false
 	}
-	first := rota.Now()
+	first := time.UnixMilli(rota.NowMS()) // as the records keep it
 	if lost, ok := extraTime(h.a, homeLostKey); ok && !lost.Before(synced) && lost.Before(first) {
 		first = lost
 	}
@@ -577,13 +591,14 @@ func (h *claudeHome) mend(ctx context.Context) (changed bool, err error) {
 // blanking is about a token it was forced to refresh, so a token rota still
 // counts as good is presented as well; rota.Refresh asks only for an expired one.
 //
-// Only a copy rota can show is the home's newest is presented (newest). Any
-// other may be one Claude Code has already spent, which would revoke the whole
+// Only a copy seen in the home a moment ago is presented (newest), and never
+// one a later login of its own lineage there shows spent (superseded). Any other
+// may be one Claude Code has already spent, which would revoke the whole
 // lineage: nothing is presented, and the account is dead, on disk at once like
 // any death, so no other process makes the same look and decides otherwise.
 func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 	a := h.a
-	if !h.newest() {
+	if h.superseded || !h.newest() {
 		a.Dead, a.DeadReason = true, fmt.Sprintf(olderCopy, a.ID)
 		if err := h.s.saveFirmly(); err != nil {
 			return true, fmt.Errorf("%s: %s, and the store could not be saved: %w", a, a.DeadReason, err)
@@ -650,7 +665,7 @@ func (h *claudeHome) writeAndSave(ctx context.Context) error {
 // beside it, so Claude Code reads the file. What the item kept beside the login
 // goes into the file first: the item is what Claude Code has been reading, so
 // its secrets are the current ones. As with any write, the new file is whole
-// before the item goes. A file readStore passes over (fileCounts) is never put
+// before the item goes. A file readStore passes over (judgeFile) is never put
 // in front of Claude Code.
 func (h *claudeHome) uncover() error {
 	file, _, err := h.readStore()
@@ -897,11 +912,11 @@ func keychainContext() (context.Context, context.CancelFunc) {
 // error, which adoption takes for an unreadable store.
 //
 // A file beside an item Claude Code blanked is read only when it counts
-// (fileCounts). Any other is passed over and the blanked item is the store, as
+// (judgeFile). Any other is passed over and the blanked item is the store, as
 // it is for Claude Code: an older file there is most likely rota's own earlier
 // write, holding a token Claude Code has since spent.
 func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
-	h.blankItem, h.item, h.passedOver = nil, nil, false
+	h.blankItem, h.item, h.passedOver, h.superseded = nil, nil, false, false
 	if svc, ok := h.service(); ok {
 		ctx, cancel := keychainContext()
 		defer cancel()
@@ -914,8 +929,9 @@ func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
 			if file, err := os.ReadFile(filepath.Join(h.home, claudeCredentials)); err == nil && fileIsNewer(file, raw) {
 				if l, ok := storedLogin(raw); ok && l.Refresh == "" {
 					h.blankItem = raw
-					if !h.fileCounts(file) {
-						h.passedOver = true
+					counts, superseded := h.judgeFile(file)
+					if !counts {
+						h.passedOver, h.superseded = true, superseded
 						return raw, true, nil
 					}
 				}
@@ -931,22 +947,42 @@ func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
 	return raw, false, err
 }
 
-// fileCounts reports whether a login file beside a blanked keychain item is the
-// home's login: it holds exactly the account's refresh token, and rota can show
-// that token is the newest the home has held (newest). A login of another
-// lineage — its refreshTokenExpiresAt and the account's both known, and not the
-// same — is somebody's /login there, and is read as the new login it is, as any
-// is (adopt): it is never passed over, and so never written over either.
-func (h *claudeHome) fileCounts(file []byte) bool {
+// judgeFile says whether a login file beside a blanked keychain item is the
+// home's login (counts), and when it is not, whether it shows rota's copy spent
+// (superseded).
+//   - The account's own refresh token counts only when rota saw it in the home a
+//     moment ago (newest).
+//   - A login of another lineage — its refreshTokenExpiresAt and the account's
+//     both known, and not the same — is somebody's /login there. It counts, and
+//     is read as the new login it is (adopt), so it is never written over.
+//   - Another refresh token no later than rota's copy is older than the item
+//     Claude Code blanked, or cannot be shown not to be: passed over.
+//   - A later one whose lineage is not known on both sides may be a /login, so
+//     it counts, as the new login it may be, for confirm to settle, and is never
+//     written over.
+//   - A later one of the account's own lineage is a rotation rota never saw:
+//     rota's copy is spent, and it is passed over with superseded set.
+func (h *claudeHome) judgeFile(file []byte) (counts, superseded bool) {
 	l, ok := storedLogin(file)
 	switch {
 	case !ok || l.Refresh == "":
-		return false
+		return false, false
 	case l.Refresh == h.a.Token.Refresh:
-		return h.newest()
+		return h.newest(), false
 	}
-	ours := h.a.Extra["refresh_token_expires_at"]
-	return l.Until > 0 && ours != "" && strconv.FormatInt(int64(l.Until), 10) != ours
+	theirs, ours := "", h.a.Extra["refresh_token_expires_at"]
+	if l.Until > 0 {
+		theirs = strconv.FormatInt(int64(l.Until), 10)
+	}
+	switch {
+	case theirs != "" && ours != "" && theirs != ours:
+		return true, false
+	case int64(l.Expires) <= h.a.Token.ExpiresAt:
+		return false, false
+	case theirs == "" || ours == "":
+		return true, false
+	}
+	return false, true
 }
 
 // loginEntry is what this file needs to know of the login in a credential store.
@@ -976,7 +1012,7 @@ func storedLogin(raw []byte) (loginEntry, bool) {
 // blanked is older than any file that does hold a login: it reads the item and
 // never the file while an item exists, so that home is signed out whatever the
 // file holds, until the item is out of the way. Whether such a file is the
-// home's login is readStore's to decide (fileCounts).
+// home's login is readStore's to decide (judgeFile).
 func fileIsNewer(file, item []byte) bool {
 	f, ok := storedLogin(file)
 	if !ok || f.Refresh == "" || f.Expires <= 0 {
@@ -1020,7 +1056,6 @@ func (h *claudeHome) adopt(ctx context.Context) error {
 	if !ok {
 		return nil
 	}
-	written := h.a.Staged
 	h.spent = rota.ClaudeHomeSpent(h.a, fsys)
 	h.lost(fsys)
 	if h.blanked = h.clearedOwn(fsys); h.blanked {
@@ -1059,14 +1094,14 @@ func (h *claudeHome) adopt(ctx context.Context) error {
 		delete(h.a.Extra, seedOwedKey) // the home holds it, however it got there
 	}
 	h.synced(fsys, taken)
-	h.dropSeed(written)
+	h.dropSeed()
 	return nil
 }
 
 // clearedOwn reports whether the home's store is blanked where the account's
 // current login was, the account being alive and holding its own refresh token.
 // A file beside a blanked keychain item is the store only when it counts
-// (fileCounts), so a leftover there changes nothing about that.
+// (judgeFile), so a leftover there changes nothing about that.
 func (h *claudeHome) clearedOwn(fsys storeFS) bool {
 	a := h.a
 	if a.Dead || !a.StagedCurrent() {
@@ -1077,19 +1112,27 @@ func (h *claudeHome) clearedOwn(fsys storeFS) bool {
 }
 
 // synced records that this look found the home's store holding exactly the
-// account's refresh token — told by its fingerprint, the one Staged records, so
-// the token is kept nowhere new — and so that nothing is lost there any more
-// (see newest). A file read beside a blanked keychain item is not the store
-// Claude Code reads, and shows nothing — unless this look has just taken the
-// new login in it (taken), which rota then holds exactly as the home does.
+// account's refresh token — told by its fingerprint, the one Staged records,
+// which is kept with the time so the record vouches for that token alone; the
+// token itself is kept nowhere new — and so that nothing is lost there any more
+// (see newest). A record of the same token less than syncedAgain old is left as
+// it is. A file read beside a blanked keychain item is not the store Claude Code
+// reads, and shows nothing — unless this look has just taken the new login in it
+// (taken), which rota then holds exactly as the home does.
 func (h *claudeHome) synced(fsys storeFS, taken bool) {
 	l, ok := storedLogin(fsys.store)
 	if !ok || l.Refresh == "" || (h.blankItem != nil && !taken) || h.hold != "" || !h.a.StagedCurrent() ||
 		fingerprint(l.Refresh) != h.a.Staged {
 		return
 	}
-	setExtra(h.a, homeSyncedKey, strconv.FormatInt(rota.NowMS(), 10))
 	delete(h.a.Extra, homeLostKey)
+	if at, ok := extraTime(h.a, homeSyncedKey); ok && h.a.Extra[homeSyncedFPKey] == h.a.Staged {
+		if age := time.UnixMilli(rota.NowMS()).Sub(at); age >= 0 && age <= syncedAgain {
+			return
+		}
+	}
+	setExtra(h.a, homeSyncedKey, strconv.FormatInt(rota.NowMS(), 10))
+	setExtra(h.a, homeSyncedFPKey, h.a.Staged)
 }
 
 // lost records when a look first found the account's current login gone from
@@ -1116,27 +1159,46 @@ func (h *claudeHome) lost(fsys storeFS) {
 // Code has moved the login into its keychain item, whatever is alive there:
 // Claude Code reads the item while there is one, so the file is only an older
 // copy — one a blanked item would otherwise leave standing behind it. It goes
-// only while it holds exactly what rota wrote (written, Staged as this look
-// found it) and the item holds a usable, newer login of the same lineage, which
-// this look has just taken; it is read once more just before, and left if it
-// changed.
-func (h *claudeHome) dropSeed(written string) {
+// only while it holds exactly what rota wrote there (seedFPKey) and the item
+// holds a usable, newer login of the same lineage that the account holds; any
+// look that finds that so removes it. It is removed under Claude Code's refresh
+// lock, after both are read again and found as they were, so no write of
+// Claude Code's can fall between; a lock somebody holds leaves it to a later
+// look.
+func (h *claudeHome) dropSeed() {
+	seeded := h.a.Extra[seedFPKey]
 	item, ok := storedLogin(h.item)
-	if !ok || h.blankItem != nil || h.hold != "" || item.Refresh == "" || item.Expires <= 0 || item.Until <= 0 ||
-		!h.a.StagedCurrent() || fingerprint(item.Refresh) != h.a.Staged {
+	if seeded == "" || !ok || h.blankItem != nil || h.hold != "" || item.Refresh == "" || item.Expires <= 0 ||
+		item.Until <= 0 || !h.a.StagedCurrent() || fingerprint(item.Refresh) != h.a.Staged {
 		return
 	}
 	path := filepath.Join(h.home, claudeCredentials)
 	raw, err := os.ReadFile(path)
-	if err != nil {
+	if errors.Is(err, fs.ErrNotExist) {
+		delete(h.a.Extra, seedFPKey) // gone already: nothing of rota's is left there
 		return
 	}
 	file, ok := storedLogin(raw)
-	if !ok || file.Refresh == "" || fingerprint(file.Refresh) != written || file.Until != item.Until || file.Expires >= item.Expires {
+	if err != nil || !ok || file.Refresh == "" || fingerprint(file.Refresh) != seeded || file.Until != item.Until ||
+		file.Expires >= item.Expires {
 		return
 	}
-	if again, err := os.ReadFile(path); err == nil && bytes.Equal(again, raw) {
-		_ = os.Remove(path)
+	lock, ok := takeRefreshLock(h.home)
+	if !ok {
+		return
+	}
+	defer lock.release()
+	svc, _ := h.service()
+	ctx, cancel := keychainContext()
+	defer cancel()
+	if now, found, err := claudecode.Read(ctx, svc); err != nil || !found || !bytes.Equal(now, h.item) {
+		return
+	}
+	if again, err := os.ReadFile(path); err != nil || !bytes.Equal(again, raw) {
+		return
+	}
+	if os.Remove(path) == nil {
+		delete(h.a.Extra, seedFPKey)
 	}
 }
 
@@ -1710,6 +1772,9 @@ func (h *claudeHome) seed(files []rota.StagedFile) error {
 		}
 		h.a.StagedWritten()
 		delete(h.a.Extra, homeLostKey) // the home holds the account's login again
+		if named {
+			setExtra(h.a, seedFPKey, h.a.Staged) // what dropSeed may take back
+		}
 	}
 	return nil
 }
@@ -1721,7 +1786,7 @@ func (h *claudeHome) seed(files []rota.StagedFile) error {
 // the keychain refused it, so it stays and the item goes instead, or Claude
 // Code would go on presenting a refresh token that was replaced; a blanked item
 // hands what it kept beside the login to the file first (uncover), and only to a
-// file that counts (fileCounts): any other stays where it is, behind the item,
+// file that counts (judgeFile): any other stays where it is, behind the item,
 // and is not put in front of Claude Code. Only when nothing is alive, and never
 // in the hold.
 func (h *claudeHome) tidy() {
@@ -2206,7 +2271,7 @@ func (s *Store) MoveHome(ctx context.Context, a *rota.Account, configDir string)
 		}
 	}
 	a.StagedSuperseded()
-	for _, k := range []string{routeKey, seedOwedKey, homeSyncedKey, homeLostKey} {
+	for _, k := range []string{routeKey, seedOwedKey, homeSyncedKey, homeSyncedFPKey, homeLostKey, seedFPKey} {
 		delete(a.Extra, k)
 	}
 	a.ConfigDir = configDir
