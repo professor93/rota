@@ -2370,7 +2370,7 @@ which is `0700`:
 | `<id>/sock` | the holder's socket, `0600`. It takes a link only from the daemon serving the store: *only the rota daemon serving this store may link to a session* |
 | `<id>/lock` | locked by the holder for its whole life: locked is running, whatever its socket does |
 | `<id>/meta.json` | the session's record, `0600`: its account, folder, arguments and conversation, which process its holder and its CLI are and when each started, and, once it stops, when and with what exit. It outlives the holder, which is how a stopped session is still listed. It holds no credential rota keeps; its arguments are what was typed, less the flags that pick a conversation |
-| `<id>/holder.log` | what the holder had to say, among it the warning a claude launch gives about a settings file that puts back what it drops (see *[Providers](#providers)*); moved to `holder.log.1` at 1 MiB. It is written only as a plain file, never through a link, and not at all once others may read or write it |
+| `<id>/holder.log` | what the holder had to say, among it the warning a claude launch gives about a settings file that puts back what it drops (see *[Providers](#providers)*), and why the holder crashed if it did; moved to `holder.log.1` at 1 MiB. It is written only as a plain file, never through a link, and not at all once others may read or write it |
 
 The daemon's own log is `<store>/daemon.log`, or `[server] log_file`. A
 recording, where `[terminal] record` asks for one, is `<id>.out` beside the

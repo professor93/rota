@@ -4,6 +4,7 @@ package hold
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -149,5 +150,43 @@ func TestTheHolderLogIsItsOwnersPlainFileAlone(t *testing.T) {
 	l.close()
 	if raw, _ := os.ReadFile(path); !strings.Contains(string(raw), "a line") {
 		t.Fatalf("a plain file of its own was not written: %q", raw)
+	}
+}
+
+// TestHelperCrashesWithALog is a holder that crashes after its log has moved
+// aside once, for TestACrashIsInTheHolderLog. It is not a test on its own.
+func TestHelperCrashesWithALog(t *testing.T) {
+	path := os.Getenv("ROTA_HOLD_TEST_CRASH_LOG")
+	if path == "" {
+		t.Skip("a helper process")
+	}
+	l := &logFile{path: path, crash: true}
+	log := l.logger()
+	for i := range logCap/100 + 1 {
+		log("a line", "i", i, "pad", strings.Repeat("x", 80))
+	}
+	go func() { panic("the holder fell over") }()
+	select {}
+}
+
+// A holder that crashes says why in holder.log, where it says everything
+// else, rather than on a standard error nobody reads: after the log has
+// moved aside, in the file that took its place.
+func TestACrashIsInTheHolderLog(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "holder.log")
+	cmd := exec.Command(os.Args[0], "-test.run=^TestHelperCrashesWithALog$")
+	cmd.Env = append(os.Environ(), "ROTA_HOLD_TEST_CRASH_LOG="+path)
+	if err := cmd.Run(); err == nil {
+		t.Fatal("the helper did not crash")
+	}
+	if _, err := os.Stat(path + ".1"); err != nil {
+		t.Fatalf("the log never moved aside: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "panic: the holder fell over") || !strings.Contains(string(raw), "goroutine ") {
+		t.Fatalf("holder.log does not say why the holder crashed; it ends:\n%s", raw[max(0, len(raw)-512):])
 	}
 }
