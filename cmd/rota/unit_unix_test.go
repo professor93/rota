@@ -105,7 +105,7 @@ func TestWriteAndRemoveUnitRunTheSupervisor(t *testing.T) {
 				t.Fatalf("reinstall asked %q, want %q", *calls, want.reinstall)
 			}
 			*calls = nil
-			if err := removeUnit(store); err != nil {
+			if _, err := removeUnit(store, filepath.Join(store, "terminals")); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -129,7 +129,7 @@ func TestRemovingAUnitDeletesItWhateverTheSupervisorSays(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := recordUnits(t, func(string) error { return errors.New("No such process") })
-	err = removeUnit(store)
+	_, err = removeUnit(store, filepath.Join(store, "terminals"))
 	if err == nil || !strings.Contains(err.Error(), "No such process") {
 		t.Fatalf("removeUnit: %v", err)
 	}
@@ -410,6 +410,14 @@ func TestReinstallStopsTheDaemonFirst(t *testing.T) {
 // The channel is closed once it has been sent one.
 func daemonByTheTest(t *testing.T, terminals string) <-chan struct{} {
 	t.Helper()
+	return daemonByTheTestThen(t, terminals, func() bool { return true })
+}
+
+// daemonByTheTestThen is daemonByTheTest with onTerm run as the SIGTERM
+// arrives: the claim is let go of only when it says so, and otherwise held
+// until the test ends, as by a daemon that will not stop.
+func daemonByTheTestThen(t *testing.T, terminals string, onTerm func() (letGo bool)) <-chan struct{} {
+	t.Helper()
 	release, err := holdwire.ClaimDaemon(terminals, "test")
 	if err != nil {
 		t.Fatal(err)
@@ -421,12 +429,134 @@ func daemonByTheTest(t *testing.T, terminals string) <-chan struct{} {
 	go func() {
 		select {
 		case <-terms:
+			letGo := onTerm()
 			close(termed)
-			release()
+			if letGo {
+				release()
+			}
 		case <-done:
 		}
 	}()
 	return termed
+}
+
+// unreachableSupervisor puts a supervisor on PATH that fails every command
+// as systemctl --user does with no user bus to reach, and has rota run the
+// real one it finds there: a fake built from this test binary, not a script.
+func unreachableSupervisor(t *testing.T) {
+	t.Helper()
+	name := map[string]string{"linux": "systemctl", "darwin": "launchctl"}[runtime.GOOS]
+	bin := t.TempDir()
+	fakecli.Install(t, bin, name, fakecli.Spec{
+		Stderr: []string{"Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined"},
+		Exit:   1,
+	})
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	old := unitRun
+	unitRun = runSupervisor
+	t.Cleanup(func() { unitRun = old })
+}
+
+// wantsLink makes the link systemctl enable makes for the unit at path, and
+// returns it; launchd has none, and there it is "".
+func wantsLink(t *testing.T, path string) string {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	link := filepath.Join(filepath.Dir(path), "default.target.wants", filepath.Base(path))
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	return link
+}
+
+// An uninstall the supervisor cannot be asked for — no user bus to reach,
+// say — may leave the daemon running under the unit, and systemd, reloading
+// a unit whose file is gone, would end every session in it as the daemon
+// stops. So the daemon is stopped first, as serve stop stops one, while the
+// file is still there; only then are the file and its link taken away, and
+// no reload is asked for, which could catch the daemon on its way out. What
+// it says names the supervisor's complaint and the daemon it stopped.
+func TestAnUninstallTheSupervisorRefusesStopsTheDaemonFirst(t *testing.T) {
+	r := newUnitRig(t)
+	if _, errb, code := call(t, "serve", "install"); code != 0 {
+		t.Fatalf("install: exit %d %q", code, errb)
+	}
+	link := wantsLink(t, r.want.path)
+	unreachableSupervisor(t)
+	fileAtTerm := make(chan bool, 1)
+	termed := daemonByTheTestThen(t, r.terminals, func() bool {
+		_, err := os.Lstat(r.want.path)
+		fileAtTerm <- err == nil
+		return true
+	})
+	out, errb, code := call(t, "serve", "uninstall")
+	for _, want := range []string{
+		r.want.path + " is removed, but " + r.want.uninstall[0] + ": exit status 1: Failed to connect to user scope bus",
+		fmt.Sprintf("; the rota daemon (pid %d) was stopped as rota serve stop stops one, and 0 sessions keep running", os.Getpid()),
+	} {
+		if code != 1 || out != "" || !strings.Contains(errb, want) {
+			t.Fatalf("uninstall with no supervisor: exit %d %q %q, want %q", code, out, errb, want)
+		}
+	}
+	if strings.Contains(errb, "daemon-reload") {
+		t.Fatalf("a reload was asked for after the daemon was stopped: %q", errb)
+	}
+	select {
+	case <-termed:
+	default:
+		t.Fatal("the daemon running was not sent SIGTERM")
+	}
+	if !<-fileAtTerm {
+		t.Fatal("the unit's file was gone before the daemon was stopped")
+	}
+	for _, p := range []string{r.want.path, link} {
+		if _, err := os.Lstat(p); p != "" && !os.IsNotExist(err) {
+			t.Fatalf("%s still there: %v", p, err)
+		}
+	}
+}
+
+// A daemon that cannot be stopped either keeps the unit's file and its link
+// where they are, and uninstall fails saying so: the daemon is running
+// still, so the file is kept, and where to run uninstall again from. It
+// never says the unit is removed or the daemon stopped.
+func TestAnUninstallThatCannotStopTheDaemonKeepsTheUnit(t *testing.T) {
+	r := newUnitRig(t)
+	if _, errb, code := call(t, "serve", "install"); code != 0 {
+		t.Fatalf("install: exit %d %q", code, errb)
+	}
+	link := wantsLink(t, r.want.path)
+	unreachableSupervisor(t)
+	old := daemonStopWait
+	daemonStopWait = 300 * time.Millisecond
+	t.Cleanup(func() { daemonStopWait = old })
+	termed := daemonByTheTestThen(t, r.terminals, func() bool { return false })
+	out, errb, code := call(t, "serve", "uninstall")
+	pid := os.Getpid()
+	want := fmt.Sprintf("%s: exit status 1: Failed to connect to user scope bus via local transport: "+
+		"$DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined; "+
+		"the rota daemon (pid %d) is still running and could not be stopped (the rota daemon (pid %d) has not stopped within 300ms), "+
+		"so %s is kept: %s; run rota serve uninstall again from %s",
+		r.want.uninstall[0], pid, pid, r.want.path, keptWhy, keptFrom)
+	if code != 1 || out != "" || strings.TrimSpace(errb) != "error: "+want {
+		t.Fatalf("uninstall that cannot stop the daemon: exit %d %q\n%q\nwant %q", code, out, errb, want)
+	}
+	for _, never := range []string{"is removed", "was stopped", "uninstalled"} {
+		if strings.Contains(errb, never) {
+			t.Fatalf("it says %q: %q", never, errb)
+		}
+	}
+	<-termed
+	for _, p := range []string{r.want.path, link} {
+		if _, err := os.Lstat(p); p != "" && err != nil {
+			t.Fatalf("%s was taken away: %v", p, err)
+		}
+	}
 }
 
 // A reinstall that stopped the daemon running and then could not have the
