@@ -284,6 +284,65 @@ func (r *Record) Name() string {
 	return r.ID
 }
 
+// Describe is the session's description from its record alone, in the
+// shape the daemon describes a held session it holds in: what GET
+// /v1/terminals lists for a session the daemon is not linked to, and what
+// the command line prints with --json, so one reader reads all three. It
+// says what Resume and Move need: whether it stopped and how, whether it
+// can be resumed, and on which conversation in which folder. labels are the
+// accounts' names by id.
+func (r *Record) Describe(labels map[int]string) map[string]any {
+	doc := map[string]any{
+		"id": r.ID, "held": true, "name": r.Name(), "title": "",
+		"holder": nil, "viewers": []any{}, "recording": false,
+		"conversation": "", "conversation_cwd": "", "resumable": false,
+	}
+	m := r.Meta
+	if m != nil {
+		doc["kind"], doc["label"], doc["cwd"] = m.Kind, m.Name, m.Cwd
+		doc["conversation"], doc["conversation_cwd"] = m.Conversation, m.ConversationCwd
+		if !m.Started.IsZero() {
+			doc["started"] = m.Started.Format(time.RFC3339)
+		}
+		if m.Kind != KindShell && m.Account != 0 {
+			doc["account"] = map[string]any{"id": m.Account, "label": labels[m.Account], "provider": m.Provider}
+		}
+	}
+	switch {
+	case r.Running():
+		doc["state"], doc["status"], doc["ended"] = string(StateLive), "running", false
+		doc["reachable"], doc["pid"] = false, m.HolderPID
+		doc["attachable"] = r.State == StateLive
+		if r.State == StateUnreadable {
+			doc["made_by"] = MadeBy(m)
+		}
+		if !m.TokenUntil.IsZero() {
+			doc["token_until"] = m.TokenUntil.Format(time.RFC3339)
+		}
+	default:
+		doc["state"], doc["status"], doc["ended"] = string(r.State), "stopped", true
+		doc["attachable"], doc["reachable"] = false, false
+		doc["exit"] = r.ExitCode()
+		if !r.Stopped.IsZero() {
+			doc["ended_at"] = r.Stopped.Format(time.RFC3339)
+		}
+		doc["resumable"] = r.Resumable()
+	}
+	return doc
+}
+
+// MadeBy is the rota a holder this one cannot speak to says made it, as far
+// as its record can be read.
+func MadeBy(m *Meta) string {
+	switch {
+	case m.Version != "":
+		return m.Version
+	case m.Protocol != 0:
+		return fmt.Sprintf("unknown (protocol %d)", m.Protocol)
+	}
+	return "unknown"
+}
+
 // Running reports whether a holder runs the session: a live one, or one
 // held by a rota this one cannot read, which runs all the same. Every other
 // state is stopped, or never started.

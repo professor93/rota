@@ -361,62 +361,6 @@ func (s *Server) describedFrom(r *holdwire.Record) bool {
 	return !noRecord(r) && s.terms[r.ID] == nil && !s.pending[r.ID]
 }
 
-// describeRecord is a session's description from its record alone, in the
-// shape of a held terminal's. It says what Resume and Move need: whether it
-// stopped and how, whether it can be resumed, and on which conversation in
-// which folder.
-func describeRecord(r *holdwire.Record, labels map[int]string) map[string]any {
-	doc := map[string]any{
-		"id": r.ID, "held": true, "name": r.Name(), "title": "",
-		"holder": nil, "viewers": []any{}, "recording": false,
-		"conversation": "", "conversation_cwd": "", "resumable": false,
-	}
-	m := r.Meta
-	if m != nil {
-		doc["kind"], doc["label"], doc["cwd"] = m.Kind, m.Name, m.Cwd
-		doc["conversation"], doc["conversation_cwd"] = m.Conversation, m.ConversationCwd
-		if !m.Started.IsZero() {
-			doc["started"] = m.Started.Format(time.RFC3339)
-		}
-		if m.Kind != termKindShell && m.Account != 0 {
-			doc["account"] = map[string]any{"id": m.Account, "label": labels[m.Account], "provider": m.Provider}
-		}
-	}
-	switch {
-	case r.Running():
-		doc["state"], doc["status"], doc["ended"] = heldLive, "running", false
-		doc["reachable"], doc["pid"] = false, m.HolderPID
-		doc["attachable"] = r.State == holdwire.StateLive
-		if r.State == holdwire.StateUnreadable {
-			doc["made_by"] = madeBy(m)
-		}
-		if !m.TokenUntil.IsZero() {
-			doc["token_until"] = m.TokenUntil.Format(time.RFC3339)
-		}
-	default:
-		doc["state"], doc["status"], doc["ended"] = string(r.State), "stopped", true
-		doc["attachable"], doc["reachable"] = false, false
-		doc["exit"] = r.ExitCode()
-		if !r.Stopped.IsZero() {
-			doc["ended_at"] = r.Stopped.Format(time.RFC3339)
-		}
-		doc["resumable"] = r.Resumable()
-	}
-	return doc
-}
-
-// madeBy is the rota a holder this one cannot speak to says made it, as far
-// as its record can be read.
-func madeBy(m *holdwire.Meta) string {
-	switch {
-	case m.Version != "":
-		return m.Version
-	case m.Protocol != 0:
-		return fmt.Sprintf("unknown (protocol %d)", m.Protocol)
-	}
-	return "unknown"
-}
-
 // checkable reports whether a record names its holder well enough to be
 // signalled: the pid, with the start time and boot id it is checked
 // against. One whose record could not be read may not.
@@ -431,7 +375,7 @@ func checkable(m *holdwire.Meta) bool {
 func recordRefusal(r *holdwire.Record) string {
 	switch r.State {
 	case holdwire.StateUnreadable:
-		if by := madeBy(r.Meta); by != "unknown" {
+		if by := holdwire.MadeBy(r.Meta); by != "unknown" {
 			return fmt.Sprintf("session %s was made by rota %s, which this rota cannot attach to; stop it, or attach with that version", r.ID, by)
 		}
 		return "session " + r.ID + " has a record this rota cannot read, so it cannot be attached to; attach with the rota that made it"

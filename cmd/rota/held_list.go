@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -25,39 +26,28 @@ import (
 func heldCell(s string) string { return oneLine(s) }
 
 // heldSessions is every held session the store's records in terminals
-// describe, newest first, each as `rota run --detach --json` describes one,
-// with its account's label from labels. A directory with no record in it —
-// a holder on its way, or one that never got there — is no session yet,
-// and is left out.
+// describe, newest first, each as the daemon describes a session it knows
+// only from its record — running, with its holder's pid, until it stops;
+// then stopped, with how and when, and whether Resume can take it up — and
+// in the same document, so --json prints what GET /v1/terminals lists. Its
+// account's label comes from labels. A directory with no record in it — a
+// holder on its way, or one that never got there — is no session yet, and
+// is left out.
 func heldSessions(terminals string, labels map[int]string) []rotaclient.Session {
 	var out []rotaclient.Session
 	for _, r := range holdwire.Scan(terminals) {
-		if r.State != holdwire.StateBroken {
-			out = append(out, heldSession(&r, labels))
+		if r.State == holdwire.StateBroken {
+			continue
+		}
+		// Strings, numbers and their maps, which encoding/json always
+		// encodes, an odd byte in a folder's name included.
+		raw, _ := json.Marshal(r.Describe(labels))
+		var s rotaclient.Session
+		if json.Unmarshal(raw, &s) == nil {
+			out = append(out, s)
 		}
 	}
 	return out
-}
-
-// heldSession is one record as the daemon describes a session it knows
-// only from its record: running, with its holder's pid, until it stops;
-// then stopped, with how and when, and whether Resume can take it up.
-func heldSession(r *holdwire.Record, labels map[int]string) rotaclient.Session {
-	m := r.Meta
-	s := rotaclient.Session{ID: r.ID, Name: r.Name(), Label: m.Name, Kind: m.Kind, Cwd: m.Cwd,
-		Conversation: m.Conversation, Started: m.Started}
-	if m.Kind != holdwire.KindShell && m.Account != 0 {
-		s.Account, s.AccountLabel, s.Provider = m.Account, labels[m.Account], m.Provider
-	}
-	if r.Running() {
-		s.State, s.Status, s.PID = string(holdwire.StateLive), "running", m.HolderPID
-		s.Attachable = r.State == holdwire.StateLive
-		return s
-	}
-	exit, ended := r.ExitCode(), r.Stopped
-	s.State, s.Status, s.Exit, s.Ended = string(r.State), "stopped", &exit, &ended
-	s.Resumable = r.Resumable()
-	return s
 }
 
 // listHeld is the held sessions for `rota list --sessions`, labelled by the

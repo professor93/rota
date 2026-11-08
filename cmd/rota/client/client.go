@@ -152,27 +152,36 @@ func (c *Client) Health() error {
 // set, which changes as the CLI works. Ended is when it stopped, and nil
 // while it runs; Exit is how its CLI ended, -1 for one that was interrupted,
 // and nil while it runs. Account, AccountLabel and Provider are empty for a
-// session that is not an account's CLI. A command's --json writes it under
-// the names its tags give.
+// session that is not an account's CLI.
+//
+// As JSON it is the daemon's description document, the shape GET
+// /v1/terminals lists a session in — the account an object, ended a bool
+// with ended_at beside it — and a session read from one is written back as
+// the very document it was read from, so a command's --json and the API are
+// read alike.
 type Session struct {
-	ID           string     `json:"id"`
-	Name         string     `json:"name"`
-	Title        string     `json:"title"`
-	Label        string     `json:"label"`
-	Kind         string     `json:"kind"`
-	State        string     `json:"state"`
-	Status       string     `json:"status"`
-	Provider     string     `json:"provider"`
-	Account      int        `json:"account"`
-	AccountLabel string     `json:"account_label"`
-	Cwd          string     `json:"cwd"`
-	Conversation string     `json:"conversation"`
-	PID          int        `json:"pid"`
-	Attachable   bool       `json:"attachable"`
-	Resumable    bool       `json:"resumable"`
-	Started      time.Time  `json:"started"`
-	Ended        *time.Time `json:"ended_at"`
-	Exit         *int       `json:"exit"`
+	ID           string
+	Name         string
+	Title        string
+	Label        string
+	Kind         string
+	State        string
+	Status       string
+	Provider     string
+	Account      int
+	AccountLabel string
+	Cwd          string
+	Conversation string
+	PID          int
+	Attachable   bool
+	Resumable    bool
+	Started      time.Time
+	Ended        *time.Time
+	Exit         *int
+
+	// doc is the description this was read from, which is what it is
+	// written as.
+	doc json.RawMessage
 }
 
 // session is a description document as the daemon writes it: ended a bool,
@@ -192,13 +201,15 @@ type session struct {
 	Resumable    bool       `json:"resumable"`
 	Started      time.Time  `json:"started"`
 	Ended        bool       `json:"ended"`
-	EndedAt      *time.Time `json:"ended_at"`
-	Exit         *int       `json:"exit"`
-	Account      *struct {
-		ID       int    `json:"id"`
-		Label    string `json:"label"`
-		Provider string `json:"provider"`
-	} `json:"account"`
+	EndedAt      *time.Time `json:"ended_at,omitempty"`
+	Exit         *int       `json:"exit,omitempty"`
+	Account      *account   `json:"account,omitempty"`
+}
+
+type account struct {
+	ID       int    `json:"id"`
+	Label    string `json:"label"`
+	Provider string `json:"provider"`
 }
 
 func (w *session) session() Session {
@@ -221,28 +232,57 @@ func (w *session) session() Session {
 	return s
 }
 
+// UnmarshalJSON reads a session from a description document, and keeps the
+// document.
+func (s *Session) UnmarshalJSON(raw []byte) error {
+	var w session
+	if err := json.Unmarshal(raw, &w); err != nil {
+		return err
+	}
+	*s = w.session()
+	s.doc = bytes.Clone(raw)
+	return nil
+}
+
+// MarshalJSON writes the document the session was read from, and for one
+// made otherwise a document in the same shape.
+func (s Session) MarshalJSON() ([]byte, error) {
+	if s.doc != nil {
+		return s.doc, nil
+	}
+	w := session{
+		ID: s.ID, Name: s.Name, Title: s.Title, Label: s.Label, Kind: s.Kind, State: s.State, Status: s.Status,
+		Cwd: s.Cwd, Conversation: s.Conversation, PID: s.PID,
+		Attachable: s.Attachable, Resumable: s.Resumable, Started: s.Started,
+		Ended: s.Ended != nil, EndedAt: s.Ended, Exit: s.Exit,
+	}
+	if s.Account != 0 {
+		w.Account = &account{ID: s.Account, Label: s.AccountLabel, Provider: s.Provider}
+	}
+	return json.Marshal(w)
+}
+
 // List is every session the daemon holds or lists, running and stopped.
 func (c *Client) List() ([]Session, error) {
 	var doc struct {
-		Terminals []session `json:"terminals"`
+		Terminals []Session `json:"terminals"`
 	}
 	if err := c.do(http.MethodGet, "/v1/terminals", nil, &doc); err != nil {
 		return nil, err
 	}
-	out := make([]Session, 0, len(doc.Terminals))
-	for i := range doc.Terminals {
-		out = append(out, doc.Terminals[i].session())
+	if doc.Terminals == nil {
+		doc.Terminals = []Session{}
 	}
-	return out, nil
+	return doc.Terminals, nil
 }
 
 // Get is one session, running or stopped, by its whole id.
 func (c *Client) Get(id string) (Session, error) {
-	var doc session
-	if err := c.do(http.MethodGet, "/v1/terminals/"+url.PathEscape(id), nil, &doc); err != nil {
+	var s Session
+	if err := c.do(http.MethodGet, "/v1/terminals/"+url.PathEscape(id), nil, &s); err != nil {
 		return Session{}, err
 	}
-	return doc.session(), nil
+	return s, nil
 }
 
 // Resolve finds the one session a person means by what they typed, among
@@ -375,11 +415,11 @@ func (c *Client) Create(r Create) (Session, error) {
 	case r.RemoteControl:
 		in.RemoteControl = true
 	}
-	var doc session
-	if err := c.do(http.MethodPost, "/v1/terminals", in, &doc); err != nil {
+	var s Session
+	if err := c.do(http.MethodPost, "/v1/terminals", in, &s); err != nil {
 		return Session{}, err
 	}
-	return doc.session(), nil
+	return s, nil
 }
 
 // SendReq is a message to type into a held session: the text, then Enter.
