@@ -233,6 +233,10 @@ func identity(dir, id string) *Meta {
 	)
 	if field("holder_pid", &pid) && field("holder_start", &start) && field("boot_id", &boot) {
 		m.HolderPID, m.HolderStart, m.BootID = pid, start, boot
+		var ticks int64
+		if field("holder_start_ticks", &ticks) {
+			m.HolderStartTicks = ticks
+		}
 	}
 	var protocol int
 	if field("protocol", &protocol) {

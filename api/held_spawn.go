@@ -103,7 +103,7 @@ func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd s
 		h.proc = cmd.Process
 	}
 	if m, err := holdwire.ReadMeta(h.dir); err == nil && m.HolderPID == ready.PID {
-		h.start, h.boot = m.HolderStart, m.BootID
+		h.start, h.ticks, h.boot = m.HolderStart, m.HolderStartTicks, m.BootID
 	}
 	conn, w, err := linkHolder(h.dir, func(w *holdwire.WelcomeMsg) int64 { return w.Oldest })
 	if err != nil {

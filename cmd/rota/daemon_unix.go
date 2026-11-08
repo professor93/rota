@@ -449,7 +449,7 @@ func endDaemon(terminals string) error {
 		return fmt.Errorf("a rota daemon holds %s, but %s names no process this rota can check; nothing was signalled",
 			oneLine(holdwire.DaemonLock(terminals)), oneLine(holdwire.DaemonPIDFile(terminals)))
 	}
-	err := holdwire.Signal(d.PID, d.ProcStart, d.BootID, syscall.SIGTERM)
+	err := holdwire.Signal(d.PID, d.ProcStart, d.ProcStartTicks, d.BootID, syscall.SIGTERM)
 	switch {
 	case errors.Is(err, holdwire.ErrNotSameProcess) && !holdwire.Locked(holdwire.DaemonLock(terminals)):
 		return nil // it went on its own meanwhile

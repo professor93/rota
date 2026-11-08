@@ -143,11 +143,12 @@ type heldTerm struct {
 	s   *Server
 	ts  *termSession
 	dir string
-	// pid, start and boot are the holder, so that it is signalled only
-	// while it is still the process that was started. proc is the same
+	// pid, start, ticks and boot are the holder, so that it is signalled
+	// only while it is still the process that was started. proc is the same
 	// process while this server is its parent, which can never be another.
 	pid   int
 	start time.Time
+	ticks int64
 	boot  string
 	proc  *os.Process
 	// left closes when this server lets go of the terminal.
