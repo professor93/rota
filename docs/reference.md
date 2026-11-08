@@ -2648,8 +2648,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
   refused it, and is read as the new login it is; so is a login later than the
   account's when the lineage of one or the other is not known, and neither is
   ever written over. A later login of the account's own lineage there is a
-  rotation rota never saw, so rota's copy is spent: rota presents nothing, and
-  the account is dead with the reason *Blanked* gives. Any other file there —
+  rotation rota never saw, so rota's copy is spent, whatever the last look
+  found: rota presents nothing, the file is not written over, and the account
+  is dead with the reason *Blanked* gives. Any other file there —
   most likely rota's own earlier write, holding a token Claude Code has since
   spent — is left where it is, behind the item, and the home is as blanked as
   the item says. A blanked file never wins. Once rota holds Claude Code's

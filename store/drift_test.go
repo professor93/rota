@@ -323,3 +323,73 @@ func TestAClaudeCodeStartingDuringTheRefreshOfADriftedLoginWaits(t *testing.T) {
 		}
 	}
 }
+
+// A look in a quiet home that finds the login gone records the home as holding
+// nothing of the account's. Claude Code then runs again, its next rotation lands
+// in the file because the keychain refused it, the item is blanked, and no look
+// comes between. rota's copy is spent whatever the last look recorded: rota
+// presents nothing, the file keeps the newest login, the account is dead and
+// says why, and whoever holds the newest token goes on. On the file store there
+// is no item to blank, and the rotation is simply followed.
+func TestALaterRotationBesideABlankedItemIsKeptWhateverTheLastLookFound(t *testing.T) {
+	for _, c := range []struct{ name, until string }{
+		{"drifted end", "1999999998700"},
+		{"exact end", lineageUntil},
+	} {
+		for _, m := range lineageModes() {
+			for _, look := range renewingLooks() {
+				t.Run(c.name+"/"+m.name+"/"+look.what, func(t *testing.T) {
+					w := newLineageWorld(t, m.keychain)
+					w.cc.start()
+					lineageLooks()[0].do(t, w)
+					w.clock.pass(freezeEvery)
+					t.Logf("daemon: %s", w.cc.refresh("claude-code daemon"))
+					lineageLooks()[1].do(t, w)
+					if w.a.Token.Refresh != "R1" || !w.a.StagedCurrent() {
+						t.Fatalf("setup: rota holds %s, staged-current=%v", w.a.Token.Refresh, w.a.StagedCurrent())
+					}
+					w.cc.stop()
+					restore := freezeStore(t, w, nil)
+					lineageLooks()[1].do(t, w)
+					restore()
+					if w.a.StagedCurrent() {
+						t.Fatal("setup: the quiet look records the home as holding nothing of the account's")
+					}
+					w.cc.start()
+					w.clock.pass(freezeEvery)
+					st, body := w.p.present("claude-code daemon", "R1")
+					if st != 200 {
+						t.Fatalf("setup: Claude Code's rotation: http %d", st)
+					}
+					answer := body.(map[string]any)
+					writeFile(t, filepath.Join(w.cc.home, claudeCredentials), storeLogin(answer["access_token"].(string),
+						answer["refresh_token"].(string), rota.Now().Add(8*time.Hour).UnixMilli(), c.until))
+					if m.keychain {
+						w.k.mu.Lock()
+						w.k.items[w.cc.svc] = clearedLogin
+						w.k.mu.Unlock()
+					}
+					w.cc.stop()
+					w.clock.pass(9 * time.Hour)
+					look.do(t, w)
+					if !m.keychain {
+						if bad := w.p.rotaSpent(); len(bad) != 0 || w.a.Dead || w.a.Token.Refresh != w.p.current ||
+							refreshOf(w.cc.store()) != w.p.current {
+							w.p.dump(t)
+							t.Fatalf("the rotation is followed: spent=%+v dead=%v holds %s home %s", bad, w.a.Dead, w.a.Token.Refresh,
+								refreshOf(w.cc.store()))
+						}
+						return
+					}
+					nothingPresented(t, w)
+					deadForAnOlderCopy(t, w)
+					stillBehindTheItem(t, w, "R2")
+					if st, _ := w.p.present("holder of R2", "R2"); st != 200 {
+						w.p.dump(t)
+						t.Fatalf("the holder of R2 keeps working: http %d", st)
+					}
+				})
+			}
+		}
+	}
+}

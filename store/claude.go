@@ -1356,10 +1356,14 @@ func (h *claudeHome) adopt(ctx context.Context) error {
 // current login was, the account being alive and holding its own refresh token.
 // A file beside a blanked keychain item is the store only when it counts
 // (judgeFile), so a leftover there changes nothing about that; nor does a file
-// read only because the item was not there (itemGone).
+// read only because the item was not there (itemGone). A later rotation of the
+// account's own in the file beside a blanked item (superseded) shows rota's copy
+// spent whatever the last look recorded about the home, so that is found blanked
+// too, for rescue to say so, and neither the file is written over nor the copy
+// presented.
 func (h *claudeHome) clearedOwn(fsys storeFS) bool {
 	a := h.a
-	if a.Dead || !a.StagedCurrent() || fsys.itemGone {
+	if a.Dead || (!a.StagedCurrent() && !h.superseded) || fsys.itemGone {
 		return false
 	}
 	l, ok := storedLogin(fsys.store)
