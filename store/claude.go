@@ -1910,7 +1910,7 @@ func (h *claudeHome) envRun(ctx context.Context) (*rota.Command, error) {
 // keep in one: refreshed as it always was — never a dead one.
 func (s *Store) tokenRun(ctx context.Context, a *rota.Account) (*rota.Command, error) {
 	if !a.Dead && !a.LongValid() && a.Expired() {
-		if _, err := s.refreshLogged(ctx, a); err != nil {
+		if _, err := s.refreshLogged(ctx, "launch", a); err != nil {
 			return nil, err
 		}
 	}

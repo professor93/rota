@@ -878,7 +878,7 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 		// the provider. One forced read per account per minute is plenty
 		// for a person watching a dashboard.
 		if accounts := s.mayForce(st.Accounts); len(accounts) > 0 {
-			for _, err := range st.Refresh(store.Looking(r.Context(), "api"), true, accounts...) {
+			for _, err := range st.Refresh(store.WithCaller(r.Context(), "api"), true, accounts...) {
 				s.log.Warn("refreshing usage", "err", err)
 			}
 		}

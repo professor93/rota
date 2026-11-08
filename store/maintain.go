@@ -29,10 +29,11 @@ import (
 // it is the right way round: a token half-rotated by two writers is not
 // recoverable, while a wait of a second is.
 func (s *Store) Maintain(ctx context.Context) []error {
+	// Its refreshes are journalled as serve's, unless its caller named itself.
+	ctx = withCallerOr(ctx, "serve")
 	// Without the lock nothing may rotate, so all that is left is reading:
 	// see Refresh. A wait the provider asked for is kept as ever, and not
 	// said again on every sweep.
-	ctx = Looking(ctx, "serve")
 	if s.released {
 		return s.refresh(ctx, false, false, nil)
 	}
@@ -120,7 +121,7 @@ func (s *Store) Maintain(ctx context.Context) []error {
 				}
 				since = snapshot(a)
 			}
-			if did, err = rota.Refresh(ctx, a); err != nil || !did || a.Dead {
+			if did, err = s.refreshLogged(ctx, callerOf(ctx), a); err != nil || !did || a.Dead {
 				return
 			}
 			if serr := save(); serr != nil {
@@ -165,7 +166,7 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 		if a.Dead {
 			return false, nil
 		}
-		did, err := s.refreshLogged(ctx, a)
+		did, err := s.refreshLogged(ctx, callerOf(ctx), a)
 		return did, wrapAccount(a, err)
 	}
 	before := snapshot(a)
@@ -178,7 +179,7 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 		return changed, nil
 	}
 	if !rota.StoresLogin(a, h.home) && !unrefreshed(a) {
-		did, err := s.refreshLogged(ctx, a)
+		did, err := s.refreshLogged(ctx, callerOf(ctx), a)
 		return changed || did, wrapAccount(a, err)
 	}
 	release, idle := s.holdIdle(a)
@@ -187,7 +188,7 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 	}
 	defer release()
 	h.others = false
-	h.via = "serve.renew"
+	h.via = callerOf(ctx) + ".renew"
 	did, err := h.renew(ctx)
 	return changed || did, wrapAccount(a, err)
 }

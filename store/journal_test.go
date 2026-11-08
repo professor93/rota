@@ -343,7 +343,7 @@ func TestEveryRefreshAndEveryChangeAtAHomeLeavesALineWithNoToken(t *testing.T) {
 		{"a listing renews a quiet home", func(t *testing.T, s *Store) {
 			a := journalClaude(s)
 			expire(a)
-			if errs := s.Refresh(Looking(ctx, "list"), true, a); len(errs) != 0 {
+			if errs := s.Refresh(WithCaller(ctx, "list"), true, a); len(errs) != 0 {
 				t.Fatal(errs)
 			}
 			seed := journalSays(t, s, "seed", "written")
@@ -733,26 +733,60 @@ func TestThePresentingLineIsWrittenBeforeTheRequest(t *testing.T) {
 	}
 }
 
-// Only a claude login's refreshes are journalled: another provider's leaves
-// no line.
-func TestAnotherProvidersRefreshIsNotJournalled(t *testing.T) {
-	rota.Register(fakeRefresher{&fakeProvider{name: "t-journal",
-		refreshTok: &rota.Token{Access: jNewAccess, Refresh: jNewRefr, ExpiresAt: rota.NowMS() + 3_600_000}}})
+// Every refresh the store makes is journalled, for any provider: by
+// maintenance, a launch and a listing, each under its caller's name, with no
+// home and no token.
+func TestAnotherProvidersRefreshIsJournalledToo(t *testing.T) {
+	rota.Register(fakeMeter{fakeRefresher{&fakeProvider{name: "t-journal",
+		refreshTok: &rota.Token{Access: jNewAccess, Refresh: jNewRefr, ExpiresAt: rota.NowMS() + 3_600_000},
+		quota:      &rota.Quota{Windows: []rota.Window{win(10, 0, true, false)}}}}})
 	ctx := context.Background()
 	s := openTemp(t)
 	a := s.add("t-journal")
-	a.Token = rota.Token{Access: jAccess, Refresh: jRefresh, ExpiresAt: rota.NowMS() - 1}
+	expired := func() { a.Token = rota.Token{Access: jAccess, Refresh: jRefresh, ExpiresAt: rota.NowMS() - 1} }
+	expired()
 	if errs := s.Maintain(ctx); len(errs) != 0 || a.Token.Refresh != jNewRefr {
 		t.Fatalf("%v %q", errs, a.Token.Refresh)
 	}
-	a.Token.ExpiresAt = rota.NowMS() - 1
+	expired()
+	if errs := s.Maintain(WithCaller(ctx, "mine")); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	expired()
 	_, release, err := s.prepare(ctx, a, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	release()
-	if _, err := os.Stat(filepath.Join(storeDir(s), journalName)); !os.IsNotExist(err) {
-		t.Fatalf("no journal: %v", err)
+	expired()
+	if errs := s.Refresh(WithCaller(ctx, "list"), true, a); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	for _, path := range []string{"serve.renew", "mine.renew", "launch.renew", "list.renew"} {
+		journalSays(t, s, path, "presenting")
+		if e := journalSays(t, s, path, "rotated"); e["provider"] != "t-journal" || e["home"] != nil ||
+			e["before"] != fingerprintOf(jRefresh) || e["after"] != fingerprintOf(jNewRefr) {
+			t.Fatalf("%s: %v", path, e)
+		}
+	}
+	journalClean(t, s, jTokens...)
+}
+
+// A caller is named with one short word, and anything else names nobody; a
+// name already given is kept by maintenance.
+func TestWithCallerNamesTheCallerInOneShortWord(t *testing.T) {
+	ctx := context.Background()
+	for name, want := range map[string]string{
+		"list": "list", "my-tool_2.0": "my-tool_2.0", "": "refresh", "List": "refresh",
+		"caf\xe9": "refresh", "two words": "refresh", strings.Repeat("x", 41): "refresh",
+	} {
+		if got := callerOf(WithCaller(ctx, name)); got != want {
+			t.Errorf("%q: %q, want %q", name, got, want)
+		}
+	}
+	if callerOf(ctx) != "refresh" || callerOf(withCallerOr(ctx, "serve")) != "serve" ||
+		callerOf(withCallerOr(WithCaller(ctx, "mine"), "serve")) != "mine" {
+		t.Fatal("serve only when nobody is named")
 	}
 }
 
@@ -905,5 +939,63 @@ func TestTheJournalIsMovedAsideOnceWhenProcessesRaceAtTheCap(t *testing.T) {
 	}
 	if smallest < limit {
 		t.Fatalf("a journal of %d bytes was moved aside, over a full one: %d looks", smallest, seen)
+	}
+}
+
+// A rotation lock that cannot be taken at all does not stop the journal being
+// moved aside, or it would grow without end; a lock somebody holds still does.
+func TestALockThatCannotBeTakenDoesNotStopTheJournalMovingAside(t *testing.T) {
+	old := journalCap
+	journalCap = 4 << 10
+	t.Cleanup(func() { journalCap = old })
+	path := filepath.Join(t.TempDir(), journalName)
+	if err := os.Mkdir(path+".lock", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line := append(bytes.Repeat([]byte("x"), 99), '\n')
+	for range 200 {
+		appendJournal(path, line)
+	}
+	moved, err := os.Stat(path + ".1")
+	if err != nil || moved.Size() < journalCap {
+		t.Fatalf("moved aside without the lock, and full: %v %v", err, moved)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Size() > journalCap+int64(len(line)) {
+		t.Fatalf("and the journal kept under the cap: %v %v", err, fi)
+	}
+}
+
+// A refusal left waiting is the account's only when the login it waited on is
+// the one confirmed: a login Claude Code rotated meanwhile shows the family
+// lived through the refusal, which is then forgotten, and nothing is said.
+func TestAWaitingRefusalIsForgottenWhenClaudeCodeRotatedTheLoginMeanwhile(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := newLineageWorld(t, m.keychain)
+			words := said(w.s)
+			replacedMeanwhileUnconfirmed(w)
+			w.clock.pass(9 * time.Hour)
+			lineageLooks()[0].do(t, w)
+			if !w.a.Dead || w.a.Extra[pendingRefusalKey] == "" {
+				t.Fatalf("setup: dead in the hold, the refusal waiting: %v %q", w.a.Dead, w.a.Extra)
+			}
+			w.unrevoke() // the provider let the family live
+			w.clock.pass(time.Minute)
+			t.Logf("Claude Code: %s", w.cc.refresh("claude-code window"))
+			lineageLooks()[1].do(t, w)
+			w.p.dump(t)
+			if w.a.Dead || w.a.Token.Refresh != "R2" {
+				t.Fatalf("alive on Claude Code's rotation: %v %q %q", w.a.Dead, w.a.Token.Refresh, w.a.WhyDead())
+			}
+			if w.a.Extra[lastRefusalKey] != "" || w.a.Extra[pendingRefusalKey] != "" || saidOf(words, replacedWarning) != "" {
+				t.Fatalf("forgotten, and nothing said: %q %q", w.a.Extra, *words)
+			}
+			if e := journalSays(t, w.s, "adopt", "new-login"); e["after"] != fingerprintOf("R2") {
+				t.Fatalf("%v", e)
+			}
+			if journalLine(journalOf(t, w.s), "adopt", "accepted-after-refusal") != nil {
+				t.Fatal("not accepted after the refusal")
+			}
+		})
 	}
 }

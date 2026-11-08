@@ -22,12 +22,14 @@ import (
 )
 
 // The refresh journal is refresh.log in the store's directory: one line of
-// JSON for every refresh rota makes of a claude login — a line as the token
-// goes out and one for what came of it — and for every change a look at a
-// claude home finds there: a rotation taken, a login made inside Claude Code
+// JSON for every refresh this store makes, for any provider — a line as the
+// token goes out and one for what came of it — and for every change a look at
+// a claude home finds there: a rotation taken, a login made inside Claude Code
 // taken, the account's login found blanked, the record of what the home holds
-// demoted; and for every login rota writes into a home. It is rota's own
-// record, written nowhere near a home, and nothing a CLI sees changes with it.
+// demoted; and for every login rota writes into a home. A codex login's repair
+// inside staging is lib's own refresh, not the store's, and is not journalled.
+// It is rota's own record, written nowhere near a home, and nothing a CLI sees
+// changes with it.
 //
 // A token is never written, only its fingerprint: the same short hash the
 // account's Staged keeps, so a line can be held against the store. What came
@@ -76,23 +78,34 @@ var journalMu sync.Mutex
 // the lock's path, so a line can say whether rota held it.
 var heldLocks sync.Map
 
-// lookKey carries who is looking through Refresh: see Looking.
-type lookKey struct{}
+// callerKey carries the caller WithCaller names.
+type callerKey struct{}
 
-// Looking is ctx carrying who is looking, for the refresh journal: a login
-// Refresh renews in its home is journalled as <who>.renew. rota names its
-// own looks — "list" for `rota list`, "choose" for the rotation choosing an
-// account, "api" for the server's ?refresh=1, "serve" for its maintenance —
-// and a caller that names none is "refresh".
-func Looking(ctx context.Context, who string) context.Context {
-	return context.WithValue(ctx, lookKey{}, who)
+// WithCaller returns a copy of ctx that names the caller for the refresh
+// journal, as one short word: a refresh Refresh or Maintain makes under it is
+// journalled as <name>.renew. A name is lower-case letters, digits, '_', '.'
+// and '-', up to 40 of them; anything else is "refresh", which is also the
+// name of a caller that gives none to Refresh. rota names its own: "list" for
+// `rota list`, "choose" for the rotation choosing an account, "api" for the
+// server's ?refresh=1; Maintain is "serve" unless its caller named itself.
+func WithCaller(ctx context.Context, name string) context.Context {
+	return context.WithValue(ctx, callerKey{}, codeOr(name, "refresh"))
 }
 
-func lookOf(ctx context.Context) string {
-	if who, _ := ctx.Value(lookKey{}).(string); who != "" {
-		return who
+// callerOf is the caller ctx names, "refresh" when it names none.
+func callerOf(ctx context.Context) string {
+	if name, _ := ctx.Value(callerKey{}).(string); name != "" {
+		return name
 	}
 	return "refresh"
+}
+
+// withCallerOr is ctx naming name as its caller, unless it names one already.
+func withCallerOr(ctx context.Context, name string) context.Context {
+	if _, named := ctx.Value(callerKey{}).(string); named {
+		return ctx
+	}
+	return WithCaller(ctx, name)
 }
 
 // journalEntry is one line. Its fields are what the line says and nothing
@@ -298,13 +311,18 @@ func appendJournal(path string, line []byte) {
 // rotateJournal moves a full journal aside, under refresh.log.lock: only the
 // process that takes the lock moves it, and only while the journal at the path
 // is still full, so no second process moves a journal begun a moment ago over
-// the one moved aside. A lock somebody holds is left to them.
+// the one moved aside. A lock somebody holds is left to them. A lock that
+// cannot be taken at all — a directory at its path, a file somebody else owns
+// — does not stop the journal being moved aside: it is moved without the lock,
+// as it was before there was one, or it would grow without end.
 func rotateJournal(path string) {
 	l, ok, err := tryLockFile(path + ".lock")
-	if err != nil || !ok {
+	switch {
+	case err == nil && !ok:
 		return
+	case err == nil:
+		defer l.Close()
 	}
-	defer l.Close()
 	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() && fi.Size() >= journalCap {
 		_ = os.Rename(path, path+".1")
 	}
@@ -431,15 +449,16 @@ func transientWhy(err error) string {
 	return "error"
 }
 
-// refreshLogged is rota.Refresh with its lines in the journal for a claude
-// login rota alone holds, on a token in its environment (token.env). Any other
-// provider's refresh is not journalled, and a refresh that had nothing to do
-// writes nothing.
-func (s *Store) refreshLogged(ctx context.Context, a *rota.Account) (bool, error) {
-	if !rota.SharedHome(a.Provider) {
-		return rota.Refresh(ctx, a)
+// refreshLogged is rota.Refresh with its lines in the journal, for every
+// refresh of a token rota alone holds: token.env for a claude login, on a
+// token in its environment, and <caller>.renew for any other provider's. A
+// refresh that had nothing to do writes nothing.
+func (s *Store) refreshLogged(ctx context.Context, caller string, a *rota.Account) (bool, error) {
+	path := caller + ".renew"
+	if rota.SharedHome(a.Provider) {
+		path = "token.env"
 	}
-	e := s.journalStart("token.env", a).presenting()
+	e := s.journalStart(path, a).presenting()
 	changed, err := rota.Refresh(ctx, a)
 	if changed || err != nil {
 		e.finish(refreshOutcome(e, changed, err))
