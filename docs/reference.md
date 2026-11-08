@@ -474,7 +474,11 @@ decides from stored numbers — a stale one sends work to an account that is
 already spent. Nothing there is fatal: a provider that cannot be reached
 leaves its account exactly as it was, and the next sweep tries again.
 `--refresh-every 0` turns it off, and the command line still refreshes what
-it is about to use.
+it is about to use. Once a server begins to stop, its sweeps start nothing
+more, while it waits for the runs in flight. Before it exits it waits, up to 45
+seconds, for every refresh still under way to be answered, saved and written
+into its home — its sweep's, and those requests started, WebSocket ones
+included — and its log says so while it waits.
 
 ### One file for the server
 
@@ -3211,7 +3215,19 @@ refresh token for and no access token counts as expired, whatever its expiry
 says, and is refreshed by those same rules before anything uses it; until then
 no credential file is written for it. A refresh is never retried within one
 look: if the reply was lost, the retry would reuse a rotated token and kill the
-lineage. Treat `re-auth needed` as normal rather than as a fault. The refusal
+lineage. Nor is one given up on halfway. A refresh rota has sent goes on to
+the provider's answer, the save and the write into the home even when whoever
+asked has gone — a client hanging up on `?refresh=1` or on a run, a server
+stopping, a cancelled context, an interrupt or a closed terminal during `rota
+list` or `rota run` — for up to 35 seconds (the HTTP client's 30-second
+ceiling and a margin), because by then the provider has replaced the token and
+its answer is the only copy of the new one. Nothing is sent once whoever asked
+has gone: what had not been sent is left for the next look, and `rota list` or
+`rota run` — headless, `--input` or the handover alike — then exits with status
+130 instead of going on, starting no CLI, after saying anything that went wrong
+beside the interrupt, such as a save that failed. An interrupt once the CLI is
+running is the CLI's, as it always was. Treat `re-auth
+needed` as normal rather than as a fault. The refusal
 that ended the lineage is kept: `rota
 list` shows it in parentheses after `re-auth needed` — `re-auth needed
 (invalid_grant: refresh token reused)` — and JSON carries it as `deadReason`.
@@ -3608,6 +3624,21 @@ errs := s.Refresh(ctx, false)                 // quota for metered providers, ca
 errs = s.Refresh(store.WithCaller(ctx, "mine"), false) // the same, journalled as mine.renew
 res, _ := s.Run(ctx, a, rota.Spec{Prompt: "hi"}, nil, os.Stdout)
 ```
+
+The store takes ctx as leave to start, never as a reason to drop a refresh
+half done. A refresh that `Refresh`, `Rescue`, `Maintain` or a launch (`Run`,
+`Start`, `Prepare`) has sent goes on to its answer, the save and the write into
+the home after ctx is done, for up to `store.RefreshTimeout()` (the client's
+ceiling and five seconds); nothing else is started after that, and `Refresh`,
+`Rescue` and `Maintain` return one error saying what was left, which
+`store.Left(err)` recognises, so a caller that went away on purpose can pass
+over it and still show the rest. A process about to exit calls
+`store.Settle(ctx)` first, which waits for every such refresh in the process,
+as `rota serve` does. `Store.Preparing`, when set, is what `Run` and `Start`
+make the launch inside, under a context of its own, while the CLI runs under
+the caller's: the command line holds its signals there. `rota.Refresh` itself honours
+ctx as every network verb does: an application calling it directly keeps the
+answer the same way, with `context.WithoutCancel` and a timeout of its own.
 
 ```go
 type Backend interface {

@@ -190,7 +190,12 @@ func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, 
 	if err != nil {
 		return nil, refuse(http.StatusBadRequest, err.Error())
 	}
-	a, err := rotation.Choose(r.Context(), st, id)
+	// A request taken over for a WebSocket keeps its context until its
+	// handler returns, whatever the server does, so the server stopping is
+	// joined in: a start that arrives once Stop was called refreshes nothing.
+	ctx, cancel := joinContexts(r.Context(), s.ctx)
+	defer cancel()
+	a, err := rotation.Choose(ctx, st, id)
 	if err != nil {
 		return nil, err
 	}
@@ -200,7 +205,7 @@ func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, 
 	// own, and a claude account's home may hold a login somebody made inside
 	// Claude Code that is waiting to be confirmed — both of which run. The
 	// rotation never offers a dead account, so this is one asked for by id.
-	if err := st.Launchable(r.Context(), a); err != nil {
+	if err := st.Launchable(ctx, a); err != nil {
 		return nil, err
 	}
 	// A server session is hermetic by default: no settings sources unless

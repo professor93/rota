@@ -596,10 +596,14 @@ func (c *cli) list(args []string) error {
 		return nil
 	}
 	var errs []error
-	if short {
-		errs = s.Rescue(context.Background(), shown...)
-	} else {
-		errs = s.Refresh(store.WithCaller(context.Background(), "list"), force, shown...)
+	if interruptedDuring(func(ctx context.Context) {
+		if short {
+			errs = s.Rescue(ctx, shown...)
+		} else {
+			errs = s.Refresh(store.WithCaller(ctx, "list"), force, shown...)
+		}
+	}) {
+		return c.interrupted(errs...)
 	}
 
 	if c.json {
@@ -1055,7 +1059,13 @@ func (c *cli) run(args []string) error {
 // which means the rotation's choice — and adds the one hint that only a
 // terminal can act on.
 func account(s *store.Store, id int) (*rota.Account, error) {
-	a, err := rotation.Choose(context.Background(), s, id)
+	var (
+		a   *rota.Account
+		err error
+	)
+	if interruptedDuring(func(ctx context.Context) { a, err = rotation.Choose(ctx, s, id) }) {
+		return nil, errInterrupted
+	}
 	if errors.Is(err, rota.ErrNoAccount) {
 		return nil, fmt.Errorf("%w; see `rota list`", err)
 	}
@@ -1137,7 +1147,17 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 	// to become the CLI, and the CLI is what must hold it. It goes only if
 	// the handover does not happen — or, when the terminal is shared, when
 	// the CLI this process is holding has ended.
-	path, env, release, err := s.Prepare(context.Background(), a)
+	var (
+		path    string
+		env     []string
+		release func()
+	)
+	if interruptedDuring(func(ctx context.Context) { path, env, release, err = s.Prepare(ctx, a) }) {
+		if err == nil {
+			release()
+		}
+		return c.interrupted(err)
+	}
 	if err != nil {
 		return err
 	}
@@ -1436,6 +1456,14 @@ func (c *cli) answer(id int, args []string) error {
 		// can send into this run, and stdout belongs to the answer.
 		fmt.Fprintf(c.err, "rota: run %s — send more with: rota send %s \"…\"\n", runID, runID)
 	}
+	// The launch is made under the signals, the run is not: an interrupt
+	// while the login is refreshed finishes that refresh and starts nothing,
+	// and one during the run does what it always did.
+	cut := false
+	s.Preparing = func(prepare func(context.Context)) bool {
+		cut = interruptedDuring(prepare)
+		return cut
+	}
 	var res *rota.Result
 	if *input {
 		res, err = c.session(s, a, spec, reach, watch, live, *verbose)
@@ -1443,6 +1471,9 @@ func (c *cli) answer(id int, args []string) error {
 		res, err = s.Run(context.Background(), a, spec, nil, watch)
 	}
 	_ = started.End()
+	if cut {
+		return c.interrupted(err)
+	}
 	// What the readings are read from, beyond the result: the stream's
 	// tally, the account, and a fresh quota reading when one was asked for.
 	src := message.Sources{Tally: tally, Account: a, Threshold: rotation.Cutoff(a)}
@@ -2422,6 +2453,8 @@ func (c *cli) serve(args []string) (err error) {
 		say("\nrota: shutting down; waiting for runs in flight (interrupt again to stop now)")
 		shutdown, cancel := context.WithTimeout(context.Background(), opts.Timeout+serveGrace)
 		defer cancel()
+		// No sweep starts while the runs in flight are waited for.
+		srv.StopRefreshing()
 		err := server.Shutdown(shutdown)
 		// Shutdown waits for handlers but cannot cancel them, and each
 		// vendor CLI is in its own process group. Stop ends the runs, so
