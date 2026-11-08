@@ -114,7 +114,8 @@ func (s *Screen) catch() {
 }
 
 // retire gives up the emulator. It closes the answer pipe's writer, so drain
-// ends, and never calls into the emulator again.
+// ends, never calls into the emulator again, and lets go of it, so that
+// what it held is given back rather than kept for the session's life.
 func (s *Screen) retire() {
 	s.ok = false
 	if s.em == nil {
@@ -126,7 +127,12 @@ func (s *Screen) retire() {
 			_ = c.Close()
 		}()
 	}
+	s.em = nil
 }
+
+// noScreen is a screen that never had an emulator: for a terminal larger
+// than a screen is kept for, it is what a retired one is from the start.
+func noScreen() *Screen { return &Screen{} }
 
 // Resize follows the terminal to a new size.
 func (s *Screen) Resize(cols, rows int) {

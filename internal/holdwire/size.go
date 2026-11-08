@@ -6,6 +6,14 @@ const (
 	MaxRows = 1000
 )
 
+// MaxScreenCells is the largest terminal, in cells, a holder keeps a screen
+// for. A pty may be as large as MaxCols by MaxRows, but what the emulator
+// holds and what each line of output costs it grow with its area: at
+// 1000×1000 one screen held 235 MB and took four seconds over 32 KiB of short
+// lines, against 52 MB and two seconds at this size. A larger session is
+// replayed from its ring rather than repainted.
+const MaxScreenCells = 200_000
+
 // BoundSize keeps a terminal to a size a terminal can be. Zero is the
 // default rather than an error — a client that says nothing means the
 // ordinary eighty by twenty-four — and the ceiling is there because the
@@ -20,3 +28,7 @@ func BoundSize(cols, rows uint16) (uint16, uint16) {
 	}
 	return min(cols, MaxCols), min(rows, MaxRows)
 }
+
+// ScreenFits says whether a holder keeps a screen for a terminal of this
+// size: whether it is at most MaxScreenCells.
+func ScreenFits(cols, rows uint16) bool { return int(cols)*int(rows) <= MaxScreenCells }
