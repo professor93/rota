@@ -28,7 +28,7 @@ import (
 /* --------------------------------------------------------------- the claim --- */
 
 // claimDaemon makes this server the one daemon of its store, or says which
-// process already is.
+// process already is, as a holdwire.DaemonRunning.
 func (s *Server) claimDaemon() error {
 	st, err := s.openStore()
 	if err != nil {
@@ -40,10 +40,6 @@ func (s *Server) claimDaemon() error {
 		return fmt.Errorf("api: %w", err)
 	}
 	release, err := holdwire.ClaimDaemon(terminals, wire.Version)
-	var running holdwire.DaemonRunning
-	if errors.As(err, &running) {
-		return fmt.Errorf("api: another rota daemon serves %s (pid %d)", filepath.Dir(terminals), running.PID)
-	}
 	if err != nil {
 		return fmt.Errorf("api: %w", err)
 	}

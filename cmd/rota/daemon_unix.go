@@ -210,7 +210,8 @@ func daemonOf(terminals string) (*holdwire.Daemon, bool) {
 // said on stderr, which under serve start nobody reads: every line goes to
 // the log, a failure to start included, and the exit status says the rest.
 //
-// It claims the store (api.New, for a server with HoldCommand), opens a TCP
+// It claims the store (api.New, for a server with HoldCommand) — and exits
+// 0, saying so in the log, when another daemon already has — opens a TCP
 // port only where server.toml asks and --ctl-only does not forbid, and
 // serves ctl.sock until SIGTERM or an interrupt. A hangup is not a stop. On
 // the way out, all within serveGrace, both listeners close, then Stop ends
@@ -274,6 +275,14 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 	}
 	opts.Token, opts.Log, opts.HoldCommand = tok, log, daemonHoldCommand(exe)
 	srv, err := api.New(opts)
+	var running holdwire.DaemonRunning
+	if errors.As(err, &running) {
+		// The store has its one daemon, which is no failure: a supervisor
+		// that started this one beside it would otherwise start it again
+		// every few seconds for as long as that one runs.
+		log.Info("another rota daemon serves this store, so this one exits 0 rather than fail", "daemon", running.PID)
+		return nil
+	}
 	if err != nil {
 		return failed(err)
 	}
