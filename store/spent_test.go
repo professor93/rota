@@ -402,6 +402,45 @@ func TestARefreshTheStoreCannotSaveLosesNothing(t *testing.T) {
 	}
 }
 
+// A run that fails at the save after its refresh, and is then read for usage on
+// the same store — a run over HTTP that asked for its quota does that — writes
+// nothing over a login in the home that rota cannot place, as one look alone
+// does not.
+func TestARunThatCannotSaveAndItsQuotaWriteNothingOverAKeptLogin(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) { f.refresh, f.singleUse = refreshesTo("A-new", "R-new"), true })
+	m := &memBackend{home: t.TempDir()}
+	left := -1
+	s, err := NewStore(savesThenFails{Backend: m, left: &left})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	a := livingClaude(s, "u1")
+	writeFile(t, filepath.Join(s.Home(a), ".credentials.json"),
+		storeLogin("A-R-prev", "R-prev", later(-time.Hour), "1999999999000"))
+	a.Staged = "-"
+	expire(a)
+	if err := s.Save(); err != nil {
+		t.Fatal(err)
+	}
+
+	left = 1 // the save before the refresh, and none after it
+	if _, err := s.Run(context.Background(), a, rota.Spec{Prompt: "hi"}, nil, nil); err == nil ||
+		!strings.Contains(err.Error(), "held by this process alone") {
+		t.Fatalf("the run says the refreshed login is nowhere else: %v", err)
+	}
+	s.Refresh(context.Background(), true, a)
+	if got := f.grants(); !slices.Equal(got, []string{"R-u1"}) {
+		t.Fatalf("presented %v", got)
+	}
+	if r, _ := readLogin(t, s.Home(a)); r != "R-prev" {
+		t.Fatalf("a login rota cannot place stays: the home holds %q", r)
+	}
+}
+
 // A refresh the provider does not answer, after the save that recorded a home
 // as holding a login held as a refresh token alone, leaves nothing in the way:
 // the blanked login that home held was taken out, so the next look finds no
