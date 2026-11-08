@@ -105,10 +105,15 @@ func (s *Store) Maintain(ctx context.Context) []error {
 			// then read back by the next adoption, whatever came before: the
 			// home of an account signed in and never run since, unstaged or
 			// holding the previous login's file, would not be. A store that
-			// cannot be saved spends no token this sweep.
+			// cannot be saved spends no token this sweep. A login held as a
+			// refresh token alone has no access token to write, and staging
+			// would refresh it on the way: it is only saved here, and goes
+			// into the home once refreshed below.
 			if rota.Flavor(a.Provider) == "codex" && a.Expired() {
-				if _, err = rota.Stage(a, home); err != nil {
-					return
+				if a.Token.Access != "" {
+					if _, err = rota.Stage(a, home); err != nil {
+						return
+					}
 				}
 				if serr := save(); serr != nil {
 					err = fmt.Errorf("not refreshed, the store could not be saved: %w", serr)

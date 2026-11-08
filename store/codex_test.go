@@ -361,6 +361,8 @@ func TestASweepThatCannotSaveSpendsNoToken(t *testing.T) {
 		{"a home rota staged, record unknown", "store", ""},
 		{"signed in, never run, empty home", "", "-"},
 		{"signed in, never run, the previous login's file", "r-prev", "-"},
+		{"held as a refresh token alone, empty home", "", "alone"},
+		{"held as a refresh token alone, the previous login's file", "r-prev", "alone"},
 	} {
 		e := codexRefreshes(t)
 		m := &memBackend{home: t.TempDir()}
@@ -381,7 +383,12 @@ func TestASweepThatCannotSaveSpendsNoToken(t *testing.T) {
 			}
 			a.Token.Refresh = "r-old"
 		}
-		if c.staged != "keep" {
+		switch c.staged {
+		case "keep":
+		case "alone":
+			a.Token = rota.Token{Refresh: "r-old"}
+			a.Staged = "-"
+		default:
 			a.Staged = c.staged
 		}
 		if err := s.Save(); err != nil {
