@@ -46,7 +46,7 @@ func (s *Store) Prepare(ctx context.Context, a *rota.Account) (path string, env 
 // among the files a launch warns about (see sayRiskySettings), so a
 // terminal started somewhere else is warned about its own directory's.
 func (s *Store) PrepareIn(ctx context.Context, a *rota.Account, dir string) (path string, env []string, release func(), err error) {
-	cmd, release, err := s.prepare(ctx, a, true)
+	cmd, release, err := s.launching(ctx, a, true)
 	if err != nil {
 		return "", nil, nil, err
 	}
@@ -311,9 +311,11 @@ func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.
 	return cmd, release, nil
 }
 
-// launching is prepare, made inside Preparing when there is one. A launch it
-// says was cut short is let go of, however far it got, and returns an error
-// Left reports as such; one that failed on its own says why, cut or not.
+// launching is prepare, made inside Preparing when there is one, under the
+// context Preparing hands it joined with the caller's ctx, so that either going
+// away gates the launch. A launch Preparing says was cut short is let go of,
+// however far it got, and returns an error Left reports as such; one that
+// failed on its own says why, cut or not.
 func (s *Store) launching(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
 	if s.Preparing == nil {
 		return s.prepare(ctx, a, mirror)
@@ -326,7 +328,9 @@ func (s *Store) launching(ctx context.Context, a *rota.Account, mirror bool) (*r
 	)
 	cut := s.Preparing(func(prep context.Context) {
 		made = true
-		cmd, release, err = s.prepare(prep, a, mirror)
+		both, stop := joinContexts(ctx, prep)
+		defer stop()
+		cmd, release, err = s.prepare(both, a, mirror)
 	})
 	switch {
 	case !made:

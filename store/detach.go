@@ -179,6 +179,18 @@ func codexRepairs(a *rota.Account) bool {
 		(a.Extra["id_token"] == "" || a.Token.Access == "")
 }
 
+// joinContexts is ctx, with its values, done too once also is, with also's
+// cause: work under it starts nothing once either has gone. stop lets go of
+// also, and is called once the work is over.
+func joinContexts(ctx, also context.Context) (context.Context, func()) {
+	both, cancel := context.WithCancelCause(ctx)
+	unhook := context.AfterFunc(also, func() { cancel(context.Cause(also)) })
+	return both, func() {
+		unhook()
+		cancel(nil)
+	}
+}
+
 // beforeRefresh is stopped at the last moment before a's token would be sent
 // for a refresh, so that every refresh still waiting for its answer when
 // whoever asked went away was sent before then and has the whole bound. nil

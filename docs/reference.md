@@ -3648,9 +3648,11 @@ ceiling and five seconds); nothing else is started after that, and `Refresh`,
 `store.Left(err)` recognises, so a caller that went away on purpose can pass
 over it and still show the rest. A process about to exit calls
 `store.Settle(ctx)` first, which waits for every such refresh in the process,
-as `rota serve` does. `Store.Preparing`, when set, is what `Run` and `Start`
-make the launch inside, under a context of its own, while the CLI runs under
-the caller's: the command line holds its signals there. `rota.Refresh` itself honours
+as `rota serve` does. `Store.Preparing`, when set, is what `Run`, `Start`,
+`Prepare` and `PrepareIn` make the launch inside, under a context of its own
+that the launch heeds beside the caller's ctx — either one done stops the
+launch from starting — while the CLI runs under the caller's alone: the
+command line holds its signals there. `rota.Refresh` itself honours
 ctx as every network verb does: an application calling it directly keeps the
 answer the same way, with `context.WithoutCancel` and a timeout of its own.
 

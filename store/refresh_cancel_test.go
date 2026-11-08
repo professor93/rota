@@ -336,3 +336,81 @@ func TestACodexRepairIsNotSentOnceTheCallerHasGone(t *testing.T) {
 		t.Fatalf("the launch should say only that the caller had gone: %v", err)
 	}
 }
+
+// Preparing hands the launch a context of its own, and the launch heeds it
+// beside the caller's: a caller already gone starts nothing whatever the hook
+// hands, and Prepare and PrepareIn make their launch inside the hook as Run
+// does, so a hook that says the launch was cut short gets no command back.
+func TestPreparingIsHeededBesideTheCallersContextByEveryLaunch(t *testing.T) {
+	storedRouteHere(t)
+	t.Run("a caller gone before a run's launch", func(t *testing.T) {
+		w := newLineageWorld(t, false)
+		w.clock.pass(9 * time.Hour)
+		calls := 0
+		w.s.Preparing = func(prepare func(context.Context)) bool {
+			calls++
+			prepare(context.Background())
+			return false
+		}
+		gone, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := w.s.Run(gone, w.a, rota.Spec{Prompt: "hi"}, nil, nil)
+		if calls != 1 || !Left(err) || len(w.p.entries()) != 0 || w.a.Token.Refresh != "R0" {
+			w.p.dump(t)
+			t.Fatalf("nothing launched, nothing sent: calls=%d err=%v holds %q", calls, err, w.a.Token.Refresh)
+		}
+	})
+	for _, prep := range []struct {
+		what string
+		do   func(s *Store, a *rota.Account) (func(), error)
+	}{
+		{"Prepare", func(s *Store, a *rota.Account) (func(), error) {
+			_, _, release, err := s.Prepare(context.Background(), a)
+			return release, err
+		}},
+		{"PrepareIn", func(s *Store, a *rota.Account) (func(), error) {
+			_, _, release, err := s.PrepareIn(context.Background(), a, t.TempDir())
+			return release, err
+		}},
+	} {
+		t.Run(prep.what+" cut short by the hook", func(t *testing.T) {
+			w := newLineageWorld(t, false)
+			w.clock.pass(9 * time.Hour)
+			calls := 0
+			w.s.Preparing = func(prepare func(context.Context)) bool {
+				calls++
+				cut, cancel := context.WithCancel(context.Background())
+				cancel()
+				prepare(cut)
+				return true
+			}
+			release, err := prep.do(w.s, w.a)
+			if calls != 1 || !Left(err) || release != nil || len(w.p.entries()) != 0 {
+				w.p.dump(t)
+				t.Fatalf("made inside the hook, cut short, nothing sent: calls=%d err=%v", calls, err)
+			}
+			if w.s.claimed(w.a) {
+				t.Fatal("the claim of a launch cut short is let go")
+			}
+		})
+		t.Run(prep.what+" inside the hook", func(t *testing.T) {
+			w := newLineageWorld(t, false)
+			w.clock.pass(9 * time.Hour)
+			calls := 0
+			w.s.Preparing = func(prepare func(context.Context)) bool {
+				calls++
+				prepare(context.Background())
+				return false
+			}
+			release, err := prep.do(w.s, w.a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			release()
+			if calls != 1 || w.a.Token.Refresh != "R1" || len(w.p.rotaSpent()) != 0 {
+				w.p.dump(t)
+				t.Fatalf("made inside the hook: calls=%d holds %q", calls, w.a.Token.Refresh)
+			}
+		})
+	}
+}

@@ -51,14 +51,17 @@ type Store struct {
 	// run, and a run it gets.
 	Warn func(msg string) `json:"-"`
 
-	// Preparing, when set, is what Run and Start make a launch inside — the
-	// claim, a refresh, the staging — under the context it hands that work,
-	// calling prepare once; it says whether something cut the launch short,
-	// and then no CLI is started and the claim is let go. nil makes the launch
-	// under the run's own ctx, as ever. A command line holds its signals
-	// there, so that an interrupt while the launch is made finishes a refresh
-	// under way and starts nothing, while one during the run does what it
-	// always did.
+	// Preparing, when set, is what Run, Start, Prepare and PrepareIn make a
+	// launch inside — the claim, a refresh, the staging — calling prepare once
+	// with a context of its own. The launch heeds that context beside the
+	// caller's own ctx, which still gates it: either one done before the launch
+	// is made starts nothing, and a refresh under way when one goes is
+	// finished and saved all the same. Preparing says whether something cut
+	// the launch short, and then no CLI is started or handed back and the
+	// claim is let go. nil makes the launch under the caller's ctx alone, as
+	// ever. A command line holds its signals there, so that an interrupt while
+	// the launch is made finishes a refresh under way and starts nothing,
+	// while one during the run does what it always did.
 	Preparing func(prepare func(ctx context.Context)) (cut bool) `json:"-"`
 
 	backend  Backend
