@@ -2179,11 +2179,11 @@ One more sign-in outranks the account's login without being a variable or
 a setting: the active profile of the Anthropic configuration directory Claude
 Code shares with the `ant` CLI and the Anthropic SDKs. The warning follows the
 directory the launch's Claude Code will read, from the environment rota hands
-it: `ANTHROPIC_CONFIG_DIR`, else `anthropic` in `XDG_CONFIG_HOME`, else
-`.config/anthropic` in `HOME` — a variable the launch drops counts for nothing,
-and a relative one is read from the directory the CLI starts in. The profile
-is `configs/<name>.json` there, `<name>` being what `active_config` says, or
-`default`. When its `authentication.type` is `oidc_federation` — workload
+it: `anthropic` in `XDG_CONFIG_HOME`, else `.config/anthropic` in `HOME`, a
+relative value read from the directory the CLI starts in. `ANTHROPIC_CONFIG_DIR`,
+which Claude Code would read first, is one of the variables every launch drops,
+so a directory it names is never read. The profile is `configs/<name>.json`
+there, `<name>` being what `active_config` says, or `default`. When its `authentication.type` is `oidc_federation` — workload
 identity federation — Claude Code signs in with it ahead of the login in its
 credential store, so ahead of the login rota keeps in every account's home.
 rota changes nothing and stops nothing for it; a launch on the account's login

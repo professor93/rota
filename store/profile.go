@@ -26,7 +26,8 @@ import (
 // gives way to a stored login, so it is not this file's business.
 //
 // Every claude launch drops ANTHROPIC_PROFILE, which would name a profile,
-// and the federation variables, which would stand in for one. The profile
+// ANTHROPIC_CONFIG_DIR, which would name another directory to find it in,
+// and the federation variables that would stand in for one. The profile
 // that is active without them is a file under the person's home, which every
 // account's Claude Code reads alike. rota changes nothing about it and stops
 // no launch for it: it is the person's, and a machine signed in that way may

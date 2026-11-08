@@ -84,6 +84,32 @@ func TestAnActiveFederationProfileIsNamedOnceByALaunchOnTheAccountsLogin(t *test
 	}
 }
 
+// Every claude launch drops ANTHROPIC_CONFIG_DIR, so a directory it names in
+// the person's environment is not the one the account's Claude Code reads: a
+// federation profile there goes unnamed, and the one in the directory the
+// CLI does read is named.
+func TestAFederationProfileOnlyADroppedVariableNamesIsNotNamed(t *testing.T) {
+	storedRouteHere(t)
+	noManaged(t)
+	claudeWorld(t)
+	dir := personHome(t)
+	named := t.TempDir()
+	profileIn(t, named, "", "default", federation)
+	t.Setenv("ANTHROPIC_CONFIG_DIR", named)
+	t.Chdir(t.TempDir())
+	onPath(t, "claude")
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+
+	if said := prepared(t, s, a); len(said) != 0 {
+		t.Fatalf("the CLI never sees the directory ANTHROPIC_CONFIG_DIR names: %q", said)
+	}
+	file := profileIn(t, dir, "", "default", federation)
+	if said := ran(t, s, a, rota.Spec{}); len(said) != 1 || said[0] != overridden(a, file) {
+		t.Fatalf("the profile it does read is named:\n%q\nwant %q", said, overridden(a, file))
+	}
+}
+
 // The directory is found as Claude Code finds it, in the environment the
 // launch hands it: ANTHROPIC_CONFIG_DIR, then anthropic in XDG_CONFIG_HOME,
 // then .config/anthropic in the home, each value trimmed and a blank one
