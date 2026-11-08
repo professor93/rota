@@ -198,21 +198,26 @@ func TestSessionsAreReadFromTheDaemonsDocuments(t *testing.T) {
 }
 
 // A session is found by its whole id, by a prefix of four characters or
-// more that begins one id alone, or by the label or name of a live session.
-// Two of either is an error that names them both; a stopped session's name
-// is nobody's, and three characters are not a prefix.
+// more that begins one id alone, or by the label, the name or the folder of
+// a live session — the folder being what an unlabelled session is called
+// until its CLI names its conversation, so the word rota run --detach said
+// still finds it after. The title its CLI sets finds nothing. Two of either
+// is an error that names them both; a stopped session's name is nobody's,
+// and three characters are not a prefix.
 func TestResolveByIDPrefixAndLabel(t *testing.T) {
 	dir := terminals(t)
-	live := func(id, name, label string) string {
+	live := func(id, name, label, cwd string) string {
 		return `{"id":"` + id + `","held":true,"name":"` + name + `","label":"` + label + `","kind":"account",
+			"cwd":"` + cwd + `","title":"Fix the tests",
 			"started":"2026-11-07T10:00:00Z","ended":false,"state":"live","status":"running",
 			"account":{"id":1,"label":"a@x","provider":"claude"}}`
 	}
 	daemonAt(t, dir, `{"terminals":[`+strings.Join([]string{
-		live("a1b2c3d4e5f60718", "refactor", "refactor"),
-		live("a1b2ffffffffffff", "twin", "twin"),
-		live("c3d4000000000001", "twin", ""),
-		`{"id":"d4e5000000000002","held":true,"name":"old","label":"old","kind":"shell",
+		live("a1b2c3d4e5f60718", "refactor", "refactor", "/src/r"),
+		live("a1b2ffffffffffff", "twin", "twin", "/src/t1"),
+		live("c3d4000000000001", "twin", "", "/src/t2"),
+		live("e5f6000000000003", "fake", "", "/src/api1755"),
+		`{"id":"d4e5000000000002","held":true,"name":"old","label":"old","kind":"shell","cwd":"/src/old",
 		  "started":"2026-11-06T09:00:00Z","ended":true,"ended_at":"2026-11-06T11:30:00Z","exit":0,
 		  "state":"ended","status":"stopped"}`,
 	}, ",")+`]}`, nil)
@@ -226,6 +231,8 @@ func TestResolveByIDPrefixAndLabel(t *testing.T) {
 		"c3d4":             "c3d4000000000001", // a prefix of four
 		"a1b2c3":           "a1b2c3d4e5f60718", // a longer one
 		"refactor":         "a1b2c3d4e5f60718", // a label
+		"fake":             "e5f6000000000003", // the name its CLI gave the conversation
+		"api1755":          "e5f6000000000003", // its folder, which it was called before that
 	} {
 		s, err := c.Resolve(in)
 		if err != nil || s.ID != want {
@@ -241,7 +248,7 @@ func TestResolveByIDPrefixAndLabel(t *testing.T) {
 			t.Errorf("Resolve(%q), which matches two, says %v; it names both ids", in, err)
 		}
 	}
-	for _, in := range []string{"old", "c3d", "nobody", ""} {
+	for _, in := range []string{"old", "c3d", "nobody", "", "Fix the tests"} {
 		if s, err := c.Resolve(in); err == nil || !errors.Is(err, ErrNoSession) {
 			t.Errorf("Resolve(%q) found %s, %v; it matches no live session", in, s.ID, err)
 		}

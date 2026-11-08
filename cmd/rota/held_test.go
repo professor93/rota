@@ -61,6 +61,55 @@ func TestSendTypesIntoAHeldSessionByName(t *testing.T) {
 	}
 }
 
+// A session nobody labelled is called after its folder, and the word rota
+// run --detach says to type goes on finding it: after its CLI sets a title,
+// which never renames it, and after its CLI names its conversation, which
+// it is called from then on, by the daemon and by the listing alike.
+func TestSendFindsAnUnlabelledSessionByTheWordDetachSaid(t *testing.T) {
+	r := newDaemonRig(t)
+	r.start()
+	dir := filepath.Join(t.TempDir(), "api1755")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cmd := r.cmd("run", "1", "--detach")
+	cmd.Dir = dir
+	id, m, _ := r.detach(cmd)
+	if m[3] != "api1755" || m[5] != "api1755" {
+		t.Fatalf("an unlabelled session is held as %q and sent to as %q; want its folder, api1755", m[3], m[5])
+	}
+	word := m[5]
+	p := r.attach(id)
+	p.waitDoc("hello")
+	p.waitOut("ready")
+
+	// ESC ] 0 ; ✳ Fix the tests BEL, as Claude Code sets its title.
+	p.send(0x2, []byte("print 1b5d303be29cb3204669782074686520746573747307\r"))
+	within(t, "the daemon reads the title", 20*time.Second, func() bool { return r.session(id).Title == "Fix the tests" })
+	if s := r.session(id); s.Name != "api1755" {
+		t.Fatalf("a title renamed the session %q", s.Name)
+	}
+	if out, errb, code := r.rota("send", word, "hello"); code != 0 || out != "" || errb != "" {
+		t.Fatalf("send %s once the CLI set a title: exit %d %q %q\nlog:\n%s", word, code, out, errb, r.log())
+	}
+	p.waitOut("got:hello")
+
+	// The CLI names its conversation fake.
+	p.send(0x2, []byte("registry idle\r"))
+	p.waitOut("registry idle")
+	within(t, "the daemon reads the conversation's name", 20*time.Second, func() bool { return r.session(id).Name == "fake" })
+	for _, w := range []string{word, "fake"} {
+		if out, errb, code := r.rota("send", w, "by "+w); code != 0 || out != "" || errb != "" {
+			t.Fatalf("send %s once the CLI named its conversation: exit %d %q %q\nlog:\n%s", w, code, out, errb, r.log())
+		}
+		p.waitOut("got:by " + w)
+	}
+	out, errb, code := r.rota("list", "--short", "--sessions")
+	if code != 0 || !regexp.MustCompile(`(?m)^  ● fake +#1 a@x +claude +running +\S*api1755 +`+id[:8]+`$`).MatchString(out) {
+		t.Fatalf("list --sessions: exit %d %q\n%s", code, errb, out)
+	}
+}
+
 // A CLI waiting on its person for a permission is not typed into, since
 // Enter there may approve a tool; --force types all the same. A session
 // that has ended says so.
