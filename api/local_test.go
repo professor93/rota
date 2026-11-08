@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 )
@@ -183,10 +185,12 @@ func TestLocalWatchCannotChange(t *testing.T) {
 // The name local is the control socket's own principal, and the person it
 // types as when nothing else is said. A user called local would be that
 // person too, and a token called local would read as the socket wherever a
-// name is shown — who holds a keyboard, and every audit line — so neither may
-// have that name: in the file, and in Options for whoever builds a server
-// without one. ReservedName is the one sentence for all of them.
-func TestNoUserOrTokenMayBeCalledLocal(t *testing.T) {
+// name is shown — who holds a keyboard, and every audit line — so on a
+// server with a control socket, one with HoldCommand, neither may have that
+// name. A server without one, foreground serve, has no principal called
+// local, and a file that worked there before the daemon still does.
+// ReservedName is the one sentence for all of them.
+func TestNoUserOrTokenOfADaemonMayBeCalledLocal(t *testing.T) {
 	const want = `the name "local" is reserved for the control socket's own principal; choose another`
 	if err := ReservedName("local"); err == nil || err.Error() != want {
 		t.Fatalf("ReservedName(local) is %v, want %q", err, want)
@@ -196,21 +200,30 @@ func TestNoUserOrTokenMayBeCalledLocal(t *testing.T) {
 	}
 	user := "[[users]]\nname = \"local\"\nrole = \"control\"\npassword = \"" + goodHash() + "\"\n"
 	token := "[[tokens]]\nname = \"local\"\nrole = \"watch\"\nsha256 = \"" + strings.Repeat("ab", 32) + "\"\n"
+	hold := func() *exec.Cmd { return exec.Command(os.DevNull) }
 	for _, c := range []struct{ table, body string }{{"users", user}, {"tokens", token}} {
-		at := `[[` + c.table + `]] "local": `
-		if _, err := LoadConfig(write(t, c.body)); err == nil || !strings.HasSuffix(err.Error(), ": "+at+want) {
-			t.Errorf("a %s entry called local in the file answers %v, want %q", c.table, err, at+want)
+		cfg, err := LoadConfig(write(t, c.body))
+		if err != nil {
+			t.Fatalf("a %s entry called local in the file is refused: %v", c.table, err)
 		}
-	}
-	_, err := New(Options{Token: "x", Dir: t.TempDir(), RefreshEvery: -1,
-		Users: []User{{Name: "local", Role: RoleWatch, Password: goodHash()}}})
-	if want := `api: [[users]] "local": ` + want; err == nil || err.Error() != want {
-		t.Errorf("a user called local in Options answers %v, want %q", err, want)
-	}
-	_, err = New(Options{Token: "x", Dir: t.TempDir(), RefreshEvery: -1,
-		Tokens: []TokenPrincipal{{Name: "local", Role: RoleWatch, SHA256: strings.Repeat("ab", 32)}}})
-	if want := `api: [[tokens]] "local": ` + want; err == nil || err.Error() != want {
-		t.Errorf("a token called local in Options answers %v, want %q", err, want)
+		opts, _, err := cfg.Serve()
+		if err != nil {
+			t.Fatal(err)
+		}
+		opts.Token, opts.Dir, opts.RefreshEvery = "x", t.TempDir(), -1
+		srv, err := New(opts)
+		if err != nil {
+			t.Fatalf("foreground serve with a %s entry called local: %v", c.table, err)
+		}
+		srv.Stop()
+		at := `[[` + c.table + `]] "local": `
+		if err := ReservedNames(opts.Users, opts.Tokens); err == nil || err.Error() != at+want {
+			t.Errorf("a daemon's file with a %s entry called local answers %v, want %q", c.table, err, at+want)
+		}
+		opts.HoldCommand = hold
+		if _, err := New(opts); err == nil || err.Error() != "api: "+at+want {
+			t.Errorf("a daemon with a %s entry called local answers %v, want %q", c.table, err, "api: "+at+want)
+		}
 	}
 }
 

@@ -1112,10 +1112,11 @@ role   = "watch"
 sha256 = "<hex of sha256(the token)>"
 ```
 
-Names are unique within each table and non-empty, and no user or token is
-called `local`, which is the control socket's own; a role is one of the two
-words; a password must parse, with at least 100 000 iterations, a salt of at
-least 16 bytes and a 32-byte hash; a digest is 64 hexadecimal characters.
+Names are unique within each table and non-empty, and no user or token of
+a daemon is called `local`, which is the control socket's own; a role is
+one of the two words; a password must parse, with at least 100 000
+iterations, a salt of at least 16 bytes and a 32-byte hash; a digest is 64
+hexadecimal characters.
 Every refusal names the entry — `[[users]] "inoyat": password: …` — because
 whoever reads it is looking at a file with several of them in it.
 
@@ -1257,11 +1258,13 @@ forking twice, escapes it.
 (*[Roles, and the keyboard](#roles-and-the-keyboard)*): two clients of the
 socket are one person on two devices, and with `[auth] local_user` — or a
 single `[[users]]` entry that may control — it is that user's device. That
-is why no user or token may be called `local`: either would read as the
-socket wherever a name is shown. A file with one is refused at start-up
-with *`[[users]] "local"`: the name "local" is reserved for the control
-socket's own principal; choose another*, and `rota serve passwd local` and
-`rota serve token local` are refused in the same words.
+is why no user or token of a daemon may be called `local`: either would
+read as the socket wherever a name is shown. A daemon's file with one is
+refused by `serve start`, `install` and the daemon itself with
+*`[[users]] "local"`: the name "local" is reserved for the control socket's
+own principal; choose another*, and `rota serve passwd local` and `rota
+serve token local` are refused in the same words. Foreground `rota serve`
+has no control socket, and serves such a file as it always did.
 
 **Only the daemon listens there.** The socket is opened by the process
 holding the store's daemon claim, and by no other. Holding it, the daemon
