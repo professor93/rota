@@ -1530,8 +1530,8 @@ page's information panel is built from:
 ```
 
 `token_until` is when the login inside will lapse — for a claude terminal on
-the account's own stored login, when that login itself ends, if Claude Code
-has recorded it, since Claude Code refreshes the token inside; for one on a
+the account's own stored login, when that login itself ends, if its end is
+known, since Claude Code refreshes the token inside; for one on a
 token, the long-lived token's date or the access token's expiry — so
 somebody looking at a terminal that has been open all day can see it coming.
 `offset` is how many bytes it has printed altogether, which is what `since`
@@ -3030,7 +3030,7 @@ Measured, not assumed — from live accounts:
 
 | Provider | Access token | Refresh token |
 |---|---|---|
-| `claude` | 8 hours | rotates occasionally; `invalid_grant` means dead |
+| `claude` | 8 hours | rotates occasionally; ends 30 days after sign-in; `invalid_grant` means dead |
 | `codex` | 10 days | rotates on **every** refresh; a reused one is rejected permanently |
 | `kimi` | **15 minutes** | not published |
 | `grok` | never | n/a — it is an API key |
@@ -3049,6 +3049,27 @@ lineage. Treat `re-auth needed` as normal rather than as a fault. The refusal
 that ended the lineage is kept: `rota
 list` shows it in parentheses after `re-auth needed` — `re-auth needed
 (invalid_grant: refresh token reused)` — and JSON carries it as `deadReason`.
+
+A claude login also has a hard end. Its refresh token works until a moment
+the provider fixes at sign-in, thirty days later, and after that nobody can
+refresh it, Claude Code included: only a new sign-in brings the account back.
+rota records that end at `rota login`, from the token reply's
+`refresh_token_expires_in` or as thirty days from then when the reply has
+none, the way Claude Code reckons a sign-in of its own. Each refresh rota
+makes keeps the earlier of the end it has and the end the reply gives, so the
+end never moves later, and a rotation rota reads back from the home brings the
+end Claude Code recorded with it. The end goes into the home with the login,
+as Claude Code's `refreshTokenExpiresAt`. Once it has passed, nothing of
+rota's presents the refresh token: no listing, rescue, maintenance, launch or
+HTTP request. An access token still good runs until it expires, and the first
+refresh due after that leaves the account `re-auth needed` with this reason:
+
+```
+its login ended on 2026-11-06 23:57 UTC: a Claude login lasts 30 days from sign-in; rota login 13 makes a new one
+```
+
+An account whose end rota has never learned, one logged in by an older rota
+and never refreshed since, say, is refreshed as before.
 
 ### A token that outlives the window
 
@@ -3097,9 +3118,10 @@ that names no account at all. So log the account in normally first.
 `rota list` says nothing about the token for eleven months, then one line
 while it is within thirty days of expiry, and one more if it lapses — after
 which those runs are back on the eight-hour token. It says the same about the
-ordinary login in its last five days, when Claude Code has recorded when it
-ends, and in the last three the STATUS column says so too — `ok (login ends in
-2d)`, then `ok (login ended 3h ago)` once it is over, because sessions that
+ordinary login in its last 72 hours, when its end is known (*Token
+lifetimes*) — `login ends in 47h (2026-11-10); rota login 13 before then` —
+and the STATUS column says so too — `ok (login ends in
+1d)`, then `ok (login ended 3h ago)` once it is over, because sessions that
 outlive a login stop making progress and cannot recover by themselves. `--json` and `GET /v1/accounts` carry `long_until` and `login_until`
 (RFC 3339); the token itself is never printed, logged or sent anywhere.
 `rota set <id> --long forget` throws it away, leaving the ordinary login
