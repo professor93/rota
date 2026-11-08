@@ -166,6 +166,9 @@ type heldTerm struct {
 	// once known: a registry that goes away does not take them with it.
 	conv    string
 	convCwd string
+	// convName is the name the CLI gave the conversation, kept the same way.
+	convName string
+
 	lastOut time.Time
 	seq     uint64
 	typed   [heldTyped]typist
@@ -266,7 +269,7 @@ func (h *heldTerm) describe(doc map[string]any) {
 	doc["attachable"] = true
 	doc["reachable"] = h.state == heldLive && h.conn != nil
 	doc["pid"] = h.pid
-	doc["title"] = h.title
+	doc["title"] = vtscan.CleanTitle(h.title)
 	doc["conversation"] = h.conv
 	doc["conversation_cwd"] = h.convCwd
 	doc["resumable"] = h.state == heldInterrupted && h.conv != ""
@@ -278,15 +281,17 @@ func (h *heldTerm) describe(doc map[string]any) {
 }
 
 // name is the first of these that there is: what the person called it, the
-// title the CLI set, the name its own registry has, and its folder.
+// name the CLI gave its conversation, and its folder — the rule its record
+// names it by (holdwire.Record.Name), so the daemon, the listing from the
+// records and rota send all call a session one thing. The title the CLI
+// sets is never its name: it changes as the CLI works, and is said beside
+// the name as the title.
 func (h *heldTerm) name() string {
 	switch {
 	case h.ts.name != "":
 		return h.ts.name
-	case vtscan.CleanTitle(h.title) != "":
-		return vtscan.CleanTitle(h.title)
-	case h.reg.Name != "":
-		return h.reg.Name
+	case h.convName != "":
+		return h.convName
 	case h.ts.cwd != "":
 		return filepath.Base(h.ts.cwd)
 	}
@@ -515,6 +520,9 @@ func (h *heldTerm) noteState(msg *holdwire.StateMsg) {
 		h.reg = *msg.Registry
 		if msg.Registry.SessionID != "" {
 			h.conv = msg.Registry.SessionID
+		}
+		if msg.Registry.Name != "" {
+			h.convName = msg.Registry.Name
 		}
 		if msg.Registry.Cwd != "" {
 			h.convCwd = msg.Registry.Cwd

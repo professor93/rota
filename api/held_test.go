@@ -237,11 +237,17 @@ func TestWithoutHoldCommandNothingChanges(t *testing.T) {
 /* ------------------------------------------------------------- what it is --- */
 
 // The description says what only a held session has: that it is held, its
-// state, the holder's pid, and a name, a status and the conversation from
-// what the holder reports.
+// state, the holder's pid, and a name, a title, a status and the
+// conversation from what the holder reports. The name is the one its record
+// gives it, which the title the CLI sets never changes: the title is said
+// beside it, without its spinner.
 func TestAHeldSessionSaysWhoItIsAndHowItIs(t *testing.T) {
 	p := withHeld(t, []string{"FAKE_HOLDER_TITLE=✳ Tidy the auth code", "FAKE_HOLDER_CONVERSATION=conv-7"})
-	id := p.start(nil)["id"].(string)
+	work := filepath.Join(p.root, "work")
+	if err := os.Mkdir(work, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	id := p.start(map[string]any{"account": 1, "cwd": work})["id"].(string)
 	var doc map[string]any
 	for range 500 {
 		if doc = p.describe(id); doc["conversation"] == "conv-7" {
@@ -251,7 +257,7 @@ func TestAHeldSessionSaysWhoItIsAndHowItIs(t *testing.T) {
 	}
 	for key, want := range map[string]any{
 		"held": true, "state": "live", "attachable": true, "status": "running",
-		"name": "Tidy the auth code", "title": "✳ Tidy the auth code", "conversation": "conv-7",
+		"name": "work", "title": "Tidy the auth code", "conversation": "conv-7",
 	} {
 		if doc[key] != want {
 			t.Errorf("%s is %v, want %v", key, doc[key], want)
@@ -282,6 +288,23 @@ func TestAHeldSessionSaysWhoItIsAndHowItIs(t *testing.T) {
 	doc3 := p3.start(map[string]any{"account": 1, "cwd": filepath.Join(p3.root, "sub")})
 	if doc3["name"] != "sub" {
 		t.Errorf("a session with no label, title or registry is named %v, want its folder", doc3["name"])
+	}
+
+	// The name the CLI gives the conversation comes before the folder, and
+	// is the record's too, so a listing from the record says the same.
+	p4 := withHeld(t, []string{"FAKE_HOLDER_TITLE=✳ x", "FAKE_HOLDER_CONVERSATION_NAME=audit-trail"})
+	id4 := p4.start(map[string]any{"account": 1, "cwd": filepath.Join(p4.root, "sub")})["id"].(string)
+	for range 500 {
+		if p4.describe(id4)["title"] == "x" {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if doc := p4.describe(id4); doc["name"] != "audit-trail" || doc["title"] != "x" {
+		t.Errorf("a session whose CLI named its conversation is %v, titled %v; want audit-trail, x", doc["name"], doc["title"])
+	}
+	if r := holdwire.Judge(p4.terminals(), id4); r.Name() != "audit-trail" {
+		t.Errorf("its record names it %q", r.Name())
 	}
 }
 

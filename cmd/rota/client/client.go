@@ -22,6 +22,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -147,13 +148,16 @@ func (c *Client) Health() error {
 }
 
 // Session is one session as the daemon describes it: running, or stopped
-// and still listed. Ended is when it stopped, and nil while it runs; Exit is
-// how its CLI ended, -1 for one that was interrupted, and nil while it runs.
-// Account, AccountLabel and Provider are empty for a session that is not an
-// account's CLI. A command's --json writes it under the names its tags give.
+// and still listed. Name is what it is called, and Title the title its CLI
+// set, which changes as the CLI works. Ended is when it stopped, and nil
+// while it runs; Exit is how its CLI ended, -1 for one that was interrupted,
+// and nil while it runs. Account, AccountLabel and Provider are empty for a
+// session that is not an account's CLI. A command's --json writes it under
+// the names its tags give.
 type Session struct {
 	ID           string     `json:"id"`
 	Name         string     `json:"name"`
+	Title        string     `json:"title"`
 	Label        string     `json:"label"`
 	Kind         string     `json:"kind"`
 	State        string     `json:"state"`
@@ -176,6 +180,7 @@ type Session struct {
 type session struct {
 	ID           string     `json:"id"`
 	Name         string     `json:"name"`
+	Title        string     `json:"title"`
 	Label        string     `json:"label"`
 	Kind         string     `json:"kind"`
 	State        string     `json:"state"`
@@ -198,7 +203,7 @@ type session struct {
 
 func (w *session) session() Session {
 	s := Session{
-		ID: w.ID, Name: w.Name, Label: w.Label, Kind: w.Kind, State: w.State, Status: w.Status,
+		ID: w.ID, Name: w.Name, Title: w.Title, Label: w.Label, Kind: w.Kind, State: w.State, Status: w.Status,
 		Cwd: w.Cwd, Conversation: w.Conversation, PID: w.PID,
 		Attachable: w.Attachable, Resumable: w.Resumable, Started: w.Started,
 	}
@@ -253,12 +258,17 @@ func (c *Client) Resolve(nameOrID string) (Session, error) {
 // Match finds the one session among all that a person means by what they
 // typed: its whole id first, running or stopped; then an id that what they
 // typed begins, at least four characters of it; then a live session whose
-// label or name it is. More than one session at either of the last two is
-// an error that names their ids, so the person can choose. So a label that
-// could begin an id — beef, or cafe1 — is read as an id first: a session
-// whose id it begins is the one found, and two such are an error even when
-// a live session has that very label, which is then named by its id. None
-// at all is an error that is ErrNoSession.
+// label, name or folder it is. More than one session at either of the last
+// two is an error that names their ids, so the person can choose. So a label
+// that could begin an id — beef, or cafe1 — is read as an id first: a
+// session whose id it begins is the one found, and two such are an error
+// even when a live session has that very label, which is then named by its
+// id. None at all is an error that is ErrNoSession.
+//
+// The folder is what a session nobody labelled is called until its CLI
+// names its conversation, and what rota run --detach told the person to
+// type; it goes on finding the session after the name changes. The title
+// the CLI sets finds nothing: it changes as the CLI works.
 func Match(all []Session, nameOrID string) (Session, error) {
 	for _, s := range all {
 		if s.ID == nameOrID {
@@ -270,7 +280,7 @@ func Match(all []Session, nameOrID string) (Session, error) {
 		if len(nameOrID) >= 4 && strings.HasPrefix(s.ID, nameOrID) {
 			begun = append(begun, s)
 		}
-		if s.State == "live" && nameOrID != "" && (s.Label == nameOrID || s.Name == nameOrID) {
+		if s.State == "live" && nameOrID != "" && (s.Label == nameOrID || s.Name == nameOrID || folder(s.Cwd) == nameOrID) {
 			named = append(named, s)
 		}
 	}
@@ -285,6 +295,15 @@ func Match(all []Session, nameOrID string) (Session, error) {
 		return Session{}, fmt.Errorf("%d live sessions are called %q, %s; name one by its id", len(named), nameOrID, ids(named))
 	}
 	return Session{}, noSession(nameOrID)
+}
+
+// folder is the last element of a session's folder, as its record names a
+// session by, and "" for a session that has none.
+func folder(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	return filepath.Base(cwd)
 }
 
 // ErrNoSession is Resolve finding no session at all by what it was given,
