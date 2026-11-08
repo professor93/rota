@@ -103,3 +103,24 @@ func TestARotationWhoseEndMovedASecondIsStillTheSameGrant(t *testing.T) {
 		t.Fatalf("and passed over in a home recorded as holding nothing of the account's: %+v %v", a, err)
 	}
 }
+
+// A grant ending more than a minute after another was signed in after it;
+// within a minute, or with either end unknown, nothing says so.
+func TestAGrantEndingMoreThanAMinuteLaterWasSignedInAfter(t *testing.T) {
+	for _, c := range []struct {
+		a, b  string
+		after bool
+	}{
+		{"2000000059001", "1999999999000", true},
+		{"2000086399000", "1999999999000", true},
+		{"2000000059000", "1999999999000", false}, // a minute: the same grant
+		{"1999999999000", "1999999999000", false},
+		{"1999913599000", "1999999999000", false}, // earlier
+		{"2000086399000", "", false},
+		{"", "1999999999000", false},
+	} {
+		if endsAfter(c.a, c.b) != c.after {
+			t.Errorf("%q after %q should be %v", c.a, c.b, c.after)
+		}
+	}
+}

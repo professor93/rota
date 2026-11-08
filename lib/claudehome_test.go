@@ -327,18 +327,39 @@ func TestAdoptionReadsWhatTheHomeHolds(t *testing.T) {
 	})
 	t.Run("an older login after a fresh rota login", func(t *testing.T) {
 		// A fresh login carries no refreshTokenExpiresAt of the login before
-		// it (Complete): none at all, or one of its own.
-		for _, own := range []string{"", "1777777777000"} {
+		// it (Complete): none at all, or one of its own, which ends after
+		// any login signed in before it.
+		for _, c := range []struct {
+			own    string
+			before []string
+		}{{"", []string{same, "1888888888000", "null"}}, {same, []string{"1888888888000", "null"}}} {
 			a := livingClaude()
 			a.Staged = stagedNone
-			if a.Extra[claudeRefreshUntil] = own; own == "" {
+			if a.Extra[claudeRefreshUntil] = c.own; c.own == "" {
 				delete(a.Extra, claudeRefreshUntil)
 			}
-			for _, until := range []string{same, "1888888888000", "null"} {
+			for _, until := range c.before {
 				if err := AdoptFrom(a, homeWith(login("R0", later, until))); err != nil || a.Token.Refresh != "R1" || a.Staged != stagedNone {
-					t.Fatalf("what the home held before the login is older, whatever it says (%q, %s): %+v %v", own, until, a, err)
+					t.Fatalf("what the home held before the login is older, whatever it says (%q, %s): %+v %v", c.own, until, a, err)
 				}
 			}
+		}
+	})
+	t.Run("a /login made after a fresh rota login", func(t *testing.T) {
+		// Ending more than a minute after the account's login, it was signed
+		// in after it: a new login to check, never passed over to be written
+		// over. With no end recorded for the account, nothing can say so.
+		a := livingClaude()
+		a.Staged = stagedNone
+		var nl *NewLogin
+		if err := AdoptFrom(a, homeWith(login("R9", later, "2000000999000"))); !errors.As(err, &nl) ||
+			a.Token.Refresh != "R1" || a.Staged != stagedNone {
+			t.Fatalf("handed back, nothing taken: %+v %v", a, err)
+		}
+		delete(a.Extra, claudeRefreshUntil)
+		if err := AdoptFrom(a, homeWith(login("R9", later, "2000000999000"))); err != nil || a.Token.Refresh != "R1" ||
+			a.Staged != stagedNone {
+			t.Fatalf("no end recorded: passed over, as before: %+v %v", a, err)
 		}
 	})
 	t.Run("a rotation after a look that found the home without the account's login", func(t *testing.T) {

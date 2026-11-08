@@ -343,12 +343,15 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //     inside that home. Nothing of it is taken here, because the home says
 //     nothing trustworthy about whose it is: it comes back as a *NewLogin
 //     for the application to check (NewLogin.Identify) and then Accept or
-//     Refuse. In a home recorded as holding nothing of the account's, a
-//     login of another grant is instead the one from before the account's
-//     current login — it was logged in again with rota since,
-//     and a fresh login never carries the last one's refreshTokenExpiresAt
-//     (see Complete) — so it is older whatever it says, and the next staging
-//     writes over it.
+//     Refuse. In a home recorded as holding nothing of the account's — it was
+//     logged in again with rota since, say — the ends tell the two apart,
+//     because a login ends a fixed time after it was signed in: one ending
+//     more than a minute after the account's login was signed in after it,
+//     with /login inside the home, and comes back as a *NewLogin like any
+//     other, so nothing writes over it before it is checked; one ending more
+//     than a minute before is the login from before the account's current
+//     one, older whatever else it says, and the next staging writes over it.
+//     So is any login there when either end is unknown.
 func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 	if a.APIKey() {
 		// A key account keeps no login in its home, so nothing found there is
@@ -398,16 +401,25 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 		return &NewLogin{Access: l.AccessToken, login: l}
 	case a.Staged == stagedNone:
 		// The last look found the home not holding the account's current
-		// login. A login of another lineage there predates that login — it
-		// was logged in again with rota since — so it is older, rotated or
-		// not, and the next write replaces it. One of the account's own
-		// lineage that expires later than the account's token is Claude Code
+		// login, and what is there now is told by when it ends. The account's
+		// own grant, expiring later than the account's token, is Claude Code
 		// having refreshed the account's own login since that look, whatever
 		// the look found: it is the newest there is, and the account's token
-		// is spent.
-		if until := l.refreshUntil(); until != "" && sameGrant(until, a.Extra[claudeRefreshUntil]) &&
-			int64(l.ExpiresAt) > a.Token.ExpiresAt {
-			l.adopt(a)
+		// is spent. A grant ending later was signed in after the account's
+		// login, with /login in the home, and is checked like any new login
+		// rather than written over. One ending earlier predates the account's
+		// login — it was logged in again with rota since — so it is older,
+		// rotated or not, and the next write replaces it; and so, as ever, is
+		// anything when either end is unknown.
+		home, own := l.refreshUntil(), a.Extra[claudeRefreshUntil]
+		switch {
+		case home == "" || own == "":
+		case sameGrant(home, own):
+			if int64(l.ExpiresAt) > a.Token.ExpiresAt {
+				l.adopt(a)
+			}
+		case endsAfter(home, own):
+			return &NewLogin{Access: l.AccessToken, login: l}
 		}
 		return nil
 	case !sameGrant(l.refreshUntil(), a.Extra[claudeRefreshUntil]):
@@ -556,6 +568,15 @@ func sameGrant(a, b string) bool {
 		return false
 	}
 	return x-y <= grantSlack && y-x <= grantSlack
+}
+
+// endsAfter reports whether the grant ending at a, as the account keeps such
+// a value, ends more than grantSlack after the one ending at b: that it was
+// signed in after it. Either end unknown says nothing.
+func endsAfter(a, b string) bool {
+	x, errA := strconv.ParseInt(a, 10, 64)
+	y, errB := strconv.ParseInt(b, 10, 64)
+	return errA == nil && errB == nil && x-y > grantSlack
 }
 
 // refreshUntil is the login's refreshTokenExpiresAt as the account keeps it:
