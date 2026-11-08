@@ -2118,9 +2118,9 @@ with what was queued it is sent `repaint{offset,cols,rows}`, the screen as
 it is now as the next binary frame, and the output after `offset`. The
 screen is asked for twice; a holder with none to give gets the viewer a
 reset (`ESC c`) as that frame, a `gap` for the scrollback before the last
-64 KiB, and those 64 KiB. A holder has none while its screen is more than
-32 KiB of output behind its CLI, and never for a session larger than
-200,000 cells, such as 500×400. What a held session's viewer is replayed — on
+64 KiB, and those 64 KiB. A holder has none while its screen is further
+behind its CLI than it can draw in a moment, and never for a session larger
+than 200,000 cells, such as 500×400. What a held session's viewer is replayed — on
 attaching, or after a repaint — comes in frames of at most 64 KiB, each
 with its own write deadline, and one viewer is repainted at most four
 times a second. Documents still arrive, and the ones that came while it

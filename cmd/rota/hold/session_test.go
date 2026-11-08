@@ -434,9 +434,9 @@ func TestAScreenARingBehindIsRetired(t *testing.T) {
 	r := newRig(t, 1024, newFakeChild())
 	claim(t, r.terminals)
 	r.c.reads()
-	r.s.em.mu.Lock()
+	r.s.em.lock.lock()
 	r.c.print(t, strings.Repeat("y", 4096)+"\x1b[6n")
-	r.s.em.mu.Unlock()
+	r.s.em.lock.unlock()
 	r.c.waitTyped(t, "\x1b[1;1R")
 	r.c.print(t, strings.Repeat("z", 4096))
 	p := r.link(t)
@@ -521,6 +521,7 @@ func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
 // leaves the session ended, not interrupted.
 func TestKeystrokesNeverWaitForTheScreen(t *testing.T) {
 	entered, release := stuck(t, "busy")
+	waitAsLongAsItTakes(t)
 	r := newRig(t, 0, newFakeChild())
 	t.Cleanup(release) // before the session is waited for
 	claim(t, r.terminals)
@@ -586,11 +587,61 @@ func TestARepaintNeverCatchesUpAFlood(t *testing.T) {
 	if err != nil || h.OK || len(repaint) != 0 || h.Offset != 0 {
 		t.Fatalf("a screen far behind answered %+v with %d bytes (%v)", h, len(repaint), err)
 	}
-	s.em.mu.Lock()
+	s.em.lock.lock()
 	off := s.em.off
-	s.em.mu.Unlock()
+	s.em.lock.unlock()
 	if off != 0 {
 		t.Fatalf("the repaint drew the flood, to %d", off)
+	}
+}
+
+// waitAsLongAsItTakes makes the repaints of the sessions the test starts
+// wait for the emulator for as long as it is busy.
+func waitAsLongAsItTakes(t *testing.T) {
+	was := repaintWait
+	repaintWait = time.Hour
+	t.Cleanup(func() { repaintWait = was })
+}
+
+// A repaint waits for a busy emulator only briefly, and then answers with
+// no repaint, so the daemon replays the ring: it does not wait for a whole
+// batch, which at 500×400 took 16.7 s, and neither does a fit asked for
+// after it.
+func TestARepaintWaitsForTheScreenOnlyBriefly(t *testing.T) {
+	entered, release := stuck(t, "busy")
+	r := newRig(t, 0, newFakeChild())
+	t.Cleanup(release)
+	claim(t, r.terminals)
+	p := r.link(t)
+	r.c.print(t, "busy\r\n")
+	waitClosed(t, entered, "the screen taking the output")
+	if h, repaint := p.screen(1); h.OK || repaint != "" {
+		t.Fatalf("a repaint behind a busy screen answered %+v with %d bytes", h, len(repaint))
+	}
+	p.json(holdwire.Resize, holdwire.SizeMsg{Cols: 100, Rows: 30})
+	p.decode(holdwire.Resized, &holdwire.SizeMsg{})
+	release()
+	if h, _ := p.caughtUp(2, 6); !h.OK || h.Cols != 100 || h.Rows != 30 {
+		t.Fatalf("once the screen was free it answered %+v", h)
+	}
+}
+
+// A repaint draws no more of the backlog itself than the emulator draws in
+// a moment at that size: one read of output at 80×24, little at 500×400,
+// where a read of line feeds takes seconds.
+func TestARepaintDrawsLittleOfTheBacklogItself(t *testing.T) {
+	lines := []byte(strings.Repeat("0123456789abcdefg\n", (4<<10)/18))
+	for _, c := range []struct {
+		cols, rows uint16
+		ok         bool
+	}{{80, 24, true}, {500, 400, false}} {
+		s := newSession(Config{ID: testID, Cols: c.cols, Rows: c.rows}, newFakeChild()) // no emulator running
+		s.took(lines)
+		h, _, err := holdwire.ScreenOf(s.repaint(1))
+		if err != nil || h.OK != c.ok || (h.Offset == int64(len(lines))) != c.ok {
+			t.Fatalf("%dx%d with %d bytes to draw: %+v (%v)", c.cols, c.rows, len(lines), h, err)
+		}
+		s.screen.Close()
 	}
 }
 
