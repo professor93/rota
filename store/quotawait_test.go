@@ -174,12 +174,14 @@ func TestTheUsageEndpointIsLeftAloneForAsLongAsItSays(t *testing.T) {
 	}
 }
 
-// A Retry-After that is a date is kept to the second; one longer than an hour
-// is kept for an hour; and a refusal that says nothing — a 429 without it, or
-// the endpoint failing on its side — waits a minute, twice as long each time
-// in a row, up to the same hour. A reading starts the count again. Anything
-// else that goes wrong is reported as ever and asks no wait.
-func TestAUsageWaitIsTheProvidersWordOrABackoffBoundedByAnHour(t *testing.T) {
+// A refusal waits a minute, twice as long each time in a row, up to an hour —
+// a 429 without a Retry-After, or the endpoint failing on its side — and a
+// Retry-After asks for at least as long as it says: one that is a date and
+// longer than the backoff is kept to the second, one longer than an hour is
+// kept for an hour, and one shorter than the backoff gives way to it. A
+// reading starts the count again. Anything else that goes wrong is reported
+// as ever and asks no wait.
+func TestAUsageWaitIsTheLongerOfTheProvidersWordAndABackoffBoundedByAnHour(t *testing.T) {
 	clock := holdClock(t)
 	u := fakeUsage(t)
 	s := openTemp(t)
@@ -216,10 +218,14 @@ func TestAUsageWaitIsTheProvidersWordOrABackoffBoundedByAnHour(t *testing.T) {
 		t.Fatalf("a reading ends it: %v %+v", errs, a.QuotaWait)
 	}
 	refuse(429, "", time.Minute, 1)
+	refuse(429, "1", 2*time.Minute, 2)
+	refuse(503, "30", 4*time.Minute, 3)
+	refuse(429, "300", 8*time.Minute, 4)
+	refuse(429, "1200", 20*time.Minute, 5)
 
 	u.next(401, "", "")
 	errs := s.Refresh(context.Background(), true, a)
-	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "http 401") || a.QuotaWait.Waiting() || a.QuotaWait.Count != 1 {
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "http 401") || a.QuotaWait.Waiting() || a.QuotaWait.Count != 5 {
 		t.Fatalf("a 401 is reported as before and asks no wait: %v %+v", errs, a.QuotaWait)
 	}
 }

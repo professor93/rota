@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -45,6 +46,32 @@ func (resetter) Quota(_ context.Context, access string) (*rota.Quota, error) {
 }
 
 func init() { rota.Register(resetter{}) }
+
+// refuser is a provider whose usage endpoint is rate-limited and says to ask
+// again in a second, every time; every request is noted with when it came.
+type refuser struct{}
+
+var refusals struct {
+	sync.Mutex
+	at []time.Time
+}
+
+func (refuser) Name() string                                               { return "t-api-refuse" }
+func (refuser) Begin(_ context.Context) (string, map[string]string, error) { return "", nil, nil }
+func (refuser) Complete(context.Context, string, map[string]string) (*rota.Token, error) {
+	return &rota.Token{Access: "a"}, nil
+}
+func (refuser) Launch(*rota.Account, string) (*rota.Command, error) {
+	return &rota.Command{Bin: "true"}, nil
+}
+func (refuser) Quota(context.Context, string) (*rota.Quota, error) {
+	refusals.Lock()
+	defer refusals.Unlock()
+	refusals.at = append(refusals.at, time.Now())
+	return nil, &rota.HTTPError{Status: http.StatusTooManyRequests, RetryAfter: time.Now().Add(time.Second)}
+}
+
+func init() { rota.Register(refuser{}) }
 
 // A server reads an account again a moment after its window resets, not up
 // to a whole sweep later: the sweep is an hour apart here, and the reading
@@ -174,6 +201,59 @@ func TestTheServerReadsAResetThatPassedDuringAWaitWhenTheWaitEnds(t *testing.T) 
 		until(time.Hour - time.Millisecond)
 		if got := reads(); len(got) != 1 {
 			t.Fatalf("one reset is one read, and nothing else is due before the sweep: %v", got)
+		}
+	})
+}
+
+// A usage endpoint that refuses every reading with a Retry-After of a second
+// is not asked every second by a server that wakes at each wait's end for a
+// reset still pending. A Retry-After is the least rota waits, and the backoff
+// — a minute, twice that each time in a row — is the least after any refusal.
+// Over half an hour of refusals the server asks no more often than its
+// two-minute sweep alone would: at the reset, then a backoff after each ask.
+func TestTheServerAsksAnEndpointThatKeepsRefusingNoMoreThanItsSweepWould(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		refusals.Lock()
+		refusals.at = nil
+		refusals.Unlock()
+		start := time.Now()
+		reset := start.Add(30 * time.Second)
+		blob := fmt.Sprintf(`{"ordered":true,"nextId":2,"accounts":[
+			{"id":1,"provider":"t-api-refuse","order":1,"token":{"accessToken":"a"},"quotaAt":%d,
+			 "quota":{"windows":[{"name":"5h","percent":100,"primary":true,"resetsAt":%q}]}}]}`,
+			start.Add(-time.Minute).UnixMilli(), reset.Format(time.RFC3339Nano))
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "accounts.json"), []byte(blob), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		const every, span = 2 * time.Minute, 30 * time.Minute
+		srv, err := New(Options{Token: "t", Dir: dir, RefreshEvery: every})
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer srv.Stop()
+		time.Sleep(span)
+		synctest.Wait()
+
+		refusals.Lock()
+		got := append([]time.Time(nil), refusals.at...)
+		refusals.Unlock()
+		if bound := int(span/every) + 1; len(got) > bound {
+			t.Fatalf("%d requests in %v, more than the %d of a sweep every %v and the reset's", len(got), span, bound, every)
+		}
+		first := reset.Add(store.ResetGrace)
+		var want []time.Time
+		for i, at := 0, first; at.Before(start.Add(span)); i++ {
+			want = append(want, at)
+			at = at.Add(time.Minute << i)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("asked at %v, want %v", got, want)
+		}
+		for i := range want {
+			if !got[i].Equal(want[i]) {
+				t.Fatalf("asked at %v, want %v", got, want)
+			}
 		}
 	})
 }
