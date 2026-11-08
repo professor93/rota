@@ -81,7 +81,7 @@ func TestTwoLocalClientsShareTheKeyboard(t *testing.T) {
 		return d["type"] == "keyboard" && d["holder_conn"] == connOf(helloA)
 	})
 
-	resp, raw := ctl.do("POST", "/v1/terminals/"+id+"/send", map[string]any{"text": "sent"})
+	resp, raw := ctl.do("POST", "/v1/terminals/"+id+"/messages", map[string]any{"text": "sent"})
 	if resp.StatusCode != 200 {
 		t.Fatalf("a send from the control socket while local holds the keyboard answered %d %s", resp.StatusCode, raw)
 	}
@@ -117,7 +117,7 @@ func TestALocalWatcherNeverTakesTheKeyboard(t *testing.T) {
 		method, path string
 		body         any
 	}{
-		{"POST", "/v1/terminals/" + id + "/send", map[string]any{"text": "peek"}},
+		{"POST", "/v1/terminals/" + id + "/messages", map[string]any{"text": "peek"}},
 		{"DELETE", "/v1/terminals/" + id, nil},
 		{"POST", "/v1/terminals", map[string]any{"account": 1}},
 	} {

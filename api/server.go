@@ -706,7 +706,7 @@ func (s *Server) guardedIn(terminal bool) map[string]http.HandlerFunc {
 		routes["GET /v1/terminals/{id}"] = s.describeTerminal
 		routes["POST /v1/terminals"] = s.createTerminal
 		routes["DELETE /v1/terminals/{id}"] = s.killTerminal
-		routes["POST /v1/terminals/{id}/send"] = s.sendTerminal
+		routes["POST /v1/terminals/{id}/messages"] = s.sendTerminal
 	}
 	return routes
 }

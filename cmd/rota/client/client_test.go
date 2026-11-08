@@ -310,7 +310,7 @@ func TestCreateGetAndARefusedSend(t *testing.T) {
 			}
 			fmt.Fprint(w, doc)
 		})
-		mux.HandleFunc("POST /v1/terminals/{id}/send", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("POST /v1/terminals/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			if body["text"] != "hi" || body["force"] != true {
