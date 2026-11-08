@@ -11,13 +11,11 @@ import (
 )
 
 // The handover replaces rota with the CLI, and the claim on the account has
-// to go with it: the CLI is the run from then on. Where no holder can be
-// started to hold it (see holdClaims), the claim is kept across the exec, as
-// it always was. Here the replacing is a child started the way an exec keeps
-// descriptors, and once the handover has let go of its own copy the account
-// must still be claimed — by the CLI. A handover that stopped passing the
-// claim on would leave it free.
-func TestWithoutAHolderTheHandoverPassesTheClaimToTheCLI(t *testing.T) {
+// to go with it: the CLI is the run from then on. Here the replacing is a
+// child started the way an exec keeps descriptors, and once the handover has
+// let go of its own copy the account must still be claimed — by the CLI. A
+// handover that stopped passing the claim on would leave it free.
+func TestTheHandoverPassesTheClaimToTheCLI(t *testing.T) {
 	seedLiving(t, "")
 	orig := execProcess
 	t.Cleanup(func() { execProcess = orig })

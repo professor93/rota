@@ -343,10 +343,68 @@ func TestAHolderLentNothingRefuses(t *testing.T) {
 	}
 }
 
-// A claude account's claim is shared, and goes to a holder the same way:
-// a second run of it starts while the first runs, and once the first CLI
-// has exited the account is free, although what it left running is not.
-func TestAFinishedClaudeSessionLeavesItsAccountFree(t *testing.T) {
+// Only a codex run lends its claim. The handover asks for a holder for a
+// codex account, and for a claude account it does not: the claim is kept
+// across the exec, as it always was, and the CLI holds it alone once the
+// handover has let go of its own. A codex account whose holder cannot be had
+// is kept across the exec the same way. Here the replacing is a child
+// started the way an exec keeps descriptors.
+func TestOnlyACodexRunLendsItsClaim(t *testing.T) {
+	for _, c := range []struct {
+		provider string
+		lends    bool
+	}{{"claude", false}, {"codex", true}} {
+		t.Run(c.provider, func(t *testing.T) {
+			if c.lends {
+				seedCodex(t)
+				bin := t.TempDir()
+				fakecli.Install(t, bin, "codex", fakecli.Spec{})
+				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			} else {
+				seedLiving(t, "")
+			}
+			origHolder, origExec := startHolder, execProcess
+			t.Cleanup(func() { startHolder, execProcess = origHolder, origExec })
+			asked := 0
+			startHolder = func([]*os.File) (claimHolder, error) {
+				asked++
+				return nil, errNoHolder
+			}
+			var cli *exec.Cmd
+			execProcess = func(string, []string, []string) error {
+				cli = exec.Command("/bin/sleep", "30")
+				return cli.Start()
+			}
+			if _, errOut, code := call(t, "run", "1"); code != 0 {
+				t.Fatalf("%d %q", code, errOut)
+			}
+			if cli == nil || cli.Process == nil {
+				t.Fatal("the handover never happened")
+			}
+			t.Cleanup(func() { _ = cli.Process.Kill(); _ = cli.Wait() })
+			if lent := asked > 0; lent != c.lends {
+				t.Fatalf("a holder was asked for %d times", asked)
+			}
+			if !inUse(t) {
+				t.Fatal("the CLI the handover became holds the account's claim")
+			}
+			_ = cli.Process.Kill()
+			_ = cli.Wait()
+			within(t, "the claim is free once the CLI has gone", 10*time.Second, func() bool { return !inUse(t) })
+		})
+	}
+}
+
+// A claude run keeps its claim across the exec and starts no holder, even
+// where one could be had, as before holders were: Claude Code's daemon was
+// seen holding no claim of rota's, and a claude account reads in use while
+// any claude process lives in its home besides. Here a real rota replaces
+// itself with a fake claude that leaves a daemon behind, which, unlike
+// Claude Code's, keeps what it inherited. That shows where the claim went:
+// to the CLI, and through it to the daemon, which still holds it once the
+// CLI has exited, where a holder would have let go then. A second run of
+// the account starts while the first runs, its claim being shared.
+func TestAClaudeRunKeepsItsClaimAcrossTheExec(t *testing.T) {
 	seedLiving(t, "")
 	bin, tmp := t.TempDir(), t.TempDir()
 	daemonUp, cliUp := filepath.Join(tmp, "daemon.pid"), filepath.Join(tmp, "cli.pid")
@@ -362,6 +420,7 @@ func TestAFinishedClaudeSessionLeavesItsAccountFree(t *testing.T) {
 	}
 	defer out.Close()
 	cmd := exec.Command(os.Args[0], "run", "1")
+	// Where a holder could be had, as it is for codex.
 	cmd.Env = append(os.Environ(), "ROTA_AS_RUN=1")
 	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Start(); err != nil {
@@ -388,10 +447,18 @@ func TestAFinishedClaudeSessionLeavesItsAccountFree(t *testing.T) {
 		raw, _ := os.ReadFile(out.Name())
 		t.Fatalf("the CLI exits as it was asked to: %v\n%s", err, raw)
 	}
-	within(t, "the account is free once the CLI has exited", 10*time.Second, func() bool { return !inUse(t) })
-	if !proc.Alive(daemonPID) {
-		t.Fatal("while what it left behind is still running")
+	// A holder lets go within moments of the CLI's exit; what the CLI left
+	// holding the claim does not.
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if !inUse(t) {
+			raw, _ := os.ReadFile(out.Name())
+			t.Fatalf("the claim went across the exec, to the daemon the CLI left, not to a holder\n%s", raw)
+		}
 	}
+	if err := syscall.Kill(daemonPID, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	within(t, "the account is free once the daemon holding the claim has gone", 10*time.Second, func() bool { return !inUse(t) })
 }
 
 // What a holder answers is read for its pid, for a holder that cannot be
