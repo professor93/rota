@@ -2,6 +2,7 @@ package fakecli
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -56,6 +57,32 @@ func TestUpFailsAFakeThatRanButNeverCameUp(t *testing.T) {
 	}
 }
 
+// A helper — a fake the run did not start itself — may still be on its way
+// when the run ends: it has run, and says it is up a moment later, once what
+// it starts before that is going. That is a fake that came up, and the grace
+// is there for it.
+func TestUpWaitsOutTheGraceForAHelperStillOnItsWay(t *testing.T) {
+	shortGrace(t)
+	upGrace = 2 * time.Second
+	pid, r := up(t, func(tb testing.TB, ready string) <-chan struct{} {
+		// The helper has run but is not up yet, and the run that started
+		// it is already over.
+		if err := os.WriteFile(ready+ranSuffix, nil, 0o600); err != nil {
+			tb.Fatal(err)
+		}
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			_ = os.WriteFile(ready, []byte("4242"), 0o600)
+		}()
+		ended := make(chan struct{})
+		close(ended)
+		return ended
+	})
+	if r.fatal != "" || pid != 4242 {
+		t.Fatalf("a helper that comes up within the grace is up: pid %d, %s", pid, r.fatal)
+	}
+}
+
 // Fakes that never run, start after start, fail the test after startTries.
 func TestUpGivesUpOnAFakeThatNeverRuns(t *testing.T) {
 	shortGrace(t)
@@ -66,7 +93,7 @@ func TestUpGivesUpOnAFakeThatNeverRuns(t *testing.T) {
 		_, ended := startFake(tb, Spec{Ready: ready, Sleep: "30s", KeepStdin: true, KilledRuns: killed})
 		return ended
 	})
-	if starts != startTries || !strings.Contains(r.fatal, "killed before it ran a line") {
+	if starts != startTries || !strings.Contains(r.fatal, "never ran a line") {
 		t.Fatalf("%d starts, %q", starts, r.fatal)
 	}
 }
