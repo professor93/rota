@@ -18,7 +18,7 @@ func TestScratchFilesGoWhereTheCallerSays(t *testing.T) {
 	if r, err := filepath.EvalSymlinks(dir); err == nil {
 		dir = r // the check resolves symlinks, so compare against the resolved dir
 	}
-	argv, err := specArgv(Spec{Prompt: "p", ScratchDir: dir}, "grok", nil)
+	argv, err := specArgv(t, Spec{Prompt: "p", ScratchDir: dir}, "grok", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -38,7 +38,7 @@ func TestScratchFilesGoWhereTheCallerSays(t *testing.T) {
 // flag used to be emitted always — silently disabling every settings source
 // for every caller, with no way to say "leave the CLI alone".
 func TestSettingSourcesFollowTheCaller(t *testing.T) {
-	argv, err := specArgv(Spec{Prompt: "p"}, "claude", nil)
+	argv, err := specArgv(t, Spec{Prompt: "p"}, "claude", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,14 +47,14 @@ func TestSettingSourcesFollowTheCaller(t *testing.T) {
 			t.Fatalf("an unset field must not disable the CLI's own sources: %v", argv)
 		}
 	}
-	argv, err = specArgv(Spec{Prompt: "p", SettingSources: []string{}}, "claude", nil)
+	argv, err = specArgv(t, Spec{Prompt: "p", SettingSources: []string{}}, "claude", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !hasPair(argv, "--setting-sources", "") {
 		t.Fatalf("an explicit empty list means none: %v", argv)
 	}
-	argv, err = specArgv(Spec{Prompt: "p", SettingSources: []string{"user"}}, "claude", nil)
+	argv, err = specArgv(t, Spec{Prompt: "p", SettingSources: []string{"user"}}, "claude", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
