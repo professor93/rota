@@ -3,12 +3,16 @@ package store
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,18 +22,29 @@ import (
 )
 
 // The refresh journal is refresh.log in the store's directory: one line of
-// JSON for every refresh rota makes, whatever came of it, and for every change
-// a look at a claude home finds there — a rotation taken, a login made inside
-// Claude Code taken, the account's login blanked, the record of what the home
-// holds demoted — and every login rota writes into a home. It is rota's own
+// JSON for every refresh rota makes of a claude login — a line as the token
+// goes out and one for what came of it — and for every change a look at a
+// claude home finds there: a rotation taken, a login made inside Claude Code
+// taken, the account's login found blanked, the record of what the home holds
+// demoted; and for every login rota writes into a home. It is rota's own
 // record, written nowhere near a home, and nothing a CLI sees changes with it.
 //
 // A token is never written, only its fingerprint: the same short hash the
-// account's Staged keeps, so a line can be held against the store. A line that
-// cannot be written is lost, and the refresh it was about goes on as if it had
-// been: the journal is evidence, never a step. It is moved aside to
-// refresh.log.1 at one MiB, replacing the one there, as the watcher's log is.
-// A store kept anywhere but in files keeps no journal.
+// account's Staged keeps, so a line can be held against the store. What came
+// of a refresh is a code — the provider's OAuth error code, an HTTP status, or
+// one of a few fixed words — and never a message, which could carry what a
+// reply held. A line that cannot be written is lost, and the refresh it was
+// about goes on as if it had been: the journal is evidence, never a step.
+//
+// At one MiB it is moved aside to refresh.log.1, replacing the one there. Any
+// number of rota processes write it at once, so the move is made under a lock
+// of its own, by whichever takes it first, and only of a journal that is still
+// full once the lock is held: a second process would otherwise move the new,
+// nearly empty journal over the full one just moved aside. A process that finds
+// the lock taken writes its line where it is, and a later line moves it. The
+// journal is always a regular file, mode 0600: anything else at its path — a
+// link, a pipe — is not written at all. A store kept anywhere but in files
+// keeps no journal.
 
 const (
 	journalName = "refresh.log"
@@ -38,6 +53,10 @@ const (
 	// profile instead (keepRefusal), until a later rotation shows the login
 	// lived through it.
 	lastRefusalKey = "last_refusal"
+	// pendingRefusalKey is such a refusal while the home's login waits to be
+	// confirmed: the account is dead and in the hold, and the look that
+	// confirms that login makes it the account's last_refusal.
+	pendingRefusalKey = "pending_refusal"
 	// refreshUntilKey is where a claude account keeps its login's
 	// refreshTokenExpiresAt: what tells one login from the next.
 	refreshUntilKey = "refresh_token_expires_at"
@@ -46,12 +65,35 @@ const (
 // journalCap is how large the journal grows before it is moved aside.
 var journalCap int64 = 1 << 20
 
+// journalTail is how much of the journal's end is read to tell whether a
+// blanked home was already journalled as it stands.
+const journalTail = 64 << 10
+
 // journalMu keeps this process's lines whole and its rotation single.
 var journalMu sync.Mutex
 
 // heldLocks are the homes whose refresh lock this process holds right now, by
 // the lock's path, so a line can say whether rota held it.
 var heldLocks sync.Map
+
+// lookKey carries who is looking through Refresh: see Looking.
+type lookKey struct{}
+
+// Looking is ctx carrying who is looking, for the refresh journal: a login
+// Refresh renews in its home is journalled as <who>.renew. rota names its
+// own looks — "list" for `rota list`, "choose" for the rotation choosing an
+// account, "api" for the server's ?refresh=1, "serve" for its maintenance —
+// and a caller that names none is "refresh".
+func Looking(ctx context.Context, who string) context.Context {
+	return context.WithValue(ctx, lookKey{}, who)
+}
+
+func lookOf(ctx context.Context) string {
+	if who, _ := ctx.Value(lookKey{}).(string); who != "" {
+		return who
+	}
+	return "refresh"
+}
 
 // journalEntry is one line. Its fields are what the line says and nothing
 // more; the unexported ones are what writing it needs.
@@ -72,13 +114,14 @@ type journalEntry struct {
 	Outcome      string       `json:"outcome"`
 	ExpBefore    string       `json:"exp_before,omitempty"`
 	ExpAfter     string       `json:"exp_after,omitempty"`
+	PresentedAt  string       `json:"presented_at,omitempty"`
 
 	s *Store
 	a *rota.Account
-	// presented is whether the refresh about to be made can reach the
-	// provider at all: a token due, a refresh token to present, a provider
-	// that refreshes.
-	presented bool
+	// skip says why the refresh about to be made cannot reach the provider —
+	// not due, no refresh token to present, a provider that cannot refresh —
+	// and is "" when it can.
+	skip string
 	// accepted is whether the provider refused the token presented and the
 	// home's login was taken by profile after it (keepRefusal).
 	accepted bool
@@ -120,13 +163,22 @@ func journalTime(ms int64) string {
 // journalStart is the first half of a line about an account: the account as
 // it is before the step.
 func (s *Store) journalStart(path string, a *rota.Account) *journalEntry {
-	p, err := rota.Lookup(a.Provider)
-	_, refreshes := p.(rota.Refresher)
-	return &journalEntry{
+	e := &journalEntry{
 		Account: a.ID, Provider: a.Provider, Path: path,
 		Before: fingerprintOf(a.Token.Refresh), StagedBefore: a.Staged, ExpBefore: journalTime(a.Token.ExpiresAt),
-		s: s, a: a, presented: err == nil && refreshes && a.Token.Refresh != "" && a.Expired(),
+		s: s, a: a,
 	}
+	p, err := rota.Lookup(a.Provider)
+	_, refreshes := p.(rota.Refresher)
+	switch {
+	case err != nil || !refreshes:
+		e.skip = "cannot-refresh"
+	case a.Token.Refresh == "":
+		e.skip = "no-refresh-token"
+	case !a.Expired():
+		e.skip = "not-due"
+	}
+	return e
 }
 
 // journalStart is the same for a claude home, with what the last read of it
@@ -159,6 +211,21 @@ func (h *claudeHome) seenHome() *journalHome {
 	return &journalHome{FP: fingerprintOf(l.Refresh), Source: source}
 }
 
+// presenting writes the line that goes out with the token, just before the
+// request, when the refresh is going to reach the provider at all, so a
+// process that dies before the answer leaves word of what it presented. The
+// line that says what came of it follows.
+func (e *journalEntry) presenting() *journalEntry {
+	if e.skip != "" {
+		return e
+	}
+	e.PresentedAt = journalTime(rota.NowMS())
+	out := *e
+	out.Outcome, out.After, out.StagedAfter, out.ExpAfter = "presenting", e.Before, e.StagedBefore, e.ExpBefore
+	e.s.journal(&out)
+	return e
+}
+
 // finish is the second half: the account as the step left it, and what came
 // of it. A rotation of rota's own shows the login lived through any refusal
 // kept before it, which is forgotten. The line is written last of all.
@@ -168,40 +235,122 @@ func (e *journalEntry) finish(outcome string) {
 		outcome = "accepted-after-refusal"
 	}
 	if outcome == "rotated" {
-		delete(a.Extra, lastRefusalKey)
+		forgetRefusals(a)
 	}
 	e.Outcome = outcome
 	e.After, e.StagedAfter, e.ExpAfter = fingerprintOf(a.Token.Refresh), a.Staged, journalTime(a.Token.ExpiresAt)
 	e.s.journal(e)
 }
 
-// journal writes one line, and never fails anything: a line that cannot be
-// written is lost.
-func (s *Store) journal(e *journalEntry) {
+// journalPath is where this store keeps its journal, "" when it keeps none.
+func (s *Store) journalPath() string {
 	fb, ok := s.backend.(*FileBackend)
 	if !ok {
+		return ""
+	}
+	return filepath.Join(fb.Dir, journalName)
+}
+
+// journal writes one line, its ts the moment it is written, and never fails
+// anything: a line that cannot be written is lost.
+func (s *Store) journal(e *journalEntry) {
+	path := s.journalPath()
+	if path == "" {
 		return
 	}
 	e.TS, e.PID, e.Version = journalTime(rota.NowMS()), os.Getpid(), rota.Version
-	line, err := json.Marshal(e)
+	line, err := rota.Encode(e)
 	if err != nil {
 		return
 	}
-	appendJournal(filepath.Join(fb.Dir, journalName), append(line, '\n'))
+	appendJournal(path, append(line, '\n'))
 }
 
+// appendJournal appends one line to the journal at path: a regular file, or
+// none yet. It is moved aside first when it is full.
 func appendJournal(path string, line []byte) {
 	journalMu.Lock()
 	defer journalMu.Unlock()
-	if fi, err := os.Stat(path); err == nil && fi.Size() >= journalCap {
-		_ = os.Rename(path, path+".1")
+	fi, err := os.Lstat(path)
+	switch {
+	case err == nil && !fi.Mode().IsRegular():
+		return // a link, a pipe, a directory: nothing of the journal's
+	case err == nil && fi.Size() >= journalCap:
+		rotateJournal(path)
+	case err != nil && !errors.Is(err, fs.ErrNotExist):
+		return
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|journalOpenFlags, 0o600)
 	if err != nil {
 		return
 	}
 	defer f.Close()
+	fi, err = f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		_ = f.Chmod(0o600) // a journal restored, or made, wider than rota makes it
+	}
 	_, _ = f.Write(line)
+}
+
+// rotateJournal moves a full journal aside, under refresh.log.lock: only the
+// process that takes the lock moves it, and only while the journal at the path
+// is still full, so no second process moves a journal begun a moment ago over
+// the one moved aside. A lock somebody holds is left to them.
+func rotateJournal(path string) {
+	l, ok, err := tryLockFile(path + ".lock")
+	if err != nil || !ok {
+		return
+	}
+	defer l.Close()
+	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() && fi.Size() >= journalCap {
+		_ = os.Rename(path, path+".1")
+	}
+}
+
+// journalState is what a line says of the account and its home, beside when
+// and by whom: two lines with the same state say the same thing.
+func journalState(e *journalEntry) string {
+	var fp, source string
+	if e.Home != nil {
+		fp, source = e.Home.FP, e.Home.Source
+	}
+	return strings.Join([]string{e.Path, e.Outcome, e.Before, e.After, e.StagedAfter, fp, source}, "\x00")
+}
+
+// alreadySaid reports whether the last adopt line of e's account in the end of
+// the journal says what e says. Only a blanked home is asked about: it is seen
+// at every look until it changes, and once is enough.
+func (s *Store) alreadySaid(e *journalEntry) bool {
+	path := s.journalPath()
+	if fi, err := os.Lstat(path); path == "" || err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY|journalOpenFlags, 0)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	from := max(fi.Size()-journalTail, 0)
+	tail := make([]byte, fi.Size()-from)
+	if _, err := f.ReadAt(tail, from); err != nil && err != io.EOF {
+		return false
+	}
+	lines := bytes.Split(tail, []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		var last journalEntry
+		if rota.UnmarshalLenient(lines[i], &last) != nil || last.Account != e.Account || last.Path != "adopt" {
+			continue
+		}
+		return journalState(&last) == journalState(e)
+	}
+	return false
 }
 
 /* ---------------------------------------------------------- refreshes --- */
@@ -221,88 +370,76 @@ func (h *claudeHome) refreshPath(rescue bool) string {
 	return "launch.renew"
 }
 
-// refreshOutcome is what the provider made of a refresh, read straight after
-// it answered and before anything else changes the account.
+// refreshOutcome is what came of a refresh, read straight after the provider
+// answered and before anything else changes the account, as a code.
 func refreshOutcome(e *journalEntry, changed bool, err error) string {
 	a := e.a
 	switch {
 	case err == nil && changed && !a.Dead:
 		return "rotated"
-	case !e.presented && (changed || err != nil):
-		return "skipped:" + journalWords(nonEmpty(a.DeadReason, errText(err)))
-	case !e.presented:
-		return "skipped:not due"
+	case e.skip != "":
+		return "skipped:" + e.skip
 	case a.Dead:
 		return "refused:" + oauthCode(a.DeadReason)
 	case err != nil:
 		return "transient:" + transientWhy(err)
 	}
-	return "skipped:nothing changed"
+	return "skipped:unchanged"
 }
 
 // oauthCode is the protocol's own word for a refusal, which a refusal's reason
-// starts with; any other reason is given in a few words.
+// starts with, or "unknown".
 func oauthCode(reason string) string {
 	code, _, _ := strings.Cut(reason, ":")
-	code = strings.TrimSpace(code)
-	if code != "" && strings.Trim(code, "abcdefghijklmnopqrstuvwxyz_") == "" {
-		return code
-	}
-	return journalWords(reason)
+	return codeOr(strings.TrimSpace(code), "unknown")
 }
 
-// transientWhy says in a word or two why a refresh did not get through: the
-// status the provider answered with, the OAuth code it gave, or what stood in
-// the way.
-func transientWhy(err error) string {
-	var he *rota.HTTPError
-	var oe *rota.OAuthError
-	var ne net.Error
-	switch {
-	case errors.As(err, &he):
-		return strconv.Itoa(he.Status)
-	case errors.As(err, &oe) && oe.Code != "":
-		return oe.Code
-	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
-		return "timeout"
-	case errors.Is(err, context.Canceled):
-		return "canceled"
-	}
-	for {
-		next := errors.Unwrap(err)
-		if next == nil {
-			return journalWords(err.Error())
-		}
-		err = next
-	}
-}
-
-func errText(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
-}
-
-// journalWords keeps a reason to one short line.
-func journalWords(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	if r := []rune(s); len(r) > 80 {
-		s = string(r[:80])
+// codeOr is s when it is a protocol code — a short run of lower-case letters,
+// digits, '_', '.' or '-' — and otherwise.
+func codeOr(s, otherwise string) string {
+	if s == "" || len(s) > 40 || strings.Trim(s, "abcdefghijklmnopqrstuvwxyz0123456789_.-") != "" {
+		return otherwise
 	}
 	return s
 }
 
-// refreshLogged is rota.Refresh with a line in the journal, for every refresh
-// of a token rota alone holds: path is the look's own renew for a provider
-// that keeps no shared home, and token.env for a claude account on a token in
-// its environment. A refresh that had nothing to do writes nothing.
-func (s *Store) refreshLogged(ctx context.Context, look string, a *rota.Account) (bool, error) {
-	path := look + ".renew"
-	if rota.SharedHome(a.Provider) {
-		path = "token.env"
+// transientWhy says why a refresh did not get through, in a code: the status
+// the provider answered with, the OAuth error code it gave, or a fixed word
+// for what stood in the way. Never an error's text, which may quote a reply.
+func transientWhy(err error) string {
+	var (
+		he  *rota.HTTPError
+		oe  *rota.OAuthError
+		ne  net.Error
+		se  *jsonv2.SemanticError
+		sye *jsontext.SyntacticError
+	)
+	switch {
+	case errors.As(err, &he):
+		return strconv.Itoa(he.Status)
+	case errors.As(err, &oe):
+		return codeOr(oe.Code, "oauth")
+	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
+		return "timeout"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.As(err, &se), errors.As(err, &sye), errors.Is(err, io.ErrUnexpectedEOF):
+		return "decode"
+	case errors.As(err, &ne):
+		return "network"
 	}
-	e := s.journalStart(path, a)
+	return "error"
+}
+
+// refreshLogged is rota.Refresh with its lines in the journal for a claude
+// login rota alone holds, on a token in its environment (token.env). Any other
+// provider's refresh is not journalled, and a refresh that had nothing to do
+// writes nothing.
+func (s *Store) refreshLogged(ctx context.Context, a *rota.Account) (bool, error) {
+	if !rota.SharedHome(a.Provider) {
+		return rota.Refresh(ctx, a)
+	}
+	e := s.journalStart("token.env", a).presenting()
 	changed, err := rota.Refresh(ctx, a)
 	if changed || err != nil {
 		e.finish(refreshOutcome(e, changed, err))
@@ -328,9 +465,13 @@ func (h *claudeHome) mark() journalMark {
 // journalAdopt writes a line for what adopt changed, deferred at its start
 // with the account as it was: a login made inside Claude Code taken, a
 // rotation taken, the home found blanked, or the record of what the home holds
-// demoted. A rotation of a living login shows it lived through any refusal
-// kept before it, which is forgotten; a death adopt found gets what rota knows
-// of one (blameRefusal).
+// demoted. A blanked home is written once for as long as it stays as it is.
+//
+// A rotation of a living login shows it lived through any refusal kept before
+// it, which is forgotten — unless it is the very login a refusal left waiting
+// to be confirmed (pendRefusal), which makes that refusal the account's
+// last_refusal now, said as if the refresh had taken it at once. A death adopt
+// found gets what rota knows of one (blameRefusal).
 func (h *claudeHome) journalAdopt(was journalMark) {
 	a := h.a
 	h.blameRefusal()
@@ -350,9 +491,20 @@ func (h *claudeHome) journalAdopt(was journalMark) {
 	}
 	if !a.Dead && now.refresh != was.refresh {
 		delete(a.Extra, lastRefusalKey)
+		if p, ok := readRefusal(a, pendingRefusalKey); ok {
+			delete(a.Extra, pendingRefusalKey)
+			if was.dead && p.Home != "" && p.Home == fingerprintOf(now.refresh) {
+				h.keptRefusal(refusal{At: p.At, Path: p.Path, FP: p.FP})
+				outcome = "accepted-after-refusal"
+			}
+		}
 	}
 	e := h.journalStart("adopt")
 	e.Before, e.StagedBefore, e.ExpBefore = fingerprintOf(was.refresh), was.staged, journalTime(was.expires)
+	e.Outcome, e.After, e.StagedAfter = outcome, fingerprintOf(now.refresh), a.Staged
+	if outcome == "blanked" && h.s.alreadySaid(e) {
+		return
+	}
 	e.finish(outcome)
 }
 
@@ -377,6 +529,15 @@ type refusal struct {
 	FP   string `json:"fp"`
 }
 
+// pendingRefusal is a refusal whose home login is waiting to be confirmed,
+// with that login's fingerprint.
+type pendingRefusal struct {
+	At   int64  `json:"at"`
+	Path string `json:"path"`
+	FP   string `json:"fp"`
+	Home string `json:"home"`
+}
+
 // keepRefusal is what refresh does when the provider refused the token rota
 // presented and the home's login was then taken by profile. The account is
 // alive on that login, but the refusal is not forgotten: under reuse detection
@@ -385,22 +546,49 @@ type refusal struct {
 // said, kept on the account until a later rotation shows the login lived, and
 // journalled as accepted after a refusal.
 func (h *claudeHome) keepRefusal(e *journalEntry) {
+	e.accepted = true
+	h.keptRefusal(refusal{At: rota.NowMS(), Path: e.Path, FP: e.Before})
+}
+
+func (h *claudeHome) keptRefusal(r refusal) {
 	a := h.a
-	raw, _ := json.Marshal(refusal{At: rota.NowMS(), Path: e.Path, FP: e.Before})
+	raw, _ := rota.Encode(r)
 	if a.Extra == nil {
 		a.Extra = map[string]string{}
 	}
 	a.Extra[lastRefusalKey] = string(raw)
-	e.accepted = true
 	h.warn(fmt.Sprintf("%s: rota presented a token the provider had already replaced; the home's login may have been revoked with it", a))
 }
 
-// lastRefusal reads what keepRefusal kept.
-func lastRefusal(a *rota.Account) (refusal, bool) {
-	var r refusal
-	raw := a.Extra[lastRefusalKey]
-	if raw == "" || json.Unmarshal([]byte(raw), &r) != nil || r.At <= 0 {
-		return refusal{}, false
+// pendRefusal is what refresh does when the provider refused the token rota
+// presented and the home's login could not be confirmed yet: the refusal is
+// the same event as one the home's login covered, only settled later, so it
+// waits on the account for the look that confirms that login.
+func (h *claudeHome) pendRefusal(e *journalEntry) {
+	a := h.a
+	var home string
+	if seen := h.seenHome(); seen != nil {
+		home = seen.FP
+	}
+	raw, _ := rota.Encode(pendingRefusal{At: rota.NowMS(), Path: e.Path, FP: e.Before, Home: home})
+	if a.Extra == nil {
+		a.Extra = map[string]string{}
+	}
+	a.Extra[pendingRefusalKey] = string(raw)
+}
+
+// forgetRefusals forgets every refusal the account kept.
+func forgetRefusals(a *rota.Account) {
+	delete(a.Extra, lastRefusalKey)
+	delete(a.Extra, pendingRefusalKey)
+}
+
+// readRefusal reads what keepRefusal or pendRefusal kept under key.
+func readRefusal(a *rota.Account, key string) (pendingRefusal, bool) {
+	var r pendingRefusal
+	raw := a.Extra[key]
+	if raw == "" || rota.UnmarshalLenient([]byte(raw), &r) != nil || r.At <= 0 {
+		return pendingRefusal{}, false
 	}
 	return r, true
 }
@@ -410,7 +598,7 @@ func lastRefusal(a *rota.Account) (refusal, bool) {
 // it had and no rotation since has shown the login lived through that.
 func (h *claudeHome) blameRefusal() {
 	a := h.a
-	r, ok := lastRefusal(a)
+	r, ok := readRefusal(a, lastRefusalKey)
 	if !ok || !a.Dead || !strings.HasPrefix(a.DeadReason, "Claude Code cleared the login") ||
 		strings.Contains(a.DeadReason, "rota had presented a replaced token") {
 		return

@@ -11,8 +11,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -131,7 +136,7 @@ func TestARefusalTheHomesLoginCoveredIsKeptSaidAndJournalled(t *testing.T) {
 	looks := []struct {
 		look lineageLook
 		path string
-	}{{lineageLooks()[0], "list.renew"}, {lineageLooks()[2], "serve.renew"}, {lineageLooks()[3], "launch.renew"}}
+	}{{lineageLooks()[0], "refresh.renew"}, {lineageLooks()[2], "serve.renew"}, {lineageLooks()[3], "launch.renew"}}
 	for _, m := range lineageModes() {
 		for _, l := range looks {
 			t.Run(m.name+"/"+l.look.what, func(t *testing.T) {
@@ -154,7 +159,11 @@ func TestARefusalTheHomesLoginCoveredIsKeptSaidAndJournalled(t *testing.T) {
 				if msg := saidOf(words, replacedWarning); !strings.HasPrefix(msg, w.a.String()+": ") {
 					t.Fatalf("said, naming the account: %q", *words)
 				}
+				p := journalSays(t, w.s, l.path, "presenting")
 				e := journalSays(t, w.s, l.path, "accepted-after-refusal")
+				if p["before"] != fingerprintOf("R0") || p["presented_at"] == nil || p["presented_at"] != e["presented_at"] {
+					t.Fatalf("the line that went out with the token: %v, then %v", p, e)
+				}
 				if e["before"] != fingerprintOf("R0") || e["after"] != fingerprintOf("R1") || e["account"] != float64(w.a.ID) ||
 					e["provider"] != "claude" {
 					t.Fatalf("the refresh's line: %v", e)
@@ -266,7 +275,7 @@ func TestALaterRotationForgetsAKeptRefusal(t *testing.T) {
 		if w.a.Token.Refresh != "R2" || w.a.Extra[lastRefusalKey] != "" {
 			t.Fatalf("rotated, and the refusal forgotten: %q %q", w.a.Token.Refresh, w.a.Extra[lastRefusalKey])
 		}
-		journalSays(t, w.s, "list.renew", "rotated")
+		journalSays(t, w.s, "refresh.renew", "rotated")
 		if bad := w.p.rotaSpent(); len(bad) != 1 {
 			t.Fatalf("rota presented one spent token, the one the second holder spent: %+v", bad)
 		}
@@ -334,7 +343,7 @@ func TestEveryRefreshAndEveryChangeAtAHomeLeavesALineWithNoToken(t *testing.T) {
 		{"a listing renews a quiet home", func(t *testing.T, s *Store) {
 			a := journalClaude(s)
 			expire(a)
-			if errs := s.Refresh(ctx, true, a); len(errs) != 0 {
+			if errs := s.Refresh(Looking(ctx, "list"), true, a); len(errs) != 0 {
 				t.Fatal(errs)
 			}
 			seed := journalSays(t, s, "seed", "written")
@@ -347,11 +356,16 @@ func TestEveryRefreshAndEveryChangeAtAHomeLeavesALineWithNoToken(t *testing.T) {
 				e["home"].(map[string]any)["fp"] != fingerprintOf(jRefresh) || e["exp_after"] == e["exp_before"] {
 				t.Fatalf("the refresh, of the login the home held: %v", e)
 			}
-			if lines := journalOf(t, s); len(lines) != 3 || lines[2]["path"] != "seed" ||
-				lines[2]["home"].(map[string]any)["fp"] != fingerprintOf(jRefresh) {
-				t.Fatalf("written before, refreshed, written after: %v", lines)
+			lines := journalOf(t, s)
+			if len(lines) != 4 || lines[1]["outcome"] != "presenting" || lines[2]["outcome"] != "rotated" ||
+				lines[3]["path"] != "seed" || lines[3]["home"].(map[string]any)["fp"] != fingerprintOf(jRefresh) {
+				t.Fatalf("written before, presented, refreshed, written after: %v", lines)
 			}
-		}, []want{{"seed", "written"}, {"list.renew", "rotated"}}},
+			if lines[1]["after"] != lines[1]["before"] || lines[1]["presented_at"] != lines[2]["presented_at"] ||
+				lines[0]["presented_at"] != nil {
+				t.Fatalf("the presenting line says what went out, and when: %v", lines)
+			}
+		}, []want{{"seed", "written"}, {"list.renew", "presenting"}, {"list.renew", "rotated"}}},
 		{"maintenance renews a quiet home", func(t *testing.T, s *Store) {
 			a := journalClaude(s)
 			expire(a)
@@ -407,28 +421,19 @@ func TestEveryRefreshAndEveryChangeAtAHomeLeavesALineWithNoToken(t *testing.T) {
 			}
 			expire(a)
 			hermetic(t, s, a)
-			if n := len(journalOf(t, s)); n != 4 {
-				t.Fatalf("four refreshes, four lines: %d", n)
+			if n := len(journalOf(t, s)); n != 8 {
+				t.Fatalf("four refreshes, two lines each: %d", n)
 			}
-		}, []want{{"token.env", "rotated"}}},
-		{"another provider", func(t *testing.T, s *Store) {
-			rota.Register(fakeRefresher{&fakeProvider{name: "t-journal",
-				refreshTok: &rota.Token{Access: jNewAccess, Refresh: jNewRefr, ExpiresAt: rota.NowMS() + 3_600_000}}})
-			a := s.add("t-journal")
-			a.Token = rota.Token{Access: jAccess, Refresh: jRefresh, ExpiresAt: rota.NowMS() - 1}
-			if errs := s.Maintain(ctx); len(errs) != 0 {
-				t.Fatal(errs)
+		}, []want{{"token.env", "presenting"}, {"token.env", "rotated"}}},
+		{"a login in its home with no refresh token", func(t *testing.T, s *Store) {
+			a := journalClaude(s)
+			a.Token.Refresh = ""
+			expire(a)
+			s.Maintain(ctx)
+			if !a.Dead || journalLine(journalOf(t, s), "token.env", "presenting") != nil {
+				t.Fatal("dead, and nothing presented")
 			}
-			a.Token.ExpiresAt = rota.NowMS() - 1
-			_, release, err := s.prepare(ctx, a, true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			release()
-			if e := journalSays(t, s, "launch.renew", "rotated"); e["provider"] != "t-journal" || e["home"] != nil {
-				t.Fatalf("%v", e)
-			}
-		}, []want{{"serve.renew", "rotated"}, {"launch.renew", "rotated"}}},
+		}, []want{{"token.env", "skipped:no-refresh-token"}}},
 		{"Claude Code rotated the login, and then an older one is found", func(t *testing.T, s *Store) {
 			a := journalClaude(s)
 			if _, err := launchEnv(t, s, a); err != nil {
@@ -464,7 +469,7 @@ func TestEveryRefreshAndEveryChangeAtAHomeLeavesALineWithNoToken(t *testing.T) {
 			if !a.Dead {
 				t.Fatal("refused, and dead")
 			}
-		}, []want{{"list.renew", "refused:invalid_grant"}}},
+		}, []want{{"refresh.renew", "refused:invalid_grant"}}},
 		{"a refresh that does not get through", func(t *testing.T, s *Store) {
 			f.set(func(f *anthropic) { f.refresh = func() (int, any) { return 503, nil } })
 			defer f.set(func(f *anthropic) { f.refresh = refreshesTo(jNewAccess, jNewRefr) })
@@ -474,7 +479,18 @@ func TestEveryRefreshAndEveryChangeAtAHomeLeavesALineWithNoToken(t *testing.T) {
 			if a.Dead {
 				t.Fatal("not dead")
 			}
-		}, []want{{"list.renew", "transient:503"}}},
+		}, []want{{"refresh.renew", "transient:503"}}},
+		{"a reply that cannot be read", func(t *testing.T, s *Store) {
+			f.set(func(f *anthropic) {
+				f.refresh = func() (int, any) {
+					return 200, map[string]any{"access_token": map[string]string{"x": "reply-SECRET"}, "refresh_token": 7}
+				}
+			})
+			defer f.set(func(f *anthropic) { f.refresh = refreshesTo(jNewAccess, jNewRefr) })
+			a := journalClaude(s)
+			expire(a)
+			s.Refresh(ctx, true, a)
+		}, []want{{"refresh.renew", "transient:decode"}}},
 		{"a token refused earlier in this process", func(t *testing.T, s *Store) {
 			a := journalClaude(s)
 			expire(a)
@@ -485,7 +501,7 @@ func TestEveryRefreshAndEveryChangeAtAHomeLeavesALineWithNoToken(t *testing.T) {
 			if _, err := s.claudeHome(a, false).refresh(ctx); err == nil || f.refreshes.Load() != before {
 				t.Fatalf("not presented again: %v", err)
 			}
-		}, []want{{"launch.renew", "skipped:refused earlier in this process"}}},
+		}, []want{{"launch.renew", "skipped:refused-before"}}},
 	} {
 		t.Run(c.what, func(t *testing.T) {
 			s := openTemp(t)
@@ -581,5 +597,313 @@ func TestTheJournalsFingerprintIsStageds(t *testing.T) {
 	a.StagedWritten()
 	if got := fingerprintOf(jRefresh); got != a.Staged || len(got) != 16 || fingerprintOf("") != "" {
 		t.Fatalf("%q %q", got, a.Staged)
+	}
+}
+
+// replacedMeanwhileUnconfirmed is replacedMeanwhile with the provider's profile
+// unable to vouch for the home's login at first: rota's refusal leaves the
+// account dead and in the hold, waiting to confirm it. confirmable lets the
+// profile answer again.
+func replacedMeanwhileUnconfirmed(w *lineageWorld) (confirmable func()) {
+	var access string
+	done := false
+	w.p.onRota = func(rt string) {
+		if done {
+			return
+		}
+		done = true
+		_, body := w.p.present("a second holder", rt)
+		m := body.(map[string]any)
+		access = m["access_token"].(string)
+		w.p.mu.Lock()
+		delete(w.p.issued, access)
+		w.p.mu.Unlock()
+		w.cc.write(storeLogin(access, m["refresh_token"].(string), rota.Now().Add(8*time.Hour).UnixMilli(), lineageUntil))
+	}
+	return func() {
+		w.p.mu.Lock()
+		defer w.p.mu.Unlock()
+		w.p.issued[access] = true
+	}
+}
+
+// A refusal whose home login cannot be confirmed at once is the same event,
+// settled later: the look that confirms the login keeps the refusal, says it,
+// and journals the login as accepted after it.
+func TestARefusalTheHomesLoginCoversOneLookLaterIsKeptToo(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := newLineageWorld(t, m.keychain)
+			words := said(w.s)
+			confirmable := replacedMeanwhileUnconfirmed(w)
+			w.clock.pass(9 * time.Hour)
+			lineageLooks()[0].do(t, w)
+			refusedAt := w.clock.at
+			if !w.a.Dead || w.a.Extra[pendingRefusalKey] == "" || w.a.Extra[lastRefusalKey] != "" ||
+				saidOf(words, replacedWarning) != "" {
+				t.Fatalf("dead in the hold, the refusal waiting: %v %q %q", w.a.Dead, w.a.WhyDead(), w.a.Extra)
+			}
+			journalSays(t, w.s, "refresh.renew", "refused:invalid_grant")
+			confirmable()
+			w.clock.pass(time.Minute)
+			lineageLooks()[1].do(t, w)
+			w.p.dump(t)
+			if w.a.Dead || w.a.Token.Refresh != "R1" || w.a.Extra[pendingRefusalKey] != "" {
+				t.Fatalf("alive on the confirmed login: %v %q %q", w.a.Dead, w.a.Token.Refresh, w.a.Extra)
+			}
+			want := fmt.Sprintf(`{"at":%d,"path":"refresh.renew","fp":"%s"}`, refusedAt.UnixMilli(), fingerprintOf("R0"))
+			if got := w.a.Extra[lastRefusalKey]; got != want {
+				t.Fatalf("last_refusal:\n got %s\nwant %s", got, want)
+			}
+			if msg := saidOf(words, replacedWarning); !strings.HasPrefix(msg, w.a.String()+": ") {
+				t.Fatalf("said, naming the account: %q", *words)
+			}
+			if e := journalSays(t, w.s, "adopt", "accepted-after-refusal"); e["after"] != fingerprintOf("R1") {
+				t.Fatalf("%v", e)
+			}
+			journalClean(t, w.s, "R0", "R1", "A0", "A1")
+		})
+	}
+}
+
+// A blanked home is journalled once for as long as it stays as it is, however
+// many looks find it; each refresh presented for it still leaves its lines, and
+// a home blanked again after it changed is journalled again.
+func TestABlankedHomeIsJournalledOnceWhileItStaysAsItIs(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	ctx := context.Background()
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) { f.refresh = func() (int, any) { return 503, nil } })
+	s := openTemp(t)
+	a := journalClaude(s)
+	home := cleared(t, s, a)
+	count := func(path, outcome string) int {
+		n := 0
+		for _, m := range journalOf(t, s) {
+			if m["path"] == path && m["outcome"] == outcome {
+				n++
+			}
+		}
+		return n
+	}
+	for range 3 {
+		s.Rescue(ctx)
+	}
+	if b, p, tr := count("adopt", "blanked"), count("rescue.blank", "presenting"), count("rescue.blank", "transient:503"); b != 1 || p != 3 || tr != 3 {
+		t.Fatalf("blanked once, every refresh twice: %d %d %d", b, p, tr)
+	}
+	f.set(func(f *anthropic) { f.refresh = refreshesTo(jNewAccess, jNewRefr) })
+	if errs := s.Rescue(ctx); len(errs) != 0 || a.Token.Refresh != jNewRefr {
+		t.Fatalf("rescued: %v %q", errs, a.Token.Refresh)
+	}
+	f.set(func(f *anthropic) { f.refresh = func() (int, any) { return 503, nil } })
+	writeFile(t, filepath.Join(home, ".credentials.json"), clearedLogin)
+	s.Rescue(ctx)
+	s.Rescue(ctx)
+	if b := count("adopt", "blanked"); b != 2 {
+		t.Fatalf("blanked again after it changed: %d", b)
+	}
+	journalClean(t, s, jTokens...)
+}
+
+// The line that goes out with the token is on disk before the provider is
+// asked, so a process that dies waiting for the answer leaves word of it.
+func TestThePresentingLineIsWrittenBeforeTheRequest(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	f := fakeAnthropic(t)
+	s := openTemp(t)
+	var last map[string]any
+	f.set(func(f *anthropic) {
+		f.refresh = func() (int, any) {
+			raw, _ := os.ReadFile(filepath.Join(storeDir(s), journalName))
+			lines := bytes.Split(bytes.TrimSpace(raw), []byte("\n"))
+			_ = json.Unmarshal(lines[len(lines)-1], &last)
+			return refreshesTo(jNewAccess, jNewRefr)()
+		}
+	})
+	a := journalClaude(s)
+	expire(a)
+	if _, err := launchEnv(t, s, a); err != nil {
+		t.Fatal(err)
+	}
+	if last["path"] != "launch.renew" || last["outcome"] != "presenting" || last["before"] != fingerprintOf(jRefresh) {
+		t.Fatalf("the last line as the provider was asked: %v", last)
+	}
+}
+
+// Only a claude login's refreshes are journalled: another provider's leaves
+// no line.
+func TestAnotherProvidersRefreshIsNotJournalled(t *testing.T) {
+	rota.Register(fakeRefresher{&fakeProvider{name: "t-journal",
+		refreshTok: &rota.Token{Access: jNewAccess, Refresh: jNewRefr, ExpiresAt: rota.NowMS() + 3_600_000}}})
+	ctx := context.Background()
+	s := openTemp(t)
+	a := s.add("t-journal")
+	a.Token = rota.Token{Access: jAccess, Refresh: jRefresh, ExpiresAt: rota.NowMS() - 1}
+	if errs := s.Maintain(ctx); len(errs) != 0 || a.Token.Refresh != jNewRefr {
+		t.Fatalf("%v %q", errs, a.Token.Refresh)
+	}
+	a.Token.ExpiresAt = rota.NowMS() - 1
+	_, release, err := s.prepare(ctx, a, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if _, err := os.Stat(filepath.Join(storeDir(s), journalName)); !os.IsNotExist(err) {
+		t.Fatalf("no journal: %v", err)
+	}
+}
+
+// A new key replaces the login a refusal was kept about, as a new login does.
+func TestANewKeyForgetsAKeptRefusal(t *testing.T) {
+	keyCheck(t, 200)
+	ctx := context.Background()
+	s := openTemp(t)
+	a, _, _, err := s.LoginKey(ctx, "claude", testKey, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Extra = map[string]string{
+		lastRefusalKey:    `{"at":1,"path":"list.renew","fp":"0123456789abcdef"}`,
+		pendingRefusalKey: `{"at":1,"path":"list.renew","fp":"0123456789abcdef","home":"fedcba9876543210"}`,
+	}
+	if again, _, _, err := s.LoginKey(ctx, "claude", testKey, ""); err != nil || again != a ||
+		a.Extra[lastRefusalKey] != "" || a.Extra[pendingRefusalKey] != "" {
+		t.Fatalf("%v %q", err, a.Extra)
+	}
+}
+
+// What came of a refresh is a code, never an error's text: whatever a reply or
+// an error says stays out of the journal.
+func TestAnOutcomeIsACodeNeverAMessage(t *testing.T) {
+	for _, c := range []struct {
+		err  error
+		want string
+	}{
+		{&rota.HTTPError{Status: 502, Body: `{"refresh_token":"body-SECRET"}`}, "502"},
+		{&rota.OAuthError{Code: "temporarily_unavailable"}, "temporarily_unavailable"},
+		{&rota.OAuthError{Code: "Code With body-SECRET in it"}, "oauth"},
+		{fmt.Errorf("refresh failed: %w", context.DeadlineExceeded), "timeout"},
+		{context.Canceled, "canceled"},
+		{&url.Error{Op: "Post", URL: "https://x", Err: &net.OpError{Op: "dial", Err: errors.New("refused body-SECRET")}}, "network"},
+		{fmt.Errorf("decoding reply: %w", io.ErrUnexpectedEOF), "decode"},
+		{errors.New("decoding reply: jsontext: invalid character near body-SECRET"), "error"},
+	} {
+		if got := transientWhy(c.err); got != c.want {
+			t.Errorf("%v: %q, want %q", c.err, got, c.want)
+		}
+	}
+	for reason, want := range map[string]string{
+		"invalid_grant: Refresh token not found or invalid": "invalid_grant",
+		"refresh_token_reused":                              "refresh_token_reused",
+		"Something body-SECRET said: x":                     "unknown",
+		"":                                                  "unknown",
+	} {
+		if got := oauthCode(reason); got != want {
+			t.Errorf("%q: %q, want %q", reason, got, want)
+		}
+	}
+}
+
+// A journal wider than rota makes it is made private again when next written;
+// a link at its path is not followed, and nothing is written through it.
+func TestTheJournalIsMadePrivateAndALinkIsNotFollowed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows keeps no Unix mode bits, and a link there takes a privilege")
+	}
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	path := filepath.Join(storeDir(s), journalName)
+	writeFile(t, path, "")
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s.journalStart("token.env", a).finish("rotated")
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 || fi.Size() == 0 {
+		t.Fatalf("written, and private again: %v %v", err, fi)
+	}
+
+	elsewhere := filepath.Join(t.TempDir(), "elsewhere")
+	writeFile(t, elsewhere, "mine\n")
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(elsewhere, path); err != nil {
+		t.Fatal(err)
+	}
+	s.journalStart("token.env", a).finish("rotated")
+	if got := readFile(elsewhere); got != "mine\n" {
+		t.Fatalf("nothing written through the link: %q", got)
+	}
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("and the link left as it is: %v %v", err, fi)
+	}
+}
+
+// TestJournalWriterHelper is not a test of its own: it is one of the rota
+// processes TestTheJournalIsMovedAsideOnceWhenProcessesRaceAtTheCap starts,
+// each writing the same journal as fast as it can.
+func TestJournalWriterHelper(t *testing.T) {
+	path := os.Getenv("ROTA_JOURNAL_WRITER")
+	if path == "" {
+		t.Skip("started by TestTheJournalIsMovedAsideOnceWhenProcessesRaceAtTheCap")
+	}
+	journalCap = 4 << 10
+	line := append(bytes.Repeat([]byte("x"), 99), '\n')
+	for range 3000 {
+		appendJournal(path, line)
+	}
+}
+
+// Rota processes writing the journal at once move a full one aside once: what
+// is moved aside is always a full journal, never one a moment old moved over
+// the one just moved aside, which would lose it.
+func TestTheJournalIsMovedAsideOnceWhenProcessesRaceAtTheCap(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Linux and macOS first: on Windows a journal another process has open is not moved at all")
+	}
+	const writers, limit = 8, 4 << 10
+	path := filepath.Join(t.TempDir(), journalName)
+	var procs []*exec.Cmd
+	for range writers {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestJournalWriterHelper$", "-test.count=1")
+		cmd.Env = append(os.Environ(), "ROTA_JOURNAL_WRITER="+path)
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		procs = append(procs, cmd)
+	}
+	done := make(chan error, 1)
+	go func() {
+		var err error
+		for _, p := range procs {
+			err = errors.Join(err, p.Wait())
+		}
+		done <- err
+	}()
+	smallest, seen := int64(-1), 0
+	for watching := true; watching; {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+			watching = false
+		default:
+		}
+		if fi, err := os.Lstat(path + ".1"); err == nil {
+			seen++
+			if smallest < 0 || fi.Size() < smallest {
+				smallest = fi.Size()
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("the journal was never moved aside")
+	}
+	if smallest < limit {
+		t.Fatalf("a journal of %d bytes was moved aside, over a full one: %d looks", smallest, seen)
 	}
 }

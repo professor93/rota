@@ -32,6 +32,7 @@ func (s *Store) Maintain(ctx context.Context) []error {
 	// Without the lock nothing may rotate, so all that is left is reading:
 	// see Refresh. A wait the provider asked for is kept as ever, and not
 	// said again on every sweep.
+	ctx = Looking(ctx, "serve")
 	if s.released {
 		return s.refresh(ctx, false, false, nil)
 	}
@@ -119,7 +120,7 @@ func (s *Store) Maintain(ctx context.Context) []error {
 				}
 				since = snapshot(a)
 			}
-			if did, err = s.refreshLogged(ctx, "serve", a); err != nil || !did || a.Dead {
+			if did, err = rota.Refresh(ctx, a); err != nil || !did || a.Dead {
 				return
 			}
 			if serr := save(); serr != nil {
@@ -164,7 +165,7 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 		if a.Dead {
 			return false, nil
 		}
-		did, err := s.refreshLogged(ctx, "serve", a)
+		did, err := s.refreshLogged(ctx, a)
 		return did, wrapAccount(a, err)
 	}
 	before := snapshot(a)
@@ -177,7 +178,7 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 		return changed, nil
 	}
 	if !rota.StoresLogin(a, h.home) && !unrefreshed(a) {
-		did, err := s.refreshLogged(ctx, "serve", a)
+		did, err := s.refreshLogged(ctx, a)
 		return changed || did, wrapAccount(a, err)
 	}
 	release, idle := s.holdIdle(a)

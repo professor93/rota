@@ -1413,12 +1413,12 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 		// Refused earlier in this process, and not on disk yet: it is not
 		// presented again.
 		a.Dead, a.DeadReason = true, why.(string)
-		h.journalStart(h.refreshPath(h.rescuing)).finish("skipped:refused earlier in this process")
+		h.journalStart(h.refreshPath(h.rescuing)).finish("skipped:refused-before")
 		return true, rota.WrapReauth(a)
 	}
 	rescue := h.rescuing
 	h.rescuing = false
-	j := h.journalStart(h.refreshPath(rescue))
+	j := h.journalStart(h.refreshPath(rescue)).presenting()
 	changed, err = rota.Refresh(ctx, a)
 	defer j.finish(refreshOutcome(j, changed, err))
 	if rescue && changed && err == nil {
@@ -1442,6 +1442,7 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 	case h.hold != "" && h.usable:
 		a.DeadReason = fmt.Sprintf("its own refresh token was refused (%s); a login made inside Claude Code in its home "+
 			"is waiting to be confirmed", refused)
+		h.pendRefusal(j)
 		return true, nil
 	}
 	return true, err
@@ -1909,7 +1910,7 @@ func (h *claudeHome) envRun(ctx context.Context) (*rota.Command, error) {
 // keep in one: refreshed as it always was — never a dead one.
 func (s *Store) tokenRun(ctx context.Context, a *rota.Account) (*rota.Command, error) {
 	if !a.Dead && !a.LongValid() && a.Expired() {
-		if _, err := s.refreshLogged(ctx, "launch", a); err != nil {
+		if _, err := s.refreshLogged(ctx, a); err != nil {
 			return nil, err
 		}
 	}
