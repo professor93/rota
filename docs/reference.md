@@ -2544,7 +2544,8 @@ Code blanked: see *Stranded* and *Blanked*, below.
   settled from it: an item being rewritten can read as none, and the file
   beside it is then an older login. A newer login of the account's own in
   that file is still taken. In a quiet home nothing can be rewriting the
-  item, so one that is not there is gone, and the file is the home's store.
+  item, so one that is not there is gone, and from then on the file is the
+  home's store.
   A login that expires before the account's own token is behind, and so is
   the one rota wrote before a refresh of its own — which rota goes on
   remembering as its own write, however often the home is looked at,
@@ -2558,8 +2559,11 @@ Code blanked: see *Stranded* and *Blanked*, below.
   account's (a dead account comes back that way); somebody else's is not
   taken, the account's own tokens stay as they were, and rota says so,
   naming both. It is not asked about again — rotated, or with its access
-  token lapsed — and the account's own login goes in over it once nothing
-  runs there. After `rota login`, until the new login is in the home, the
+  token lapsed, and in the home of an account marked dead too — and the
+  account's own login goes in over it once nothing runs there. A login
+  Claude Code records as this account's is never mistaken for the refused
+  one; where Claude Code records nobody, a `/login` of this account made
+  within a minute of it is, and is written over with it. After `rota login`, until the new login is in the home, the
   ends decide what the home holds, because a login ends a fixed time after
   it was signed in: one ending more than a minute after the new login's, or
   in the same minute but recorded as another account's, was made with
