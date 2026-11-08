@@ -362,7 +362,10 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //     unknown, and one of a grant already refused (Refuse), which is not
 //     asked about again unless Claude Code records it as this account's or
 //     as a third: one that records nothing, within a minute of the refused
-//     grant, is taken for it.
+//     grant, is taken for it. In such a home, though, a login ending within a
+//     minute of the end in effect the account has learned since sign-in
+//     (login_ends_at) is the account's own grant, which the provider has
+//     shortened, and is taken as a rotation like one ending with the grant.
 func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 	if a.APIKey() {
 		// A key account keeps no login in its home, so nothing found there is
@@ -430,23 +433,29 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 		// own grant, expiring later than the account's token, is Claude Code
 		// having refreshed the account's own login since that look, whatever
 		// the look found: it is the newest there is, and the account's token
-		// is spent. A grant the provider already said is somebody else's
-		// (Refuse) is passed over without asking again, rotated or not, and the
-		// next write replaces it — unless Claude Code records the login as
-		// this account's (refusedBefore). One ending earlier predates the account's
-		// login — it was logged in again with rota since — so it is older
-		// whoever's it says it is, and the next write replaces it too; and so,
-		// as ever, is anything when either end is unknown. A grant ending later
+		// is spent. That grant is told by its own end, or by the end in effect
+		// when the provider has said an earlier one since sign-in, because
+		// Claude Code's refresh writes that earlier end into its store
+		// (ofGrantInEffect) — which is also how an account that never learned
+		// its grant's own end knows its login. A grant the provider already said
+		// is somebody else's (Refuse) is passed over without asking again,
+		// rotated or not, and the next write replaces it — unless Claude Code
+		// records the login as this account's (refusedBefore). One ending
+		// earlier predates the account's login — it was logged in again with
+		// rota since — so it is older whoever's it says it is, and the next
+		// write replaces it too; and so, as ever, is anything else when either
+		// end is unknown. A grant ending later
 		// was signed in after the account's login, with /login in the home, and
 		// is checked like any new login rather than written over; so is one
 		// Claude Code records as another account's.
 		home, own := l.refreshUntil(), a.Extra[claudeRefreshUntil]
 		switch {
-		case home == "" || own == "":
-		case l.ofGrant(a):
+		case home == "":
+		case l.ofGrant(a) || l.ofGrantInEffect(a):
 			if int64(l.ExpiresAt) > a.Token.ExpiresAt {
 				l.adopt(a)
 			}
+		case own == "":
 		case l.refusedBefore(a):
 		case endsAfter(own, home):
 		case endsAfter(home, own) || l.otherAccount(a):
@@ -630,6 +639,19 @@ func sameGrant(a, b string) bool {
 // that is not is never taken as a rotation, however close its end.
 func (l *claudeLogin) ofGrant(a *Account) bool {
 	return sameGrant(l.refreshUntil(), a.Extra[claudeRefreshUntil]) && !l.otherAccount(a)
+}
+
+// ofGrantInEffect reports whether a login found in a home ends within a minute
+// of the account's end in effect (login_ends_at), and Claude Code does not
+// record it as another account's: the account's own grant, which the provider
+// has shortened since sign-in. Claude Code's refresh writes the shortened end
+// into its store, while the grant's own end, which the account keeps to tell
+// rotations apart (ofGrant), stays the one it was signed in with. Only a home
+// recorded as holding nothing of the account's asks this; anywhere else such a
+// login is a new login, which the provider is asked about.
+func (l *claudeLogin) ofGrantInEffect(a *Account) bool {
+	end, ok := a.loginEnd()
+	return ok && sameGrant(l.refreshUntil(), strconv.FormatInt(end, 10)) && !l.otherAccount(a)
 }
 
 // otherAccount reports whether Claude Code recorded the login as another

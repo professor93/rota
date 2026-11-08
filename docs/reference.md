@@ -2577,7 +2577,11 @@ Code blanked: see *Stranded* and *Blanked*, below.
   way, never written over first; one ending before it, or carrying no end at
   all, is the login from before, and the new one goes in over it once
   nothing runs there. For an account whose login's end rota has not
-  recorded, the new login goes in over whatever is there. A login Claude
+  recorded, the new login goes in over whatever is there. Wherever rota last
+  found the home not holding the account's current login, one ending within a
+  minute of the end in effect rota has learned since sign-in (see
+  [Token lifetimes](#token-lifetimes)) is the account's own login, refreshed
+  by Claude Code after the provider shortened it, and is taken. A login Claude
   Code blanked is not taken for the end of the account when it was the
   account's current one: see *Blanked*, below. A store that is there and
   cannot be read is not an

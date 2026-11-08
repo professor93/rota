@@ -106,6 +106,57 @@ func TestARotationWhoseEndMovedASecondIsStillTheSameGrant(t *testing.T) {
 	}
 }
 
+// The provider may give a grant a shorter life than the one recorded at sign-in
+// (a sign-in reply with no refresh_token_expires_in counts thirty days), and
+// then the end in effect (login_ends_at) comes earlier while the grant's own
+// end stays. Claude Code's refresh writes that earlier end into its store, so
+// in a home recorded as holding nothing of the account's a login ending within
+// a minute of the end in effect is the account's own rotation and is taken —
+// for an account that never learned its grant's own end too — never passed
+// over as the login from before for rota to write its spent copy over. One not
+// newer than the account's token, one recorded as another account's, and one
+// two minutes off the end in effect are passed over as before.
+func TestARotationOfAShortenedGrantIsTakenAfterALookThatFoundTheHomeWithoutTheLogin(t *testing.T) {
+	later := time.Now().Add(3 * time.Hour).UnixMilli()
+	const inEffect, shaved, off = "1999567999000", "1999567998100", "1999567879000" // five days before livingClaude's 1999999999000
+	login := func(exp int64, until, who string) string {
+		return `{"accessToken":"A-R2","refreshToken":"R2","expiresAt":` + strconv.FormatInt(exp, 10) +
+			`,"refreshTokenExpiresAt":` + until + `,"tokenAccount":` + who + `}`
+	}
+	shortened := func(identity bool) *Account {
+		a := livingClaude()
+		a.Staged = stagedNone
+		a.Extra[claudeLoginEnds] = inEffect
+		if !identity {
+			delete(a.Extra, claudeRefreshUntil)
+		}
+		return a
+	}
+	for _, identity := range []bool{true, false} {
+		a := shortened(identity)
+		if err := AdoptFrom(a, homeWith(login(later, shaved, "null"))); err != nil || a.Token.Refresh != "R2" ||
+			!a.StagedCurrent() || a.Extra[claudeRefreshUntil] != shaved || a.Dead {
+			t.Fatalf("grant end known=%v: the shortened grant's rotation is taken: %+v %v", identity, a, err)
+		}
+		if end, ok := a.loginEnd(); !ok || strconv.FormatInt(end, 10) != shaved {
+			t.Fatalf("grant end known=%v: the end in effect is the home's: %d %v", identity, end, ok)
+		}
+	}
+	for _, c := range []struct {
+		what  string
+		login string
+	}{
+		{"no newer than the account's token", login(time.Now().Add(-time.Hour).UnixMilli(), shaved, "null")},
+		{"recorded as another account's", login(later, shaved, `{"uuid":"u-other"}`)},
+		{"two minutes off the end in effect", login(later, off, "null")},
+	} {
+		a := shortened(true)
+		if err := AdoptFrom(a, homeWith(c.login)); err != nil || a.Token.Refresh != "R1" || a.Staged != stagedNone {
+			t.Fatalf("%s: passed over: %+v %v", c.what, a, err)
+		}
+	}
+}
+
 // A grant ending more than a minute after another was signed in after it;
 // within a minute, or with either end unknown, nothing says so.
 func TestAGrantEndingMoreThanAMinuteLaterWasSignedInAfter(t *testing.T) {
