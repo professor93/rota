@@ -33,6 +33,19 @@ func TestBareRotaIsShortAndHelpIsFull(t *testing.T) {
 	}
 }
 
+// Both summaries say send reaches a held session too, not only a run
+// started with --input.
+func TestBothSummariesSaySendTypesIntoAHeldSession(t *testing.T) {
+	const want = `rota send <run-or-session> "..." send into a --input run, or type into a held session`
+	short, _, _ := call(t)
+	full, _, _ := call(t, "--help")
+	for name, text := range map[string]string{"bare rota": short, "rota --help": full} {
+		if !strings.Contains(strings.Join(strings.Fields(text), " "), want) {
+			t.Errorf("%s does not say %q:\n%s", name, want, text)
+		}
+	}
+}
+
 // `rota set -h` asks for the flags before naming an account, as the banner
 // promises for every command; it must not be read as an account id.
 func TestSetHelpNeedsNoID(t *testing.T) {
