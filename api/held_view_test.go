@@ -355,6 +355,28 @@ func TestAttachingAndTypingNeverResize(t *testing.T) {
 	}
 }
 
+// A fit is told to everyone once the holder says it has taken it, and not
+// before: a holder that could not, its CLI ending or its terminal refusing
+// the size, leaves the size as it was, for the server and every viewer.
+func TestAFitIsToldOnceTheHolderHasTakenIt(t *testing.T) {
+	rec := filepath.Join(t.TempDir(), "record")
+	p := withHeld(t, []string{"FAKE_HOLDER_RECORD=" + rec, "FAKE_HOLDER_RESIZE=none"})
+	id := p.start(map[string]any{"account": 1, "cols": 120, "rows": 40})["id"].(string)
+	alice := p.attach(id, p.alice, "")
+	alice.waitType("hello")
+	alice.say(map[string]any{"type": "resize", "cols": 100, "rows": 30, "fit": true})
+	waitRecorded(t, rec, "resize 100x30")
+	alice.settled()
+	if doc := p.describe(id); doc["cols"] != float64(120) || doc["rows"] != float64(40) {
+		t.Fatalf("a fit the holder did not take moved the size to %vx%v", doc["cols"], doc["rows"])
+	}
+	for _, doc := range alice.c.log {
+		if doc["type"] == "resized" {
+			t.Fatalf("a fit the holder did not take was told: %v", doc)
+		}
+	}
+}
+
 /* ------------------------------------------------------- falling behind --- */
 
 // A viewer of a held session that cannot keep up is not closed: what it
