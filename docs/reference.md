@@ -876,8 +876,8 @@ control socket /home/me/.rota/terminals/ctl.sock
 sessions: 2 running, 1 stopped
 ```
 
-with `http on <address>` before the last line when it opens a port, the
-time in this machine's zone. With no daemon it says `no rota daemon is
+with `http on <address>` before the last line when it opens a port; the
+time is in this machine's zone. With no daemon it says `no rota daemon is
 running for <store>`, and the sessions line after it only when the store
 has a record of a running or a stopped one. With `--json`:
 
@@ -1018,16 +1018,17 @@ and `rota run <id>` on it says which session has it, at the end of its
 error: *— held by session api (0123456789abcdef)*.
 
 **Sending into a held session.** `rota send <session> "text"` types the text
-into a held session, and then Enter, the way a person would: as a paste
-where the CLI has bracketed paste on. The session is named by its id, the
-start of one four characters or longer, or the name of a running one —
+into a held session, and Enter 100 ms later, the way a person would: as a
+paste where the CLI has bracketed paste on. The session is named by its id,
+the start of one four characters or longer, or the name of a running one —
 an id it begins before a name, and two of either an error that names their
 ids. A run started with `--input` of that id is tried first, as it always
 was; a target with a path in it is never a run's. It waits until the CLI
 is ready for a message — idle, by Claude Code's own record of the session,
-or quiet for a moment where there is none — for up to 30 seconds, and
-while it waits nobody else types into the session but one Esc or Ctrl-C.
-It prints nothing once the text is in, or `{"ok":true}` with `--json`.
+or 1.5 seconds without output where there is none — for up to 30
+seconds, and while it waits nobody else types into the session but one
+Esc or Ctrl-C. It prints nothing once the text is in, or `{"ok":true}` with
+`--json`.
 Every refusal exits 1:
 
 ```
@@ -1262,10 +1263,12 @@ holding the store's daemon claim, and by no other. Holding it, the daemon
 removes whatever a daemon that crashed left at the path before it listens; a
 server without the claim is refused and leaves the file alone, since it may
 be a live daemon's. A path longer than a hundred bytes is refused by name,
-since a unix socket's address cannot hold it. Stopping the daemon removes
-the socket — before it lets go of the claim, and only while the file at the
-path is still that socket, so a daemon that took the store over is never
-left without its own. It runs on linux and macOS, as the daemon does.
+since a unix socket's address cannot hold it, and so is a holder's socket
+in a session's directory; a shorter `ROTA_HOME` fixes either. Stopping the
+daemon removes the socket — before it lets go of the claim, and only while
+the file at the path is still that socket, so a daemon that took the store
+over is never left without its own. It runs on linux and macOS, as the
+daemon does.
 
 #### What is written down
 
@@ -2016,9 +2019,10 @@ lock, not a silent socket, says whether it is still there. A holder made by
 a rota this one cannot attach to — or one whose record this rota cannot
 read, while its lock says it is running — is listed `live` with
 `"attachable": false` and `made_by`, the version that made it as far as its
-record says, counts under `max_sessions`, and is never stopped but by a
-`DELETE`. A held session that has stopped is still listed once the five
-minutes an ended terminal stays are over: from its record, for
+record says, counts under `max_sessions`, and is never stopped but when
+asked to: by a `DELETE`, or by `rota serve stop --all`. A held session
+that has stopped is still listed once the five minutes an ended terminal
+stays are over: from its record, for
 `[terminal] keep_stopped` after it stopped — `ended` with its exit,
 `interrupted` (exit `-1`) for a holder that went without recording one, a
 reboot or a kill, or `broken` for a record that cannot be read. Nothing
@@ -2368,50 +2372,36 @@ which is `0700`:
 
 | Path | What it is |
 |---|---|
-| `ctl.sock` | the daemon's control socket, `0600` |
+| `ctl.sock` | the daemon's control socket, `0600`: who reaches it, and how long its path may be, are in *[The control socket](#the-control-socket)* |
 | `daemon.lock` | locked by the one daemon serving the store, for as long as it does. Only this lock says a daemon runs; a socket or a pid file left behind never does |
 | `daemon.pid` | which process that daemon is, its version, when it started and the port it serves, for `serve status` and `serve stop` |
 | `<id>/` | one held session, `0700`; its id is 16 hexadecimal characters |
 | `<id>/sock` | the holder's socket, `0600`. It takes a link only from the daemon serving the store: *only the rota daemon serving this store may link to a session* |
 | `<id>/lock` | locked by the holder for its whole life: locked is running, whatever its socket does |
-| `<id>/meta.json` | the session's record, `0600`: its account, folder, arguments and conversation, which process its holder and its CLI are and when each started, and, once it stops, when and with what exit. It outlives the holder, which is how a stopped session is still listed. It holds no credential rota keeps; its arguments are what was typed |
+| `<id>/meta.json` | the session's record, `0600`: its account, folder, arguments and conversation, which process its holder and its CLI are and when each started, and, once it stops, when and with what exit. It outlives the holder, which is how a stopped session is still listed. It holds no credential rota keeps; its arguments are what was typed, less the flags that pick a conversation |
 | `<id>/holder.log` | what the holder had to say, among it the warning a claude launch gives about a settings file that puts back what it drops (see *[Providers](#providers)*); moved to `holder.log.1` at 1 MiB |
 
 The daemon's own log is `<store>/daemon.log`, or `[server] log_file`. A
 recording, where `[terminal] record` asks for one, is `<id>.out` beside the
-sessions' directories, as for any terminal. A socket path longer than a
-hundred bytes is refused by name, with the advice that a shorter
-`ROTA_HOME` fixes it.
+sessions' directories, as for any terminal.
 
-**Four states.** A session is `live` while its holder holds its lock, and its
-`status` says more: `running`, `needs_you` while the CLI waits on its person
-for a permission or a question, or `quiet` after 30 seconds without output.
-It is `ended` when the CLI exited and the holder recorded the exit, and
-`interrupted` when the holder went without recording one — a kill, the
-machine rebooting. An interrupted session keeps its conversation, and is
-`resumable` when that conversation is known; nothing restarts it. A record that
-cannot be read is `broken`. A holder this rota cannot speak to — made by a
-rota of another protocol, or one whose record cannot be read while its lock
-says it runs — is listed `live` with `"attachable": false` and `made_by`,
-and is never stopped but by a `DELETE`. Every field is in *[A terminal on
-the server](#a-terminal-on-the-server)*.
-
-A stopped session stays listed for `[terminal] keep_stopped`, a week
-(`168h`) by default, counted from when it stopped; then its directory is
-deleted, and nothing else — never a worktree, and never a directory whose
-lock is held. A directory a holder never wrote a record in goes after an
-hour. `keep_stopped` has to be longer than nothing: *terminal.keep_stopped
-must be longer than nothing*.
+**Four states.** A session is `live` while its holder holds its lock,
+`ended` once the holder recorded how its CLI exited, `interrupted` when the
+holder went without recording it, and `broken` when its record cannot be
+read; a stopped one stays listed for `[terminal] keep_stopped`, a week by
+default, and a holder this rota cannot speak to is listed `live` and not
+attachable. *[A terminal on the server](#a-terminal-on-the-server)* has
+every field and rule. Besides those, a directory a holder never wrote a
+record in goes after an hour, and `keep_stopped` has to be longer than
+nothing: *terminal.keep_stopped must be longer than nothing*.
 
 **Restarting changes nothing.** A daemon that starts takes up every holder
-still running on its store, each on its own and given two seconds to
-answer, as if it had started it. What a session printed while no daemon was
-there is in its holder's scrollback, up to `scrollback_bytes`, and a
-viewer's offsets go on meaning the same bytes, so a restart looks to the
-page like a brief reconnect. An upgrade changes the holders started after
-it: one an upgrade left behind is taken up like any other while the two
-speak a protocol in common, and is otherwise listed as above, not
-attachable and not stopped.
+still running on its store, as *[A terminal on the
+server](#a-terminal-on-the-server)* says, each given two seconds to answer;
+what a session printed while no daemon was there is in its holder's
+scrollback, up to `scrollback_bytes`. An upgrade changes only the holders
+started after it: one it left behind is taken up like any other while the
+two speak a protocol in common.
 
 **This machine's own commands** reach the daemon over `ctl.sock` as the
 principal `local`, with no token, since the socket's permission and the
@@ -2420,24 +2410,17 @@ session — the agent in it, or anything it started — a caller may only
 watch. *[The control socket](#the-control-socket)* is the whole of it.
 
 **The keyboard follows the person.** On a held session the keyboard is a
-person's rather than one connection's: the same person typing from a second
-device takes it there without asking (*[Roles, and the
-keyboard](#roles-and-the-keyboard)*). `local` is a person by this rule: the
-one `[[users]]` entry that may control when there is exactly one; else the
-entry `[auth] local_user` names; else `local`, a person of its own. With
-either of the first two, `local` and that user signed in on the page are
-one person: `rota send` from this machine types into a session whose
-keyboard that user holds on the page, without asking. `local_user` must
-name a `[[users]]` entry that may control, or the file is refused:
+person's rather than one connection's, and `local` is a person too, by
+`[auth] local_user` when more than one user may control: see *[Roles, and
+the keyboard](#roles-and-the-keyboard)*. `local_user` must name a
+`[[users]]` entry that may control, or the file is refused:
 *auth.local_user names "bob", who is not a [[users]] entry that may
 control*.
 
 **Only a fit resizes.** A held session is watched from several windows at
-once, and the last one to attach is not the one whose size it should take.
-Attaching never changes its size, and neither does typing or a page fitting
-itself to its window: a `resize` frame changes it only with `"fit":true`,
-from whoever holds the keyboard, within 1000×1000, a 0 meaning 80 columns or
-24 rows; everyone is told with `resized`.
+once, and the last one to attach is not the one whose size it should take,
+so only a `resize` with `"fit":true` changes it (*[Roles, and the
+keyboard](#roles-and-the-keyboard)*).
 
 **The holder answers the CLI's questions.** A CLI asks its terminal what it
 is, what colours it draws in and where the cursor is, and a held session's
@@ -2457,30 +2440,27 @@ whoever is attached:
 | DECRQM | set or reset for the modes the holder tracks — cursor keys, the cursor shown, the alternate screen, the mouse and its encodings, focus, bracketed paste — and unknown for every other |
 
 The kitty keyboard protocol's query goes unanswered, so a CLI stays on the
-keys every viewer's terminal can send. A viewer's own terminal answers the
-queries it sees replayed too, and those answers are taken out of what it
-types (*[Roles, and the keyboard](#roles-and-the-keyboard)*), so the CLI is
-never answered twice and an answer is never typing.
+keys every viewer's terminal can send. What a viewer's own terminal answers
+is taken out of its typing: *[Roles, and the
+keyboard](#roles-and-the-keyboard)*.
 
 **Sending.** `rota send` and `POST /v1/terminals/{id}/send` type a message
-into a held session once its CLI is ready for one — idle by Claude Code's
-own record of the session, or, for a CLI that keeps none, 1.5 seconds
-without output — as a paste where the CLI has bracketed paste on, then
-Enter 100 ms later, waiting up to 30 seconds. *Sending into a held session*
-under *[The daemon](#the-daemon)* is the rest.
+into a held session once its CLI is ready for one: *Sending into a held
+session*, under *[The daemon](#the-daemon)*.
 
 **Not yet, and not everywhere.**
 
 - **Attaching from a terminal comes in a later beta.** For now a held
   session is watched and typed at on the terminal page or over its
   WebSocket, and `rota send` types a message into it.
-- **On Linux, a held session outlives its person's logout only under
-  `rota serve install` with lingering on.** A daemon started by hand, and
-  the sessions it holds, belong to the login and may end with it; `install`
-  says the `loginctl enable-linger` line when the user does not linger.
-- **On macOS, the launchd agent runs the daemon and every session it holds
-  at `Interactive` priority**, as a daemon started by hand runs; with
-  launchd's default they were measured at priority 20 (*Under a
+- **On Linux, a held session is sure to outlive its person's logout only
+  under `rota serve install` with lingering on.** A daemon started by hand,
+  and the sessions it holds, belong to the login and may end with it;
+  `install` says the `loginctl enable-linger` line when the user does not
+  linger.
+- **On macOS, launchd's default would hold the daemon and every session it
+  holds at priority 20**, under a ceiling of 20, so the agent sets
+  `Interactive`, which runs them as a daemon started by hand runs (*Under a
   supervisor*, in *[The daemon](#the-daemon)*).
 - **Watch-only on `ctl.sock` is a guard against accidents, not a wall.** A
   process inside a held session that calls `setsid` leaves its session, and
