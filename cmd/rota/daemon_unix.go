@@ -76,7 +76,7 @@ func (c *cli) spawnDaemon(ctlOnly bool, conf string) (*daemonStart, error) {
 		return nil, err
 	}
 	sock := holdwire.CtlSock(terminals)
-	if err := holdwire.SockFits(sock); err != nil {
+	if err := holdwire.SocketsFit(terminals); err != nil {
 		return nil, err
 	}
 	already := func(d *holdwire.Daemon) (*daemonStart, error) {

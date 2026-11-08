@@ -61,3 +61,27 @@ func TestIsIDIsWhatRunIDMakes(t *testing.T) {
 		}
 	}
 }
+
+// A store is refused for its longest socket, a held session's, which is
+// thirteen bytes longer than ctl.sock: one with room for ctl.sock and none
+// for a session is refused, saying which path, and one with room for both
+// is not.
+func TestSocketsFitAsksOfTheLongest(t *testing.T) {
+	sessionSuffix := len(SockPath(Dir("", "0123456789abcdef")))
+	ctlSuffix := len(CtlSock(""))
+	if sessionSuffix-ctlSuffix != 13 {
+		t.Fatalf("a session's socket is %d bytes longer than ctl.sock, want 13", sessionSuffix-ctlSuffix)
+	}
+	tooDeep := "/" + strings.Repeat("t", MaxSockPath-sessionSuffix-1) // its session sockets are 101 bytes
+	if SockFits(CtlSock(tooDeep)) != nil {
+		t.Fatal("the test's ctl.sock does not fit")
+	}
+	err := SocketsFit(tooDeep)
+	if err == nil || !strings.Contains(err.Error(), "a held session's socket, "+SockPath(Dir(tooDeep, "<id>"))+", is 101 bytes") ||
+		!strings.Contains(err.Error(), "a shorter ROTA_HOME fixes it") {
+		t.Fatalf("a store with room for ctl.sock alone: %v", err)
+	}
+	if err := SocketsFit(tooDeep[:len(tooDeep)-1]); err != nil {
+		t.Fatalf("a store with room for both: %v", err)
+	}
+}
