@@ -28,15 +28,17 @@ var unitRun = runSupervisor
 
 // runSupervisor runs one supervisor command, and when it fails names the
 // command and says what the supervisor said, not only its exit status: of
-// several that failed, each is told apart.
+// several that failed, each is told apart. The command, which names a unit
+// file, is said on one line and what the supervisor said on as many as it
+// took, each with a space for a control character (see printable).
 func runSupervisor(name string, args ...string) error {
 	out, err := exec.Command(name, args...).CombinedOutput()
 	if err == nil {
 		return nil
 	}
-	cmd := strings.Join(append([]string{name}, args...), " ")
+	cmd := oneLine(strings.Join(append([]string{name}, args...), " "))
 	if m := strings.TrimSpace(string(out)); m != "" {
-		return fmt.Errorf("%s: %w: %s", cmd, err, m)
+		return fmt.Errorf("%s: %w: %s", cmd, err, printable(m))
 	}
 	return fmt.Errorf("%s: %w", cmd, err)
 }

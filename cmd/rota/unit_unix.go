@@ -22,6 +22,9 @@ import (
 // one, its sessions running on, so the daemon the unit starts never finds
 // the store taken. Since it may stop the daemon, it is not run from inside
 // a held session, as serve stop is not.
+//
+// Each path it says, the store's and the unit's, is said with a space for
+// each control character in it (see oneLine).
 func (c *cli) installDaemon() error {
 	home, terminals, err := daemonStore()
 	if err != nil {
@@ -51,7 +54,7 @@ func (c *cli) installDaemon() error {
 	stopped := false
 	if d, ok := daemonOf(terminals); ok {
 		if !again {
-			return fmt.Errorf("a rota daemon is running for %s%s, started by hand; rota serve stop it, then install", home, pidOf(d))
+			return fmt.Errorf("a rota daemon is running for %s%s, started by hand; rota serve stop it, then install", oneLine(home), pidOf(d))
 		}
 		if err := endDaemon(terminals); err != nil {
 			return err
@@ -60,7 +63,7 @@ func (c *cli) installDaemon() error {
 	}
 	if written, err := writeUnit(exe, home, unitEnv(), again); err != nil {
 		if written != "" {
-			err = fmt.Errorf("%s is written, but %w; rota serve uninstall takes it away", written, err)
+			err = fmt.Errorf("%s is written, but %w; rota serve uninstall takes it away", oneLine(written), err)
 		}
 		if stopped {
 			err = fmt.Errorf("%w. The rota daemon that was running is stopped, and its sessions keep running; rota serve start starts one again", err)
@@ -68,9 +71,9 @@ func (c *cli) installDaemon() error {
 		return err
 	}
 	if again {
-		fmt.Fprintf(c.out, "rota daemon reinstalled for %s and restarted: %s\n", home, path)
+		fmt.Fprintf(c.out, "rota daemon reinstalled for %s and restarted: %s\n", oneLine(home), oneLine(path))
 	} else {
-		fmt.Fprintf(c.out, "rota daemon installed for %s: %s\n", home, path)
+		fmt.Fprintf(c.out, "rota daemon installed for %s: %s\n", oneLine(home), oneLine(path))
 	}
 	if hint := lingerHint(); hint != "" {
 		fmt.Fprintln(c.err, hint)
@@ -96,12 +99,12 @@ func (c *cli) uninstallDaemon() error {
 		return err
 	}
 	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
-		fmt.Fprintf(c.out, "no rota daemon is installed for %s\n", home)
+		fmt.Fprintf(c.out, "no rota daemon is installed for %s\n", oneLine(home))
 		return nil
 	}
 	if err := removeUnit(home); err != nil {
 		if _, lerr := os.Lstat(path); errors.Is(lerr, fs.ErrNotExist) {
-			return fmt.Errorf("%s is removed, but %w", path, err)
+			return fmt.Errorf("%s is removed, but %w", oneLine(path), err)
 		}
 		return err
 	}
@@ -110,6 +113,6 @@ func (c *cli) uninstallDaemon() error {
 	if n == 1 {
 		verb = "keeps"
 	}
-	fmt.Fprintf(c.out, "rota daemon uninstalled for %s; %s %s running\n", home, sessionsN(n), verb)
+	fmt.Fprintf(c.out, "rota daemon uninstalled for %s; %s %s running\n", oneLine(home), sessionsN(n), verb)
 	return nil
 }

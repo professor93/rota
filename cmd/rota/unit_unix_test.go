@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -141,7 +142,7 @@ func TestRemovingAUnitDeletesItWhateverTheSupervisorSays(t *testing.T) {
 }
 
 // When a supervisor command fails, the error names it and says what it
-// said, not only its exit status.
+// said, not only its exit status, each with a space for an escape in it.
 func TestASupervisorsComplaintIsKept(t *testing.T) {
 	dir := t.TempDir()
 	if err := runSupervisor("ls", dir); err != nil {
@@ -151,6 +152,10 @@ func TestASupervisorsComplaintIsKept(t *testing.T) {
 	err := runSupervisor("ls", absent)
 	if err == nil || !strings.HasPrefix(err.Error(), "ls "+absent+": exit status ") || !strings.Contains(err.Error(), "No such file or directory") {
 		t.Fatalf("a command that fails: %v", err)
+	}
+	err = runSupervisor("ls", absent+"\x1b[2J")
+	if err == nil || !strings.HasPrefix(err.Error(), "ls "+absent+" [2J: exit status ") || strings.ContainsRune(err.Error(), 0x1b) {
+		t.Fatalf("a command named with an escape: %q", err)
 	}
 }
 
@@ -275,6 +280,43 @@ func TestUninstallRemovesIt(t *testing.T) {
 	out, errb, code = call(t, "serve", "uninstall")
 	if code != 0 || out != fmt.Sprintf("no rota daemon is installed for %s\n", r.store) || len(*r.calls) != 0 {
 		t.Fatalf("uninstall again: exit %d %q %q, asked %q", code, out, errb, *r.calls)
+	}
+}
+
+// A store whose path has an escape and a bell in it is said with a space
+// for each in every line rota serve install, status, stop and uninstall
+// print, and status --json carries the path as it is.
+func TestServeSaysADirtyStorePathCleaned(t *testing.T) {
+	shortHome(t)
+	store := filepath.Join(os.Getenv("ROTA_HOME"), "s\x1b]0;owned\x07")
+	if err := os.Mkdir(store, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ROTA_HOME", store)
+	unitHome(t, true)
+	recordUnits(t, nil)
+	unit := expectedCalls(t, store).path
+	drawn := strings.TrimSuffix(store, "s\x1b]0;owned\x07") + "s ]0;owned "
+	for _, c := range []struct {
+		args []string
+		code int
+		want string
+	}{
+		{[]string{"serve", "install"}, 0, "rota daemon installed for " + drawn + ": " + unit + "\n"},
+		{[]string{"serve", "status"}, 3, "no rota daemon is running for " + drawn + "\n"},
+		{[]string{"serve", "stop"}, 0, "no rota daemon is running for " + drawn + "\n"},
+		{[]string{"serve", "stop", "--all", "--yes"}, 0, "no rota daemon is running for " + drawn + ", and no session is\n"},
+		{[]string{"serve", "uninstall"}, 0, "rota daemon uninstalled for " + drawn + "; 0 sessions keep running\n"},
+	} {
+		out, errb, code := call(t, c.args...)
+		if code != c.code || out != c.want || strings.ContainsAny(out+errb, "\x1b\x07") {
+			t.Errorf("%s: exit %d %q %q; want exit %d %q", strings.Join(c.args, " "), code, out, errb, c.code, c.want)
+		}
+	}
+	out, errb, code := call(t, "--json", "serve", "status")
+	var doc statusJSON
+	if code != 3 || json.Unmarshal([]byte(out), &doc) != nil || doc.Store != store || doc.Ctl != holdwire.CtlSock(filepath.Join(store, "terminals")) {
+		t.Fatalf("status --json: exit %d %q %q; want the store as it is, %q", code, out, errb, store)
 	}
 }
 
