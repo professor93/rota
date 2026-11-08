@@ -19,6 +19,7 @@ import (
 	"time"
 
 	rotaclient "github.com/professor93/rota/cmd/rota/client"
+	"github.com/professor93/rota/internal/fakecli"
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/pty"
 )
@@ -292,6 +293,30 @@ func TestDetachCarriesTheCallersEnvironment(t *testing.T) {
 	real, _ := filepath.EvalSymlinks(filepath.Join(work, "cc"))
 	p.send(0x2, []byte("envhas "+real+"\r"))
 	p.waitOut("envhas yes")
+}
+
+// A held CLI is given ROTA_HOME exactly when a run's CLI is: never, since
+// it names the file the store's tokens live in, not even when the command
+// that asked had it set, as this one does to name the rig's store. The
+// holder runs with it too, and adds nothing of its own.
+func TestAHeldCLIGetsROTAHOMEAsARunsCLIDoes(t *testing.T) {
+	r := newDaemonRig(t)
+	if envValue(r.env, "ROTA_HOME") == "" {
+		t.Fatal("the rig names its store by ROTA_HOME, which this test is about")
+	}
+	r.start()
+	bin := t.TempDir()
+	fakecli.Install(t, bin, "claude", fakecli.Lines(`{"type":"result","subtype":"success","is_error":false,"session_id":"s1","result":"ROTA_HOME={{env:ROTA_HOME|unset}}","num_turns":1}`))
+	cmd := r.cmd("run", "1", "hello")
+	cmd.Env = append(cmd.Env, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if out, errb, code := r.run(cmd); code != 0 || !strings.Contains(out, "ROTA_HOME=unset") {
+		t.Fatalf("a run's CLI: exit %d %q %q; want ROTA_HOME unset", code, out, errb)
+	}
+	id, _, _ := r.detach(r.cmd("run", "1", "--detach"))
+	p := r.attach(id)
+	p.waitOut("ready")
+	p.send(0x2, []byte("env ROTA_HOME\r"))
+	p.waitOut("env ROTA_HOME unset")
 }
 
 // --json prints the session as the daemon describes it, in the shape GET
