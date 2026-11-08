@@ -145,10 +145,11 @@ type Session struct {
 	code    int
 
 	// em is the screen's progress through the ring, under a lock of its own
-	// that the pump never takes: a repaint and a resize see the screen at a
-	// sequence boundary, with the modes that were on there.
+	// that the pump never takes and a repaint waits for only briefly: a
+	// repaint sees the screen at a sequence boundary, with the modes that
+	// were on there.
 	em struct {
-		mu      sync.Mutex
+		lock    waitLock
 		off     int64
 		modes   vtscan.Modes
 		cols    uint16
@@ -158,6 +159,9 @@ type Session struct {
 	emWake chan struct{}
 	emDone chan struct{} // the emulator's goroutine has returned
 	sizing sync.Mutex    // one resize at a time, the CLI's and the screen's in one order
+	// wait is how long a repaint waits for the emulator: repaintWait when
+	// the session was made.
+	wait time.Duration
 
 	turn     chan struct{} // one send types at a time
 	finished chan struct{} // the session is ending: the emulator stops
@@ -198,7 +202,8 @@ func newSession(cfg Config, c Child) *Session {
 		pumped:   make(chan struct{}),
 		done:     make(chan struct{}),
 	}
-	s.em.cols, s.em.rows = cols, rows
+	s.em.lock, s.em.cols, s.em.rows = make(waitLock, 1), cols, rows
+	s.wait = repaintWait
 	if holdwire.ScreenFits(cols, rows) {
 		s.screen = NewScreen(int(cols), int(rows))
 	} else {
