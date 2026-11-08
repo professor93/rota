@@ -18,9 +18,12 @@ import (
 // listening is a socket at ctl.sock that answers nothing and counts every
 // byte anybody sends it.
 type listening struct {
-	mu   sync.Mutex
-	sent int
-	wg   sync.WaitGroup
+	sock   string
+	mark   string        // what received sends to know it is last in line
+	marked chan struct{} // closed once the mark has been read
+	mu     sync.Mutex
+	sent   int
+	wg     sync.WaitGroup
 }
 
 func listen(t *testing.T, sock string) *listening {
@@ -29,7 +32,7 @@ func listen(t *testing.T, sock string) *listening {
 	if err != nil {
 		t.Fatal(err)
 	}
-	l := &listening{}
+	l := &listening{sock: sock, mark: fmt.Sprintf("mark-%d-%d", os.Getpid(), time.Now().UnixNano()), marked: make(chan struct{})}
 	t.Cleanup(func() { ln.Close() })
 	go func() {
 		for {
@@ -42,9 +45,13 @@ func listen(t *testing.T, sock string) *listening {
 				defer l.wg.Done()
 				defer c.Close()
 				_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
-				n, _ := io.Copy(io.Discard, c)
+				got, _ := io.ReadAll(c)
+				if string(got) == l.mark {
+					close(l.marked)
+					return
+				}
 				l.mu.Lock()
-				l.sent += int(n)
+				l.sent += len(got)
 				l.mu.Unlock()
 			}()
 		}
@@ -52,8 +59,27 @@ func listen(t *testing.T, sock string) *listening {
 	return l
 }
 
-// received is every byte sent so far, once each connection has ended.
-func (l *listening) received() int {
+// received is every byte sent so far, once each connection has ended. A
+// listener accepts its connections in the order they were made, so received
+// makes one of its own, sending the mark, and waits for it to be read: by
+// then every connection made before it has been accepted and counted in wg,
+// and wg is waited on only after that.
+func (l *listening) received(t *testing.T) int {
+	t.Helper()
+	c, err := net.Dial("unix", l.sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = io.WriteString(c, l.mark)
+	c.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-l.marked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the listener never read the mark")
+	}
 	l.wg.Wait()
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -91,7 +117,7 @@ func TestTheClientSendsNothingToAnotherUsersSocket(t *testing.T) {
 	if err := c.Health(); err == nil || !strings.Contains(err.Error(), want) {
 		t.Fatalf("a request to another user's socket: %v, want %q", err, want)
 	}
-	if n := l.received(); n != 0 {
+	if n := l.received(t); n != 0 {
 		t.Fatalf("another user's socket was sent %d bytes", n)
 	}
 }
