@@ -206,7 +206,8 @@ func TestARestartReadoptsWithOffsetsIntact(t *testing.T) {
 	id, pid := doc["id"].(string), doc["pid"].(float64)
 	p.waitOffset(id, 3)
 	p.api.Stop()
-	time.Sleep(500 * time.Millisecond) // the holder prints "two" with no daemon there
+	// The holder prints "two" with no daemon there.
+	waitLogged(t, holdwire.LogPath(holdwire.Dir(p.terminals(), id)), "printed with nobody linked")
 
 	q := p.restart()
 	wants(t, "a readopted session", q.describe(id), map[string]any{
@@ -416,7 +417,7 @@ func TestARecordingCarriesOnAcrossARestart(t *testing.T) {
 	if err := os.WriteFile(out, []byte("ONE"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(500 * time.Millisecond)
+	waitLogged(t, holdwire.LogPath(holdwire.Dir(p.terminals(), id)), "printed with nobody linked")
 	q := p.restart()
 	q.waitOffset(id, 6)
 	tm := q.attach(id, q.alice, "since=6")

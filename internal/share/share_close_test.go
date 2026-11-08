@@ -1,6 +1,7 @@
 package share
 
 import (
+	"io"
 	"net"
 	"testing"
 	"time"
@@ -14,7 +15,11 @@ func TestCloseDoesNotWaitForAStuckSend(t *testing.T) {
 	c := NewConn(a, 0)
 	sent := make(chan error, 1)
 	go func() { sent <- c.Send(Ping, []byte("x")) }()
-	time.Sleep(50 * time.Millisecond)
+	// The peer takes one byte of the frame and no more. A pipe keeps
+	// nothing, so the Send is then inside its write, stuck on the rest.
+	if _, err := io.ReadFull(b, make([]byte, 1)); err != nil {
+		t.Fatal(err)
+	}
 	done := make(chan struct{})
 	go func() { c.Close(); c.Close(); close(done) }()
 	select {

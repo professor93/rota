@@ -240,6 +240,11 @@ func TestAHeldSessionIsWarnedAboutTheSettingsOfItsOwnFolder(t *testing.T) {
 	}
 }
 
+// The holder reads the CLI's registry while it runs and records the
+// conversation it names. What each read does with another claude's file, or
+// with none, is tested a read at a time in package hold
+// (TestEachRegistryReadKeepsTheConversationItKnows), where no poll has to be
+// waited for.
 func TestTheConversationComesFromTheRegistry(t *testing.T) {
 	_, terminals := holdStore(t)
 	bin := holdFake(t, "claude", fakecli.Spec{})
@@ -249,24 +254,7 @@ func TestTheConversationComesFromTheRegistry(t *testing.T) {
 	}
 	l := h.link()
 	l.wait("ready")
-	home := strings.TrimPrefix(l.line("env CLAUDE_CONFIG_DIR"), "env CLAUDE_CONFIG_DIR=")
 	m := h.meta()
-	file := filepath.Join(home, "sessions", strconv.Itoa(m.ChildPID)+".json")
-
-	// A file whose writer started an hour away from this CLI is some other
-	// claude that had this pid once.
-	if err := os.MkdirAll(filepath.Dir(file), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	other := `{"pid":` + strconv.Itoa(m.ChildPID) + `,"procStart":"` + m.ChildStart.Add(-time.Hour).Local().Format(time.ANSIC) +
-		`","sessionId":"somebody-else","cwd":"/elsewhere","name":"other","status":"idle","waitingFor":null,"kind":"interactive"}`
-	if err := os.WriteFile(file, []byte(other), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(4500 * time.Millisecond) // two polls
-	if c := h.meta().Conversation; c != "" {
-		t.Fatalf("a registry an hour off was believed: %q", c)
-	}
 
 	want := "fake-" + strconv.Itoa(m.ChildPID)
 	if got := l.line("registry idle"); got != "registry idle" {
@@ -277,14 +265,6 @@ func TestTheConversationComesFromTheRegistry(t *testing.T) {
 	cwd, _ := filepath.EvalSymlinks(m.Cwd)
 	if got.ConversationName != "fake" || (got.ConversationCwd != m.Cwd && got.ConversationCwd != cwd) {
 		t.Fatalf("and what it is called and where it works: %+v", got)
-	}
-
-	if err := os.Remove(file); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(4500 * time.Millisecond)
-	if c := h.meta().Conversation; c != want {
-		t.Fatalf("a registry that went away took the conversation with it: %q", c)
 	}
 }
 
