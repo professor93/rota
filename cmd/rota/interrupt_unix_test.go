@@ -6,9 +6,14 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/professor93/rota/internal/fakecli"
 )
 
 // An interrupt, a SIGTERM or a closed terminal during a command's look at its
@@ -36,5 +41,131 @@ func TestASignalDuringALookEndsTheLookNotTheProcess(t *testing.T) {
 		if !cut {
 			t.Errorf("%v: the look does not read as interrupted", sig)
 		}
+	}
+}
+
+// interruptOnArrival sends this process SIGINT once the provider has been
+// presented want and is holding its answer, waits for the signal to be taken,
+// runs meanwhile, and lets the answer go.
+func interruptOnArrival(t *testing.T, p *heldProvider, want string, meanwhile func()) {
+	t.Helper()
+	if rt := p.arrival(t); rt != want {
+		t.Fatalf("presented %s, want %s", rt, want)
+	}
+	if err := syscall.Kill(os.Getpid(), syscall.SIGINT); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond) // the signal's goroutine cancels the look
+	if meanwhile != nil {
+		meanwhile()
+	}
+	p.letGo()
+}
+
+type called struct {
+	out, err string
+	code     int
+}
+
+func callAsync(t *testing.T, args ...string) <-chan called {
+	got := make(chan called, 1)
+	go func() {
+		out, errOut, code := call(t, args...)
+		got <- called{out, errOut, code}
+	}()
+	return got
+}
+
+func result(t *testing.T, got <-chan called) called {
+	t.Helper()
+	select {
+	case r := <-got:
+		return r
+	case <-time.After(20 * time.Second):
+		t.Fatal("the command did not return")
+		return called{}
+	}
+}
+
+// rota list interrupted while a refresh is being answered: the refresh goes on
+// to its answer, the listing is not printed, the command exits with 130 — and
+// what went wrong beside the interrupt is said, not swallowed. Here the store
+// cannot be saved after the answer, so the new login is in the home alone, and
+// the person is told; that the rest was left for the next look is not news.
+func TestAnInterruptedListFinishesTheRefreshAndSaysWhatWentWrong(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	p := newHeldProvider(t)
+	writeAccounts(t, home, expiredClaude(t, home, 1, "R0"))
+	got := callAsync(t, "list")
+	accounts := filepath.Join(home, "accounts.json")
+	kept := filepath.Join(t.TempDir(), "accounts.json")
+	interruptOnArrival(t, p, "R0", func() {
+		// The save after the answer fails, whoever runs the test: a file
+		// cannot be renamed over a directory.
+		if err := os.Rename(accounts, kept); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(accounts, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	})
+	r := result(t, got)
+	_ = os.Remove(accounts)
+	_ = os.Rename(kept, accounts)
+	if r.code != 130 || r.out != "" {
+		t.Fatalf("an interrupted listing exits 130 and lists nothing: %d %q %q", r.code, r.out, r.err)
+	}
+	if !strings.Contains(r.err, "warning:") || !strings.Contains(r.err, "accounts.json") {
+		t.Errorf("the failed save was not said: %q", r.err)
+	}
+	if strings.Contains(r.err, "whoever asked went away") {
+		t.Errorf("what was left for the next look is not news to whoever interrupted: %q", r.err)
+	}
+	raw, _ := os.ReadFile(filepath.Join(home, "homes", "claude-1", ".credentials.json"))
+	if !strings.Contains(string(raw), `"R0+"`) {
+		t.Errorf("the new login is not in the home, the one copy left: %s", raw)
+	}
+	if got := p.tokens(); !slices.Equal(got, []string{"R0"}) {
+		t.Errorf("presented %v", got)
+	}
+}
+
+// A run on a named account, headless or kept open with --input, refreshes its
+// login as its launch is made. An interrupt then lets that refresh finish and
+// be saved, starts no CLI, and exits with 130; an interrupt once the CLI runs
+// is the CLI's, as it always was.
+func TestAnInterruptedLaunchKeepsTheRefreshAndStartsNothing(t *testing.T) {
+	for _, way := range []struct {
+		name string
+		args []string
+	}{
+		{"headless", []string{"run", "1", "hello"}},
+		{"--input", []string{"run", "1", "hello", "--input"}},
+		{"handover", []string{"run", "1"}},
+	} {
+		t.Run(way.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("ROTA_HOME", home)
+			p := newHeldProvider(t)
+			writeAccounts(t, home, expiredClaude(t, home, 1, "R0"))
+			bin, ran := t.TempDir(), filepath.Join(t.TempDir(), "ran")
+			fakecli.Install(t, bin, "claude", fakecli.Spec{Stdout: []string{`[{"type":"result","result":"ANSWERED"}]`}, Touch: ran})
+			t.Setenv("PATH", bin)
+			argv := handover(t)
+			got := callAsync(t, way.args...)
+			interruptOnArrival(t, p, "R0", nil)
+			r := result(t, got)
+			if r.code != 130 {
+				t.Fatalf("an interrupted launch exits 130: %d %q %q", r.code, r.out, r.err)
+			}
+			if _, err := os.Stat(ran); err == nil || *argv != nil {
+				t.Fatalf("a CLI was started after the interrupt: ran=%v handover=%v", err == nil, *argv)
+			}
+			holdsLogin(t, home, 1, "R0+")
+			if got := p.tokens(); !slices.Equal(got, []string{"R0"}) {
+				t.Errorf("presented %v", got)
+			}
+		})
 	}
 }

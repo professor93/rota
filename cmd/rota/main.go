@@ -603,7 +603,7 @@ func (c *cli) list(args []string) error {
 			errs = s.Refresh(ctx, force, shown...)
 		}
 	}) {
-		return errInterrupted
+		return c.interrupted(errs...)
 	}
 
 	if c.json {
@@ -1156,7 +1156,7 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 		if err == nil {
 			release()
 		}
-		return errInterrupted
+		return c.interrupted(err)
 	}
 	if err != nil {
 		return err
@@ -1456,6 +1456,14 @@ func (c *cli) answer(id int, args []string) error {
 		// can send into this run, and stdout belongs to the answer.
 		fmt.Fprintf(c.err, "rota: run %s — send more with: rota send %s \"…\"\n", runID, runID)
 	}
+	// The launch is made under the signals, the run is not: an interrupt
+	// while the login is refreshed finishes that refresh and starts nothing,
+	// and one during the run does what it always did.
+	cut := false
+	s.Preparing = func(prepare func(context.Context)) bool {
+		cut = interruptedDuring(prepare)
+		return cut
+	}
 	var res *rota.Result
 	if *input {
 		res, err = c.session(s, a, spec, reach, watch, live, *verbose)
@@ -1463,6 +1471,9 @@ func (c *cli) answer(id int, args []string) error {
 		res, err = s.Run(context.Background(), a, spec, nil, watch)
 	}
 	_ = started.End()
+	if cut {
+		return c.interrupted(err)
+	}
 	// What the readings are read from, beyond the result: the stream's
 	// tally, the account, and a fresh quota reading when one was asked for.
 	src := message.Sources{Tally: tally, Account: a, Threshold: rotation.Cutoff(a)}

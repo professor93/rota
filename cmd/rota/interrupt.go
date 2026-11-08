@@ -6,6 +6,8 @@ import (
 	"os/signal"
 	"runtime"
 	"syscall"
+
+	"github.com/professor93/rota/store"
 )
 
 // interrupted is the context a command's own look at its accounts runs under:
@@ -43,5 +45,18 @@ func interruptedDuring(look func(ctx context.Context)) (cut bool) {
 
 // errInterrupted ends a command whose look a signal cut short, once what was
 // under way is saved: with the status a shell gives a command an interrupt
-// ended, and nothing more said.
+// ended.
 const errInterrupted = exitCode(130)
+
+// interrupted ends a command a signal cut short. It says what went wrong
+// beside the interrupt first — a refresh that was answered but could not be
+// saved, above all, whose new login this process alone then holds — and
+// passes over what only says the look left the rest for next time.
+func (c *cli) interrupted(errs ...error) error {
+	for _, err := range errs {
+		if err != nil && !store.Left(err) {
+			warn(c.err, "%v", err)
+		}
+	}
+	return errInterrupted
+}
