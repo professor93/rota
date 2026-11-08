@@ -580,3 +580,24 @@ func TestDoneClosesWhenTheEndPanics(t *testing.T) {
 		t.Fatalf("the log says %q", r.logLines())
 	}
 }
+
+// The ending is recorded as soon as the CLI has exited: before its terminal
+// is drained, which something it started may hold open for a while, and so
+// before anything else the holder does on its way out.
+func TestTheEndingIsRecordedFirst(t *testing.T) {
+	r := newRig(t, 0, newFakeChild())
+	r.c.exitKeep(7)
+	select {
+	case code := <-r.exits:
+		if code != 7 {
+			t.Fatalf("recorded %d", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the ending was never recorded")
+	}
+	select {
+	case <-r.s.pumped:
+		t.Fatal("the ending was recorded only once the CLI's terminal had been drained")
+	default:
+	}
+}
