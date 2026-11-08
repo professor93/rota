@@ -93,9 +93,9 @@ func holdRequest(t *testing.T) holdwire.Request {
 	}
 }
 
-// startHolder starts a holder on req with bin first on PATH and reads its
+// startHolderProc starts a holder on req with bin first on PATH and reads its
 // one line of answer.
-func startHolder(t *testing.T, terminals, bin string, req holdwire.Request) *holderProc {
+func startHolderProc(t *testing.T, terminals, bin string, req holdwire.Request) *holderProc {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {

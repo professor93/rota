@@ -34,7 +34,7 @@ func TestAHolderRunsTheCLIAndSaysItIsReady(t *testing.T) {
 	_, terminals := holdStore(t)
 	bin := holdFake(t, "claude", fakecli.Spec{})
 	req := holdRequest(t)
-	h := startHolder(t, terminals, bin, req)
+	h := startHolderProc(t, terminals, bin, req)
 	if !h.ready.OK || h.ready.PID != h.cmd.Process.Pid || !proc.Alive(h.ready.PID) {
 		t.Fatalf("the holder says it is ready, and is the process it says: %+v (pid %d)", h.ready, h.cmd.Process.Pid)
 	}
@@ -83,7 +83,7 @@ func TestAHolderRunsTheCLIAndSaysItIsReady(t *testing.T) {
 func TestAHolderTakesNothingFromArgvAndKeepsNoToken(t *testing.T) {
 	_, terminals := holdStore(t)
 	bin := holdFake(t, "claude", fakecli.Spec{})
-	h := startHolder(t, terminals, bin, holdRequest(t))
+	h := startHolderProc(t, terminals, bin, holdRequest(t))
 	if !h.ready.OK {
 		t.Fatalf("%+v", h.ready)
 	}
@@ -175,7 +175,7 @@ func TestTheChildsEnvironmentIsScrubbed(t *testing.T) {
 		"TMUX=x", "CLAUDECODE=1", "TERM_PROGRAM=iTerm.app", "CODEX_THREAD_ID=y", "FOO=bar",
 		"ROTA_CONTROL="+holdwire.CtlSock(terminals), "ROTA_HOME=/nowhere/at/all", "TERM=dumb",
 	)
-	h := startHolder(t, terminals, bin, req)
+	h := startHolderProc(t, terminals, bin, req)
 	if !h.ready.OK {
 		t.Fatalf("%+v", h.ready)
 	}
@@ -230,7 +230,7 @@ func TestAHeldSessionIsWarnedAboutTheSettingsOfItsOwnFolder(t *testing.T) {
 	own := filepath.Join(req.Cwd, ".claude", "settings.json")
 	put(own, `{"env":{"ANTHROPIC_BASE_URL":"https://SECRET.example"}}`)
 
-	h := startHolder(t, terminals, bin, req)
+	h := startHolderProc(t, terminals, bin, req)
 	if !h.ready.OK {
 		t.Fatalf("%+v", h.ready)
 	}
@@ -253,7 +253,7 @@ func TestAHeldSessionIsWarnedAboutTheSettingsOfItsOwnFolder(t *testing.T) {
 func TestTheConversationComesFromTheRegistry(t *testing.T) {
 	_, terminals := holdStore(t)
 	bin := holdFake(t, "claude", fakecli.Spec{})
-	h := startHolder(t, terminals, bin, holdRequest(t))
+	h := startHolderProc(t, terminals, bin, holdRequest(t))
 	if !h.ready.OK {
 		t.Fatalf("%+v", h.ready)
 	}
@@ -281,7 +281,7 @@ func TestTheClaimLivesWithTheCLI(t *testing.T) {
 	bin := holdFake(t, "codex", fakecli.Spec{Linger: "3s"})
 	req := holdRequest(t)
 	req.Account, req.Args = 2, nil
-	h := startHolder(t, terminals, bin, req)
+	h := startHolderProc(t, terminals, bin, req)
 	if !h.ready.OK {
 		t.Fatalf("%+v", h.ready)
 	}
@@ -327,7 +327,7 @@ func TestAFailedPrepareSaysWhyAndLeavesNothing(t *testing.T) {
 
 	req := holdRequest(t)
 	req.Account = 9
-	h := startHolder(t, terminals, bin, req)
+	h := startHolderProc(t, terminals, bin, req)
 	if h.ready.OK || h.ready.Kind != holdwire.KindNoAccount || h.ready.Error == "" {
 		t.Fatalf("no account 9 is said as such: %+v", h.ready)
 	}
@@ -353,7 +353,7 @@ func TestAHolderFailingAfterItsCLIStartedLeavesNothingRunning(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(holdwire.SockPath(dir), "in-the-way"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	h := startHolder(t, terminals, bin, req)
+	h := startHolderProc(t, terminals, bin, req)
 	if h.ready.OK || h.ready.Kind != holdwire.KindOther || h.ready.Error == "" {
 		t.Fatalf("a socket that cannot be made is a failure: %+v", h.ready)
 	}
@@ -457,7 +457,7 @@ func TestAHolderWhoseAnswerNobodyReadsKeepsHolding(t *testing.T) {
 func TestTheExitIsRecorded(t *testing.T) {
 	_, terminals := holdStore(t)
 	bin := holdFake(t, "claude", fakecli.Spec{})
-	h := startHolder(t, terminals, bin, holdRequest(t))
+	h := startHolderProc(t, terminals, bin, holdRequest(t))
 	if !h.ready.OK {
 		t.Fatalf("%+v", h.ready)
 	}
@@ -490,7 +490,7 @@ func TestTheExitIsRecorded(t *testing.T) {
 func TestATermToTheHolderHangsUpTheCLI(t *testing.T) {
 	_, terminals := holdStore(t)
 	bin := holdFake(t, "claude", fakecli.Spec{})
-	h := startHolder(t, terminals, bin, holdRequest(t))
+	h := startHolderProc(t, terminals, bin, holdRequest(t))
 	if !h.ready.OK {
 		t.Fatalf("%+v", h.ready)
 	}
