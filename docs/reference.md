@@ -2563,7 +2563,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
   `refreshTokenExpiresAt` is more than a minute from the account's, or that
   only one of them knows, or that Claude Code records as another account's
   — or any living login in the home of an account marked dead but rota's own
-  write — is somebody running `/login` inside that home: rota asks the
+  write or an older copy of the account's own login, one that expires no
+  later than the account's token, which is spent and never taken back — is
+  somebody running `/login` inside that home: rota asks the
   provider whose it is, with that login's own access token, and takes it
   when it is this account's (a dead account comes back that way); somebody
   else's is not taken, the account's own tokens stay as they were, and rota

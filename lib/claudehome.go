@@ -345,7 +345,8 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //   - a new login — a refreshTokenExpiresAt more than a minute from the
 //     account's, one where only one side has any, a login Claude Code
 //     records as another account's, or any living login in the home of a
-//     dead account but the one it wrote — which somebody made by running
+//     dead account but the one it wrote or an older copy of its own grant —
+//     which somebody made by running
 //     /login inside that home. Nothing of it is taken here, because the home
 //     says nothing trustworthy about whose it is: it comes back as a
 //     *NewLogin for the application to check (NewLogin.Identify) and then
@@ -422,8 +423,13 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 	case a.Dead:
 		// The login this account had is over, so a living one in its home
 		// is somebody signing in again there — whatever it says about itself
-		// — unless the provider has already said it is somebody else's.
-		if l.refusedBefore(a) {
+		// — unless the provider has already said it is somebody else's, or it
+		// is an older copy of the account's own grant: one that expires no
+		// later than the account's token is behind it, spent, whoever's the
+		// profile says it is, and confirming it would take that spent token
+		// back. A /login is always a grant of its own, and Claude Code's
+		// rotation since the account died expires later; both are asked about.
+		if l.refusedBefore(a) || l.olderOwn(a) {
 			return nil
 		}
 		return &NewLogin{Access: l.AccessToken, login: l}
@@ -641,14 +647,22 @@ func (l *claudeLogin) ofGrant(a *Account) bool {
 	return sameGrant(l.refreshUntil(), a.Extra[claudeRefreshUntil]) && !l.otherAccount(a)
 }
 
+// olderOwn reports whether a login found in a home is an older copy of the
+// account's own grant (by its own end or the end in effect): it expires no later
+// than the account's token, so the account has refreshed past it.
+func (l *claudeLogin) olderOwn(a *Account) bool {
+	return (l.ofGrant(a) || l.ofGrantInEffect(a)) && int64(l.ExpiresAt) <= a.Token.ExpiresAt
+}
+
 // ofGrantInEffect reports whether a login found in a home ends within a minute
 // of the account's end in effect (login_ends_at), and Claude Code does not
 // record it as another account's: the account's own grant, which the provider
 // has shortened since sign-in. Claude Code's refresh writes the shortened end
 // into its store, while the grant's own end, which the account keeps to tell
 // rotations apart (ofGrant), stays the one it was signed in with. Only a home
-// recorded as holding nothing of the account's asks this; anywhere else such a
-// login is a new login, which the provider is asked about.
+// recorded as holding nothing of the account's, and a dead account's looking
+// for an older copy of its own (olderOwn), ask this; anywhere else such a login
+// is a new login, which the provider is asked about.
 func (l *claudeLogin) ofGrantInEffect(a *Account) bool {
 	end, ok := a.loginEnd()
 	return ok && sameGrant(l.refreshUntil(), strconv.FormatInt(end, 10)) && !l.otherAccount(a)

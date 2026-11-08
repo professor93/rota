@@ -335,3 +335,37 @@ func TestAFreshLoginForgetsARefusal(t *testing.T) {
 		t.Fatalf("forgotten: %v", a.Extra)
 	}
 }
+
+// A dead account asks the provider about a living login in its home — somebody
+// signing in again there — but never about an older copy of its own grant: one
+// that expires no later than the account's token is spent, and confirming it by
+// profile would take that spent token back. Claude Code's rotation since the
+// account died, and a /login of a grant of its own, are still asked about.
+func TestADeadAccountNeverTakesBackAnOlderCopyOfItsOwnLogin(t *testing.T) {
+	dead := func() *Account {
+		a := livingClaude()
+		a.Staged = fingerprint("R1")
+		a.Dead, a.DeadReason = true, "invalid_grant"
+		a.Extra[claudeLoginEnds] = "1999567999000"
+		return a
+	}
+	earlier := time.Now().Add(-time.Hour).UnixMilli()
+	later := time.Now().Add(3 * time.Hour).UnixMilli()
+	for _, c := range []struct {
+		what  string
+		login string
+		asked bool
+	}{
+		{"an older copy of its grant", freezeLogin("R0", earlier, "1999999998700"), false},
+		{"an older copy, by the end in effect", freezeLogin("R0", earlier, "1999567998700"), false},
+		{"Claude Code's rotation since", freezeLogin("R2", later, "1999999998700"), true},
+		{"a /login of a grant of its own, expiring sooner", freezeLogin("R9", earlier, "2000086399000"), true},
+	} {
+		a := dead()
+		err := AdoptFrom(a, homeWith(c.login))
+		var nl *NewLogin
+		if errors.As(err, &nl) != c.asked || a.Token.Refresh != "R1" || !a.Dead {
+			t.Fatalf("%s: asked about=%v, want %v; holds %q dead=%v (%v)", c.what, errors.As(err, &nl), c.asked, a.Token.Refresh, a.Dead, err)
+		}
+	}
+}
