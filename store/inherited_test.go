@@ -27,7 +27,8 @@ func TestNothingRotaInheritedSignsInAnAccountsCLI(t *testing.T) {
 			t.Setenv(n, "inherited")
 		}
 	}
-	kept := []string{"AWS_PROFILE", "ANTHROPIC_VERTEX_PROJECT_ID", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CODEX_SANDBOX", "OPENAI_ORGANIZATION"}
+	kept := []string{"AWS_PROFILE", "ANTHROPIC_VERTEX_PROJECT_ID", "CLAUDE_CODE_SKIP_VERTEX_AUTH",
+		"ANTHROPIC_WORKSPACE_ID", "CLAUDE_CODE_FEDERATION_CACHE_DIR", "CODEX_SANDBOX", "OPENAI_ORGANIZATION"}
 	for _, n := range kept {
 		t.Setenv(n, "inherited")
 	}

@@ -96,6 +96,12 @@ func ClaudeCredentialVars() []string {
 // CLAUDE_CODE_USE_* switch below has chosen that provider, and the programs a
 // run starts — Anthropic's SDKs, the clouds' own tools — read them too. A
 // provider's base URL is an endpoint, and goes with ANTHROPIC_BASE_URL.
+// Workload identity federation is treated as a provider too: what selects
+// it — ANTHROPIC_PROFILE, ANTHROPIC_CONFIG_DIR, the rule and organization
+// pair — and its identity token are dropped, while its workspace, service
+// account, scope and cache directory stay as its configuration. Claude Code
+// reads those only while it resolves a federation, and one it resolves
+// outranks the login whether they are there or not.
 // CLAUDE_CONFIG_DIR stays as well; a route that points Claude Code somewhere
 // sets it, and one that does not leaves the person's own.
 var claudeCompeting = []string{
@@ -108,11 +114,10 @@ var claudeCompeting = []string{
 	"CLAUDE_CODE_SUBSCRIPTION_TYPE", "CLAUDE_CODE_RATE_LIMIT_TIER",
 	"CLAUDE_CODE_SESSIONS_OAUTH_TOKEN", "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_SESSION_INGRESS_TOKEN_FILE",
 	"CLAUDE_BRIDGE_OAUTH_TOKEN", "CLAUDE_TRUSTED_DEVICE_TOKEN",
-	// Anthropic profiles and workload identity federation, which outrank the
-	// login.
+	// An Anthropic profile or workload identity federation, which outrank the
+	// login: what selects one, and its identity token.
 	"ANTHROPIC_PROFILE", "ANTHROPIC_CONFIG_DIR", "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID",
-	"ANTHROPIC_SERVICE_ACCOUNT_ID", "ANTHROPIC_IDENTITY_TOKEN", "ANTHROPIC_IDENTITY_TOKEN_FILE",
-	"ANTHROPIC_WORKSPACE_ID", "CLAUDE_CODE_FEDERATION_CACHE_DIR",
+	"ANTHROPIC_IDENTITY_TOKEN", "ANTHROPIC_IDENTITY_TOKEN_FILE",
 	// A host that signs Claude Code in, or refreshes its login for it.
 	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "CLAUDE_CODE_HOST_AUTH_ENV_VAR", "CLAUDE_CODE_HOST_CREDS_FILE",
 	"CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH", "CLAUDE_CODE_SDK_HAS_SESSIONS_OAUTH_REFRESH",

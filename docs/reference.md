@@ -2016,7 +2016,10 @@ requests or its credential somewhere else, change whose login or which
 configuration it uses, or tell it that it runs inside another session of
 itself — a shell profile, a host application or an outer Claude Code may have
 exported any of them. Each goes by its exact name, never by a prefix, and
-nothing else is dropped. For `claude`:
+nothing else is dropped beyond the proxy and certificate variables every
+provider drops: `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and their lowercase
+forms, `NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`,
+`REQUESTS_CA_BUNDLE` and `CURL_CA_BUNDLE`. For `claude`:
 
 - **another credential:** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `ANTHROPIC_AWS_API_KEY`, `ANTHROPIC_FOUNDRY_API_KEY`,
@@ -2029,12 +2032,11 @@ nothing else is dropped. For `claude`:
   `CLAUDE_CODE_SESSIONS_OAUTH_TOKEN`, `CLAUDE_CODE_SESSION_ACCESS_TOKEN`,
   `CLAUDE_SESSION_INGRESS_TOKEN_FILE`, `CLAUDE_BRIDGE_OAUTH_TOKEN`,
   `CLAUDE_TRUSTED_DEVICE_TOKEN`;
-- **Anthropic profiles and workload identity federation**, which outrank the
-  login: `ANTHROPIC_PROFILE`, `ANTHROPIC_CONFIG_DIR`,
-  `ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`,
-  `ANTHROPIC_SERVICE_ACCOUNT_ID`, `ANTHROPIC_IDENTITY_TOKEN`,
-  `ANTHROPIC_IDENTITY_TOKEN_FILE`, `ANTHROPIC_WORKSPACE_ID`,
-  `CLAUDE_CODE_FEDERATION_CACHE_DIR`;
+- **what selects an Anthropic profile or workload identity federation**,
+  which outrank the login, and federation's identity token:
+  `ANTHROPIC_PROFILE`, `ANTHROPIC_CONFIG_DIR`, `ANTHROPIC_FEDERATION_RULE_ID`,
+  `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_IDENTITY_TOKEN`,
+  `ANTHROPIC_IDENTITY_TOKEN_FILE`;
 - **a host that signs Claude Code in or refreshes for it:**
   `CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST`, `CLAUDE_CODE_HOST_AUTH_ENV_VAR`,
   `CLAUDE_CODE_HOST_CREDS_FILE`, `CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH`,
@@ -2087,8 +2089,12 @@ and the cloud vendors' own variables — `AWS_PROFILE`,
 `AWS_BEARER_TOKEN_BEDROCK`, `GOOGLE_CLOUD_PROJECT`, `CLOUD_ML_REGION` and
 their like. Claude Code reads them only once a dropped switch has chosen the
 provider, and Anthropic's SDKs and the clouds' own tools in the run read them
-too. So do `CLAUDE_CODE_HTTP_PROXY` and `CLAUDE_CODE_HTTPS_PROXY`, which only
-a cloud session reads, for the package managers it starts, and
+too. Workload identity federation's own configuration stays the same way:
+`ANTHROPIC_WORKSPACE_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID`, `ANTHROPIC_SCOPE`
+and `CLAUDE_CODE_FEDERATION_CACHE_DIR`, which Claude Code reads only while it
+resolves a federation that the dropped names, or an active profile, chose.
+`CLAUDE_CODE_HTTP_PROXY` and `CLAUDE_CODE_HTTPS_PROXY`, which only a cloud
+session reads, for the package managers it starts, stay too, and so does
 `CLAUDE_CODE_ACCOUNT_TAGGED_ID`, a telemetry label. `CLAUDE_CONFIG_DIR` stays
 as well; a route that points Claude Code at a directory sets it, and one that
 does not leaves your own.

@@ -29,10 +29,10 @@ var claudeInheritedNever = []string{
 	"CLAUDE_CODE_SUBSCRIPTION_TYPE", "CLAUDE_CODE_RATE_LIMIT_TIER",
 	"CLAUDE_CODE_SESSIONS_OAUTH_TOKEN", "CLAUDE_CODE_SESSION_ACCESS_TOKEN", "CLAUDE_SESSION_INGRESS_TOKEN_FILE",
 	"CLAUDE_BRIDGE_OAUTH_TOKEN", "CLAUDE_TRUSTED_DEVICE_TOKEN",
-	// Anthropic profiles and workload identity federation.
+	// What selects an Anthropic profile or workload identity federation, and
+	// its identity token.
 	"ANTHROPIC_PROFILE", "ANTHROPIC_CONFIG_DIR", "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID",
-	"ANTHROPIC_SERVICE_ACCOUNT_ID", "ANTHROPIC_IDENTITY_TOKEN", "ANTHROPIC_IDENTITY_TOKEN_FILE",
-	"ANTHROPIC_WORKSPACE_ID", "CLAUDE_CODE_FEDERATION_CACHE_DIR",
+	"ANTHROPIC_IDENTITY_TOKEN", "ANTHROPIC_IDENTITY_TOKEN_FILE",
 	// A host that signs Claude Code in, or refreshes its login for it.
 	"CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST", "CLAUDE_CODE_HOST_AUTH_ENV_VAR", "CLAUDE_CODE_HOST_CREDS_FILE",
 	"CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH", "CLAUDE_CODE_SDK_HAS_SESSIONS_OAUTH_REFRESH",
@@ -77,14 +77,17 @@ var codexInheritedNever = []string{
 // CLI itself signs in or where it sends its requests: a variable that shares
 // a prefix with one; a provider's configuration, which Claude Code reads only
 // behind a dropped CLAUDE_CODE_USE_* switch and Anthropic's SDKs and the
-// clouds' own tools read too; Claude Code's proxies for the package managers
-// a cloud session starts; a telemetry label; codex's request headers and its
-// sandbox's own fact. Each stays for everything the run starts.
+// clouds' own tools read too; workload identity federation's configuration,
+// which Claude Code reads only behind the dropped names that select it;
+// Claude Code's proxies for the package managers a cloud session starts; a
+// telemetry label; codex's request headers and its sandbox's own fact. Each
+// stays for everything the run starts.
 var inheritedKept = []string{
 	"CLAUDE_CODE_USE_POWERSHELL_TOOL", "ANTHROPIC_MODEL", "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
 	"AWS_PROFILE", "AWS_BEARER_TOKEN_BEDROCK", "GOOGLE_CLOUD_PROJECT", "CLOUD_ML_REGION",
 	"ANTHROPIC_VERTEX_PROJECT_ID", "ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_AWS_WORKSPACE_ID",
 	"ANTHROPIC_GOOGLE_CLOUD_PROJECT", "ANTHROPIC_GOOGLE_CLOUD_LOCATION", "ANTHROPIC_GOOGLE_CLOUD_WORKSPACE_ID",
+	"ANTHROPIC_WORKSPACE_ID", "ANTHROPIC_SERVICE_ACCOUNT_ID", "ANTHROPIC_SCOPE", "CLAUDE_CODE_FEDERATION_CACHE_DIR",
 	"CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
 	"CLAUDE_CODE_SKIP_MANTLE_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH", "CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH",
 	"CLAUDE_CODE_HTTP_PROXY", "CLAUDE_CODE_HTTPS_PROXY", "CLAUDE_CODE_ACCOUNT_TAGGED_ID",
