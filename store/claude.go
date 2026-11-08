@@ -1203,7 +1203,10 @@ func (h *claudeHome) writeDue(ctx context.Context) error {
 			}
 		}
 	}
-	h.readBack = a.StagedCurrent()
+	// A refreshed login written over the one rota wrote there and has
+	// refreshed past since is read back too: the record names that login,
+	// neither "-" nor the current one.
+	h.readBack = a.StagedCurrent() || h.spent
 	return nil
 }
 

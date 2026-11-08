@@ -294,9 +294,12 @@ func TestARefreshTheStoreCannotSaveLosesNothing(t *testing.T) {
 		}},
 	} {
 		for _, c := range []struct {
-			what   string
-			file   string // the refresh token the home holds: "" none
-			staged string // what the store records of the home: "keep" its own login there
+			what string
+			file string // the refresh token the home holds: "" none
+			// staged is what the store records of the home: "keep" its own login
+			// there; "alone" a refresh token alone, never run; "spent alone" a
+			// refresh token alone whose home holds what rota wrote before it.
+			staged string
 			kept   bool   // the home's login is one rota cannot place, and stays
 			body   string // the credential store in the home when it holds no login of file's
 		}{
@@ -309,6 +312,7 @@ func TestARefreshTheStoreCannotSaveLosesNothing(t *testing.T) {
 			{"held as a refresh token alone, signed in, never run, a blanked login there", "", "alone", false, clearedLogin},
 			{"held as a refresh token alone, signed in, never run, an inference-only login there", "", "alone", false,
 				`{"mcpOAuth":{"srv":{"accessToken":"mcp-secret"}},"claudeAiOauth":{"accessToken":"A-x","refreshToken":"R-x","expiresAt":0}}`},
+			{"held as a refresh token alone, rota's own spent login there", "R-old", "spent alone", false, ""},
 		} {
 			// good is how many saves the look gets through before every one
 			// fails: none, the one before the refresh, that and the one after.
@@ -337,6 +341,13 @@ func TestARefreshTheStoreCannotSaveLosesNothing(t *testing.T) {
 					case "alone":
 						a.Token.Access = ""
 						a.Staged = "-"
+					case "spent alone":
+						// The home holds the login rota wrote there and has refreshed
+						// past since.
+						own := a.Token.Refresh
+						a.Token.Refresh = c.file
+						a.StagedWritten()
+						a.Token.Refresh, a.Token.Access = own, ""
 					default:
 						a.Staged = c.staged
 					}
