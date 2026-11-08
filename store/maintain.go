@@ -31,9 +31,10 @@ import (
 //
 // ctx decides what starts, as for Refresh: a server stopping lets the refresh
 // under way finish and be saved, for up to RefreshTimeout, and starts no other.
-func (s *Store) Maintain(ctx context.Context) []error {
+func (s *Store) Maintain(ctx context.Context) (out []error) {
 	ctx, done := detach(ctx)
 	defer done()
+	defer func() { out = onceLeft(out) }()
 	// Without the lock nothing may rotate, so all that is left is reading:
 	// see Refresh. A wait the provider asked for is kept as ever, and not
 	// said again on every sweep.
@@ -54,10 +55,10 @@ func (s *Store) Maintain(ctx context.Context) []error {
 		}
 		return err
 	}
-	var left error
+	left := false
 	for _, a := range s.Accounts {
-		if left = stopped(ctx); left != nil {
-			errs = append(errs, left)
+		if err := stopped(ctx); err != nil {
+			errs, left = append(errs, err), true
 			break
 		}
 		if rota.SharedHome(a.Provider) {
@@ -68,6 +69,10 @@ func (s *Store) Maintain(ctx context.Context) []error {
 			unsaved = unsaved || did
 			if err != nil {
 				errs = append(errs, err)
+				if errors.Is(err, errLeft) {
+					left = true
+					break
+				}
 			}
 			continue
 		}
@@ -129,6 +134,9 @@ func (s *Store) Maintain(ctx context.Context) []error {
 				}
 				since = snapshot(a)
 			}
+			if err = beforeRefresh(ctx, a); err != nil {
+				return
+			}
 			if did, err = rota.Refresh(ctx, a); err != nil || !did || a.Dead {
 				return
 			}
@@ -148,6 +156,10 @@ func (s *Store) Maintain(ctx context.Context) []error {
 		unsaved = unsaved || (did && !saved) || since.differs(a)
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", a, err))
+			if errors.Is(err, errLeft) {
+				left = true
+				break
+			}
 		}
 	}
 	if unsaved {
@@ -155,7 +167,7 @@ func (s *Store) Maintain(ctx context.Context) []error {
 			errs = append(errs, fmt.Errorf("tokens could not be saved: %w", err))
 		}
 	}
-	if left != nil {
+	if left {
 		return errs // said once, above
 	}
 	// Usage honours the five-minute cache and any wait a provider asked for,
@@ -177,6 +189,9 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 		if a.Dead {
 			return false, nil
 		}
+		if err := beforeRefresh(ctx, a); err != nil {
+			return false, err
+		}
 		did, err := rota.Refresh(ctx, a)
 		return did, wrapAccount(a, err)
 	}
@@ -190,6 +205,9 @@ func (s *Store) maintainShared(ctx context.Context, a *rota.Account) (bool, erro
 		return changed, nil
 	}
 	if !rota.StoresLogin(a, h.home) && !unrefreshed(a) {
+		if err := beforeRefresh(ctx, a); err != nil {
+			return changed, err
+		}
 		did, err := rota.Refresh(ctx, a)
 		return changed || did, wrapAccount(a, err)
 	}

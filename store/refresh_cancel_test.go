@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -138,6 +139,34 @@ func TestALookWhoseCallerHasGoneStartsNothing(t *testing.T) {
 	}
 }
 
+// Whoever asked going away part of the way through an account — here while
+// the home is read, before anything is sent — stops the refresh at the last
+// moment before it would be sent, so a refresh still waiting for its answer
+// when the caller left was always sent before, and has the whole bound.
+func TestARefreshNotYetSentWhenTheCallerLeavesIsNotSent(t *testing.T) {
+	storedRouteHere(t)
+	for _, look := range cancelLooks() {
+		t.Run(look.what, func(t *testing.T) {
+			w := newLineageWorld(t, true)
+			w.clock.pass(9 * time.Hour)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			w.k.onFind = func(string) { cancel() }
+			errs := look.do(ctx, w)
+			if n := len(w.p.entries()); n != 0 {
+				w.p.dump(t)
+				t.Fatalf("rota sent a refresh after whoever asked had gone: %d", n)
+			}
+			if !slices.ContainsFunc(errs, func(err error) bool { return errors.Is(err, context.Canceled) }) {
+				t.Errorf("nothing said the caller had gone: %v", errs)
+			}
+			if w.a.Token.Refresh != "R0" || w.a.Dead {
+				t.Errorf("the account changed: %q dead=%v", w.a.Token.Refresh, w.a.Dead)
+			}
+		})
+	}
+}
+
 // What detach hands the work: never the caller's cancellation, a bound of its
 // own that starts only once the caller has gone, and nothing armed after the
 // work has returned.
@@ -212,4 +241,40 @@ func TestDetachedWorkHasItsOwnBoundOnceTheCallerHasGone(t *testing.T) {
 			t.Fatal("the first caller's going away does not count")
 		}
 	})
+}
+
+// Settle waits for every piece of work detach has handed out in this process,
+// work that starts while it waits included, and gives up when its own ctx is
+// done.
+func TestSettleWaitsForTheWorkUnderWay(t *testing.T) {
+	bounded, stop := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stop()
+	if err := Settle(bounded); err != nil {
+		t.Fatalf("nothing should be under way: %v", err)
+	}
+	_, first := detach(context.Background())
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := Settle(short); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Settle did not wait for the work under way: %v", err)
+	}
+	settled := make(chan error, 1)
+	go func() { settled <- Settle(bounded) }()
+	_, second := detach(context.Background()) // started while Settle waits
+	first()
+	first() // done twice counts once
+	select {
+	case err := <-settled:
+		t.Fatalf("Settle returned with work still under way: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	second()
+	select {
+	case err := <-settled:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Settle did not return once the work was done")
+	}
 }

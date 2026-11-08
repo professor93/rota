@@ -64,7 +64,7 @@ import (
 func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Account) []error {
 	ctx, done := detach(ctx)
 	defer done()
-	return s.refresh(ctx, force, true, accounts)
+	return onceLeft(s.refresh(ctx, force, true, accounts))
 }
 
 // refresh is Refresh; sayWaits says whether an account left alone for a wait it
@@ -139,21 +139,9 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			report(false, fmt.Errorf("usage readings could not be read from the store: %w", err))
 		}
 	}
-	// left is whether whoever asked going away has been said already, once
-	// being enough (see stopped).
-	left := false
-	leave := func(err error) {
-		if !left {
-			report(false, err)
-		}
-		left = true
-	}
 	// Before any worker starts, because a rescue saves the store, and a save
 	// reads every account.
-	homes := s.lookIn(ctx, accounts, collect, func(changed bool, err error) {
-		left = left || errors.Is(err, errLeft)
-		report(changed, err)
-	})
+	homes := s.lookIn(ctx, accounts, collect, report)
 	now := rota.Now()
 	// The work is planned first, one account at a time, and set going only
 	// once the plan is whole: the plan writes into homes and saves the store,
@@ -167,7 +155,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 	var plain, renews []work
 	for _, a := range accounts {
 		if err := stopped(ctx); err != nil {
-			leave(err)
+			report(false, err)
 			break
 		}
 		shared := rota.SharedHome(a.Provider)
@@ -265,6 +253,10 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			}
 			held = append(held, release)
 			plain = append(plain, work{a, func() {
+				if err := beforeRefresh(ctx, a); err != nil {
+					report(false, err)
+					return
+				}
 				changed, err := rota.Refresh(ctx, a)
 				if err != nil {
 					report(changed, err)
@@ -290,7 +282,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 	// way yet: a renew has written into its home only what writeDue may, and
 	// the store says so on disk.
 	if err := stopped(ctx); err != nil && len(plain)+len(renews) > 0 {
-		leave(err)
+		report(false, err)
 		plain, renews = nil, nil
 	}
 	for _, w := range slices.Concat(plain, renews) {
@@ -371,7 +363,7 @@ func (s *Store) Rescue(ctx context.Context, accounts ...*rota.Account) []error {
 			errs = append(errs, err)
 		}
 	}
-	return errs
+	return onceLeft(errs)
 }
 
 // lookIn reads the home of every claude account whose login lives in one and

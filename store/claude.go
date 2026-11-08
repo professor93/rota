@@ -1404,6 +1404,9 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 		a.Dead, a.DeadReason = true, why.(string)
 		return true, rota.WrapReauth(a)
 	}
+	if err := beforeRefresh(ctx, a); err != nil {
+		return false, err
+	}
 	rescue := h.rescuing
 	h.rescuing = false
 	changed, err = rota.Refresh(ctx, a)
@@ -1892,6 +1895,9 @@ func (h *claudeHome) envRun(ctx context.Context) (*rota.Command, error) {
 // keep in one: refreshed as it always was — never a dead one.
 func tokenRun(ctx context.Context, a *rota.Account) (*rota.Command, error) {
 	if !a.Dead && !a.LongValid() && a.Expired() {
+		if err := beforeRefresh(ctx, a); err != nil {
+			return nil, err
+		}
 		if _, err := rota.Refresh(ctx, a); err != nil {
 			return nil, err
 		}

@@ -95,6 +95,9 @@ func refreshForLaunch(ctx context.Context, a *rota.Account) (bool, error) {
 	if a.LongValid() || a.Dead {
 		return false, nil
 	}
+	if err := beforeRefresh(ctx, a); err != nil {
+		return false, err
+	}
 	return rota.Refresh(ctx, a)
 }
 
@@ -317,8 +320,8 @@ func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.
 // away meanwhile, as one the listing makes does (see Refresh). The CLI itself
 // is started, and stopped, by the caller's own ctx.
 func (s *Store) prepare(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
-	if ctx.Err() != nil {
-		return nil, nil, fmt.Errorf("%s: not launched: %w", a, context.Cause(ctx))
+	if err := stopped(ctx); err != nil {
+		return nil, nil, fmt.Errorf("%s: not launched: %w", a, err)
 	}
 	ctx, done := detach(ctx)
 	defer done()
