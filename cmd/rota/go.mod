@@ -6,7 +6,7 @@ require (
 	github.com/charmbracelet/ultraviolet v0.0.0-20260303162955-0b88c25f3fff
 	github.com/charmbracelet/x/ansi v0.11.7
 	github.com/charmbracelet/x/vt v0.1.0
-	github.com/professor93/rota v1.4.0-beta.8
+	github.com/professor93/rota v1.4.0-beta.9
 )
 
 require (
