@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/professor93/rota/internal/fakecli"
+	"github.com/professor93/rota/internal/lend"
 	"github.com/professor93/rota/internal/proc"
 	"github.com/professor93/rota/store"
 )
@@ -107,13 +108,11 @@ func TestAFinishedSessionLeavesItsAccountFreeWhileItsDaemonRuns(t *testing.T) {
 }
 
 // A handover whose exec fails lets go of the claim before it returns: the
-// holder it was lent to is told to, and is waited for.
-//
-// Before the exec the claim is lent, not kept across it, and the exec closes
-// this process's own copy, as the real one does to a close-on-exec file: the
-// holder holds it through the exec on its own.
+// holder it was lent to is told to, and is waited for. And the claim was
+// lent, not kept across the exec: what the exec started, the way an exec
+// keeps descriptors, holds none of it.
 func TestAHandoverWhoseExecFailsLetsGoOfTheLentClaimAtOnce(t *testing.T) {
-	lock := seedCodex(t)
+	seedCodex(t)
 	bin := t.TempDir()
 	fakecli.Install(t, bin, "codex", fakecli.Spec{})
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -121,29 +120,25 @@ func TestAHandoverWhoseExecFailsLetsGoOfTheLentClaimAtOnce(t *testing.T) {
 	t.Setenv("ROTA_AS_RUN", "1")
 	orig := execProcess
 	t.Cleanup(func() { execProcess = orig })
-	var lent, heldThrough bool
+	var cli *exec.Cmd
 	execProcess = func(string, []string, []string) error {
-		for _, f := range store.ClaimFiles() {
-			if f.Name() != lock {
-				continue
-			}
-			lent = closeOnExecFile(t, f)
-			_ = f.Close()
+		// Whatever is not close-on-exec goes with it, as with an exec.
+		cli = exec.Command("/bin/sleep", "30")
+		if err := cli.Start(); err != nil {
+			return err
 		}
-		heldThrough = inUse(t)
 		return errors.New("exec failed on purpose")
 	}
-	if _, errOut, code := call(t, "run", "1"); code == 0 || !strings.Contains(errOut, "exec failed on purpose") {
+	_, errOut, code := call(t, "run", "1")
+	if cli != nil && cli.Process != nil {
+		t.Cleanup(func() { _ = cli.Process.Kill(); _ = cli.Wait() })
+	}
+	if code == 0 || !strings.Contains(errOut, "exec failed on purpose") {
 		t.Fatalf("the failed exec is the run's error: %d %q", code, errOut)
 	}
-	if !lent {
-		t.Fatal("the claim is lent to a holder, still close-on-exec, rather than kept across the exec")
-	}
-	if !heldThrough {
-		t.Fatal("the holder holds the claim once the exec has closed this process's copy")
-	}
 	if inUse(t) {
-		t.Fatal("a handover whose exec failed has let go of the claim by the time it returns")
+		t.Fatal("a handover whose exec failed has let go of the claim by the time it returns, " +
+			"and what the exec started holds none of it")
 	}
 }
 
@@ -200,15 +195,6 @@ func TestLettingGoWaitsForTheHolder(t *testing.T) {
 	}
 }
 
-func closeOnExecFile(t *testing.T, f *os.File) bool {
-	t.Helper()
-	flags, _, errno := syscall.Syscall(syscall.SYS_FCNTL, f.Fd(), uintptr(syscall.F_GETFD), 0)
-	if errno != 0 {
-		t.Fatal(errno)
-	}
-	return flags&syscall.FD_CLOEXEC != 0
-}
-
 // exitOf answers when a process has exited, a zombie its parent has yet to
 // wait for included, and at once for one that has already gone.
 func TestExitOfAnswersWhenAProcessExits(t *testing.T) { exitOfAnswers(t) }
@@ -261,10 +247,10 @@ func TestServeClaimTakesAPidAndACount(t *testing.T) {
 	}
 }
 
-// lend takes the codex account's claim in this process, lends it to a real
-// holder watching this process, and lets go of this process's own copy: the
+// lendToHolder takes the codex account's claim in this process, lends it to a
+// real holder watching this process, and lets go of this process's own: the
 // holder alone holds it then.
-func lend(t *testing.T, lock string) *holder {
+func lendToHolder(t *testing.T, lock string) *holder {
 	t.Helper()
 	s, err := store.Open("")
 	if err != nil {
@@ -276,8 +262,13 @@ func lend(t *testing.T, lock string) *holder {
 		t.Fatal("the account was claimed already")
 	}
 	defer release()
+	copies, err := lend.Claims()
+	if err != nil {
+		t.Fatal(err)
+	}
 	var files []*os.File
-	for _, f := range store.ClaimFiles() {
+	for _, f := range copies {
+		defer f.Close()
 		if f.Name() == lock {
 			files = append(files, f)
 		}
@@ -299,7 +290,7 @@ func lend(t *testing.T, lock string) *holder {
 func TestOnlySIGKILLEndsAHolderEarly(t *testing.T) {
 	lock := seedCodex(t)
 	t.Setenv("ROTA_AS_RUN", "1")
-	h := lend(t, lock)
+	h := lendToHolder(t, lock)
 	if !inUse(t) {
 		t.Fatal("the holder holds the claim")
 	}
@@ -317,7 +308,7 @@ func TestOnlySIGKILLEndsAHolderEarly(t *testing.T) {
 		t.Fatal("told to by the run, it has let go")
 	}
 
-	h = lend(t, lock)
+	h = lendToHolder(t, lock)
 	if err := syscall.Kill(h.pid, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}

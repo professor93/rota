@@ -23,3 +23,7 @@ func tryLockFile(path string) (*os.File, bool, error) {
 
 // tryLockShared is tryLockFile: nothing is locked outside Unix and Windows.
 func tryLockShared(path string) (*os.File, bool, error) { return tryLockFile(path) }
+
+// dupClaim lends nothing here: no handover lends its claims, because the CLI
+// runs as a child while this process holds them.
+func dupClaim(*os.File) (*os.File, error) { return nil, nil }
