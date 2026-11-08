@@ -204,7 +204,7 @@ func (s *Server) adopt(r *holdwire.Record, labels map[int]string) {
 		return
 	}
 	m := r.Meta
-	h := &heldTerm{s: s, dir: r.Dir, pid: m.HolderPID, start: m.HolderStart, boot: m.BootID,
+	h := &heldTerm{s: s, dir: r.Dir, pid: m.HolderPID, start: m.HolderStart, ticks: m.HolderStartTicks, boot: m.BootID,
 		conn: conn, features: w.Features, state: heldLive, lastOut: s.now(),
 		conv: m.Conversation, convCwd: m.ConversationCwd,
 		reg:  holdwire.Registry{SessionID: m.Conversation, Name: m.ConversationName, Cwd: m.ConversationCwd},

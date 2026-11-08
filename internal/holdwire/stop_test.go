@@ -70,11 +70,15 @@ func helper(t *testing.T, deaf bool) (*Record, *exec.Cmd) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	ticks, err := proc.StartTicks(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
 	boot, err := proc.BootID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &Meta{ID: "0123456789abcdef", HolderPID: cmd.Process.Pid, HolderStart: start, BootID: boot}
+	m := &Meta{ID: "0123456789abcdef", HolderPID: cmd.Process.Pid, HolderStart: start, HolderStartTicks: ticks, BootID: boot}
 	return &Record{ID: m.ID, Dir: dir, Meta: m, State: StateLive}, cmd
 }
 
@@ -129,10 +133,13 @@ func TestStopHolderKillsWhatWillNotStop(t *testing.T) {
 func TestStopHolderSignalsNothingThatIsNotTheHolder(t *testing.T) {
 	r, cmd := helper(t, false)
 	r.Meta.HolderStart = r.Meta.HolderStart.Add(time.Hour)
+	if r.Meta.HolderStartTicks != 0 {
+		r.Meta.HolderStartTicks += 3600 * 100
+	}
 	if _, err := StopHolder(r, time.Second); !errors.Is(err, ErrNotSameProcess) {
 		t.Fatalf("a record an hour off answers %v, want ErrNotSameProcess", err)
 	}
-	if err := Signal(r.Meta.HolderPID, r.Meta.HolderStart, r.Meta.BootID, syscall.SIGHUP); !errors.Is(err, ErrNotSameProcess) {
+	if err := Signal(r.Meta.HolderPID, r.Meta.HolderStart, r.Meta.HolderStartTicks, r.Meta.BootID, syscall.SIGHUP); !errors.Is(err, ErrNotSameProcess) {
 		t.Fatalf("Signal answers %v, want ErrNotSameProcess", err)
 	}
 	time.Sleep(100 * time.Millisecond)
@@ -143,5 +150,25 @@ func TestStopHolderSignalsNothingThatIsNotTheHolder(t *testing.T) {
 		if _, err := StopHolder(bad, time.Second); !errors.Is(err, ErrNotSameProcess) {
 			t.Fatalf("a record naming nobody answers %v", err)
 		}
+	}
+}
+
+// On Linux a holder is told by its start in ticks, which no setting of the
+// clock moves: once the clock has been stepped an hour, the start time its
+// record keeps is an hour from the one read now, and it is hung up all the
+// same. macOS keeps no ticks, and its start time does not move.
+func TestStopHolderSurvivesASteppedClock(t *testing.T) {
+	r, _ := helper(t, false)
+	if r.Meta.HolderStartTicks == 0 {
+		t.Skip("this system's start times do not move with the clock")
+	}
+	r.Meta.HolderStart = r.Meta.HolderStart.Add(-time.Hour)
+	kill, err := StopHolder(r, 5*time.Second)
+	if err != nil {
+		t.Fatalf("a holder recorded before the clock was stepped is not itself: %v", err)
+	}
+	kill()
+	if hangups(r) != 1 {
+		t.Fatalf("the holder got %d hangups, want 1", hangups(r))
 	}
 }

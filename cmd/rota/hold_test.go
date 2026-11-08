@@ -53,11 +53,16 @@ func TestAHolderRunsTheCLIAndSaysItIsReady(t *testing.T) {
 		t.Fatalf("meta.json says what the session is: %+v", m)
 	}
 	if m.HolderPID != h.ready.PID || m.HolderStart.IsZero() || m.BootID == "" ||
-		!holdwire.SameProcess(m.HolderPID, m.HolderStart, m.BootID) {
+		!holdwire.SameProcess(m.HolderPID, m.HolderStart, m.HolderStartTicks, m.BootID) {
 		t.Fatalf("and who holds it: %+v", m)
 	}
+	// Linux keeps its start in ticks too, which no setting of the clock
+	// moves; macOS has no ticks and needs none.
+	if (m.HolderStartTicks != 0) != (runtime.GOOS == "linux") {
+		t.Fatalf("the holder's start in ticks on %s is %d", runtime.GOOS, m.HolderStartTicks)
+	}
 	if m.ChildPID <= 0 || m.ChildPID == m.HolderPID || !proc.Alive(m.ChildPID) ||
-		!holdwire.SameProcess(m.ChildPID, m.ChildStart, m.BootID) {
+		!holdwire.SameProcess(m.ChildPID, m.ChildStart, 0, m.BootID) {
 		t.Fatalf("and which CLI it holds: %+v", m)
 	}
 	if m.Protocol != holdwire.Major || m.Version != wire.Version || m.Cwd != req.Cwd ||

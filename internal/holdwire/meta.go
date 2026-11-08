@@ -20,9 +20,10 @@ import (
 // gone. It never holds a credential rota keeps; Args may hold whatever the
 // person typed into the command line, as StoredArgs says.
 //
-// The holder's pid and start time and the boot id are there so the pid is
-// signalled only while it is still the same process; the child's are there
-// so the CLI's own registry is believed only for the process it is about.
+// The holder's pid, start and boot id are there so the pid is signalled only
+// while it is still the same process (SameProcess; the start in ticks is
+// Linux's alone); the child's are there so the CLI's own registry is
+// believed only for the process it is about.
 type Meta struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
@@ -30,11 +31,12 @@ type Meta struct {
 	Account  int    `json:"account"`
 	Provider string `json:"provider"`
 
-	HolderPID   int       `json:"holder_pid"`
-	HolderStart time.Time `json:"holder_start"`
-	BootID      string    `json:"boot_id"`
-	ChildPID    int       `json:"child_pid"`
-	ChildStart  time.Time `json:"child_start"`
+	HolderPID        int       `json:"holder_pid"`
+	HolderStart      time.Time `json:"holder_start"`
+	HolderStartTicks int64     `json:"holder_start_ticks,omitempty"`
+	BootID           string    `json:"boot_id"`
+	ChildPID         int       `json:"child_pid"`
+	ChildStart       time.Time `json:"child_start"`
 
 	// Protocol is the major the holder speaks, and Version the rota that
 	// made it: a holder no major agrees with is named by its version.

@@ -183,13 +183,13 @@ func (r *daemonRig) session(id string) *rotaclient.Session {
 // locks to go: nothing this test started may outlive it.
 func (r *daemonRig) reap() {
 	if d, ok := holdwire.RunningDaemon(r.terminals); ok {
-		_ = holdwire.Signal(d.PID, d.ProcStart, d.BootID, syscall.SIGKILL)
+		_ = holdwire.Signal(d.PID, d.ProcStart, d.ProcStartTicks, d.BootID, syscall.SIGKILL)
 	}
 	recs := holdwire.Scan(r.terminals)
 	for _, rec := range recs {
 		if m := rec.Meta; m != nil {
-			_ = holdwire.Signal(m.HolderPID, m.HolderStart, m.BootID, syscall.SIGKILL)
-			_ = holdwire.Signal(m.ChildPID, m.ChildStart, m.BootID, syscall.SIGKILL)
+			_ = holdwire.Signal(m.HolderPID, m.HolderStart, m.HolderStartTicks, m.BootID, syscall.SIGKILL)
+			_ = holdwire.Signal(m.ChildPID, m.ChildStart, 0, m.BootID, syscall.SIGKILL)
 		}
 	}
 	locks := []string{holdwire.DaemonLock(r.terminals)}

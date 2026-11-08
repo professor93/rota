@@ -161,14 +161,16 @@ func (s *Session) take(c *net.UnixConn) {
 }
 
 // fromDaemon says whether c's peer is the process holding the store's
-// daemon lock, and which process it is.
+// daemon lock, and which process it is. The kernel names the peer, so it is
+// running now, and daemon.pid need only name it: its start is not asked
+// about, which a clock set since the daemon started would make look like
+// another process's (holdwire.IsDaemon).
 func (s *Session) fromDaemon(c *net.UnixConn) (int, bool) {
 	pid, err := proc.PeerPID(c)
 	if err != nil {
 		return 0, false
 	}
-	d, ok := holdwire.RunningDaemon(s.cfg.Terminals)
-	return pid, ok && d.PID == pid
+	return pid, holdwire.IsDaemon(s.cfg.Terminals, pid)
 }
 
 // read handles the daemon's frames until the link ends. Frames it does not
