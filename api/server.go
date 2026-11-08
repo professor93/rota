@@ -457,10 +457,14 @@ func (s *Server) maintain() (reset time.Time) {
 // a signal to rota does not reach it. Without this, exiting would leave
 // agents running: still spending, still writing to a staged credential file
 // whose store no longer holds the lock.
-// It also waits, briefly, for the background refresher to return. A sweep
-// that is still running after Stop holds the store's lock and is about to
-// write to it, which is exactly the state a caller thinks it has left behind
-// — and, for a test, is a directory that will not delete.
+// It also waits for the background refresher to return. A sweep that is
+// still running after Stop holds the store's lock and is about to write to
+// it, which is exactly the state a caller thinks it has left behind — and,
+// for a test, is a directory that will not delete. A sweep starts nothing
+// once Stop is called, but a refresh it has under way goes on to its answer
+// and the save after it (see store.Refresh), so Stop waits for that, up to
+// store.RefreshTimeout: a process that exits before the answer has lost the
+// token that replaced the one presented.
 func (s *Server) Stop() {
 	// The socket first, so nothing new is offered to a server that is
 	// stopping, and the file it left behind goes with it.
@@ -476,10 +480,7 @@ func (s *Server) Stop() {
 	}
 	select {
 	case <-s.keeperDone:
-	case <-time.After(5 * time.Second):
-		// A sweep can be inside a provider call with its own timeout. Waiting
-		// for that is worse than leaving it: it will find the cancelled
-		// context on its next turn round the loop.
+	case <-time.After(store.RefreshTimeout()):
 		s.log.Warn("background refresh did not stop in time")
 	}
 }
