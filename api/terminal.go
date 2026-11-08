@@ -853,7 +853,12 @@ func (ts *termSession) resizeTo(tc *termConn, cols, rows uint16) error {
 	if err := back.resize(cols, rows); err != nil {
 		return err
 	}
-	ts.resizedBy(cols, rows)
+	// A holder says the size once it has taken it, and everyone is told
+	// then: one whose CLI is ending, or whose terminal refused the size,
+	// leaves it as it was.
+	if !ts.held() {
+		ts.resizedBy(cols, rows)
+	}
 	return nil
 }
 

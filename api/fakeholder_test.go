@@ -62,6 +62,8 @@ import (
 //	                              200 ms later
 //	FAKE_HOLDER_SEND_AFTER=<path> type a send only once path exists, as a
 //	                              session that is busy for a while
+//	FAKE_HOLDER_RESIZE=none       take no resize and answer none, as a holder
+//	                              whose CLI is ending
 //
 // The conversation and its folder are written into meta.json as well, as a
 // real holder keeps them there for a session that has stopped.
@@ -337,6 +339,9 @@ func (f *fake) frame(conn *share.Conn, c net.Conn, kind byte, payload []byte) {
 		var msg holdwire.SizeMsg
 		_ = share.Unmarshal(payload, &msg)
 		f.record("resize %dx%d", msg.Cols, msg.Rows)
+		if os.Getenv("FAKE_HOLDER_RESIZE") == "none" {
+			return
+		}
 		f.mu.Lock()
 		f.cols, f.rows = msg.Cols, msg.Rows
 		f.mu.Unlock()
