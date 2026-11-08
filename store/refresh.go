@@ -72,7 +72,10 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 		said    []string
 		renewed []*claudeHome
 		held    []func()
-		read    []*rota.Account
+		// letGos are the renews' locks and claims, let go of once their
+		// logins are in their homes, before anything is read with them.
+		letGos []func()
+		read   []*rota.Account
 	)
 	// The claims taken for a refresh are let go when this returns, however
 	// it returns: a worker that panics must not leave an account claimed.
@@ -185,13 +188,13 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			// Nothing may rotate here; the account keeps its last reading.
 		case h != nil:
 			// Expired: a refresh, which only a quiet home may have. The claim,
-			// and Claude Code's refresh lock with it, are kept until the new
-			// login is in the home, and the home is read again once both are
-			// held (lockAndRead): a lock somebody holds is Claude Code
-			// refreshing right now, which leaves the account to the next look,
-			// and a rotation found under it is read with instead. The home is
-			// given the account's login first, as for a launch's refresh (see
-			// renew), and the save below says so on disk.
+			// and Claude Code's refresh lock with it, are taken now and kept
+			// until the new login is in the home, and the home is read again
+			// once both are held (lockAndRead): a lock somebody holds is Claude
+			// Code refreshing right now, which leaves the account to the next
+			// look, and a rotation found under it is read with instead. The
+			// home is given the account's login first, as for a launch's
+			// refresh (see renew), and the save below says so on disk.
 			release, ok := s.holdIdle(a)
 			if !ok {
 				continue
@@ -208,7 +211,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			held = append(held, letGo)
 			h.others = false
 			lock, changed, err := h.lockAndRead(ctx)
-			report(changed, err)
+			report(changed, unlessHeld(err))
 			if lock == nil {
 				letGo()
 				continue
@@ -233,9 +236,11 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 				return h.writeDue(ctx)
 			}()
 			if err != nil {
+				letGo()
 				report(true, err)
 				continue
 			}
+			letGos = append(letGos, letGo)
 			renews = append(renews, work{a, func() {
 				changed, err := h.refresh(ctx)
 				if err != nil {
@@ -250,8 +255,6 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 				mu.Lock()
 				renewed = append(renewed, h)
 				mu.Unlock()
-				q, err := rota.Usage(ctx, a)
-				reading(a, q, err)
 			}})
 		default:
 			// A running account is left alone: refreshing rotates the token
@@ -289,18 +292,65 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			renews = nil
 		}
 	}
-	for _, w := range slices.Concat(plain, renews) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer guard(w.a)
-			w.do()
-		}()
+	run := func(ws []work) {
+		for _, w := range ws {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				defer guard(w.a)
+				w.do()
+			}()
+		}
+		wg.Wait()
 	}
-	wg.Wait()
-	for _, msg := range said {
-		s.say(msg)
+	tell := func() {
+		for _, msg := range said {
+			s.say(msg)
+		}
+		said = nil
 	}
+	// The renews go first, alone. Each login refreshed is saved, written into
+	// its home while the home is still claimed — when rota may write there
+	// (mayWrite), which a home still holding the login just refreshed away
+	// always is — and then its lock and claim are let go, so a Claude Code
+	// waiting on one of those locks waits for that home's refresh and nothing
+	// else. Their readings are taken after that, with everybody else's.
+	run(renews)
+	if len(renewed) > 0 {
+		if err := s.Save(); err != nil {
+			// The refreshed logins are not on disk, and the ones they replaced
+			// are spent. Each still goes into its home, the one copy left that
+			// the next look can read back.
+			errs = append(errs, err)
+			for _, h := range renewed {
+				if werr := h.writeRefreshed(ctx, false); werr != nil {
+					errs = append(errs, werr)
+				}
+			}
+			tell()
+			return errs
+		}
+		for _, h := range renewed {
+			if err := h.writeRefreshed(ctx, true); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if err := s.Save(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	for _, letGo := range letGos {
+		letGo()
+	}
+	for _, h := range renewed {
+		a := h.a
+		plain = append(plain, work{a, func() {
+			q, err := rota.Usage(ctx, a)
+			reading(a, q, err)
+		}})
+	}
+	run(plain)
+	tell()
 	if s.released {
 		if err := s.keepReadings(read); err != nil {
 			errs = append(errs, fmt.Errorf("usage readings could not be kept: %w", err))
@@ -311,31 +361,7 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 		return errs
 	}
 	if err := s.Save(); err != nil {
-		// The refreshed logins are not on disk, and the ones they replaced are
-		// spent. Each still goes into its home, the one copy left that the
-		// next look can read back.
 		errs = append(errs, err)
-		for _, h := range renewed {
-			if werr := h.writeRefreshed(ctx, false); werr != nil {
-				errs = append(errs, werr)
-			}
-		}
-		return errs
-	}
-	// Each refreshed login goes into its home now that the store has it,
-	// while the home is still claimed — when rota may write there (mayWrite),
-	// which a home still holding the login just refreshed away always is.
-	again := false
-	for _, h := range renewed {
-		if err := h.writeRefreshed(ctx, true); err != nil {
-			errs = append(errs, err)
-		}
-		again = true
-	}
-	if again {
-		if err := s.Save(); err != nil {
-			errs = append(errs, err)
-		}
 	}
 	return errs
 }
