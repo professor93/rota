@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -228,5 +229,34 @@ func TestARegistryMatchesInTheRepeatedHour(t *testing.T) {
 	}
 	if f.belongsTo(pid, edt.Add(2*time.Second)) || f.belongsTo(pid, est.Add(-2*time.Second)) {
 		t.Fatal("a start two seconds off matched")
+	}
+}
+
+// A registry string longer than any Claude Code writes is not believed, so
+// the State every link begins with always fits in a frame (see
+// TestTheStateFitsWhateverTheRegistrySays). A waitingFor too long to
+// believe still says the session waits.
+func TestARegistryStringPastItsBoundIsNotBelieved(t *testing.T) {
+	huge := strings.Repeat("\x01", 200<<10)
+	for _, c := range []struct {
+		key string
+		v   any
+	}{
+		{"name", huge}, {"cwd", huge}, {"sessionId", huge}, {"status", huge}, {"kind", huge},
+		{"waitingFor", huge}, {"waitingFor", map[string]any{"type": huge}},
+	} {
+		f, err := parseRegistry(fixtureWith(t, c.key, c.v), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, _ := parseRegistry(fixtureWith(t, c.key, absent), nil)
+		if c.key == "waitingFor" {
+			want.WaitingFor = waitingUnknown
+		}
+		if !sameFile(f, want) {
+			g := f.Registry
+			t.Fatalf("%s of %d bytes read as fields of %d, %d, %d, %d, %d and %d bytes",
+				c.key, len(huge), len(g.SessionID), len(g.Name), len(g.Cwd), len(g.Status), len(g.WaitingFor), len(g.Kind))
+		}
 	}
 }
