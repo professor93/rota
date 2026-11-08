@@ -52,3 +52,21 @@ func TestALoginsLastThreeDaysAreNoted(t *testing.T) {
 		t.Errorf("an end nobody recorded: %q", got)
 	}
 }
+
+// The STATUS cell and the note read one clock, the one the account's end is
+// kept by, so under any clock an application sets they say the same thing.
+func TestTheStatusCellAndTheNoteReadOneClock(t *testing.T) {
+	at := time.UnixMilli(time.Now().Add(10 * 24 * time.Hour).UnixMilli())
+	old := rota.Now
+	rota.Now = func() time.Time { return at }
+	t.Cleanup(func() { rota.Now = old })
+	a := &rota.Account{ID: 4, Provider: "claude",
+		Extra: map[string]string{"refresh_token_expires_at": strconv.FormatInt(at.Add(50*time.Hour).UnixMilli(), 10)}}
+	if s, n := LoginStatus(a), LoginNote(a); s != "login ends in 2d" || n == "" {
+		t.Fatalf("50 hours on the account's clock: status %q, note %q", s, n)
+	}
+	a.Extra["refresh_token_expires_at"] = strconv.FormatInt(at.Add(-3*time.Hour).UnixMilli(), 10)
+	if s := LoginStatus(a); s != "login ended 3h ago" {
+		t.Fatalf("three hours past on the account's clock: %q", s)
+	}
+}
