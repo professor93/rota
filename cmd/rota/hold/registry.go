@@ -39,6 +39,12 @@ const registrySlack = time.Second
 // failed to recognise.
 const waitingUnknown = "unknown"
 
+// maxField bounds each string a registry file gives, as the scanner bounds a
+// title. Claude Code writes a few dozen bytes in each; a longer one is not
+// believed, so that the State every link begins with always fits in a frame,
+// even with each string at the bound and written six bytes to the byte.
+const maxField = 4096
+
 // registryPath is where Claude Code keeps the record of the session running
 // as pid in an account's home.
 func registryPath(home string, pid int) string {
@@ -47,7 +53,8 @@ func registryPath(home string, pid int) string {
 
 // parseRegistry reads one registry file. The file is undocumented, so each
 // key is read on its own and one that is missing, or not what Claude Code
-// 2.1.318 writes there, leaves only its own field empty. Only a file that is
+// 2.1.318 writes there, leaves only its own field empty, as does a string
+// longer than maxField. Only a file that is
 // not one JSON object — one caught half written — is an error, so the caller
 // keeps what it last knew. loc is the zone the writer's procStart is in:
 // Claude Code writes it in its own local time, so the caller passes the zone
@@ -104,10 +111,11 @@ func wall(t time.Time) time.Time {
 	return time.Date(y, mo, d, h, mi, sec, t.Nanosecond(), time.UTC)
 }
 
-// str is a JSON string's value, and empty for anything else.
+// str is a JSON string's value, and empty for anything else and for a
+// string longer than maxField.
 func str(raw json.RawMessage) string {
 	var s string
-	if json.Unmarshal(raw, &s) != nil {
+	if json.Unmarshal(raw, &s) != nil || len(s) > maxField {
 		return ""
 	}
 	return s
@@ -125,7 +133,8 @@ func number(raw json.RawMessage) int64 {
 
 // waitingFor names what the session waits for: a string as written, an
 // object by its type or else its kind, nothing for null, false or an empty
-// string, and waitingUnknown for any other answer.
+// string, and waitingUnknown for any other answer, a name longer than
+// maxField among them.
 func waitingFor(raw json.RawMessage) string {
 	var v any
 	if json.Unmarshal(raw, &v) != nil {
@@ -139,10 +148,15 @@ func waitingFor(raw json.RawMessage) string {
 			return ""
 		}
 	case string:
-		return w
+		if len(w) <= maxField {
+			return w
+		}
 	case map[string]any:
 		for _, k := range []string{"type", "kind"} {
 			if s, ok := w[k].(string); ok && s != "" {
+				if len(s) > maxField {
+					break
+				}
 				return s
 			}
 		}

@@ -807,3 +807,24 @@ func TestTheEndingIsRecordedFirst(t *testing.T) {
 	default:
 	}
 }
+
+// The State every link begins with fits in a frame whatever the CLI's
+// registry says. A registry name of 200 KiB of control characters, which
+// JSON writes six bytes to the byte, made one too big to send, and every
+// link after it failed on that State; and with every string at its bound
+// the State still fits.
+func TestTheStateFitsWhateverTheRegistrySays(t *testing.T) {
+	r := newRig(t, 0, newFakeChild())
+	claim(t, r.terminals)
+	f, err := parseRegistry(fixtureWith(t, "name", strings.Repeat("\x01", 200<<10)), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.s.SetRegistry(&f.Registry)
+	r.link(t)
+	full := strings.Repeat("\x01", maxField)
+	r.s.SetRegistry(&holdwire.Registry{SessionID: full, Name: full, Cwd: full, Status: full, WaitingFor: full, Kind: full})
+	p := r.link(t)
+	p.send(holdwire.Ping, nil)
+	p.until(holdwire.Pong)
+}
