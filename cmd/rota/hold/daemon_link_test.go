@@ -3,11 +3,13 @@
 package hold
 
 import (
+	"net"
 	"os"
 	"testing"
 	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/share"
 	rota "github.com/professor93/rota/lib"
 )
 
@@ -43,4 +45,27 @@ func TestTheDaemonLinksWhateverItsRecordedStart(t *testing.T) {
 	p := r.link(t)
 	p.send(holdwire.Ping, nil)
 	p.until(holdwire.Pong)
+}
+
+// A process that is not the daemon is refused before anything it sends is
+// read: here it sends nothing at all, and is refused at once rather than
+// after helloWithin.
+func TestALinkIsRefusedBeforeItsHello(t *testing.T) {
+	r := newRig(t, 0, newFakeChild())
+	conn, err := net.Dial("unix", holdwire.SockPath(holdwire.Dir(r.terminals, testID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := &peer{t: t, c: share.NewConn(conn, 0)}
+	t.Cleanup(func() { p.c.Close() })
+	began := time.Now()
+	p.c.Deadline(began.Add(helloWithin / 2))
+	kind, b, err := p.c.Read()
+	if err != nil || kind != holdwire.Refused {
+		t.Fatalf("a silent peer that is not the daemon got %d %q (%v) after %s", kind, b, err, time.Since(began))
+	}
+	var m holdwire.RefusedMsg
+	if err := share.Unmarshal(b, &m); err != nil || m.Message != refusedNotDaemon {
+		t.Fatalf("refused with %q (%v)", m.Message, err)
+	}
 }
