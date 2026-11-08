@@ -60,6 +60,25 @@ func (p Procfs) StartTicks(pid int) (int64, error) {
 	return ticks, nil
 }
 
+// Parent is the process a process's parent is now: field 4 of
+// /proc/<pid>/stat. A process whose parent has gone has been handed to init,
+// or to whichever of its ancestors reaps orphans, and names that one.
+func (p Procfs) Parent(pid int) (int, error) {
+	fields, err := p.stat(pid)
+	if err != nil {
+		return 0, err
+	}
+	const at = 4 - 3
+	if len(fields) <= at {
+		return 0, fmt.Errorf("proc: /proc/%d/stat: too few fields", pid)
+	}
+	ppid, err := strconv.Atoi(fields[at])
+	if err != nil {
+		return 0, fmt.Errorf("proc: /proc/%d/stat: %w", pid, err)
+	}
+	return ppid, nil
+}
+
 // stat is /proc/<pid>/stat's fields from the third on. The second is the
 // command's name in parentheses, which may itself hold spaces and
 // parentheses, so the count starts after the last closing one: what follows

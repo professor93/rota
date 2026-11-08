@@ -85,3 +85,17 @@ func TestStartTimeAndBootIDOfThisProcess(t *testing.T) {
 		t.Fatal("a pid nothing has has a start time")
 	}
 }
+
+// A process's parent is the one the kernel says, which here is whatever ran
+// this test, and a pid that names nothing has none.
+func TestParentOfThisProcess(t *testing.T) {
+	if ppid, err := Parent(os.Getpid()); err != nil || ppid != os.Getppid() {
+		t.Fatalf("this process's parent is %d (%v), want %d", ppid, err, os.Getppid())
+	}
+	if _, err := Parent(-1); err == nil {
+		t.Fatal("pid -1 has a parent")
+	}
+	if _, err := Parent(1 << 30); err == nil {
+		t.Fatal("a pid nothing has has a parent")
+	}
+}
