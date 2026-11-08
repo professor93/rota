@@ -260,6 +260,14 @@ type claudeHome struct {
 	// lock, which goes on deciding for the write that follows: once the refresh
 	// has answered, the token is good and the home is no longer stranded.
 	rescuing bool
+	// copyExpires is when the account's own copy truly expires, kept while a
+	// rescue has forced its expiry into the past to present it: what judgeFile
+	// measures a file against meanwhile, so a value that is only forced for the
+	// length of a refresh changes no verdict. 0 the rest of the time.
+	copyExpires int64
+	// locked is whether this look holds Claude Code's refresh lock (mend), so
+	// what it does under that lock takes no lock of its own (dropSeed).
+	locked bool
 	// readBack is whether the next look would read a login rota refreshed and
 	// wrote into the home back as a rotation, from what the store says on disk
 	// before the refresh: the account's current login is what the home holds.
@@ -568,6 +576,8 @@ func (h *claudeHome) mend(ctx context.Context) (changed bool, err error) {
 		return false, nil
 	}
 	defer lock.release()
+	h.locked = true
+	defer func() { h.locked = false }()
 	before := snapshot(h.a)
 	if err := h.adopt(ctx); err != nil {
 		return false, err
@@ -617,7 +627,9 @@ func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 	forced := a.Token.ExpiresAt
 	h.rescuing = true
 	h.readBack = a.StagedCurrent() // a home is rescued only on the account's current login
+	h.copyExpires = expires
 	changed, err := h.refresh(ctx)
+	h.copyExpires = 0
 	if !due && a.Token.ExpiresAt == forced {
 		a.Token.ExpiresAt = expires
 	}
@@ -956,7 +968,8 @@ func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
 //     both known, and not the same — is somebody's /login there. It counts, and
 //     is read as the new login it is (adopt), so it is never written over.
 //   - Another refresh token no later than rota's copy is older than the item
-//     Claude Code blanked, or cannot be shown not to be: passed over.
+//     Claude Code blanked, or cannot be shown not to be: passed over. "rota's
+//     copy" is when it truly expires, not the past a rescue forces on it.
 //   - A later one whose lineage is not known on both sides may be a /login, so
 //     it counts, as the new login it may be, for confirm to settle, and is never
 //     written over.
@@ -977,7 +990,7 @@ func (h *claudeHome) judgeFile(file []byte) (counts, superseded bool) {
 	switch {
 	case theirs != "" && ours != "" && theirs != ours:
 		return true, false
-	case int64(l.Expires) <= h.a.Token.ExpiresAt:
+	case int64(l.Expires) <= max(h.copyExpires, h.a.Token.ExpiresAt):
 		return false, false
 	case theirs == "" || ours == "":
 		return true, false
@@ -1164,7 +1177,8 @@ func (h *claudeHome) lost(fsys storeFS) {
 // look that finds that so removes it. It is removed under Claude Code's refresh
 // lock, after both are read again and found as they were, so no write of
 // Claude Code's can fall between; a lock somebody holds leaves it to a later
-// look.
+// look. Under the lock mend holds it acts at once, and never takes the lock
+// again: taking it there could clear mend's own as stale after a long stall.
 func (h *claudeHome) dropSeed() {
 	seeded := h.a.Extra[seedFPKey]
 	item, ok := storedLogin(h.item)
@@ -1183,11 +1197,13 @@ func (h *claudeHome) dropSeed() {
 		file.Expires >= item.Expires {
 		return
 	}
-	lock, ok := takeRefreshLock(h.home)
-	if !ok {
-		return
+	if !h.locked {
+		lock, ok := takeRefreshLock(h.home)
+		if !ok {
+			return
+		}
+		defer lock.release()
 	}
-	defer lock.release()
 	svc, _ := h.service()
 	ctx, cancel := keychainContext()
 	defer cancel()

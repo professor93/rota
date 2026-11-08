@@ -769,6 +769,89 @@ func TestTheLookThatFirstFoundTheHomeBlankedOutlivesItsProcess(t *testing.T) {
 	}
 }
 
+// A rescue forces the expiry of rota's own copy into the past to present it.
+// That is no reason to judge the file beside a blanked item any differently
+// when the home is read again after a refusal: a login older than the copy
+// the provider just refused is passed over then as it was before, so it is
+// neither taken nor put in front of Claude Code, and the account dies with the
+// refusal.
+func TestARefusedRescueTakesNoOlderLoginBesideABlankedItem(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	k := fakeKeychain(t)
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) {
+		f.refresh = func() (int, any) { return 400, map[string]string{"error": "invalid_grant"} }
+		f.profile = profileOf("A-old", "u1")
+	})
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	delete(a.Extra, "refresh_token_expires_at")
+	a.Token.ExpiresAt = later(2 * time.Hour)
+	home := s.Home(a)
+	svc := service(t, home)
+	a.StagedWritten()
+	seenInSync(a)
+	k.items[svc] = clearedLogin
+	file := storeLogin("A-old", "R-old", later(time.Hour), "1888888888000")
+	writeFile(t, filepath.Join(home, ".credentials.json"), file)
+	alive(t, home, "sessions/1.json", os.Getpid())
+	for look := 1; look <= 2; look++ {
+		s.Rescue(context.Background(), a)
+		if f.refreshes.Load() != 1 || !a.Dead || a.Token.Refresh != "R-u1" ||
+			!strings.Contains(a.WhyDead(), "refused rota's own refresh token") || !strings.Contains(a.WhyDead(), "invalid_grant") {
+			t.Fatalf("look %d: presented once, dead with the refusal, nothing taken: %d %v %q %q",
+				look, f.refreshes.Load(), a.Dead, a.Token.Refresh, a.WhyDead())
+		}
+		if v, ok := k.item(svc); !ok || v != clearedLogin || readFile(filepath.Join(home, ".credentials.json")) != file {
+			t.Fatalf("look %d: the older login is not put in front of Claude Code", look)
+		}
+	}
+}
+
+// Under the refresh lock mend holds, rota's seed file goes without the lock
+// being taken again. Here the look's first reading leaves it — the item moved
+// under it between the reading and the removal — and mend, rescuing the home
+// it found stranded, removes it under its own lock.
+func TestRotasSeedFileGoesUnderTheLockMendHolds(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	k := fakeKeychain(t)
+	f := fakeAnthropic(t)
+	f.set(func(f *anthropic) {
+		f.refresh = func() (int, any) { return 503, map[string]string{"error": "overloaded"} }
+	})
+	s := openTemp(t)
+	a := livingClaude(s, "u1")
+	a.Token.ExpiresAt = later(-9 * time.Hour)
+	home := s.Home(a)
+	svc := service(t, home)
+	a.StagedWritten()
+	seededByRota(a)
+	file := filepath.Join(home, ".credentials.json")
+	writeFile(t, file, storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000"))
+	item := storeLogin("A-n", "R-n", later(-time.Hour), "1999999999000")
+	k.items[svc] = item
+	finds := 0
+	k.onFind = func(svc string) {
+		if finds++; finds == 2 { // the first reading's check just before it removes the file
+			k.items[svc] = strings.Replace(item, "mcp-secret", "mcp-secret-2", 1)
+		}
+	}
+	alive(t, home, "daemon.lock", os.Getpid())
+	gaveUp(t, home, later(-30*time.Minute))
+	s.Rescue(context.Background(), a)
+	if a.Token.Refresh != "R-n" || f.refreshes.Load() != 1 {
+		t.Fatalf("the rotation is taken and the stranded home's rescue tried: %q %d", a.Token.Refresh, f.refreshes.Load())
+	}
+	if _, err := os.Stat(file); !os.IsNotExist(err) || a.Extra[seedFPKey] != "" {
+		t.Fatalf("the seed file goes under mend's lock: %v %q", err, a.Extra[seedFPKey])
+	}
+	if _, err := os.Stat(filepath.Join(home, claudeRefreshLock)); !os.IsNotExist(err) {
+		t.Fatal("and the lock is let go")
+	}
+}
+
 // The store's fingerprint is the one lib records in Staged, or nothing a look
 // compares would ever match.
 func TestTheFingerprintIsTheOneStagedRecords(t *testing.T) {
