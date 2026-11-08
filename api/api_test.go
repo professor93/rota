@@ -1153,11 +1153,14 @@ func TestTheServerRecordsTheRunsItStarts(t *testing.T) {
 	h := newHarness(t, Options{})
 
 	// A CLI that announces its session and then takes its time, as the real
-	// ones do: the run has to still be going when the listing is read.
+	// ones do: the run has to still be going when the listing is read. It
+	// goes on for far longer than a listing takes, even on a loaded machine,
+	// where one costs a ps and an lsof for every CLI running on it; the test
+	// ends the run itself by leaving, once it has looked.
 	bin := t.TempDir()
 	fakecli.Install(t, bin, "claude", fakecli.Lines(
 		`{"type":"system","subtype":"init","session_id":"s-server"}`,
-		"{{sleep:1s}}",
+		"{{sleep:30s}}",
 		`{"type":"result","subtype":"success","is_error":false,"session_id":"s-server","result":"ok","total_cost_usd":0.01}`,
 	))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1165,25 +1168,25 @@ func TestTheServerRecordsTheRunsItStarts(t *testing.T) {
 	// Streaming, because that is when the conversation can be known while the
 	// run is still going: a buffered run's CLI prints one document at the end,
 	// so there is nothing to read until there is nothing left to say.
-	go h.do("POST", "/v1/accounts/1/run", map[string]any{"prompt": "hi", "stream": true})
+	run := openStream(t, h, "POST", "/v1/accounts/1/run",
+		map[string]any{"prompt": "hi", "stream": true}, "Accept", "application/x-ndjson")
 
-	// Both facts are looked for while the run is going, and neither has to
-	// arrive in the same reading: the account is known when the run starts,
-	// the conversation only once the CLI has said what it is.
-	var sawAccount, sawSession bool
-	var last string
-	for range 60 {
-		time.Sleep(50 * time.Millisecond)
-		_, raw := h.do("GET", "/v1/accounts?sessions=1", nil)
-		last = string(raw)
-		// The HTTP body is compact, so the assertions are too.
-		sawAccount = sawAccount || strings.Contains(last, `"kind":"cli","provider":"claude","account":1`)
-		sawSession = sawSession || strings.Contains(last, `"session":"s-server"`)
-		if sawAccount && sawSession {
-			return
+	// The server writes the conversation down before it passes the event
+	// naming it on, so once that event has arrived one listing must carry
+	// both facts: the account, known since the run started, and the
+	// conversation the CLI has just said it is in.
+	for {
+		if ev := run.ev(t); ev["session_id"] == "s-server" {
+			break
 		}
 	}
-	t.Fatalf("account seen: %v, conversation seen: %v; last listing:\n%s", sawAccount, sawSession, last)
+	_, raw := h.do("GET", "/v1/accounts?sessions=1", nil)
+	// The HTTP body is compact, so the assertions are too.
+	listing := string(raw)
+	if !strings.Contains(listing, `"kind":"cli","provider":"claude","account":1`) ||
+		!strings.Contains(listing, `"session":"s-server"`) {
+		t.Fatalf("the run and its conversation must be listed while it goes on:\n%s", listing)
+	}
 }
 
 // The CLI calls it login and the API called it auth, for one act. It is
