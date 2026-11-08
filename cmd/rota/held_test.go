@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net"
@@ -292,6 +293,35 @@ func TestAHeldSessionsDirtyNameIsDrawnCleaned(t *testing.T) {
 	var doc map[string]any
 	if code != 1 || json.Unmarshal([]byte(out), &doc) != nil || doc["error"] != "session "+drawn+" has ended" || doc["reason"] != "ended" {
 		t.Errorf("send --json to the stopped one: exit %d %q %q", code, out, errb)
+	}
+}
+
+// rota list --sessions passes its terminal on to the held sessions too: at
+// 60 columns a row with a long title and a long folder fits, and keeps the
+// start of its id whole.
+func TestListHeldSessionsFitTheTerminalItIsOn(t *testing.T) {
+	shortHome(t)
+	terminals := terminalsOf(t)
+	const cwd = "/Users/someone/GolandProjects/a-rather-long-project-name/services/api"
+	plantRecord(t, terminals, holdwire.Meta{ID: "a1b2c3d4e5f60718", Name: "Review of the account rotation when a refresh token is reused",
+		Kind: holdwire.KindAccount, Account: 1, Provider: "claude", Cwd: cwd, Started: time.Now(), HolderPID: os.Getpid()}, true)
+
+	piped, errb, code := call(t, "list", "--short", "--sessions")
+	if code != 0 || !strings.Contains(piped, cwd+"  a1b2c3d4\n") {
+		t.Fatalf("off a terminal the folder is whole: exit %d %q\n%s", code, errb, piped)
+	}
+	var out, errs bytes.Buffer
+	c := &cli{out: &out, err: &errs, in: strings.NewReader(""), cols: 60}
+	if err := c.list([]string{"--short", "--sessions"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(out.String(), "\n") {
+		if n := screenWidth(line); n > 60 {
+			t.Fatalf("a line %d wide at 60 columns: %q\n%s", n, line, out.String())
+		}
+	}
+	if !regexp.MustCompile(`(?m)^Held sessions:\n  ● Review… +#1 a@x +claude +running +…\S+/api  a1b2c3d4$`).MatchString(out.String()) {
+		t.Fatalf("the title and the folder cut, the id whole:\n%s", out.String())
 	}
 }
 

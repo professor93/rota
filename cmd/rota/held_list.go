@@ -3,7 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
-	"text/tabwriter"
+	"strings"
 
 	rotaclient "github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/internal/holdwire"
@@ -76,12 +76,27 @@ func listHeld(s *store.Store) []rotaclient.Session {
 
 // showHeld prints the held sessions, when there are any: ● for one that is
 // running and ○ for one that has stopped, which says how.
-func (c *cli) showHeld(held []rotaclient.Session) {
+//
+// width is the terminal's, or 0. Each row is one line, lined up by the
+// columns its cells take on screen, so a name in Chinese or an emoji lines
+// up too. On a terminal narrower than a row the free text is cut to fit, as
+// the sessions above it are: the name keeps its start and the folder its
+// end, each eight columns wide until the account has given way as far, then
+// the account, the CLI and how the session is, and the start of its id,
+// which rota send takes, never. Anywhere else nothing changes.
+func (c *cli) showHeld(held []rotaclient.Session, width int) {
 	if len(held) == 0 {
 		return
 	}
 	fmt.Fprintln(c.out, "\nHeld sessions:")
-	w := tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
+	// The name shares its cell with the dot and the space before it (see
+	// heldName), two more columns than the folder at every floor: the
+	// wider of the two is cut first, and the folder then goes the last two
+	// columns alone.
+	g := grid{plain: true, width: width,
+		cutBy: map[int]func(string, int) string{0: heldName, 1: cut, 4: cutStart},
+		steps: []stage{{[]int{0, 4}, heldMark + cutSoft}, {[]int{4}, cutSoft}, {[]int{1}, cutSoft},
+			{[]int{0, 4}, heldMark + cutHard}, {[]int{4}, cutHard}, {[]int{1}, cutHard}, {[]int{2}, cutHard}, {[]int{3}, cutHard}}}
 	for _, h := range held {
 		dot, what := "●", h.Status
 		if h.Ended != nil {
@@ -91,10 +106,23 @@ func (c *cli) showHeld(held []rotaclient.Session) {
 		if h.Account != 0 {
 			who = fmt.Sprintf("#%d %s", h.Account, heldCell(h.AccountLabel))
 		}
-		fmt.Fprintf(w, "  %s %s\t%s\t%s\t%s\t%s\t%s\n", dot, clip(heldCell(h.Name), 44), who,
-			orDash(heldCell(h.Provider)), heldCell(what), orDash(heldCell(h.Cwd)), heldCell(short(h.ID)))
+		g.add(dot+" "+clip(heldCell(h.Name), 44), who, orDash(heldCell(h.Provider)), heldCell(what),
+			orDash(heldCell(h.Cwd)), heldCell(short(h.ID)))
 	}
-	_ = w.Flush()
+	g.render(c.out)
+}
+
+// heldMark is the columns the dot and the space after it take before a
+// held session's name.
+const heldMark = 2
+
+// heldName cuts the name in a held session's first cell to fit n columns
+// with the dot before it, as cutCell cuts a title, keeping its start: the
+// dot and its space stay, so a name whose first character is two columns
+// wide is "○ …" rather than a dot against its "…".
+func heldName(c string, n int) string {
+	dot, name, _ := strings.Cut(c, " ")
+	return dot + " " + cutCell(name, n-heldMark)
 }
 
 // heldBusy is a busy account's refusal with the held session that has the
