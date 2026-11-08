@@ -238,6 +238,7 @@ func TestAKeychainItemWrittenMeanwhileIsNotDeleted(t *testing.T) {
 		home := s.Home(a)
 		svc := service(t, home)
 		a.StagedWritten()
+		seenInSync(a)
 		k.items[svc] = clearedLogin
 		file := storeLogin(a.Token.Access, a.Token.Refresh, a.Token.ExpiresAt, "1999999999000")
 		writeFile(t, filepath.Join(home, ".credentials.json"), file)

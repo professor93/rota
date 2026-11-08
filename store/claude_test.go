@@ -833,8 +833,9 @@ func TestAFileNewerThanTheKeychainItemIsTheLogin(t *testing.T) {
 }
 
 // Only a login beats the item: a file holding a blanked login, or nothing that
-// can be read, is not newer whatever it says; nor is any file beside an item
-// Claude Code blanked, because that is what it did to the login it was using.
+// can be read, is not newer whatever it says; nor is a file beside an item
+// Claude Code blanked, because that is what it did to the login it was using,
+// unless it holds exactly the account's own login, seen in the home a moment ago.
 func TestOnlyALoginInTheFileBeatsTheKeychainItem(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
@@ -878,17 +879,32 @@ func TestOnlyALoginInTheFileBeatsTheKeychainItem(t *testing.T) {
 	}
 	t.Run("beside an item Claude Code blanked", func(t *testing.T) {
 		k := fakeKeychain(t)
+		f := fakeAnthropic(t)
+		f.set(func(f *anthropic) { f.refresh = refreshesTo("A-x", "R-x") })
 		s := openTemp(t)
 		a := livingClaude(s, "u1")
 		home := s.Home(a)
 		a.StagedWritten()
 		k.items[service(t, home)] = `{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}`
-		writeFile(t, filepath.Join(home, ".credentials.json"), storeLogin("A-new", "R-new", later(2*time.Hour), "1999999999000"))
-		if err := s.claudeHome(a, false).adopt(context.Background()); err != nil {
+		file := storeLogin("A-new", "R-new", later(2*time.Hour), "1999999999000")
+		writeFile(t, filepath.Join(home, ".credentials.json"), file)
+		seenInSync(a)
+		h := s.claudeHome(a, false)
+		if err := h.adopt(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if a.Dead || a.Token.Refresh != "R-new" {
-			t.Fatalf("a blanked item is older than a file that holds a login: %v %q", a.Dead, a.Token.Refresh)
+		// A later login of the same lineage may be one Claude Code rotated past
+		// into the item before it blanked it; it is surely one rotated past
+		// rota's copy, which is spent, so the rescue presents nothing.
+		if a.Dead || a.Token.Refresh != "R-u1" || !h.blanked {
+			t.Fatalf("the home is as blanked as its item: %v %q %v", a.Dead, a.Token.Refresh, h.blanked)
+		}
+		s.Rescue(context.Background(), a)
+		if f.refreshes.Load() != 0 || !a.Dead || a.WhyDead() != olderCopyWords(a) {
+			t.Fatalf("nothing presented, and dead: %d %v %q", f.refreshes.Load(), a.Dead, a.WhyDead())
+		}
+		if readFile(filepath.Join(home, ".credentials.json")) != file {
+			t.Fatal("and nothing written over the later login")
 		}
 	})
 }

@@ -158,6 +158,9 @@ func TestAWatcherRescuesAStrandedOrBlankedHomeWhileSomethingRunsThere(t *testing
 		{"stranded", func(t *testing.T, s *Store, a *rota.Account) { stranded(t, s, a) }, "daemon.lock"},
 		{"blanked", func(t *testing.T, s *Store, a *rota.Account) {
 			home := cleared(t, s, a)
+			// Found blanked at once: a watcher's twenty milliseconds would
+			// otherwise make how soon its first look comes part of the test.
+			a.Extra[homeLostKey] = a.Extra[homeSyncedKey]
 			alive(t, home, "sessions/1.json", os.Getpid())
 		}, "sessions/1.json"},
 	} {
