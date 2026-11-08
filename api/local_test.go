@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+
+	"github.com/professor93/rota/internal/pty"
 )
 
 // These are about LocalHandler: every route, served to one principal fixed
@@ -220,9 +222,12 @@ func TestNoUserOrTokenOfADaemonMayBeCalledLocal(t *testing.T) {
 		if err := ReservedNames(opts.Users, opts.Tokens); err == nil || err.Error() != at+want {
 			t.Errorf("a daemon's file with a %s entry called local answers %v, want %q", c.table, err, at+want)
 		}
-		opts.HoldCommand = hold
-		if _, err := New(opts); err == nil || err.Error() != "api: "+at+want {
-			t.Errorf("a daemon with a %s entry called local answers %v, want %q", c.table, err, "api: "+at+want)
+		// Where held sessions do not run, a daemon is refused before that.
+		if pty.Supported {
+			opts.HoldCommand = hold
+			if _, err := New(opts); err == nil || err.Error() != "api: "+at+want {
+				t.Errorf("a daemon with a %s entry called local answers %v, want %q", c.table, err, "api: "+at+want)
+			}
 		}
 	}
 }
