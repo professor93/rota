@@ -22,12 +22,15 @@ import (
 //   - the pump reads what the CLI prints, answers its terminal queries,
 //     keeps it in the ring, and wakes the others;
 //   - the emulator feeds the ring to the Screen, a sequence boundary at a
-//     time, and answers the cursor-position queries the Screen alone knows;
+//     time, answers the cursor-position queries the Screen alone knows, and
+//     takes each size the terminal took where in the output it took it;
 //   - the writer is the only thing that writes to the CLI: answers first,
 //     then keystrokes, from a queue that refuses out loud when it is full;
 //   - the link, when the daemon has one, sends the ring from wherever the
 //     daemon has got to, so a daemon that is slow loses bytes it can see it
-//     lost, and the CLI loses nothing;
+//     lost, and the CLI loses nothing; what it asks of the screen, a repaint
+//     or a resize, waits on a worker of its own, never in front of a
+//     keystroke, a stop or a send;
 //   - and life waits for the CLI to exit, and ends the rest in order.
 //
 // The pump is the one that must never stop. A CLI whose output is not read
@@ -101,6 +104,14 @@ type due struct {
 	replies [][]byte
 }
 
+// sized is a size the terminal took once the ring had reached end, which the
+// screen takes there too: what was printed before it was printed at the
+// size before.
+type sized struct {
+	end        int64
+	cols, rows uint16
+}
+
 // Session is one held CLI. Start makes it, Serve links it to the daemon, and
 // Done says when the CLI has ended and everything about it is finished.
 type Session struct {
@@ -116,6 +127,8 @@ type Session struct {
 	gmodes  vtscan.Modes // the modes as of ground
 	dues    []due
 	owed    int          // dues the screen has taken and not yet answered
+	sizes   []sized      // sizes the screen has yet to take
+	drawn   int64        // em.off as of the screen's last catch-up
 	modes   vtscan.Modes // the modes as of the newest byte
 	title   string
 	bells   uint64
@@ -144,6 +157,7 @@ type Session struct {
 	}
 	emWake chan struct{}
 	emDone chan struct{} // the emulator's goroutine has returned
+	sizing sync.Mutex    // one resize at a time, the CLI's and the screen's in one order
 
 	turn     chan struct{} // one send types at a time
 	finished chan struct{} // the session is ending: the emulator stops
@@ -155,12 +169,21 @@ type Session struct {
 
 // Start begins holding c, at the size cfg gives, bounded.
 func Start(cfg Config, c Child) *Session {
+	s := newSession(cfg, c)
+	go s.pump()
+	go s.emulate()
+	go s.w.run()
+	go s.life()
+	return s
+}
+
+// newSession is a session with nothing running yet.
+func newSession(cfg Config, c Child) *Session {
 	cols, rows := holdwire.BoundSize(cfg.Cols, cfg.Rows)
 	s := &Session{
 		cfg:      cfg,
 		child:    c,
 		scan:     vtscan.NewScanner(),
-		screen:   NewScreen(int(cols), int(rows)),
 		ring:     ring.New(cfg.Scrollback),
 		cols:     cols,
 		rows:     rows,
@@ -176,12 +199,14 @@ func Start(cfg Config, c Child) *Session {
 		done:     make(chan struct{}),
 	}
 	s.em.cols, s.em.rows = cols, rows
+	if holdwire.ScreenFits(cols, rows) {
+		s.screen = NewScreen(int(cols), int(rows))
+	} else {
+		s.screen, s.em.retired = noScreen(), true
+		s.log(tooLarge, "cols", cols, "rows", rows, "cells", holdwire.MaxScreenCells)
+	}
 	s.w = newWriter(c, InputQueue, s.log)
 	s.log("holding the CLI", "session", cfg.ID, "pid", c.Pid(), "cols", cols, "rows", rows)
-	go s.pump()
-	go s.emulate()
-	go s.w.run()
-	go s.life()
 	return s
 }
 

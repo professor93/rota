@@ -372,6 +372,22 @@ func (p *peer) screen(seq uint64) (holdwire.ScreenHead, string) {
 	return h, string(repaint)
 }
 
+// caughtUp asks for the screen, from sequence seq on, until it stands for
+// offset off: a screen far behind its CLI answers at once with none.
+func (p *peer) caughtUp(seq uint64, off int64) (holdwire.ScreenHead, string) {
+	p.t.Helper()
+	for deadline := time.Now().Add(20 * time.Second); ; seq++ {
+		h, repaint := p.screen(seq)
+		if h.Offset >= off {
+			return h, repaint
+		}
+		if time.Now().After(deadline) {
+			p.t.Fatalf("the screen stands for %d, never %d", h.Offset, off)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // eof waits for the holder to close the link.
 func (p *peer) eof() {
 	p.t.Helper()
