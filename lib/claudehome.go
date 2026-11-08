@@ -327,13 +327,25 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //     next staging writes it. What this package itself wrote there before a
 //     refresh of its own stays recorded as that write — it is what proves
 //     the login there spent (ClaudeHomeSpent) — and any other older login is
-//     recorded as nothing of the account's;
+//     recorded as nothing of the account's. A rotation is taken even when
+//     the home is recorded as holding nothing of the account's, provided the
+//     account knows its login's refreshTokenExpiresAt and the rotation
+//     expires later than its own token: a look that found the store empty,
+//     blanked, without an expiry, behind or unreadable says nothing about
+//     what Claude Code wrote there after it, and an account that passed over
+//     its own login rotated would go on to present the refresh token that
+//     rotation replaced;
 //   - a new login — another refreshTokenExpiresAt, or any living login in
 //     the home of a dead account — which somebody made by running /login
 //     inside that home. Nothing of it is taken here, because the home says
 //     nothing trustworthy about whose it is: it comes back as a *NewLogin
 //     for the application to check (NewLogin.Identify) and then Accept or
-//     Refuse.
+//     Refuse. In a home recorded as holding nothing of the account's, a
+//     login of another refreshTokenExpiresAt is instead the one from before
+//     the account's current login — it was logged in again with rota since,
+//     and a fresh login never carries the last one's refreshTokenExpiresAt
+//     (see Complete) — so it is older whatever it says, and the next staging
+//     writes over it.
 func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 	if a.APIKey() {
 		// A key account keeps no login in its home, so nothing found there is
@@ -382,9 +394,18 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 		// is somebody signing in again there — whatever it says about itself.
 		return &NewLogin{Access: l.AccessToken, login: l}
 	case a.Staged == stagedNone:
-		// The home predates the account's current login — it was logged in
-		// again with rota since — so whatever is there is older, rotated or
-		// not, and the next write replaces it.
+		// The last look found the home not holding the account's current
+		// login. A login of another lineage there predates that login — it
+		// was logged in again with rota since — so it is older, rotated or
+		// not, and the next write replaces it. One of the account's own
+		// lineage that expires later than the account's token is Claude Code
+		// having refreshed the account's own login since that look, whatever
+		// the look found: it is the newest there is, and the account's token
+		// is spent.
+		if until := l.refreshUntil(); until != "" && until == a.Extra[claudeRefreshUntil] &&
+			int64(l.ExpiresAt) > a.Token.ExpiresAt {
+			l.adopt(a)
+		}
 		return nil
 	case l.refreshUntil() != a.Extra[claudeRefreshUntil]:
 		return &NewLogin{Access: l.AccessToken, login: l}

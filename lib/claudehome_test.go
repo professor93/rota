@@ -326,11 +326,38 @@ func TestAdoptionReadsWhatTheHomeHolds(t *testing.T) {
 		}
 	})
 	t.Run("an older login after a fresh rota login", func(t *testing.T) {
+		// A fresh login carries no refreshTokenExpiresAt of the login before
+		// it (Complete): none at all, or one of its own.
+		for _, own := range []string{"", "1777777777000"} {
+			a := livingClaude()
+			a.Staged = stagedNone
+			if a.Extra[claudeRefreshUntil] = own; own == "" {
+				delete(a.Extra, claudeRefreshUntil)
+			}
+			for _, until := range []string{same, "1888888888000", "null"} {
+				if err := AdoptFrom(a, homeWith(login("R0", later, until))); err != nil || a.Token.Refresh != "R1" || a.Staged != stagedNone {
+					t.Fatalf("what the home held before the login is older, whatever it says (%q, %s): %+v %v", own, until, a, err)
+				}
+			}
+		}
+	})
+	t.Run("a rotation after a look that found the home without the account's login", func(t *testing.T) {
 		a := livingClaude()
 		a.Staged = stagedNone
-		for _, until := range []string{same, "1888888888000"} {
-			if err := AdoptFrom(a, homeWith(login("R0", later, until))); err != nil || a.Token.Refresh != "R1" || a.Staged != stagedNone {
-				t.Fatalf("what the home held before the login is older, whatever it says: %+v %v", a, err)
+		if err := AdoptFrom(a, homeWith(login("R2", later, same))); err != nil || a.Token.Refresh != "R2" ||
+			a.Token.Access != "A-R2" || a.Token.ExpiresAt != later || a.Staged != fingerprint("R2") {
+			t.Fatalf("a later login of the account's own lineage is its rotation, whatever the last look found: %+v %v", a, err)
+		}
+	})
+	t.Run("the account's own lineage, not newer, after such a look", func(t *testing.T) {
+		for _, exp := range []int64{earlier, 0} {
+			a := livingClaude()
+			a.Staged = stagedNone
+			if exp == 0 {
+				exp = a.Token.ExpiresAt
+			}
+			if err := AdoptFrom(a, homeWith(login("R0", exp, same))); err != nil || a.Token.Refresh != "R1" || a.Staged != stagedNone {
+				t.Fatalf("a login that does not expire later is not newer: %+v %v", a, err)
 			}
 		}
 	})
