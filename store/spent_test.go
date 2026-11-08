@@ -271,8 +271,10 @@ func TestAKeychainItemWrittenMeanwhileIsNotDeleted(t *testing.T) {
 // save that failed. Such a refresh, alone, the next look cannot read back.
 //
 // A login held as a refresh token alone has nothing to write before the
-// refresh; a home with no login at all is recorded as holding it, so what the
-// refresh writes there after a failed save is read back all the same.
+// refresh. A home with no login in it — none at all, or one with no expiry —
+// is recorded as holding it, and a blanked login is taken out of the home
+// first, so what the refresh writes there after a failed save is read back all
+// the same, and what Claude Code keeps beside the login stays.
 func TestARefreshTheStoreCannotSaveLosesNothing(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
@@ -287,89 +289,171 @@ func TestARefreshTheStoreCannotSaveLosesNothing(t *testing.T) {
 		{"a listing", func(t *testing.T, s *Store, a *rota.Account) error {
 			return errors.Join(s.Refresh(context.Background(), true, a)...)
 		}},
+		{"maintenance", func(t *testing.T, s *Store, a *rota.Account) error {
+			return errors.Join(s.Maintain(context.Background())...)
+		}},
 	} {
 		for _, c := range []struct {
 			what   string
 			file   string // the refresh token the home holds: "" none
 			staged string // what the store records of the home: "keep" its own login there
 			kept   bool   // the home's login is one rota cannot place, and stays
+			body   string // the credential store in the home when it holds no login of file's
 		}{
-			{"a home holding the login", "R-u1", "keep", false},
-			{"a home holding the login, record unknown", "R-u1", "", false},
-			{"signed in, never run, empty home", "", "-", false},
-			{"signed in, never run, another login there", "R-prev", "-", true},
-			{"held as a refresh token alone, signed in, never run, empty home", "", "alone", false},
-			{"held as a refresh token alone, signed in, never run, another login there", "R-prev", "alone", true},
+			{"a home holding the login", "R-u1", "keep", false, ""},
+			{"a home holding the login, record unknown", "R-u1", "", false, ""},
+			{"signed in, never run, empty home", "", "-", false, ""},
+			{"signed in, never run, another login there", "R-prev", "-", true, ""},
+			{"held as a refresh token alone, signed in, never run, empty home", "", "alone", false, ""},
+			{"held as a refresh token alone, signed in, never run, another login there", "R-prev", "alone", true, ""},
+			{"held as a refresh token alone, signed in, never run, a blanked login there", "", "alone", false, clearedLogin},
+			{"held as a refresh token alone, signed in, never run, an inference-only login there", "", "alone", false,
+				`{"mcpOAuth":{"srv":{"accessToken":"mcp-secret"}},"claudeAiOauth":{"accessToken":"A-x","refreshToken":"R-x","expiresAt":0}}`},
 		} {
+			if look.what == "maintenance" && c.kept {
+				continue // the sweep pays the write it owes over a login rota cannot place
+			}
 			// good is how many saves the look gets through before every one
 			// fails: none, the one before the refresh, that and the one after.
 			for _, good := range []int{0, 1, 2} {
 				what := fmt.Sprintf("%s, %s, %d good saves", look.what, c.what, good)
-				f := fakeAnthropic(t)
-				f.set(func(f *anthropic) { f.refresh, f.singleUse = refreshesTo("A-new", "R-new"), true })
-				m := &memBackend{home: t.TempDir()}
-				left := -1
-				s, err := NewStore(savesThenFails{Backend: m, left: &left})
-				if err != nil {
-					t.Fatal(err)
-				}
-				a := livingClaude(s, "u1")
-				if c.file != "" {
-					writeFile(t, filepath.Join(s.Home(a), ".credentials.json"),
-						storeLogin("A-"+c.file, c.file, later(-time.Hour), "1999999999000"))
-					a.StagedWritten()
-				}
-				switch c.staged {
-				case "keep":
-				case "alone":
-					a.Token.Access = ""
-					a.Staged = "-"
-				default:
-					a.Staged = c.staged
-				}
-				expire(a)
-				if err := s.Save(); err != nil {
-					t.Fatal(err)
-				}
-
-				left = good
-				err = look.do(t, s, a)
-				if err == nil {
-					t.Fatalf("%s: a store that cannot be saved is said", what)
-				}
-				if got, want := f.grants(), []string{"R-u1"}[:min(good, 1)]; !slices.Equal(got, want) {
-					t.Fatalf("%s: a look that cannot save before refreshing spends nothing, "+
-						"and one that can spends the login once: presented %v", what, got)
-				}
-				s.Close() // the look's process ends
-				left = -1
-				if r, _ := readLogin(t, s.Home(a)); c.kept && good < 2 && r != c.file {
-					t.Fatalf("%s: a login rota cannot place stays: the home holds %q", what, r)
-				}
-				if c.kept && good == 1 {
-					if !strings.Contains(err.Error(), "held by this process alone") {
-						t.Fatalf("%s: and the refreshed login is said to be nowhere else: %v", what, err)
+				t.Run(what, func(t *testing.T) {
+					f := fakeAnthropic(t)
+					f.set(func(f *anthropic) { f.refresh, f.singleUse = refreshesTo("A-new", "R-new"), true })
+					m := &memBackend{home: t.TempDir()}
+					left := -1
+					s, err := NewStore(savesThenFails{Backend: m, left: &left})
+					if err != nil {
+						t.Fatal(err)
 					}
-					continue
-				}
+					a := livingClaude(s, "u1")
+					if c.file != "" {
+						writeFile(t, filepath.Join(s.Home(a), ".credentials.json"),
+							storeLogin("A-"+c.file, c.file, later(-time.Hour), "1999999999000"))
+						a.StagedWritten()
+					}
+					if c.body != "" {
+						writeFile(t, filepath.Join(s.Home(a), ".credentials.json"), c.body)
+					}
+					switch c.staged {
+					case "keep":
+					case "alone":
+						a.Token.Access = ""
+						a.Staged = "-"
+					default:
+						a.Staged = c.staged
+					}
+					expire(a)
+					if err := s.Save(); err != nil {
+						t.Fatal(err)
+					}
 
-				again, err := NewStore(m)
-				if err != nil {
-					t.Fatal(err)
-				}
-				b := again.Find(a.ID)
-				if err := look.do(t, again, b); err != nil {
-					t.Fatalf("%s: the next look: %v (presented %v)", what, err, f.grants())
-				}
-				again.Close()
-				if got := f.grants(); !slices.Equal(got, []string{"R-u1"}) || b.Dead || b.Token.Refresh != "R-new" {
-					t.Fatalf("%s: presented %v, dead=%v %q, token %q", what, got, b.Dead, b.DeadReason, b.Token.Refresh)
-				}
-				if r, _ := readLogin(t, again.Home(b)); r != "R-new" {
-					t.Fatalf("%s: the home holds %q", what, r)
-				}
+					left = good
+					err = look.do(t, s, a)
+					if err == nil {
+						t.Fatalf("%s: a store that cannot be saved is said", what)
+					}
+					if got, want := f.grants(), []string{"R-u1"}[:min(good, 1)]; !slices.Equal(got, want) {
+						t.Fatalf("%s: a look that cannot save before refreshing spends nothing, "+
+							"and one that can spends the login once: presented %v", what, got)
+					}
+					s.Close() // the look's process ends
+					left = -1
+					if r, _ := readLogin(t, s.Home(a)); c.kept && good < 2 && r != c.file {
+						t.Fatalf("%s: a login rota cannot place stays: the home holds %q", what, r)
+					}
+					if c.kept && good == 1 {
+						if !strings.Contains(err.Error(), "held by this process alone") {
+							t.Fatalf("%s: and the refreshed login is said to be nowhere else: %v", what, err)
+						}
+						return
+					}
+
+					again, err := NewStore(m)
+					if err != nil {
+						t.Fatal(err)
+					}
+					b := again.Find(a.ID)
+					if err := look.do(t, again, b); err != nil {
+						t.Fatalf("%s: the next look: %v (presented %v)", what, err, f.grants())
+					}
+					again.Close()
+					if got := f.grants(); !slices.Equal(got, []string{"R-u1"}) || b.Dead || b.Token.Refresh != "R-new" {
+						t.Fatalf("%s: presented %v, dead=%v %q, token %q", what, got, b.Dead, b.DeadReason, b.Token.Refresh)
+					}
+					r, doc := readLogin(t, again.Home(b))
+					if r != "R-new" {
+						t.Fatalf("%s: the home holds %q", what, r)
+					}
+					if _, mcp := doc["mcpOAuth"]; c.body != "" && !mcp {
+						t.Fatalf("%s: what Claude Code keeps beside the login stays: %v", what, doc)
+					}
+				})
 			}
 		}
+	}
+}
+
+// A refresh the provider does not answer, after the save that recorded a home
+// as holding a login held as a refresh token alone, leaves nothing in the way:
+// the blanked login that home held was taken out, so the next look finds no
+// login there, refreshes once more and goes on. Recorded against the blanked
+// login left in place, the record would read as the account's own login
+// blanked, which no look refreshes.
+func TestAnUnansweredRefreshOfALoginHeldAsARefreshTokenAloneStrandsNothing(t *testing.T) {
+	storedRouteHere(t)
+	claudeWorld(t)
+	for _, look := range []struct {
+		what string
+		do   func(t *testing.T, s *Store, a *rota.Account) error
+	}{
+		{"a launch", func(t *testing.T, s *Store, a *rota.Account) error {
+			_, err := launchEnv(t, s, a)
+			return err
+		}},
+		{"a listing", func(t *testing.T, s *Store, a *rota.Account) error {
+			return errors.Join(s.Refresh(context.Background(), true, a)...)
+		}},
+		{"maintenance", func(t *testing.T, s *Store, a *rota.Account) error {
+			return errors.Join(s.Maintain(context.Background())...)
+		}},
+	} {
+		t.Run(look.what, func(t *testing.T) {
+			f := fakeAnthropic(t)
+			f.set(func(f *anthropic) { f.refresh = func() (int, any) { return 503, nil } })
+			m := &memBackend{home: t.TempDir()}
+			s, err := NewStore(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := livingClaude(s, "u1")
+			writeFile(t, filepath.Join(s.Home(a), ".credentials.json"), clearedLogin)
+			a.Token.Access = ""
+			a.Staged = "-"
+			expire(a)
+			if err := s.Save(); err != nil {
+				t.Fatal(err)
+			}
+			look.do(t, s, a)
+			s.Close()
+
+			// The unanswered refresh spent nothing, so the token is good again.
+			f.set(func(f *anthropic) { f.refresh = refreshesTo("A-new", "R-new") })
+			again, err := NewStore(m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := again.Find(a.ID)
+			if err := look.do(t, again, b); err != nil {
+				t.Fatalf("the next look: %v (presented %v)", err, f.grants())
+			}
+			again.Close()
+			r, doc := readLogin(t, again.Home(b))
+			if _, mcp := doc["mcpOAuth"]; b.Dead || b.Token.Refresh != "R-new" || r != "R-new" || !mcp {
+				t.Fatalf("dead=%v %q, token %q, the home holds %q: %v (presented %v)",
+					b.Dead, b.DeadReason, b.Token.Refresh, r, doc, f.grants())
+			}
+		})
 	}
 }
 

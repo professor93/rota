@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json/jsontext"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -1177,36 +1178,124 @@ func (h *claudeHome) writeDue(ctx context.Context) error {
 			return fmt.Errorf("%s: not refreshed, its login could not be written into its home first: %w", a, err)
 		}
 		// A login held as a refresh token alone has no access token to write,
-		// so nothing was planned. A home with no login at all is then
-		// recorded as holding it, as a write would have left the record, so a
+		// so nothing was planned. A home with no login in it is then recorded
+		// as holding it, as a write would have left the record, so a
 		// refreshed login written there is read back even if no save after
-		// the refresh succeeds. A home holding anything else is left as the
-		// record says.
-		if len(files) == 0 && a.Token.Access == "" && h.holdsNoLogin() {
-			a.StagedWritten()
+		// the refresh succeeds. A blanked login is taken out first: recorded
+		// against one, the next look would take it for the account's own
+		// login blanked. A home holding anything else is left as the record
+		// says.
+		if len(files) == 0 && a.Token.Access == "" {
+			switch h.homeLogin() {
+			case homeNoLogin:
+				a.StagedWritten()
+			case homeBlankLogin:
+				if err := h.dropBlank(); err != nil {
+					return fmt.Errorf("%s: not refreshed, the blanked login in its home could not be taken out first: %w", a, err)
+				}
+				a.StagedWritten()
+			}
 		}
 	}
 	h.readBack = a.StagedCurrent()
 	return nil
 }
 
-// holdsNoLogin reports whether the home's credential store holds no login at
-// all: there is none, or it reads and has no login entry. A blanked login is
-// one, and so is a store that cannot be read.
-func (h *claudeHome) holdsNoLogin() bool {
+// What a home's credential store holds, as writeDue asks for a login held as a
+// refresh token alone.
+const (
+	// homeOtherLogin is a usable login, or a store that cannot be read.
+	homeOtherLogin = iota
+	// homeNoLogin is no store, one with no login entry, or one whose login
+	// has no expiry, which Claude Code takes for inference only and adoption
+	// for nothing of the account's.
+	homeNoLogin
+	// homeBlankLogin is a login entry Claude Code blanked: no refresh token.
+	homeBlankLogin
+)
+
+// homeLogin reads the home's credential store and says which of those it
+// holds.
+func (h *claudeHome) homeLogin() int {
 	raw, _, err := h.readStore()
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return false
+		return homeOtherLogin
 	}
 	if len(bytes.TrimSpace(raw)) == 0 {
-		return true
+		return homeNoLogin
 	}
 	var doc map[string]any
 	if rota.UnmarshalLenient(raw, &doc) != nil {
-		return false
+		return homeOtherLogin
 	}
-	_, ok := storedLogin(raw)
-	return !ok
+	l, ok := storedLogin(raw)
+	switch {
+	case !ok:
+		return homeNoLogin
+	case l.Refresh == "":
+		return homeBlankLogin
+	case l.Expires <= 0:
+		return homeNoLogin
+	}
+	return homeOtherLogin
+}
+
+// dropBlank takes a blanked login entry out of the home's credential store,
+// keeping every other entry as it was, the way seed writes one in: the store
+// goes to the file, and a keychain item it was read from goes once the file is
+// in place. A store that no longer holds a blanked login is left alone.
+func (h *claudeHome) dropBlank() error {
+	base, inKeychain, err := h.readStore()
+	if err != nil {
+		return err
+	}
+	if l, ok := storedLogin(base); !ok || l.Refresh != "" {
+		return errors.New("its credential store changed meanwhile")
+	}
+	stripped, err := withoutLogin(base)
+	if err != nil {
+		return err
+	}
+	svc, named := h.service()
+	judged := h.item
+	return writeAtomicThen(filepath.Join(h.home, claudeCredentials), stripped, func() error {
+		if !named || !inKeychain {
+			return nil
+		}
+		return dropItemAsJudged(svc, judged)
+	})
+}
+
+// withoutLogin is a credential store with its login entry taken out and every
+// other entry kept byte for byte, in its place.
+func withoutLogin(raw []byte) ([]byte, error) {
+	dec := jsontext.NewDecoder(bytes.NewReader(raw), jsontext.AllowDuplicateNames(true), jsontext.AllowInvalidUTF8(true))
+	if tok, err := dec.ReadToken(); err != nil || tok.Kind() != '{' {
+		return nil, errors.New("its credential store is not a JSON object")
+	}
+	out := []byte{'{'}
+	for dec.PeekKind() != '}' {
+		tok, err := dec.ReadToken()
+		if err != nil || tok.Kind() != '"' {
+			return nil, errors.New("its credential store is not a JSON object")
+		}
+		name := tok.String()
+		v, err := dec.ReadValue()
+		if err != nil {
+			return nil, err
+		}
+		if name == "claudeAiOauth" {
+			continue
+		}
+		if len(out) > 1 {
+			out = append(out, ',')
+		}
+		if out, err = jsontext.AppendQuote(out, name); err != nil {
+			return nil, err
+		}
+		out = append(append(out, ':'), v...)
+	}
+	return append(out, '}'), nil
 }
 
 // writeRefreshed puts a login rota has refreshed into the home, when it may.
@@ -1222,6 +1311,10 @@ func (h *claudeHome) writeRefreshed(ctx context.Context, saved bool) error {
 	// lost is what is true of the login when it cannot go into the home either.
 	lost := "the new login is held by this process alone, and the one it replaced is spent"
 	if !saved && !h.readBack {
+		if !h.usable {
+			return fmt.Errorf("%s: its login was refreshed but could not be saved, and its home holds nothing the next "+
+				"look could read it back from: %s", a, lost)
+		}
 		return fmt.Errorf("%s: its login was refreshed but could not be saved, and its home holds a login rota cannot "+
 			"place, which is left as it is: %s", a, lost)
 	}
