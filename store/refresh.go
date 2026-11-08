@@ -374,10 +374,11 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 		letGo()
 	}
 	for _, h := range renewed {
-		a := h.a
-		plain = append(plain, work{a, func() {
-			q, err := rota.Usage(ctx, a)
-			reading(a, q, err)
+		// Read with the home: a Claude Code that started once the lock went may
+		// have rotated the login already, and a 401 then reads the home again.
+		plain = append(plain, work{h.a, func() {
+			q, err := h.usage(ctx)
+			reading(h.a, q, err)
 		}})
 	}
 	run(plain)

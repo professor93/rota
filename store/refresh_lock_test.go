@@ -685,3 +685,50 @@ func TestAListingReadsUsageOnlyAfterLettingGoOfTheLock(t *testing.T) {
 		})
 	}
 }
+
+// The listing reads a renewed account's usage after it lets go of the lock, so
+// a Claude Code that starts in that moment may rotate the login first. A
+// reading turned away then (401) reads the home again and is taken with the
+// rotation found there, as every listing's reading is.
+func TestAReadingAfterTheLockGoesIsReadAgainOnceTheHomeRotated(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := newLineageWorld(t, m.keychain)
+			w.clock.pass(9 * time.Hour)
+			var (
+				mu      sync.Mutex
+				started string
+			)
+			srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/usage" {
+					mu.Lock()
+					if started == "" {
+						w.cc.start()
+						started = w.cc.refresh("claude-code window started after the lock went")
+					}
+					mu.Unlock()
+					if strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ") == "A1" {
+						rw.WriteHeader(http.StatusUnauthorized)
+						_, _ = rw.Write([]byte(`{"error":{"type":"authentication_error"}}`))
+						return
+					}
+				}
+				w.p.serve(rw, r)
+			}))
+			t.Cleanup(srv.Close)
+			old := rota.ClaudeEndpoints.Usage
+			rota.ClaudeEndpoints.Usage = srv.URL + "/usage"
+			t.Cleanup(func() { rota.ClaudeEndpoints.Usage = old })
+			errs := w.s.Refresh(t.Context(), false, w.a)
+			mu.Lock()
+			defer mu.Unlock()
+			if started != "rotated to R2" {
+				t.Fatalf("setup: Claude Code rotated after the lock went: %q", started)
+			}
+			if len(errs) != 0 || w.a.Quota == nil || w.a.Token.Refresh != "R2" || len(w.p.rotaSpent()) != 0 || w.a.Dead {
+				w.p.dump(t)
+				t.Fatalf("read again with the rotation: errs=%v quota=%v holds %q dead=%v", errs, w.a.Quota, w.a.Token.Refresh, w.a.Dead)
+			}
+		})
+	}
+}
