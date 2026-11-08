@@ -808,8 +808,9 @@ func TestRotaTakingTheItemAwayForgetsIt(t *testing.T) {
 	}
 }
 
-// A listing that takes a blanked item out of the way of the login in the file
-// (uncover) forgets the item, and that is saved, not left for some later save.
+// A look that takes a blanked item out of the way of the login in the file
+// (uncover) — here the watcher's, which reads no usage and saves only what
+// changed — forgets the item, and that is saved, not left for some later save.
 func TestUncoveringALoginForgetsTheItemOnDisk(t *testing.T) {
 	storedRouteHere(t)
 	claudeWorld(t)
@@ -822,6 +823,7 @@ func TestUncoveringALoginForgetsTheItemOnDisk(t *testing.T) {
 	home := s.Home(a)
 	svc := service(t, home)
 	alive(t, home, "daemon.lock", os.Getpid())
+	s.Rescue(context.Background(), a) // settles what the first look after the write takes from the store
 	k.mu.Lock()
 	k.items[svc] = clearedLogin
 	k.mu.Unlock()
@@ -829,7 +831,9 @@ func TestUncoveringALoginForgetsTheItemOnDisk(t *testing.T) {
 	if err := s.Save(); err != nil {
 		t.Fatal(err)
 	}
-	s.Refresh(context.Background(), false, a)
+	if errs := s.Rescue(context.Background(), a); len(errs) != 0 {
+		t.Fatal(errs)
+	}
 	if _, ok := k.item(svc); ok || a.Extra[inItemKey] != "" {
 		t.Fatalf("setup: the blanked item is taken out of the way and forgotten: item there %v, %v", ok, a.Extra)
 	}

@@ -244,6 +244,10 @@ func TestARefusalIsTakenOnlyForTheAccountRefusedOrNobody(t *testing.T) {
 		{refused + " u2", `{"uuid":"u3"}`, false},
 		{refused, `null`, true},
 		{refused, `{"uuid":"u3"}`, false},
+		// A refusal whose record fell back on the login's own record of this
+		// account (the provider named an e-mail only): a login recorded as
+		// this account is still never taken for it.
+		{refused + " u-5", `{"uuid":"u-5"}`, false},
 	} {
 		for _, dead := range []bool{false, true} {
 			a := livingClaude()
