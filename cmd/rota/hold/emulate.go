@@ -37,36 +37,11 @@ func (s *Session) emulate() {
 // from then on, as it is for a screen whose emulator panicked.
 func (s *Session) catchUp() {
 	defer s.noticeLoss()
-	s.mu.Lock()
-	target, modes := s.ground, s.gmodes
-	n := 0
-	for n < len(s.dues) && s.dues[n].end <= target {
-		n++
-	}
-	dues := make([]due, n)
-	copy(dues, s.dues)
-	s.dues = append(s.dues[:0], s.dues[n:]...)
-	k := 0
-	for k < len(s.sizes) && s.sizes[k].end <= target {
-		k++
-	}
-	sizes := make([]sized, k)
-	copy(sizes, s.sizes)
-	s.sizes = append(s.sizes[:0], s.sizes[k:]...)
-	s.owed += n
-	defer func() {
-		s.mu.Lock()
-		s.owed -= n
-		s.drawn = s.em.off
-		s.mu.Unlock()
-	}()
-	live := !s.em.retired && s.screen.OK()
-	var data []byte
-	var from int64
-	if live && target > s.em.off {
-		data, from = s.ring.Read(s.em.off)
-	}
-	s.mu.Unlock()
+	b := s.batch()
+	// Registered once s.mu is let go, so that a panic anywhere in catchUp
+	// unwinds through it without waiting on a lock it holds itself.
+	defer s.drew(len(b.dues))
+	target, modes, dues, sizes, live, data, from := b.target, b.modes, b.dues, b.sizes, b.live, b.data, b.from
 	if live && from > s.em.off {
 		s.em.retired, live = true, false
 		s.screen.Close()
@@ -107,6 +82,56 @@ func (s *Session) catchUp() {
 	if target > s.em.off {
 		s.em.off, s.em.modes = target, modes
 	}
+}
+
+// catchBatch is what one catch-up has to do: draw the ring up to target,
+// with the modes on there, answering dues and taking sizes on the way.
+type catchBatch struct {
+	target int64
+	modes  vtscan.Modes
+	dues   []due
+	sizes  []sized
+	live   bool
+	data   []byte
+	from   int64
+}
+
+// batch takes what the screen owes up to the last ground point, under s.mu,
+// and counts its dues as owed, last, once nothing more can go wrong. The
+// caller holds s.em.mu.
+func (s *Session) batch() (b catchBatch) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b.target, b.modes = s.ground, s.gmodes
+	n := 0
+	for n < len(s.dues) && s.dues[n].end <= b.target {
+		n++
+	}
+	b.dues = make([]due, n)
+	copy(b.dues, s.dues)
+	k := 0
+	for k < len(s.sizes) && s.sizes[k].end <= b.target {
+		k++
+	}
+	b.sizes = make([]sized, k)
+	copy(b.sizes, s.sizes)
+	b.live = !s.em.retired && s.screen.OK()
+	if b.live && b.target > s.em.off {
+		b.data, b.from = s.ring.Read(s.em.off)
+	}
+	s.dues = append(s.dues[:0], s.dues[n:]...)
+	s.sizes = append(s.sizes[:0], s.sizes[k:]...)
+	s.owed += n
+	return b
+}
+
+// drew is the end of a catch-up: the n dues it took are answered, and how
+// far the screen has drawn is known without its lock.
+func (s *Session) drew(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.owed -= n
+	s.drawn = s.em.off
 }
 
 // tooLarge is what the log says of a terminal larger than a screen is kept
