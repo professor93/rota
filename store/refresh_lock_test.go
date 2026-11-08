@@ -732,3 +732,49 @@ func TestAReadingAfterTheLockGoesIsReadAgainOnceTheHomeRotated(t *testing.T) {
 		})
 	}
 }
+
+// S3's fourth look, the rescue. A Claude Code that starts while rota is rescuing
+// the home finds rota's refresh lock and waits; rota presents its copy once,
+// unspent, under the lock, and the home ends up holding the login rota wrote.
+func TestClaudeCodeStartingDuringARescueWaitsForTheLock(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := newLineageWorld(t, m.keychain)
+			w.cc.start()
+			want := "R0"
+			if m.keychain {
+				// A blanked item in front of rota's own current file is a covered
+				// home, not a blank: the login has to be in the item.
+				w.clock.pass(7*time.Hour + 56*time.Minute)
+				t.Logf("daemon: %s", w.cc.refresh("claude-code daemon"))
+				want = "R1"
+			}
+			lineageLooks()[1].do(t, w) // a look in sync
+			w.cc.write(clearedLogin)
+			w.clock.pass(4 * time.Minute)
+			var cc string
+			w.p.onRota = func(string) {
+				if cc == "" {
+					cc = w.cc.refresh("claude-code window")
+				}
+			}
+			lineageLooks()[1].do(t, w)
+			w.p.onRota = nil
+			if !strings.HasPrefix(cc, "refresh lock held") {
+				t.Fatalf("Claude Code finds rota's lock: %q", cc)
+			}
+			mine := w.p.rotaPresented()
+			if len(mine) != 1 || mine[0].wasSpent || !mine[0].lockHeld || mine[0].rt != want {
+				w.p.dump(t)
+				t.Fatalf("rota presents its copy once, unspent, under the lock: %+v", mine)
+			}
+			if bad := w.p.rotaSpent(); len(bad) != 0 || w.a.Dead {
+				t.Fatalf("spent=%+v dead=%v %s", bad, w.a.Dead, w.a.WhyDead())
+			}
+			if got := refreshOf(w.cc.store()); got != w.a.Token.Refresh || got != w.p.current {
+				t.Fatalf("home %s, rota %s, provider %s", got, w.a.Token.Refresh, w.p.current)
+			}
+			lockGone(t, w)
+		})
+	}
+}

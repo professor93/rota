@@ -168,6 +168,30 @@ func TestAKeychainMisreadDoesNotFreezeRotaOffItsOwnLineage(t *testing.T) {
 	freezeFollows(t, w, 1)
 }
 
+// S2 from every look: whichever look it is that finds no keychain item while
+// something runs in the home, the file read in its place changes nothing rota
+// believes, nothing is presented, and rota goes on following its own lineage.
+func TestAKeychainMisreadOnAnyLookDoesNotFreezeRota(t *testing.T) {
+	for _, look := range lineageLooks() {
+		t.Run(look.what, func(t *testing.T) {
+			w := newLineageWorld(t, true)
+			w.cc.start()
+			w.clock.pass(freezeEvery)
+			t.Logf("daemon: %s", w.cc.refresh("claude-code daemon")) // item R1, file still R0
+			lineageLooks()[1].do(t, w)
+			restore := freezeHideItem(w)
+			look.do(t, w)
+			restore()
+			if w.a.Token.Refresh != "R1" || !w.a.StagedCurrent() || w.a.Dead || len(w.p.rotaPresented()) != 0 {
+				w.p.dump(t)
+				t.Fatalf("a file read in place of an absent item changes nothing: holds %s, staged %q, dead=%v",
+					w.a.Token.Refresh, w.a.Staged, w.a.Dead)
+			}
+			freezeFollows(t, w, 1)
+		})
+	}
+}
+
 // One "no such item" is asked again before anything is decided: the daemon
 // rotated to R2 while rota was not looking, the first read of the next look
 // is caught while the item is being rewritten, and the second finds R2, which

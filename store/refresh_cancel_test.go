@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -481,4 +482,95 @@ func TestPreparingMakesOneLaunchHoweverItCallsPrepare(t *testing.T) {
 			t.Fatalf("its refresh kept, its claim let go: holds %q claimed=%v", w.a.Token.Refresh, w.s.claimed(w.a))
 		}
 	})
+}
+
+// blankedForRescue leaves a home Claude Code blanked moments after a look found
+// the account's login there, so a rescue will present rota's copy, with something
+// alive beside it. The login is rotated into the keychain item first where there
+// is one, since a blanked item in front of rota's own current file is a covered
+// home and not a blanked one.
+func blankedForRescue(t *testing.T, w *lineageWorld, keychain bool) string {
+	t.Helper()
+	w.cc.start()
+	want := "R0"
+	if keychain {
+		w.clock.pass(7*time.Hour + 56*time.Minute)
+		t.Logf("daemon: %s", w.cc.refresh("claude-code daemon"))
+		want = "R1"
+	}
+	lineageLooks()[1].do(t, w)
+	if w.a.Token.Refresh != want {
+		t.Fatalf("setup: rota holds %q, want %q", w.a.Token.Refresh, want)
+	}
+	w.cc.write(clearedLogin)
+	w.clock.pass(4 * time.Minute)
+	return want
+}
+
+// A rescue is a refresh like any other: the caller going away while the provider
+// answers loses nothing. The new token is kept, saved and written into the home,
+// and the token it replaced is never presented again.
+func TestARescueOutlivesWhoeverAskedForIt(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := newLineageWorld(t, m.keychain)
+			had := blankedForRescue(t, w, m.keychain)
+			next := "R" + itoa(int(had[1]-'0')+1)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			w.p.onRota = func(string) { cancel() }
+			for _, err := range w.s.Rescue(ctx, w.a) {
+				t.Logf("    %v", err)
+			}
+			w.p.onRota = nil
+			if ctx.Err() == nil {
+				t.Fatal("rota presented nothing, so nobody went away")
+			}
+			if got := savedRefresh(t, w.s, w.a.ID); w.a.Token.Refresh != next || refreshOf(w.cc.store()) != next || got != next {
+				t.Fatalf("the answer is kept: rota %q, home %q, on disk %q, want %q", w.a.Token.Refresh, refreshOf(w.cc.store()), got, next)
+			}
+			if bad := w.p.rotaSpent(); len(bad) != 0 || w.a.Dead {
+				t.Fatalf("spent=%+v dead=%v", bad, w.a.Dead)
+			}
+		})
+	}
+}
+
+// A rescue asked for by a caller already gone presents nothing and says why, and
+// so does one whose caller goes while the home is read under the lock: the
+// account stays as it was, and the next look makes the rescue on the same terms.
+func TestARescueWhoseCallerHasGoneSendsNothing(t *testing.T) {
+	for _, when := range []string{"before the look", "under the lock"} {
+		t.Run(when, func(t *testing.T) {
+			w := newLineageWorld(t, true)
+			had := blankedForRescue(t, w, true)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if when == "before the look" {
+				cancel()
+			} else {
+				w.k.onFind = func(string) {
+					if _, err := os.Stat(lockPath(w)); err == nil {
+						cancel()
+					}
+				}
+			}
+			errs := w.s.Rescue(ctx, w.a)
+			w.k.onFind = nil
+			if n := len(w.p.rotaPresented()); n != 0 {
+				w.p.dump(t)
+				t.Fatalf("rota presented %d tokens after the caller had gone", n)
+			}
+			if !slices.ContainsFunc(errs, func(err error) bool { return errors.Is(err, context.Canceled) }) {
+				t.Fatalf("nothing said the caller had gone: %v", errs)
+			}
+			if w.a.Dead || w.a.Token.Refresh != had {
+				t.Fatalf("the account changed: dead=%v %q", w.a.Dead, w.a.Token.Refresh)
+			}
+			lineageLooks()[1].do(t, w)
+			if got := w.p.rotaPresented(); len(got) != 1 || got[0].rt != had || got[0].wasSpent {
+				t.Fatalf("the next look makes the rescue: %+v", got)
+			}
+		})
+	}
 }
