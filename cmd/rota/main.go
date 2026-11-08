@@ -58,7 +58,8 @@ Usage:
                                 Remote Control on, as this account
   rota run [id] --detach        hand the CLI to a session the daemon holds,
                                 which runs on with no terminal open
-  rota send <run> "..."         send another message into a run started with --input
+  rota send <run-or-session> "..."   send into a --input run, or type into
+                                a held session
   rota set <id> [flags]         where an account sits and what it reads:
                                 --order, --threshold, --cwd, --config,
                                 --sessions, --remote-control, --long forget,
@@ -110,7 +111,8 @@ Usage:
   rota login [provider]    add an account, or finish signing one in
   rota list                accounts, usage, health
   rota run [id] [flags]    ask with flags — or open the CLI itself
-  rota send <run> "..."    send more into a run started with --input
+  rota send <run-or-session> "..."
+                           send into a --input run, or type into a held session
   rota set <id> [flags]    order, threshold, cwd, config, sessions, long token
   rota remove <id>...      forget accounts
   rota serve [addr]        the HTTP API and its playground
