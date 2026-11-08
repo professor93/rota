@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -642,6 +643,54 @@ func TestARepaintDrawsLittleOfTheBacklogItself(t *testing.T) {
 			t.Fatalf("%dx%d with %d bytes to draw: %+v (%v)", c.cols, c.rows, len(lines), h, err)
 		}
 		s.screen.Close()
+	}
+}
+
+// workers waits until n links' screen workers are running in this process.
+func workers(t *testing.T, n int) {
+	t.Helper()
+	buf := make([]byte, 1<<20)
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		got := strings.Count(string(buf[:runtime.Stack(buf, true)]), "hold.(*Session).screens(")
+		if got == n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d screen workers, want %d", got, n)
+		}
+	}
+}
+
+// A link that is replaced runs nothing it still had queued for the screen.
+// With the screen busy, the old link has a ScreenAsk waiting for it and a
+// Resize behind that; the new link resizes and is answered; then the screen
+// is free. The old Resize ran after the new one in 10 of 30 runs, leaving
+// the CLI at a size the daemon was not told, and repaints drawn at it.
+func TestAReplacedLinkDropsWhatItQueued(t *testing.T) {
+	workers(t, 0)
+	waitAsLongAsItTakes(t)
+	r := newRig(t, 0, newFakeChild())
+	claim(t, r.terminals)
+	for i := range 20 {
+		r.s.em.lock.lock() // the screen is busy
+		old := r.link(t)
+		old.json(holdwire.ScreenAsk, holdwire.ScreenAskMsg{Seq: 1})
+		old.json(holdwire.Resize, holdwire.SizeMsg{Cols: 100, Rows: 30})
+		// Frames are read in order: once the Pong is back, both wait for
+		// the old link's worker.
+		old.send(holdwire.Ping, nil)
+		old.until(holdwire.Pong)
+		p := r.link(t)
+		p.json(holdwire.Resize, holdwire.SizeMsg{Cols: 90, Rows: 20})
+		p.decode(holdwire.Resized, &holdwire.SizeMsg{})
+		r.s.em.lock.unlock()
+		workers(t, 1)
+		r.c.mu.Lock()
+		last := r.c.sizes[len(r.c.sizes)-1]
+		r.c.mu.Unlock()
+		if last != "90x20" {
+			t.Fatalf("run %d: the CLI ended at %s, after the new link's 90x20", i, last)
+		}
 	}
 }
 
