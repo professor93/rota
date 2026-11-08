@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -524,5 +525,42 @@ func TestARefusalWithoutTheLockLongAfterTheLastWaitStartsTheBackoffAgainOnDisk(t
 	ran = keep(rota.QuotaWait{Until: clock.now.Add(-QuotaWaitMax - time.Second).UnixMilli(), Status: 503, Count: 5})
 	if got := onDisk(); got != ran {
 		t.Fatalf("one that ran out longer ago than that is not: %+v, want %+v", got, ran)
+	}
+}
+
+// A count is read from a store anything may have written. One below zero
+// counts as none, so the next refusal is the first of a run and waits a
+// minute, rather than shifting the backoff by a negative amount, which
+// panics; one that cannot grow stays where it is, at the longest wait.
+func TestAWaitCountOutOfRangeIsTakenAsTheEdgeOfIt(t *testing.T) {
+	clock := holdClock(t)
+	refused := &rota.HTTPError{Status: http.StatusTooManyRequests}
+	for _, c := range []struct {
+		count, want int
+		wait        time.Duration
+	}{
+		{-1, 1, time.Minute},
+		{-5, 1, time.Minute},
+		{math.MinInt, 1, time.Minute},
+		{math.MaxInt, math.MaxInt, time.Hour},
+	} {
+		a := &rota.Account{QuotaWait: rota.QuotaWait{Until: clock.now.Add(-time.Minute).UnixMilli(), Status: 429, Count: c.count}}
+		if !turnedAway(a, refused) {
+			t.Fatalf("count %d: a 429 is a refusal", c.count)
+		}
+		if want := (rota.QuotaWait{Until: clock.now.Add(c.wait).UnixMilli(), Status: 429, Count: c.want}); a.QuotaWait != want {
+			t.Fatalf("count %d: %+v, want %+v", c.count, a.QuotaWait, want)
+		}
+	}
+
+	// And through a reading, from the store on disk.
+	u := fakeUsage(t)
+	s := openTemp(t)
+	a := tokenClaude(t, s)
+	a.QuotaWait = rota.QuotaWait{Until: clock.now.Add(-time.Minute).UnixMilli(), Status: 429, Count: -3}
+	u.next(429, "", "")
+	errs := s.Refresh(context.Background(), true, a)
+	if len(errs) != 1 || !strings.Contains(errs[0].Error(), "asked rota to wait") || a.QuotaWait.Count != 1 {
+		t.Fatalf("one note and a wait of a minute: %v %+v", errs, a.QuotaWait)
 	}
 }

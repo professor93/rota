@@ -70,8 +70,9 @@ type QuotaWait struct {
 	// with.
 	Status int `json:"status,omitzero"`
 	// Count is how many times in a row the endpoint has turned a reading
-	// away, for a caller that waits longer each time it is not told how
-	// long.
+	// away, for a caller that backs off longer each time, whether or not it
+	// was told how long: rota's store waits at least a backoff that doubles
+	// with it, and longer when the endpoint asks for longer.
 	Count int `json:"count,omitzero"`
 }
 
