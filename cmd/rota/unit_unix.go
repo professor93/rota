@@ -33,7 +33,7 @@ func (c *cli) installDaemon() error {
 	if err := refusedInsideHeldSession("rota serve install", terminals); err != nil {
 		return err
 	}
-	if err := holdwire.SockFits(holdwire.CtlSock(terminals)); err != nil {
+	if err := holdwire.SocketsFit(terminals); err != nil {
 		return err
 	}
 	// Read as the daemon will read it, so a file it would refuse is refused

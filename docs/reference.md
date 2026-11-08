@@ -1274,8 +1274,11 @@ holding the store's daemon claim, and by no other. Holding it, the daemon
 removes whatever a daemon that crashed left at the path before it listens; a
 server without the claim is refused and leaves the file alone, since it may
 be a live daemon's. A path longer than a hundred bytes is refused by name,
-since a unix socket's address cannot hold it, and so is a holder's socket
-in a session's directory; a shorter `ROTA_HOME` fixes either. Stopping the
+since a unix socket's address cannot hold it. A held session's socket,
+`<store>/terminals/<id>/sock`, is the longest, so `serve start`, `serve
+install` and the daemon itself refuse a store with no room for it, though
+`ctl.sock` would fit: *a held session's socket, <path>, is N bytes, longer
+than the 100 a unix socket can have; a shorter ROTA_HOME fixes it*. Stopping the
 daemon removes the socket — before it lets go of the claim, and only while
 the file at the path is still that socket, so a daemon that took the store
 over is never left without its own. It runs on linux and macOS, as the
