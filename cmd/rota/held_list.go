@@ -11,6 +11,7 @@ import (
 	rotaclient "github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/internal/holdwire"
 	rota "github.com/professor93/rota/lib"
+	"github.com/professor93/rota/sessions"
 	"github.com/professor93/rota/store"
 )
 
@@ -77,6 +78,27 @@ func listHeld(s *store.Store) (held []rotaclient.Session, note string) {
 			len(unread), strings.Join(unread, ", "))
 	}
 	return held, note
+}
+
+// scanSessions is sessions.Scan for `rota list --sessions`, less the CLIs
+// that held sessions run: the scan finds every CLI running on the machine,
+// and a held one is listed under Held sessions, once.
+func scanSessions(s *store.Store, recent int) sessions.Report {
+	rep := sessions.Scan(s, recent)
+	terminals, err := s.TerminalDir()
+	if err != nil {
+		return rep
+	}
+	held := map[int]bool{}
+	for _, r := range holdwire.Scan(terminals) {
+		// A running holder lives exactly as long as its CLI, so the pid it
+		// recorded is still that CLI's.
+		if r.Running() && r.Meta != nil && r.Meta.ChildPID > 0 {
+			held[r.Meta.ChildPID] = true
+		}
+	}
+	rep.Instances = slices.DeleteFunc(rep.Instances, func(in sessions.Instance) bool { return held[in.PID] })
+	return rep
 }
 
 // showHeld prints the held sessions, when there are any: ● for one that is
