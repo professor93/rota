@@ -415,3 +415,70 @@ func TestPreparingIsHeededBesideTheCallersContextByEveryLaunch(t *testing.T) {
 		})
 	}
 }
+
+// Preparing calls prepare once, before it returns. A second call makes no second
+// launch, one made after it has returned makes none at all, and one still under
+// way when it returns is waited for, so its claim is neither read half-made nor
+// lost.
+func TestPreparingMakesOneLaunchHoweverItCallsPrepare(t *testing.T) {
+	storedRouteHere(t)
+	t.Run("twice", func(t *testing.T) {
+		onPath(t, "claude")
+		w := newLineageWorld(t, false)
+		w.clock.pass(9 * time.Hour)
+		w.s.Preparing = func(prepare func(context.Context)) bool {
+			prepare(context.Background())
+			prepare(context.Background())
+			return false
+		}
+		_, _, release, err := w.s.Prepare(context.Background(), w.a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+		if got := w.p.rotaPresented(); len(got) != 1 || w.a.Token.Refresh != "R1" || w.s.claimed(w.a) {
+			t.Fatalf("one launch, its claim let go: %+v holds %q claimed=%v", got, w.a.Token.Refresh, w.s.claimed(w.a))
+		}
+	})
+	t.Run("after it has returned", func(t *testing.T) {
+		w := newLineageWorld(t, false)
+		w.clock.pass(9 * time.Hour)
+		var late func(context.Context)
+		w.s.Preparing = func(prepare func(context.Context)) bool {
+			late = prepare
+			return false
+		}
+		_, _, release, err := w.s.Prepare(context.Background(), w.a)
+		if err == nil || release != nil || !strings.Contains(err.Error(), "never made") {
+			t.Fatalf("no launch was made, and that is said: %v", err)
+		}
+		late(context.Background())
+		if got := w.p.rotaPresented(); len(got) != 0 || w.s.claimed(w.a) {
+			t.Fatalf("a call after it returned makes no launch: %+v claimed=%v", got, w.s.claimed(w.a))
+		}
+	})
+	t.Run("still under way when it returns", func(t *testing.T) {
+		onPath(t, "claude")
+		w := newLineageWorld(t, false)
+		w.clock.pass(9 * time.Hour)
+		entered, proceed := make(chan struct{}), make(chan struct{})
+		w.p.onRota = func(string) {
+			close(entered)
+			<-proceed
+		}
+		w.s.Preparing = func(prepare func(context.Context)) bool {
+			go prepare(context.Background())
+			<-entered
+			close(proceed) // the answer comes as this hook returns
+			return false
+		}
+		_, _, release, err := w.s.Prepare(context.Background(), w.a)
+		if err != nil || release == nil {
+			t.Fatalf("the launch under way is waited for: %v", err)
+		}
+		release()
+		if w.a.Token.Refresh != "R1" || w.s.claimed(w.a) {
+			t.Fatalf("its refresh kept, its claim let go: holds %q claimed=%v", w.a.Token.Refresh, w.s.claimed(w.a))
+		}
+	})
+}

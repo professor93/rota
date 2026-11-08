@@ -52,8 +52,10 @@ type Store struct {
 	Warn func(msg string) `json:"-"`
 
 	// Preparing, when set, is what Run, Start, Prepare and PrepareIn make a
-	// launch inside — the claim, a refresh, the staging — calling prepare once
-	// with a context of its own. The launch heeds that context beside the
+	// launch inside — the claim, a refresh, the staging. It calls prepare once,
+	// before it returns, with a context of its own: a second call, or one made
+	// after it has returned, does nothing, and a Preparing that made no launch
+	// gets an error and no CLI. The launch heeds that context beside the
 	// caller's own ctx, which still gates it: either one done before the launch
 	// is made starts nothing, and a refresh under way when one goes is
 	// finished and saved all the same. Preparing says whether something cut

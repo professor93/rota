@@ -313,25 +313,36 @@ func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.
 
 // launching is prepare, made inside Preparing when there is one, under the
 // context Preparing hands it joined with the caller's ctx, so that either going
-// away gates the launch. A launch Preparing says was cut short is let go of,
-// however far it got, and returns an error Left reports as such; one that
-// failed on its own says why, cut or not.
+// away gates the launch. Only the first call of prepare makes a launch, and
+// none does once Preparing has returned; a call still under way then is waited
+// for, so that its claim is neither read half-made nor lost. A launch Preparing
+// says was cut short is let go of, however far it got, and returns an error
+// Left reports as such; one that failed on its own says why, cut or not.
 func (s *Store) launching(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
 	if s.Preparing == nil {
 		return s.prepare(ctx, a, mirror)
 	}
 	var (
-		cmd     *rota.Command
-		release func()
-		err     error
-		made    bool
+		mu         sync.Mutex
+		cmd        *rota.Command
+		release    func()
+		err        error
+		made, over bool
 	)
 	cut := s.Preparing(func(prep context.Context) {
+		mu.Lock()
+		defer mu.Unlock()
+		if made || over {
+			return
+		}
 		made = true
 		both, stop := joinContexts(ctx, prep)
 		defer stop()
 		cmd, release, err = s.prepare(both, a, mirror)
 	})
+	mu.Lock()
+	defer mu.Unlock()
+	over = true
 	switch {
 	case !made:
 		return nil, nil, fmt.Errorf("%s: not launched: Preparing never made the launch", a)
