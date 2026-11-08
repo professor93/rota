@@ -131,6 +131,7 @@ func (p claudeProvider) Complete(ctx context.Context, code string, state map[str
 		t.Extra = map[string]string{}
 	}
 	t.Extra[claudeRefreshUntil] = ""
+	t.Extra[claudeRefusedGrant] = "" // and what the home held that was refused is not this login's business
 	return t, nil
 }
 

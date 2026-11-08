@@ -351,10 +351,12 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //     because a login ends a fixed time after it was signed in: one ending
 //     more than a minute after the account's login was signed in after it,
 //     with /login inside the home, and comes back as a *NewLogin like any
-//     other, so nothing writes over it before it is checked; one ending more
-//     than a minute before is the login from before the account's current
-//     one, older whatever else it says, and the next staging writes over it.
-//     So is any login there when either end is unknown.
+//     other, so nothing writes over it before it is checked — as does one
+//     Claude Code records as another account's; one ending more than a
+//     minute before is the login from before the account's current one,
+//     older whatever else it says, and the next staging writes over it. So
+//     is any login there when either end is unknown, and one of a grant
+//     already refused (Refuse), which is not asked about again.
 func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 	if a.APIKey() {
 		// A key account keeps no login in its home, so nothing found there is
@@ -408,21 +410,25 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 		// own grant, expiring later than the account's token, is Claude Code
 		// having refreshed the account's own login since that look, whatever
 		// the look found: it is the newest there is, and the account's token
-		// is spent. A grant ending later was signed in after the account's
-		// login, with /login in the home, and is checked like any new login
-		// rather than written over; so is one ending in the same minute that
-		// Claude Code records as another account's. One ending earlier
-		// predates the account's login — it was logged in again with rota
-		// since — so it is older, rotated or not, and the next write replaces
-		// it; and so, as ever, is anything when either end is unknown.
-		home, own := l.refreshUntil(), a.Extra[claudeRefreshUntil]
+		// is spent. A grant the provider already said is somebody else's
+		// (Refuse) is passed over without asking again, rotated or not, and the
+		// next write replaces it. One ending earlier predates the account's
+		// login — it was logged in again with rota since — so it is older
+		// whoever's it says it is, and the next write replaces it too; and so,
+		// as ever, is anything when either end is unknown. A grant ending later
+		// was signed in after the account's login, with /login in the home, and
+		// is checked like any new login rather than written over; so is one
+		// Claude Code records as another account's.
+		home, own, refused := l.refreshUntil(), a.Extra[claudeRefreshUntil], a.Extra[claudeRefusedGrant]
 		switch {
 		case home == "" || own == "":
 		case l.ofGrant(a):
 			if int64(l.ExpiresAt) > a.Token.ExpiresAt {
 				l.adopt(a)
 			}
-		case endsAfter(home, own) || sameGrant(home, own):
+		case refused != "" && sameGrant(home, refused):
+		case endsAfter(own, home):
+		case endsAfter(home, own) || l.otherAccount(a):
 			return &NewLogin{Access: l.AccessToken, login: l}
 		}
 		return nil
@@ -476,6 +482,10 @@ func (l *claudeLogin) adopt(a *Account) {
 	a.Dead, a.DeadReason = false, ""
 }
 
+// claudeRefusedGrant is where an account remembers, by when it ends, the grant
+// of the last login in its home the provider said is somebody else's (Refuse).
+const claudeRefusedGrant = "refused_grant"
+
 // NewLogin is a login found in an account's home that is not a rotation of
 // the one the account holds: somebody ran /login inside that home. It is
 // what AdoptFS returns instead of taking it, because nothing in the home can
@@ -509,16 +519,25 @@ func (n *NewLogin) Identify(ctx context.Context) (*Identity, error) {
 
 // Accept takes the login into the account — the application has found it
 // is this account's. A dead account is alive again: someone signed it in.
-func (n *NewLogin) Accept(a *Account) { n.login.adopt(a) }
+func (n *NewLogin) Accept(a *Account) {
+	n.login.adopt(a)
+	delete(a.Extra, claudeRefusedGrant)
+}
 
 // Refuse records that the home holds somebody else's login. Nothing of it is
 // taken and the account's tokens stay exactly as they were; the home is
 // marked as holding nothing of this account's, so the account's own login
-// goes back in the first time nothing runs there. The error says so, naming
-// both, and is an ErrForeignLogin for an application to show rather than
-// fail on.
+// goes back in the first time nothing runs there. Which grant was refused is
+// remembered, by when it ends, so that later looks pass it over without asking
+// again — rotated, or with its access token lapsed — until the account's own
+// login is written in or the account signs in afresh. The error says so,
+// naming both, and is an ErrForeignLogin for an application to show rather
+// than fail on.
 func (n *NewLogin) Refuse(a *Account, found *Identity) error {
 	a.Staged = stagedNone
+	if v := n.login.refreshUntil(); v != "" {
+		a.setExtra(claudeRefusedGrant, v)
+	}
 	who := "another account"
 	if found != nil {
 		switch {
@@ -822,6 +841,7 @@ func stageMerged(a *Account, home string, f StagedFile) error {
 		return err
 	}
 	a.Staged = fingerprint(a.Token.Refresh)
+	delete(a.Extra, claudeRefusedGrant) // the account's own login is in, over whatever was refused
 	return nil
 }
 

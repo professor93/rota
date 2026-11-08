@@ -168,3 +168,54 @@ func TestALoginRecordedAsAnotherAccountsIsNeverARotation(t *testing.T) {
 		t.Fatalf("ending a day earlier it is the login from before, passed over whoever's: %+v %v", a, err)
 	}
 }
+
+// Refuse remembers the refused grant by when it ends. In a home recorded as
+// holding nothing of the account's, a login of that grant — rotated or not —
+// is passed over rather than handed back to be asked about again, while a
+// later grant still is. The account's own login going back in (StagedWritten,
+// or a stage) and a login accepted as the account's forget it.
+func TestARefusedGrantIsPassedOverUntilTheAccountsOwnLoginIsBackIn(t *testing.T) {
+	later := time.Now().Add(3 * time.Hour).UnixMilli()
+	const refused, afterThat = "2000086399000", "2000172799000" // livingClaude ends at 1999999999000
+	a := livingClaude()
+	a.Staged = fingerprint("R1")
+	var nl *NewLogin
+	if !errors.As(AdoptFrom(a, homeWith(freezeLogin("RX", later, refused))), &nl) {
+		t.Fatal("setup: another grant is a new login")
+	}
+	_ = nl.Refuse(a, &Identity{UUID: "u-other", Email: "other@x"})
+	if a.Extra[claudeRefusedGrant] != refused || a.Staged != stagedNone {
+		t.Fatalf("the refused grant is remembered: %v %q", a.Extra, a.Staged)
+	}
+	for _, rt := range []string{"RX", "RY"} {
+		if err := AdoptFrom(a, homeWith(freezeLogin(rt, later+3_600_000, refused))); err != nil || a.Token.Refresh != "R1" ||
+			a.Staged != stagedNone {
+			t.Fatalf("%s: a login of the refused grant is passed over, not asked about again: %+v %v", rt, a, err)
+		}
+	}
+	if !errors.As(AdoptFrom(a, homeWith(freezeLogin("RZ", later, afterThat))), &nl) {
+		t.Fatal("a later grant than that is a new login still")
+	}
+	a.StagedWritten()
+	if _, ok := a.Extra[claudeRefusedGrant]; ok {
+		t.Fatalf("the account's own login written in forgets the refusal: %v", a.Extra)
+	}
+
+	b := livingClaude()
+	b.Staged, b.Extra[claudeRefusedGrant] = fingerprint("R1"), refused
+	errors.As(AdoptFrom(b, homeWith(freezeLogin("R9", later, afterThat))), &nl)
+	nl.Accept(b)
+	if _, ok := b.Extra[claudeRefusedGrant]; ok || b.Token.Refresh != "R9" {
+		t.Fatalf("a login accepted as the account's forgets it: %v", b.Extra)
+	}
+
+	onDisk(t)
+	c := livingClaude()
+	c.Staged, c.Extra[claudeRefusedGrant] = stagedNone, refused
+	if _, err := Stage(c, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := c.Extra[claudeRefusedGrant]; ok || !c.StagedCurrent() {
+		t.Fatalf("a stage that writes the account's login forgets it: %v", c.Extra)
+	}
+}
