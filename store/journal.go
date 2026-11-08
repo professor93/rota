@@ -83,12 +83,16 @@ var heldLocks sync.Map
 type callerKey struct{}
 
 // WithCaller returns a copy of ctx that names the caller for the refresh
-// journal, as one short word: a refresh Refresh or Maintain makes under it is
-// journalled as <name>.renew. A name is lower-case letters, digits, '_', '.'
-// and '-', up to 40 of them; anything else is "refresh", which is also the
-// name of a caller that gives none to Refresh. rota names its own: "list" for
-// `rota list`, "choose" for the rotation choosing an account, "api" for the
-// server's ?refresh=1; Maintain is "serve" unless its caller named itself.
+// journal, as one short word: a renew Refresh or Maintain makes under it — a
+// refresh of a claude login kept in a home, or of any other provider's login
+// — is journalled as <name>.renew. A claude login on a token is journalled as
+// token.env and a rescue as rescue.blank or rescue.stranded whoever asks, and
+// a store kept anywhere but in files keeps no journal. A name is lower-case
+// letters, digits, '_', '.' and '-', up to 40 of them; anything else is
+// "refresh", which still counts as a name given, and is also the name of a
+// caller that gives none to Refresh. rota names its own: "list" for `rota
+// list`, "choose" for the rotation choosing an account, "api" for the server's
+// ?refresh=1; Maintain is "serve" unless its caller named itself.
 func WithCaller(ctx context.Context, name string) context.Context {
 	return context.WithValue(ctx, callerKey{}, codeOr(name, "refresh"))
 }
