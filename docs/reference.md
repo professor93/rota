@@ -801,12 +801,12 @@ keeps nothing that CLI carries for its account either: `ROTA_ACCOUNT_ID`,
 `ROTA_ACCOUNT`, `ROTA_PROVIDER`, the account's `CODEX_HOME`, `GROK_HOME` or
 `KIMI_CODE_HOME`, and the token or key it was handed. Its
 `CLAUDE_CONFIG_DIR` is the person's own, by the rule `install` uses, so a
-shell it holds does not run as that account. It reads the configuration first, as the daemon
-will, so a configuration the daemon would refuse is refused at the terminal;
-a certificate or token file it names is opened by the daemon alone, and one
-it cannot open is in the log lines a failed start quotes. Then it
-waits up to ten seconds for the daemon to answer on its control socket and
-says
+shell it holds does not run as that account. It reads the configuration
+first, as the daemon will, so a configuration the daemon would refuse is
+refused at the terminal; a certificate or token file it names is opened by
+the daemon alone, and one it cannot open is in the log lines a failed start
+quotes. Then it waits up to ten seconds for the daemon to answer on its
+control socket and says
 
 ```
 rota daemon started for /home/me/.rota (pid 4242); control socket /home/me/.rota/terminals/ctl.sock; http on 127.0.0.1:8787
@@ -945,14 +945,14 @@ that opens a TCP port wants `auth.token_file` or `[[users]]` in
 either stops the daemon and never its sessions, and each restarts a daemon
 that fails, five seconds later under systemd. A daemon that finds another
 already serving the store has not failed: it says so in its log and exits
-`0`, so neither starts it again while that one runs. The agent's `ProcessType` is
-`Interactive` because with none, launchd's default, the daemon and every
-session it holds were measured at priority 20 under a ceiling of 20, where
-`Interactive` runs them at 31 under 63, as a daemon started by hand does.
-On Linux, where the user does not linger, it adds
-*run "loginctl enable-linger <user>" so the daemon starts at boot and
-outlives your login*: without it, systemd starts a user's units at login and
-stops them at logout.
+`0`, so neither starts it again while that one runs. The agent's
+`ProcessType` is `Interactive` because with none, launchd's default, the
+daemon and every session it holds were measured at priority 20 under a
+ceiling of 20, where `Interactive` runs them at 31 under 63, as a daemon
+started by hand does. On Linux, where the user does not linger, it adds *run
+"loginctl enable-linger <user>" so the daemon starts at boot and outlives
+your login*: without it, systemd starts a user's units at login and stops
+them at logout.
 
 `install` reads `server.toml` as the daemon will, so a file the daemon
 would refuse is refused before anything is written. While a daemon runs
@@ -1264,9 +1264,9 @@ session of its own. The walk up the parents ends at one the caller cannot
 read, which under a `/proc` mounted with `hidepid` is another user's, such
 as root's `sshd` above an ssh login: holders and CLIs are the caller's own.
 With no session held nothing is walked. A caller the daemon cannot place
-is given `watch` as well. The watch-only rule is a guard against accidents, not a wall: a
-process that leaves both its parent and its session, as a daemon does by
-forking twice, escapes it.
+is given `watch` as well. The watch-only rule is a guard against accidents,
+not a wall: a process that leaves both its parent and its session, as a
+daemon does by forking twice, escapes it.
 
 **At the keyboard** `local` is a person, as a user signed in on the page is
 (*[Roles, and the keyboard](#roles-and-the-keyboard)*): two clients of the
@@ -1289,10 +1289,10 @@ since a unix socket's address cannot hold it. A held session's socket,
 `<store>/terminals/<id>/sock`, is the longest, so `serve start`, `serve
 install` and the daemon itself refuse a store with no room for it, though
 `ctl.sock` would fit: *a held session's socket, <path>, is N bytes, longer
-than the 100 a unix socket can have; a shorter ROTA_HOME fixes it*. Stopping the
-daemon removes the socket — before it lets go of the claim, and only while
-the file at the path is still that socket, so a daemon that took the store
-over is never left without its own. It runs on linux and macOS, as the
+than the 100 a unix socket can have; a shorter ROTA_HOME fixes it*. Stopping
+the daemon removes the socket — before it lets go of the claim, and only
+while the file at the path is still that socket, so a daemon that took the
+store over is never left without its own. It runs on linux and macOS, as the
 daemon does.
 
 #### What is written down
