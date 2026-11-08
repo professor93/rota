@@ -842,7 +842,11 @@ func (s *Server) account(w http.ResponseWriter, r *http.Request, st *store.Store
 		fail(w, http.StatusBadRequest, err.Error())
 		return nil, false
 	}
-	a, err := rotation.Choose(r.Context(), st, id)
+	// Joined with the server's own context, as everything that may refresh
+	// is: a server that has stopped starts no refresh (see Stop).
+	ctx, cancel := joinContexts(r.Context(), s.ctx)
+	defer cancel()
+	a, err := rotation.Choose(ctx, st, id)
 	if err != nil {
 		s.report(w, r, err)
 		return nil, false
@@ -931,7 +935,10 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 		// the provider. One forced read per account per minute is plenty
 		// for a person watching a dashboard.
 		if accounts := s.mayForce(st.Accounts); len(accounts) > 0 {
-			for _, err := range st.Refresh(r.Context(), true, accounts...) {
+			// A server that has stopped starts no refresh (see Stop).
+			ctx, cancel := joinContexts(r.Context(), s.ctx)
+			defer cancel()
+			for _, err := range st.Refresh(ctx, true, accounts...) {
 				s.log.Warn("refreshing usage", "err", err)
 			}
 		}

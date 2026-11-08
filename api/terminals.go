@@ -246,18 +246,21 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest, cw
 	}
 	defer st.Close()
 	rotation.Backfill(st)
-	a, err := rotation.Choose(r.Context(), st, req.Account)
+	// A server that has stopped starts no refresh (see Stop).
+	ctx, cancel := joinContexts(r.Context(), s.ctx)
+	defer cancel()
+	a, err := rotation.Choose(ctx, st, req.Account)
 	if err != nil {
 		return nil, err
 	}
 	// A dead lineage is refused before anything starts, by the store's own
 	// rule, for the reasons run.go gives.
-	if err := st.Launchable(r.Context(), a); err != nil {
+	if err := st.Launchable(ctx, a); err != nil {
 		return nil, err
 	}
 	// Prepared for the directory the terminal starts in, whose project
 	// settings its Claude Code reads, rather than for the server's own.
-	path, env, release, err := st.PrepareIn(r.Context(), a, cwd)
+	path, env, release, err := st.PrepareIn(ctx, a, cwd)
 	if err != nil {
 		return nil, err
 	}
