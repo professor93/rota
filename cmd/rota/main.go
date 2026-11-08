@@ -654,7 +654,7 @@ func (c *cli) list(args []string) error {
 		c.sayLongNotes(shown, width)
 		if withSessions {
 			c.showSessions(sessions.Scan(s, recent), width)
-			c.showHeld(listHeld(s))
+			c.showHeld(listHeld(s), width)
 		}
 		for _, e := range errs {
 			warn(c.err, "%v", e)
@@ -697,7 +697,7 @@ func (c *cli) list(args []string) error {
 	c.sayLongNotes(shown, width)
 	if withSessions {
 		c.showSessions(sessions.Scan(s, recent), width)
-		c.showHeld(listHeld(s))
+		c.showHeld(listHeld(s), width)
 	}
 	for _, e := range errs {
 		warn(c.err, "%v", e)
