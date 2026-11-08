@@ -9,10 +9,14 @@ package store
 // home's login was last found in the item, demotes nothing at all.
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	rota "github.com/professor93/rota/lib"
 )
 
 // freezeEvery is how often Claude Code's daemon rotates the login: a little
@@ -332,5 +336,96 @@ func TestTheFileIsTheStoreAgainOnceRotaWroteTheLoginBackIntoIt(t *testing.T) {
 	if bad := w.p.rotaSpent(); len(bad) != 0 || w.a.Dead {
 		w.p.dump(t)
 		t.Fatalf("nothing spent was presented: %+v dead=%v", bad, w.a.Dead)
+	}
+}
+
+// After a fresh `rota login` — Staged "-", with the end of the account's new
+// login recorded — the login a quiet home holds is told by when it ends,
+// because a login ends a fixed time after it was signed in. One ending more
+// than a minute later was made with /login after rota's: it goes the way of
+// any new login (the provider is asked whose it is) and is never written over
+// before that; this account's is taken, and one nobody can vouch for yet is
+// the hold, in which nothing is written. One ending earlier is the login from
+// before `rota login`, and rota's newer login goes in over it. An account with
+// no end recorded is as it was: the home's login is passed over either way.
+func TestAfterAFreshRotaLoginTheHomesLoginIsToldByItsEnd(t *testing.T) {
+	const (
+		own    = "1999999999000" // livingClaude's: the end of the account's login
+		after  = "2000086399000" // signed in a day after it, with /login
+		before = "1999913599000" // signed in a day before it: the old lineage
+	)
+	for _, c := range []struct {
+		name    string
+		until   string
+		noEnd   bool                    // the account has no end recorded
+		profile func(string) (int, any) // nil: never to be asked
+		check   func(*testing.T, *rota.Account, string, []string)
+	}{
+		{"a /login after, this account's", after, false, profileOf("A-login", "u1"),
+			func(t *testing.T, a *rota.Account, home string, _ []string) {
+				if a.Token.Refresh != "R-login" || !a.StagedCurrent() || refreshOf(home) != "R-login" {
+					t.Fatalf("confirmed and taken, and left in the home: holds %s, home %s", a.Token.Refresh, refreshOf(home))
+				}
+			}},
+		{"a /login after, nobody can vouch for it yet", after, false, func(string) (int, any) { return 401, nil },
+			func(t *testing.T, a *rota.Account, home string, _ []string) {
+				if a.Token.Refresh != "R-u1" || refreshOf(home) != "R-login" {
+					t.Fatalf("the hold: nothing taken, nothing written: holds %s, home %s", a.Token.Refresh, refreshOf(home))
+				}
+			}},
+		{"a /login after, somebody else's", after, false, profileOf("A-login", "u2"),
+			func(t *testing.T, a *rota.Account, home string, words []string) {
+				if a.Token.Refresh != "R-u1" || len(words) == 0 || !strings.Contains(words[0], "u2@x") {
+					t.Fatalf("refused, saying whose it is: holds %s, said %q", a.Token.Refresh, words)
+				}
+				if refreshOf(home) != "R-u1" {
+					t.Fatalf("and, as for any login refused, the account's own goes in once nothing runs there: %s", refreshOf(home))
+				}
+			}},
+		{"the login from before rota login", before, false, nil,
+			func(t *testing.T, a *rota.Account, home string, _ []string) {
+				if a.Token.Refresh != "R-u1" || refreshOf(home) != "R-u1" || !a.StagedCurrent() {
+					t.Fatalf("passed over, and rota's newer login written over it: holds %s, home %s", a.Token.Refresh, refreshOf(home))
+				}
+			}},
+		{"no end recorded", after, true, nil,
+			func(t *testing.T, a *rota.Account, home string, _ []string) {
+				if a.Token.Refresh != "R-u1" || refreshOf(home) != "R-u1" {
+					t.Fatalf("as before: passed over and written over: holds %s, home %s", a.Token.Refresh, refreshOf(home))
+				}
+			}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			storedRouteHere(t)
+			claudeWorld(t)
+			f := fakeAnthropic(t)
+			if c.profile != nil {
+				f.set(func(f *anthropic) { f.profile = c.profile })
+			}
+			s := openTemp(t)
+			words := said(s)
+			a := livingClaude(s, "u1") // Staged "-", as `rota login` leaves it
+			if a.Extra["refresh_token_expires_at"] != own {
+				t.Fatalf("setup: %v", a.Extra)
+			}
+			if c.noEnd {
+				delete(a.Extra, "refresh_token_expires_at")
+			}
+			file := filepath.Join(s.Home(a), ".credentials.json")
+			access := "A-login"
+			if c.until == before {
+				access = "A-old"
+			}
+			writeFile(t, file, storeLogin(access, "R-"+strings.TrimPrefix(access, "A-"), later(2*time.Hour), c.until))
+			if _, err := launchEnv(t, s, a); err != nil {
+				t.Fatal(err)
+			}
+			s.Refresh(context.Background(), false, a)
+			if (f.profiles.Load() != 0) != (c.profile != nil) || f.refreshes.Load() != 0 {
+				t.Fatalf("the provider is asked whose it is exactly when it ends later: %d profile reads, %d refreshes",
+					f.profiles.Load(), f.refreshes.Load())
+			}
+			c.check(t, a, readFile(file), *words)
+		})
 	}
 }
