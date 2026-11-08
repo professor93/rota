@@ -2641,8 +2641,8 @@ Code blanked: see *Stranded* and *Blanked*, below.
   *Blanked*): then rota takes it, and since Claude Code reads the item and
   never the file while an item exists, the blanked item goes even with
   something alive, once what it kept beside the login is in the file. A login
-  of another lineage there (a `refreshTokenExpiresAt` that is not the
-  account's) is somebody's `/login`, kept in the file because the keychain
+  of another lineage there (a `refreshTokenExpiresAt` more than a minute from
+  the account's) is somebody's `/login`, kept in the file because the keychain
   refused it, and is read as the new login it is; so is a login later than the
   account's when the lineage of one or the other is not known, and neither is
   ever written over. A later login of the account's own lineage there is a
@@ -2654,8 +2654,10 @@ Code blanked: see *Stranded* and *Blanked*, below.
   rotation from the keychain item, the file rota last wrote beside it goes,
   even with something alive, under Claude Code's refresh lock, as long as it
   still holds exactly what rota wrote (rota keeps its fingerprint) and the item
-  a usable, newer login with the same `refreshTokenExpiresAt`; a lock somebody
-  holds leaves it to a later look.
+  a usable, newer login whose `refreshTokenExpiresAt` is within a minute of the
+  file's; a lock somebody holds leaves it to a later look. No end is ever
+  compared to the millisecond: Claude Code's own refresh may set it up to a
+  second short of the one rota wrote, and the login is still the account's.
   From the moment the provider answers a refresh of rota's, the home's login
   is spent, so a home that cannot then be read or written is an error naming
   the account. A write is tried a few times, under the refresh lock when there

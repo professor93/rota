@@ -1111,8 +1111,10 @@ func (h *claudeHome) readStore() (raw []byte, inKeychain bool, err error) {
 //   - The account's own refresh token counts only when rota saw it in the home a
 //     moment ago (newest).
 //   - A login of another lineage — its refreshTokenExpiresAt and the account's
-//     both known, and not the same — is somebody's /login there. It counts, and
-//     is read as the new login it is (adopt), so it is never written over.
+//     both known, and more than a minute apart (sameGrant) — is somebody's
+//     /login there. It counts, and is read as the new login it is (adopt), so it
+//     is never written over. Within the minute it is the account's own grant,
+//     whose end Claude Code's refresh may set a second short of rota's.
 //   - Another refresh token no later than rota's copy is older than the item
 //     Claude Code blanked, or cannot be shown not to be: passed over. "rota's
 //     copy" is when it truly expires, not the past a rescue forces on it.
@@ -1129,12 +1131,9 @@ func (h *claudeHome) judgeFile(file []byte) (counts, superseded bool) {
 	case l.Refresh == h.a.Token.Refresh:
 		return h.newest(), false
 	}
-	theirs, ours := "", h.a.Extra["refresh_token_expires_at"]
-	if l.Until > 0 {
-		theirs = strconv.FormatInt(int64(l.Until), 10)
-	}
+	theirs, ours := l.until(), h.a.Extra[refreshUntilKey]
 	switch {
-	case theirs != "" && ours != "" && theirs != ours:
+	case theirs != "" && ours != "" && !sameGrant(theirs, ours):
 		return true, false
 	case int64(l.Expires) <= max(h.copyExpires, h.a.Token.ExpiresAt):
 		return false, false
@@ -1145,12 +1144,48 @@ func (h *claudeHome) judgeFile(file []byte) (counts, superseded bool) {
 }
 
 // loginEntry is what this file needs to know of the login in a credential store.
-// Until is its refreshTokenExpiresAt, which a refresh carries over unchanged, so
-// two logins with the same one are one lineage.
+// Until is its refreshTokenExpiresAt, which a refresh carries over, give or take
+// the second Claude Code's may take off it, so two logins whose ends are within a
+// minute of each other are one lineage (sameGrant).
 type loginEntry struct {
 	Refresh string  `json:"refreshToken"`
 	Expires float64 `json:"expiresAt"`
 	Until   float64 `json:"refreshTokenExpiresAt"`
+}
+
+// until is the login's refreshTokenExpiresAt as an account keeps it: decimal
+// milliseconds, or "" when it carries none.
+func (l loginEntry) until() string {
+	if l.Until <= 0 {
+		return ""
+	}
+	return strconv.FormatInt(int64(l.Until), 10)
+}
+
+// grantSlack is how far apart two refreshTokenExpiresAt values may lie and
+// still be one grant's, in milliseconds: lib's rule for telling a rotation of
+// the account's login from a new login (AdoptFS), which a test pins this to. On
+// a refresh Claude Code keeps the earlier of the end it had and now plus the
+// reply's refresh_token_expires_in, so its end may land up to a second short of
+// the one rota wrote; a sign-in ends a fixed time after it was made, so two ends
+// this close were signed in within the same minute.
+const grantSlack = 60_000
+
+// sameGrant reports whether two refreshTokenExpiresAt values, as the account
+// keeps them, say one grant: neither is known, or both are and lie within
+// grantSlack of each other. One known and one not is two grants. No end is ever
+// compared exactly: Claude Code's own refresh moves it by a fraction of a
+// second.
+func sameGrant(a, b string) bool {
+	if a == b {
+		return true
+	}
+	x, errA := strconv.ParseInt(a, 10, 64)
+	y, errB := strconv.ParseInt(b, 10, 64)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return x-y <= grantSlack && y-x <= grantSlack
 }
 
 // storedLogin reads the login entry out of a credential store, ok being false
@@ -1404,7 +1439,7 @@ func (h *claudeHome) lost(fsys storeFS) {
 // Claude Code reads the item while there is one, so the file is only an older
 // copy — one a blanked item would otherwise leave standing behind it. It goes
 // only while it holds exactly what rota wrote there (seedFPKey) and the item
-// holds a usable, newer login of the same lineage that the account holds; any
+// holds a usable, newer login of the same lineage (sameGrant) that the account holds; any
 // look that finds that so removes it. It is removed under Claude Code's refresh
 // lock, after both are read again and found as they were, so no write of
 // Claude Code's can fall between; a lock somebody holds leaves it to a later
@@ -1424,8 +1459,8 @@ func (h *claudeHome) dropSeed() {
 		return
 	}
 	file, ok := storedLogin(raw)
-	if err != nil || !ok || file.Refresh == "" || fingerprint(file.Refresh) != seeded || file.Until != item.Until ||
-		file.Expires >= item.Expires {
+	if err != nil || !ok || file.Refresh == "" || fingerprint(file.Refresh) != seeded || file.until() == "" ||
+		!sameGrant(file.until(), item.until()) || file.Expires >= item.Expires {
 		return
 	}
 	if !h.locked {

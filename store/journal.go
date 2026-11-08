@@ -546,7 +546,7 @@ func (h *claudeHome) journalAdopt(was journalMark) {
 	now := h.mark()
 	var outcome string
 	switch {
-	case now.refresh != was.refresh && (was.dead || now.until != was.until):
+	case now.refresh != was.refresh && (was.dead || !sameGrant(now.until, was.until)):
 		outcome = "new-login"
 	case now.refresh != was.refresh || now.access != was.access:
 		outcome = "rotation"
