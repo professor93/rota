@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math"
 	"net/http"
 	"slices"
 	"sync"
@@ -474,7 +475,12 @@ func turnedAway(a *rota.Account, err error) bool {
 		return false
 	}
 	now := rota.Now()
-	count := a.QuotaWait.Count + 1
+	// A count is read from a store anything may have written: one below zero
+	// counts as none, and one that cannot grow stays where it is.
+	count := max(a.QuotaWait.Count, 0)
+	if count < math.MaxInt {
+		count++
+	}
 	if lapsed(a.QuotaWait, now) {
 		count = 1
 	}
