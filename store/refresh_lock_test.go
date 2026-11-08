@@ -443,3 +443,245 @@ func TestAPanicWhileReadingTheHomeUnderTheLockLetsGoOfIt(t *testing.T) {
 		})
 	}
 }
+
+// tokenWorld is the lineage world as a run on a token finds it beside Claude Code
+// from before (launchBeside): a window alive in the home, which was last launched
+// on the environment route and holds no login, and rota's token run out.
+func tokenWorld(t *testing.T, keychain bool) *lineageWorld {
+	t.Helper()
+	w := newLineageWorld(t, keychain)
+	home := w.s.Home(w.a)
+	if err := os.Remove(filepath.Join(home, claudeCredentials)); err != nil {
+		t.Fatal(err)
+	}
+	w.a.StagedSuperseded()
+	w.a.Extra[routeKey] = routeEnv
+	alive(t, home, filepath.Join(claudeSessionsDir, "1.json"), os.Getpid())
+	if err := w.s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	w.clock.pass(9 * time.Hour)
+	return w
+}
+
+// underTheLock puts doc in the home's keychain item in the keychain's answer to
+// the first read made while the refresh lock is held: a write that lands after
+// the look's first read and before rota's read under the lock. It reports
+// whether it has landed.
+func underTheLock(w *lineageWorld, doc string) func() bool {
+	landed := false
+	w.k.onFind = func(svc string) {
+		if _, err := os.Stat(lockPath(w)); err == nil && !landed && svc == w.cc.svc {
+			landed = true
+			w.k.items[svc] = doc
+		}
+	}
+	return func() bool { return landed }
+}
+
+// A run on a token whose home, read again under the lock, now holds the
+// account's current login while a window is alive there presents nothing: that
+// window reads the store, and would present the token rota had just spent.
+func TestATokenRunIsRefusedWhenTheHomeReadUnderTheLockHoldsTheCurrentLogin(t *testing.T) {
+	w := tokenWorld(t, true)
+	landed := underTheLock(w, storeLogin("A0", "R0", w.a.Token.ExpiresAt, lineageUntil))
+	_, err := launchEnv(t, w.s, w.a)
+	w.p.dump(t)
+	if !landed() {
+		t.Fatal("the home was read under the lock")
+	}
+	if mine := w.p.byRota(); len(mine) != 0 || !errors.Is(err, rota.ErrBusy) || w.a.Dead {
+		t.Fatalf("refused, nothing presented, not dead: err=%v presented=%+v dead=%v", err, mine, w.a.Dead)
+	}
+	lockGone(t, w)
+}
+
+// The home read again under the lock may hold the account's refresh token with
+// a fresh access token beside it — a refresh of Claude Code's that did not
+// rotate the refresh token. The run takes it and goes on it, presenting nothing.
+func TestATokenRunTakesAFreshAccessTokenFoundUnderTheLock(t *testing.T) {
+	w := tokenWorld(t, true)
+	landed := underTheLock(w, storeLogin("A0b", "R0", rota.Now().Add(8*time.Hour).UnixMilli(), lineageUntil))
+	_, err := launchEnv(t, w.s, w.a)
+	w.p.dump(t)
+	if !landed() {
+		t.Fatal("the home was read under the lock")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mine := w.p.byRota(); len(mine) != 0 || w.a.Token.Access != "A0b" || w.a.Token.Refresh != "R0" {
+		t.Fatalf("taken, nothing presented: %+v, holds %s/%s", mine, w.a.Token.Access, w.a.Token.Refresh)
+	}
+	lockGone(t, w)
+}
+
+// tokenNow never presents the account's refresh token while something alive in
+// the home may hold it: here the home holds the account's current login and a
+// window runs there, although the home was last launched on a token.
+func TestTokenNowPresentsNothingWhileAWindowCanReadTheCurrentLogin(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := newLineageWorld(t, m.keychain)
+			home := w.s.Home(w.a)
+			w.a.Extra[routeKey] = routeEnv
+			alive(t, home, filepath.Join(claudeSessionsDir, "1.json"), os.Getpid())
+			w.clock.pass(9 * time.Hour)
+			h := w.s.claudeHome(w.a, false)
+			if err := h.adopt(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if !h.usable || !w.a.StagedCurrent() {
+				t.Fatal("setup: the home holds the account's current login")
+			}
+			err := h.tokenNow(t.Context())
+			w.p.dump(t)
+			if mine := w.p.byRota(); len(mine) != 0 || !errors.Is(err, rota.ErrBusy) || w.a.Dead {
+				t.Fatalf("refused, nothing presented, not dead: err=%v presented=%+v", err, mine)
+			}
+			lockGone(t, w)
+		})
+	}
+}
+
+// A store Claude Code blanked where the account's current login was is a
+// rescue's to present, never a run's: tokenNow presents nothing, even in a
+// quiet home.
+func TestTokenNowPresentsNothingForABlankedLogin(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := newLineageWorld(t, m.keychain)
+			writeFile(t, filepath.Join(w.s.Home(w.a), claudeCredentials), clearedLogin)
+			w.clock.pass(9 * time.Hour)
+			h := w.s.claudeHome(w.a, false)
+			if err := h.adopt(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if !h.blanked {
+				t.Fatal("setup: the account's current login is blanked")
+			}
+			err := h.tokenNow(t.Context())
+			w.p.dump(t)
+			if mine := w.p.byRota(); len(mine) != 0 || !errors.Is(err, rota.ErrBusy) || w.a.Dead {
+				t.Fatalf("refused, nothing presented, not dead: err=%v presented=%+v", err, mine)
+			}
+			lockGone(t, w)
+		})
+	}
+}
+
+// A hermetic run in a quiet home whose lock somebody holds is told to try again
+// in a moment, as a run on a token is: Claude Code is refreshing the login.
+func TestAHermeticRunIsToldToTryAgainWhileTheLockIsHeld(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := newLineageWorld(t, m.keychain)
+			w.clock.pass(9 * time.Hour)
+			if err := os.Mkdir(lockPath(w), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			_, release, err := w.s.prepare(t.Context(), w.a, false)
+			if release != nil {
+				release()
+			}
+			if !errors.Is(err, rota.ErrBusy) || !errors.Is(err, errLockHeld) || !strings.Contains(err.Error(), "try again in a moment") {
+				t.Fatalf("told to try again in a moment: %v", err)
+			}
+			if mine := w.p.byRota(); len(mine) != 0 || w.a.Dead || w.a.Token.Refresh != "R0" {
+				t.Fatalf("nothing presented, alive: %+v dead=%v", mine, w.a.Dead)
+			}
+		})
+	}
+}
+
+// A home where the refresh lock cannot be made at all — one rota may not write
+// in — is not taken for one whose lock somebody holds: every renewing look says
+// so, presents nothing, and leaves the account alive.
+func TestAHomeWhereTheLockCannotBeMadeIsReported(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes in any directory")
+	}
+	for _, m := range lineageModes() {
+		for _, look := range renewingLooks() {
+			t.Run(m.name+"/"+look.what, func(t *testing.T) {
+				w := newLineageWorld(t, m.keychain)
+				w.clock.pass(9 * time.Hour)
+				home := w.s.Home(w.a)
+				// The run claim's file is there before the home is locked down.
+				if f, err := os.OpenFile(filepath.Join(home, runLock), os.O_CREATE|os.O_RDWR, 0o600); err == nil {
+					f.Close()
+				}
+				if err := os.Chmod(home, 0o500); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
+				var errs []error
+				switch look.what {
+				case "rota list":
+					errs = w.s.Refresh(t.Context(), false, w.a)
+				case "rota serve maintenance":
+					errs = w.s.Maintain(t.Context())
+				default:
+					if _, err := launchEnv(t, w.s, w.a); err != nil {
+						errs = append(errs, err)
+					}
+				}
+				said := errors.Join(errs...)
+				if said == nil || !strings.Contains(said.Error(), "refresh lock could not be made") {
+					t.Fatalf("the look says the lock could not be made: %v", errs)
+				}
+				if mine := w.p.byRota(); len(mine) != 0 || w.a.Dead || w.a.Token.Refresh != "R0" {
+					t.Fatalf("nothing presented, alive: %+v dead=%v", mine, w.a.Dead)
+				}
+			})
+		}
+	}
+}
+
+// A listing reads usage with a login it refreshed only once that login is in
+// its home and the lock is let go, so a Claude Code waiting on the lock waits
+// for the refresh and the write, and not for a reading.
+func TestAListingReadsUsageOnlyAfterLettingGoOfTheLock(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := newLineageWorld(t, m.keychain)
+			w.clock.pass(9 * time.Hour)
+			var (
+				mu     sync.Mutex
+				reads  int
+				locked bool
+				homeRT string
+			)
+			srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/usage" {
+					_, err := os.Stat(lockPath(w))
+					held := refreshOf(w.cc.store())
+					mu.Lock()
+					reads++
+					locked = locked || err == nil
+					homeRT = held
+					mu.Unlock()
+				}
+				w.p.serve(rw, r)
+			}))
+			t.Cleanup(srv.Close)
+			old := rota.ClaudeEndpoints.Usage
+			rota.ClaudeEndpoints.Usage = srv.URL + "/usage"
+			t.Cleanup(func() { rota.ClaudeEndpoints.Usage = old })
+			if errs := w.s.Refresh(t.Context(), false, w.a); len(errs) != 0 {
+				t.Fatal(errs)
+			}
+			w.p.dump(t)
+			mu.Lock()
+			defer mu.Unlock()
+			if reads != 1 || locked || homeRT != "R1" {
+				t.Fatalf("one reading, after the lock went and with R1 in the home: %d reads, locked=%v, home %q",
+					reads, locked, homeRT)
+			}
+			if mine := w.p.byRota(); len(mine) != 1 || !mine[0].lockHeld || w.a.Quota == nil {
+				t.Fatalf("refreshed under the lock, read after: %+v quota=%v", mine, w.a.Quota)
+			}
+			lockGone(t, w)
+		})
+	}
+}
