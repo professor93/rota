@@ -173,18 +173,24 @@ func (s *Session) fromDaemon(c *net.UnixConn) (int, bool) {
 
 // read handles the daemon's frames until the link ends. Frames it does not
 // know are skipped: a newer daemon may send them.
+//
+// What needs the screen, a ScreenAsk or a Resize, goes to the link's own
+// worker, so that keystrokes, a Stop, a send, a Since and a Ping are handled
+// the moment they arrive, however busy the emulator is.
 func (s *Session) read(l *link) {
 	defer l.close()
+	work := make(chan frame, screenQueue)
+	go s.screens(l, work)
 	for {
 		kind, payload, err := l.c.Read()
 		if err != nil {
 			return
 		}
-		s.safely("a frame from the daemon", func() { s.handle(l, kind, payload) })
+		s.safely("a frame from the daemon", func() { s.handle(l, work, kind, payload) })
 	}
 }
 
-func (s *Session) handle(l *link, kind byte, payload []byte) {
+func (s *Session) handle(l *link, work chan<- frame, kind byte, payload []byte) {
 	switch kind {
 	case holdwire.Since:
 		var m holdwire.SinceMsg
@@ -203,21 +209,11 @@ func (s *Session) handle(l *link, kind byte, payload []byte) {
 		if !s.w.typeIn(p) {
 			_ = l.sendJSON(holdwire.InputRefused, holdwire.InputRefusedMsg{Seq: seq, Message: refusedTooFast})
 		}
-	case holdwire.Resize:
-		var m holdwire.SizeMsg
-		if share.Unmarshal(payload, &m) != nil {
-			return
-		}
-		if got, ok := s.resize(m); ok {
-			_ = l.sendJSON(holdwire.Resized, got)
-		}
-	case holdwire.ScreenAsk:
-		var m holdwire.ScreenAskMsg
-		if share.Unmarshal(payload, &m) != nil {
-			return
-		}
-		if out := s.repaint(m.Seq); out != nil {
-			_ = l.send(holdwire.Screen, out)
+	case holdwire.Resize, holdwire.ScreenAsk:
+		select {
+		case work <- frame{kind, payload}:
+		default:
+			s.tooMany(l, frame{kind, payload})
 		}
 	case holdwire.Stop:
 		s.Stop()
@@ -233,6 +229,70 @@ func (s *Session) handle(l *link, kind byte, payload []byte) {
 		}
 	case holdwire.Ping:
 		_ = l.send(holdwire.Pong, nil)
+	}
+}
+
+// frame is one frame from the daemon, kept for the screen's worker.
+type frame struct {
+	kind    byte
+	payload []byte
+}
+
+// screenQueue is how many frames may wait for the screen on one link. The
+// daemon asks for a screen twice when somebody attaches or falls behind, and
+// resizes when somebody fits: a few at a time.
+const screenQueue = 64
+
+// screens is a link's worker for the screen: its ScreenAsks and Resizes, one
+// at a time in the order they came, until the link ends.
+func (s *Session) screens(l *link, work <-chan frame) {
+	defer s.recovered("a link's screen")
+	for {
+		select {
+		case <-l.gone:
+			return
+		case f := <-work:
+			s.safely("a frame for the screen", func() { s.screenFrame(l, f) })
+		}
+	}
+}
+
+func (s *Session) screenFrame(l *link, f frame) {
+	switch f.kind {
+	case holdwire.Resize:
+		var m holdwire.SizeMsg
+		if share.Unmarshal(f.payload, &m) != nil {
+			return
+		}
+		if got, ok := s.resize(m); ok {
+			_ = l.sendJSON(holdwire.Resized, got)
+		}
+	case holdwire.ScreenAsk:
+		var m holdwire.ScreenAskMsg
+		if share.Unmarshal(f.payload, &m) != nil {
+			return
+		}
+		if out := s.repaint(m.Seq); out != nil {
+			_ = l.send(holdwire.Screen, out)
+		}
+	}
+}
+
+// tooMany answers a frame the worker has no room for: a ScreenAsk with no
+// screen, so the daemon replays the ring, and a Resize not at all, so the
+// size stays what it was and the daemon says no new one.
+func (s *Session) tooMany(l *link, f frame) {
+	switch f.kind {
+	case holdwire.ScreenAsk:
+		var m holdwire.ScreenAskMsg
+		if share.Unmarshal(f.payload, &m) != nil {
+			return
+		}
+		if out := s.unpainted(m.Seq); out != nil {
+			_ = l.send(holdwire.Screen, out)
+		}
+	case holdwire.Resize:
+		s.log("a resize was not done: too many frames wait for the screen", "waiting", screenQueue)
 	}
 }
 

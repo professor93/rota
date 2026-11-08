@@ -461,7 +461,8 @@ func TestAScreenTooBigToRepaintIsReplayed(t *testing.T) {
 	claim(t, r.terminals)
 	p := r.link(t)
 	p.since(0)
-	p.json(holdwire.Resize, holdwire.SizeMsg{Cols: 1000, Rows: 1000})
+	// As large as a screen is kept for.
+	p.json(holdwire.Resize, holdwire.SizeMsg{Cols: 500, Rows: 400})
 	p.decode(holdwire.Resized, &holdwire.SizeMsg{})
 	// Every cell styled apart from the one before it, which a repaint draws
 	// in about 40 bytes: past a megabyte in all.
@@ -472,12 +473,217 @@ func TestAScreenTooBigToRepaintIsReplayed(t *testing.T) {
 		b = b[n:]
 	}
 	p.output(0, len(out))
-	h, repaint := p.screen(1)
-	if h.OK || repaint != "" || h.Offset != int64(len(out)) || h.Cols != 1000 || h.Rows != 1000 {
+	h, repaint := p.caughtUp(1, int64(len(out)))
+	if h.OK || repaint != "" || h.Offset != int64(len(out)) || h.Cols != 500 || h.Rows != 400 {
 		t.Fatalf("a screen too big to repaint answered %+v with %d bytes", h, len(repaint))
+	}
+	if !r.s.screen.OK() {
+		t.Fatal("a repaint too big for a frame retired the screen")
 	}
 	p.send(holdwire.Ping, nil)
 	p.until(holdwire.Pong)
+}
+
+// stuck makes the screen's emulator stop inside the write that carries mark,
+// as one working through a flood at a large size does, until the returned
+// function is called; entered is closed once it has. The test's cleanup
+// lets it go too.
+func stuck(t *testing.T, mark string) (entered <-chan struct{}, release func()) {
+	t.Helper()
+	orig := vtWrite
+	in, gate := make(chan struct{}), make(chan struct{})
+	release = sync.OnceFunc(func() { close(gate) })
+	var once sync.Once
+	vtWrite = func(em *vt.Emulator, p []byte) (int, error) {
+		if bytes.Contains(p, []byte(mark)) {
+			once.Do(func() { close(in); <-gate })
+		}
+		return orig(em, p)
+	}
+	t.Cleanup(func() { vtWrite = orig }) // after the session is done
+	return in, release
+}
+
+func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s never happened", what)
+	}
+}
+
+// Nothing the daemon sends waits for the screen but what needs it. With the
+// emulator stuck in a write, as one drawing a flood at a large size is, and
+// a ScreenAsk ahead of them waiting for it to finish, a Ctrl-C reaches the
+// CLI and a Stop ends it while the screen is still stuck; and the ending is
+// recorded before the daemon is told it, so a holder killed after a DELETE
+// leaves the session ended, not interrupted.
+func TestKeystrokesNeverWaitForTheScreen(t *testing.T) {
+	entered, release := stuck(t, "busy")
+	r := newRig(t, 0, newFakeChild())
+	t.Cleanup(release) // before the session is waited for
+	claim(t, r.terminals)
+	r.c.reads()
+	p := r.link(t)
+	p.since(0)
+	r.c.print(t, "busy\r\n")
+	waitClosed(t, entered, "the screen taking the output")
+
+	p.json(holdwire.ScreenAsk, holdwire.ScreenAskMsg{Seq: 1})
+	p.send(holdwire.Input, holdwire.PutInput(1, []byte{0x03}))
+	r.c.waitTyped(t, "\x03")
+	p.send(holdwire.Stop, nil)
+	p.until(holdwire.Exit, holdwire.Screen)
+	select {
+	case code := <-r.exits:
+		if code != 129 {
+			t.Fatalf("the ending is recorded as %d, want the HUP's 129", code)
+		}
+	default:
+		t.Fatal("the daemon was told the CLI ended before the ending was recorded")
+	}
+	release()
+}
+
+// A ScreenAsk to a screen far behind its CLI is answered at once with no
+// repaint, without waiting for the emulator to finish what it is drawing,
+// and the daemon replays the ring instead. Once the screen has caught up it
+// repaints again.
+func TestAScreenFarBehindIsAnsweredAtOnce(t *testing.T) {
+	entered, release := stuck(t, "the flood begins")
+	r := newRig(t, 0, newFakeChild())
+	t.Cleanup(release)
+	claim(t, r.terminals)
+	first := "the flood begins\r\n"
+	r.c.print(t, first)
+	waitClosed(t, entered, "the screen taking the flood")
+	flood := strings.Repeat("0123456789abcdefg\n", (96<<10)/18)
+	r.c.print(t, flood)
+	p := r.link(t)
+	if h, repaint := p.screen(1); h.OK || repaint != "" {
+		t.Fatalf("a screen far behind answered %+v with %d bytes", h, len(repaint))
+	}
+	release()
+	if h, repaint := p.caughtUp(2, int64(len(first)+len(flood))); !h.OK || repaint == "" {
+		t.Fatalf("the screen caught up answered %+v with %d bytes", h, len(repaint))
+	}
+}
+
+// A repaint never draws a flood itself either: a screen far behind whose
+// emulator happens to be between two batches, free to be taken, is
+// answered without a repaint all the same.
+func TestARepaintNeverCatchesUpAFlood(t *testing.T) {
+	s := newSession(Config{ID: testID}, newFakeChild()) // no emulator running
+	defer s.screen.Close()
+	flood := []byte(strings.Repeat("0123456789abcdefg\n", (96<<10)/18))
+	for len(flood) > 0 {
+		n := min(len(flood), pumpRead)
+		s.took(flood[:n])
+		flood = flood[n:]
+	}
+	h, repaint, err := holdwire.ScreenOf(s.repaint(1))
+	if err != nil || h.OK || len(repaint) != 0 || h.Offset != 0 {
+		t.Fatalf("a screen far behind answered %+v with %d bytes (%v)", h, len(repaint), err)
+	}
+	s.em.mu.Lock()
+	off := s.em.off
+	s.em.mu.Unlock()
+	if off != 0 {
+		t.Fatalf("the repaint drew the flood, to %d", off)
+	}
+}
+
+// A resize never waits for the screen either: the CLI takes the size and
+// the daemon is answered at once, and the screen takes it once it has drawn
+// what was printed before, at the size before. A cursor query asked before
+// the resize is answered where the cursor was then, one asked after where
+// it is now, and a repaint after it is at the new size.
+func TestAResizeNeverWaitsForTheScreen(t *testing.T) {
+	entered, release := stuck(t, "the flood begins")
+	r := newRig(t, 0, newFakeChild())
+	t.Cleanup(release)
+	claim(t, r.terminals)
+	r.c.reads()
+	p := r.link(t)
+	p.since(0)
+	r.c.print(t, "the flood begins\r\n")
+	waitClosed(t, entered, "the screen taking the flood")
+	r.c.print(t, "\x1b[999C\x1b[6n")
+	p.json(holdwire.Resize, holdwire.SizeMsg{Cols: 40, Rows: 30})
+	var got holdwire.SizeMsg
+	p.decode(holdwire.Resized, &got)
+	if got != (holdwire.SizeMsg{Cols: 40, Rows: 30}) {
+		t.Fatalf("resized to %+v", got)
+	}
+	r.c.mu.Lock()
+	sizes := slices.Clone(r.c.sizes)
+	r.c.mu.Unlock()
+	if !slices.Equal(sizes, []string{"40x30"}) {
+		t.Fatalf("the CLI was resized to %v while the screen was busy", sizes)
+	}
+	release()
+	r.c.waitTyped(t, "\x1b[2;80R")
+	r.c.print(t, "\x1b[999C\x1b[6n")
+	r.c.waitTyped(t, "\x1b[2;80R\x1b[2;40R")
+	if h, _ := p.screen(1); !h.OK || h.Cols != 40 || h.Rows != 30 {
+		t.Fatalf("after the resize the screen is %+v", h)
+	}
+}
+
+// A terminal larger than a screen is kept for has none: past the budget the
+// screen is retired for the session's life, said once, and lets go of its
+// emulator, and a repaint says OK=false so the daemon replays the ring. One
+// started that large never has one.
+func TestAScreenPastItsBudgetIsReplayed(t *testing.T) {
+	r := newRig(t, 0, newFakeChild())
+	claim(t, r.terminals)
+	p := r.link(t)
+	p.since(0)
+	resize := func(cols, rows uint16) {
+		t.Helper()
+		p.json(holdwire.Resize, holdwire.SizeMsg{Cols: cols, Rows: rows})
+		var got holdwire.SizeMsg
+		p.decode(holdwire.Resized, &got)
+		if got.Cols != cols || got.Rows != rows {
+			t.Fatalf("asked %dx%d, resized to %+v", cols, rows, got)
+		}
+	}
+	resize(500, 400)
+	r.c.print(t, "hi")
+	if h, repaint := p.screen(1); !h.OK || h.Cols != 500 || h.Rows != 400 || !strings.Contains(repaint, "hi") {
+		t.Fatalf("at the budget the screen answered %+v with %d bytes", h, len(repaint))
+	}
+	resize(500, 401)
+	if h, repaint := p.screen(2); h.OK || repaint != "" || h.Cols != 500 || h.Rows != 401 {
+		t.Fatalf("past the budget the screen answered %+v with %d bytes", h, len(repaint))
+	}
+	resize(80, 24)
+	if h, _ := p.screen(3); h.OK || h.Cols != 80 || h.Rows != 24 {
+		t.Fatalf("back within the budget the screen answered %+v", h)
+	}
+	r.s.screen.mu.Lock()
+	kept := r.s.screen.em != nil
+	r.s.screen.mu.Unlock()
+	if kept {
+		t.Fatal("a retired screen kept its emulator")
+	}
+	n := 0
+	for _, l := range r.logLines() {
+		if strings.Contains(l, "larger than a screen is kept for") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("%d lines about the size: %q", n, r.logLines())
+	}
+
+	c := newFakeChild()
+	s := Start(Config{ID: testID, Cols: 1000, Rows: 1000, Log: func(string, ...any) {}}, c)
+	defer func() { c.exit(0); <-s.Done() }()
+	if s.screen.OK() || s.screen.em != nil {
+		t.Fatal("a session started past the budget has an emulator")
+	}
 }
 
 // A Screen the daemon could not take, made with an error or too big for a

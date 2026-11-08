@@ -121,10 +121,12 @@ type ScreenAskMsg struct {
 }
 
 // ScreenHead is the document at the front of a Screen frame. OK false is a
-// holder with no screen to give — its emulator failed — and a daemon then
-// replays the ring instead. Offset is the ring offset the repaint stands for:
-// output from there on follows it. Modes are the terminal modes the CLI had
-// set at that offset, which a repaint alone does not restore.
+// holder with no screen to give — its emulator failed, the terminal is
+// larger than MaxScreenCells, or the screen is too far behind its CLI to
+// wait for — and a daemon then replays the ring instead. Offset is the ring
+// offset the repaint stands for: output from there on follows it. Modes are
+// the terminal modes the CLI had set at that offset, which a repaint alone
+// does not restore.
 type ScreenHead struct {
 	Seq    uint64       `json:"seq"`
 	OK     bool         `json:"ok"`
