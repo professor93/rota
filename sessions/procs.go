@@ -21,11 +21,17 @@ type proc struct {
 // the flavours lib speaks, which is the same list by construction.
 var cliNames = []string{"claude", "codex", "grok", "kimi"}
 
-// listProcs and cwdOf are variables so tests can stand in for the machine.
+// listProcs and cwdsOf are variables so tests can stand in for the machine.
 var (
 	listProcs = psList
-	cwdOf     = processCwd
+	cwdsOf    = processCwds
 )
+
+// cwd is where one process is working, or why that could not be read.
+type cwd struct {
+	dir string
+	err error
+}
 
 // ProcessInstances reports vendor CLIs running that rota did not start,
 // skipping the pids given because those are the registry's to describe.
@@ -39,26 +45,34 @@ func ProcessInstances(known []int) ([]Instance, string) {
 	if err != nil {
 		return nil, "could not read the process list: " + err.Error()
 	}
-	var (
-		out     []Instance
-		blind   int
-		blindBy string
-	)
+	var out []Instance
 	for _, p := range list {
 		provider := cliFor(p.command)
 		if provider == "" || slices.Contains(known, p.pid) {
 			continue
 		}
-		in := Instance{Kind: "cli", Provider: provider, PID: p.pid}
-		dir, err := cwdOf(p.pid)
-		switch {
-		case err == nil:
-			in.Dir = dir
-		default:
+		out = append(out, Instance{Kind: "cli", Provider: provider, PID: p.pid})
+	}
+	if len(out) == 0 {
+		return nil, ""
+	}
+	// Every directory is asked for at once: on macOS each question is an lsof,
+	// and a busy machine pays for every one of them.
+	pids := make([]int, len(out))
+	for i, in := range out {
+		pids[i] = in.PID
+	}
+	var (
+		blind   int
+		blindBy string
+	)
+	for i, c := range cwdsOf(pids) {
+		if c.err != nil {
 			blind++
-			blindBy = err.Error()
+			blindBy = c.err.Error()
+			continue
 		}
-		out = append(out, in)
+		out[i].Dir = c.dir
 	}
 	if blind > 0 {
 		where := "lsof"
@@ -164,32 +178,99 @@ func parsePS(out string) []proc {
 	return list
 }
 
-// processCwd is where a process is working.
+// processCwds is where each process is working, in the order asked.
 //
 // Linux keeps it in /proc, which costs a readlink. macOS has no such file and
 // no way to ask without cgo, so it takes lsof — which is present on a stock
-// install but is still another program, and one rota can do without.
-func processCwd(pid int) (string, error) {
-	if runtime.GOOS == "windows" {
+// install but is still another program, and one rota can do without. It is
+// one lsof for all of them rather than one each, because starting lsof is
+// what costs: tens of milliseconds a time on a loaded machine.
+func processCwds(pids []int) []cwd {
+	out := make([]cwd, len(pids))
+	switch runtime.GOOS {
+	case "windows":
 		// Another process's working directory is not readable without
 		// native calls rota does not make; the row is still listed, blind.
-		return "", errors.New("the working directory of another process is not readable on windows")
+		for i := range out {
+			out[i].err = errors.New("the working directory of another process is not readable on windows")
+		}
+	case "linux":
+		for i, pid := range pids {
+			out[i].dir, out[i].err = os.Readlink("/proc/" + strconv.Itoa(pid) + "/cwd")
+		}
+	default:
+		lsofCwds(pids, out, runLsof)
 	}
-	if runtime.GOOS == "linux" {
-		return os.Readlink("/proc/" + strconv.Itoa(pid) + "/cwd")
-	}
-	out, err := exec.Command("lsof", "-a", "-p", strconv.Itoa(pid), "-d", "cwd", "-Fn").Output()
-	if err != nil {
-		return "", err
-	}
-	// -Fn prints one field per line, each tagged by its first character; the
-	// name is the one beginning with "n".
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "n/") {
-			return strings.TrimPrefix(line, "n"), nil
+	return out
+}
+
+// lsofChunk bounds how many pids go into one lsof's argument, which stays a
+// few kilobytes however many CLIs are open.
+const lsofChunk = 256
+
+// runLsof asks lsof for the working directory of every pid in the
+// comma-separated list, one record per process it could read.
+func runLsof(list string) ([]byte, error) {
+	return exec.Command("lsof", "-a", "-p", list, "-d", "cwd", "-Fpn").Output()
+}
+
+// lsofCwds fills out with where each pid is working, asking lsof a chunk at a
+// time.
+//
+// lsof leaves out a process that has gone or that belongs to someone it may
+// not read, and then exits 1 while still printing every other one. So each
+// pid is judged by its own record, and gets what one lsof for it alone would
+// have said: the directory its record names; "not found" for a record that
+// names none, as that lsof would have succeeded with no name; and for no
+// record at all, the error lsof ended with, since that lsof would have failed.
+func lsofCwds(pids []int, out []cwd, lsof func(list string) ([]byte, error)) {
+	for start := 0; start < len(pids); start += lsofChunk {
+		chunk := pids[start:min(start+lsofChunk, len(pids))]
+		ids := make([]string, len(chunk))
+		for i, pid := range chunk {
+			ids[i] = strconv.Itoa(pid)
+		}
+		raw, err := lsof(strings.Join(ids, ","))
+		if err == nil {
+			err = os.ErrNotExist
+		}
+		dirs := parseLsofCwds(string(raw))
+		for i, pid := range chunk {
+			dir, listed := dirs[pid]
+			switch {
+			case dir != "":
+				out[start+i] = cwd{dir: dir}
+			case listed:
+				out[start+i] = cwd{err: os.ErrNotExist}
+			default:
+				out[start+i] = cwd{err: err}
+			}
 		}
 	}
-	return "", os.ErrNotExist
+}
+
+// parseLsofCwds reads what lsof -Fpn prints: one field per line, tagged by its
+// first character, where "p" opens a process and the "n" under it names its
+// working directory. lsof escapes a newline or a tab in a name, so a line is
+// never part of a path; the name is kept exactly as printed. Every process
+// printed has an entry, "" when no absolute path was named for it.
+func parseLsofCwds(out string) map[int]string {
+	dirs := map[int]string{}
+	pid := 0
+	for line := range strings.SplitSeq(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "p"):
+			pid, _ = strconv.Atoi(line[1:])
+			if pid > 0 {
+				if _, seen := dirs[pid]; !seen {
+					dirs[pid] = ""
+				}
+			}
+		case strings.HasPrefix(line, "n/") && pid > 0 && dirs[pid] == "":
+			dirs[pid] = line[1:]
+		}
+	}
+	return dirs
 }
 
 func plural(n int) string {
