@@ -46,7 +46,7 @@ var ctlOwner = os.Geteuid
 // them with every other request, so it can wait for their goodbyes.
 func listenCtl(srv *api.Server, terminals string, log *slog.Logger, requests ...*inFlight) (stop func(), err error) {
 	path := holdwire.CtlSock(terminals)
-	if err := holdwire.SockFits(path); err != nil {
+	if err := holdwire.SocketsFit(terminals); err != nil {
 		return nil, err
 	}
 	if !srv.HoldsDaemon(terminals) {

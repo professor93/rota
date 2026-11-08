@@ -3,6 +3,7 @@ package holdwire
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 )
 
 // Where everything is. A store's terminals directory (store.TerminalDir)
@@ -59,6 +60,21 @@ func SockFits(path string) error {
 	if len(path) > MaxSockPath {
 		return fmt.Errorf("the socket path %s is %d bytes, longer than the %d a unix socket can have; a shorter ROTA_HOME fixes it",
 			path, len(path), MaxSockPath)
+	}
+	return nil
+}
+
+// SocketsFit refuses a store whose sockets are too long to bind. The
+// longest is a held session's, <id>/sock, thirteen bytes longer than
+// ctl.sock, so a store can have room for a daemon and none for any session
+// it would start: each would fail where only the daemon's log says why. So
+// wherever a daemon could start, this is asked rather than SockFits of
+// ctl.sock, and says which path is too long.
+func SocketsFit(terminals string) error {
+	sock := SockPath(Dir(terminals, strings.Repeat("0", 16)))
+	if len(sock) > MaxSockPath {
+		return fmt.Errorf("a held session's socket, %s, is %d bytes, longer than the %d a unix socket can have; a shorter ROTA_HOME fixes it",
+			SockPath(Dir(terminals, "<id>")), len(sock), MaxSockPath)
 	}
 	return nil
 }
