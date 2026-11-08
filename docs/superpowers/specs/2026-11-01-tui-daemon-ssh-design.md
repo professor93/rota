@@ -657,7 +657,8 @@ one of them shipped; where a rule and an earlier section differ, this one wins.
   secrets: `TMUX`, host terminal ids, and the marks a CLI puts on what it
   starts — `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`,
   `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_THREAD_ID`,
-  `CODEX_SESSION_ID`, `CODEX_TOOL_CALL_ID`. An account's CLI also gets its
+  `CODEX_SESSION_ID`, `CODEX_TOOL_CALL_ID`; the claude marks are one list
+  (`termenv.ClaudeMarks`) with lib's `claudeCompeting`. An account's CLI also gets its
   provider's own drop list (lib's `claudeCompeting` and `codexCompeting`),
   which names exactly everything that would sign it in some other way, send it
   elsewhere, or say it is nested. `run --detach` and New from the
