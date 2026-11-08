@@ -325,7 +325,7 @@ func TestServeSaysADirtyStorePathCleaned(t *testing.T) {
 }
 
 // Uninstall deletes the file even when the supervisor will not stop the
-// unit, and says both.
+// unit, and says both. With no daemon running it says nothing of one.
 func TestUninstallSaysWhatTheSupervisorSaid(t *testing.T) {
 	r := newUnitRig(t)
 	if _, errb, code := call(t, "serve", "install"); code != 0 {
@@ -339,8 +339,8 @@ func TestUninstallSaysWhatTheSupervisorSaid(t *testing.T) {
 		return nil
 	})
 	_, errb, code := call(t, "serve", "uninstall")
-	if code != 1 || !strings.Contains(errb, r.want.path+" is removed, but No such process") {
-		t.Fatalf("uninstall: exit %d %q", code, errb)
+	if code != 1 || !strings.Contains(errb, r.want.path+" is removed, but No such process") || strings.Contains(errb, "rota daemon") {
+		t.Fatalf("uninstall: exit %d %q, want the supervisor's words and nothing of a daemon", code, errb)
 	}
 	if _, err := os.Lstat(r.want.path); !os.IsNotExist(err) {
 		t.Fatalf("unit still there: %v", err)
@@ -494,6 +494,15 @@ func TestAnUninstallTheSupervisorRefusesStopsTheDaemonFirst(t *testing.T) {
 		fileAtTerm <- err == nil
 		return true
 	})
+	// The daemon is this process, which goes on after it lets go of the
+	// store, as a daemon still serving does: it is taken to exit only at
+	// the third look, and the file must be there at each look before.
+	var looks []bool
+	playExit(t, func(within time.Duration) bool {
+		_, err := os.Lstat(r.want.path)
+		looks = append(looks, err == nil)
+		return len(looks) == 3
+	})
 	out, errb, code := call(t, "serve", "uninstall")
 	for _, want := range []string{
 		r.want.path + " is removed, but " + r.want.uninstall[0] + ": exit status 1: Failed to connect to user scope bus",
@@ -514,10 +523,234 @@ func TestAnUninstallTheSupervisorRefusesStopsTheDaemonFirst(t *testing.T) {
 	if !<-fileAtTerm {
 		t.Fatal("the unit's file was gone before the daemon was stopped")
 	}
+	if !slices.Equal(looks, []bool{true, true, true}) {
+		t.Fatalf("the daemon's exit was waited for %d times, the file there at each: %v; want 3, all there", len(looks), looks)
+	}
 	for _, p := range []string{r.want.path, link} {
 		if _, err := os.Lstat(p); p != "" && !os.IsNotExist(err) {
 			t.Fatalf("%s still there: %v", p, err)
 		}
+	}
+}
+
+// playExit stands in for the wait for the daemon's process to exit, which
+// for a daemon that is this test process would never end: exited is asked
+// instead, once for each look, until it says yes.
+func playExit(t *testing.T, exited func(within time.Duration) bool) {
+	t.Helper()
+	old := daemonExited
+	daemonExited = func(_ *holdwire.Daemon, within time.Duration) bool {
+		for !exited(within) {
+		}
+		return true
+	}
+	t.Cleanup(func() { daemonExited = old })
+}
+
+// A real daemon, a process of its own, is waited for until it has exited,
+// not only until it lets go of the store, before the unit's file goes: in
+// between it still serves what is in flight, as the unit's main process,
+// and a reload by anybody then would take its sessions with it.
+func TestAnUninstallWaitsForTheDaemonsProcessToExit(t *testing.T) {
+	r := newDaemonRig(t)
+	unitHome(t, true)
+	recordUnits(t, nil)
+	if _, errb, code := call(t, "serve", "install"); code != 0 {
+		t.Fatalf("install: exit %d %q", code, errb)
+	}
+	path := expectedCalls(t, r.home).path
+	pid, _ := r.start()
+	d, ok := holdwire.RunningDaemon(r.terminals)
+	if !ok || d.PID != pid {
+		t.Fatalf("daemon.pid says %+v, want pid %d", d, pid)
+	}
+	unreachableSupervisor(t)
+	out, errb, code := call(t, "serve", "uninstall")
+	want := fmt.Sprintf("; the rota daemon (pid %d) was stopped as rota serve stop stops one, and 0 sessions keep running", pid)
+	if code != 1 || out != "" || !strings.Contains(errb, path+" is removed, but ") || !strings.Contains(errb, want) {
+		t.Fatalf("uninstall with no supervisor: exit %d %q %q, want %q\nlog:\n%s", code, out, errb, want, r.log())
+	}
+	// Exited, a zombie included: under a pid 1 that never reaps, as in a
+	// bare container, one is left for good.
+	exited := make(chan struct{})
+	if wait, err := exitOf(pid); err != nil {
+		t.Fatal(err)
+	} else {
+		go func() { wait(); close(exited) }()
+	}
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatalf("the daemon (pid %d) was still running when uninstall said it was stopped", pid)
+	}
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("unit still there: %v", err)
+	}
+}
+
+// A daemon that lets go of the store and then does not exit within
+// daemonExitWait keeps the unit's file and its link, as one that will not
+// stop does, and uninstall says why. The daemon is this process, which
+// never exits, and the real wait is asked.
+func TestAnUninstallKeepsTheUnitWhileTheDaemonsProcessLingers(t *testing.T) {
+	r := newUnitRig(t)
+	if _, errb, code := call(t, "serve", "install"); code != 0 {
+		t.Fatalf("install: exit %d %q", code, errb)
+	}
+	link := wantsLink(t, r.want.path)
+	unreachableSupervisor(t)
+	old := daemonExitWait
+	daemonExitWait = 300 * time.Millisecond
+	t.Cleanup(func() { daemonExitWait = old })
+	termed := daemonByTheTest(t, r.terminals)
+	out, errb, code := call(t, "serve", "uninstall")
+	want := fmt.Sprintf("; the rota daemon (pid %d) is still running and could not be stopped (it let go of the store but has not exited within 300ms), so %s is kept: %s; run rota serve uninstall again from %s",
+		os.Getpid(), r.want.path, keptWhy, keptFrom)
+	if code != 1 || out != "" || !strings.Contains(errb, want) {
+		t.Fatalf("uninstall while the daemon lingers: exit %d %q %q, want %q", code, out, errb, want)
+	}
+	for _, never := range []string{"is removed", "was stopped", "uninstalled"} {
+		if strings.Contains(errb, never) {
+			t.Fatalf("it says %q: %q", never, errb)
+		}
+	}
+	<-termed
+	for _, p := range []string{r.want.path, link} {
+		if _, err := os.Lstat(p); p != "" && err != nil {
+			t.Fatalf("%s was taken away: %v", p, err)
+		}
+	}
+}
+
+// When the daemon was stopped but the file cannot be deleted, uninstall
+// still says the daemon was stopped and its sessions keep running, and that
+// the file is kept, after what went wrong.
+func TestAnUninstallThatCannotDeleteTheFileSaysTheDaemonStopped(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root deletes from a directory it may not write")
+	}
+	r := newUnitRig(t)
+	if _, errb, code := call(t, "serve", "install"); code != 0 {
+		t.Fatalf("install: exit %d %q", code, errb)
+	}
+	unreachableSupervisor(t)
+	termed := daemonByTheTest(t, r.terminals)
+	playExit(t, func(time.Duration) bool { return true })
+	dir := filepath.Dir(r.want.path)
+	if err := os.Chmod(dir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
+	out, errb, code := call(t, "serve", "uninstall")
+	for _, want := range []string{
+		r.want.uninstall[0] + ": exit status 1: Failed to connect to user scope bus",
+		"permission denied",
+		fmt.Sprintf("; the rota daemon (pid %d) was stopped as rota serve stop stops one, and 0 sessions keep running; %s is kept", os.Getpid(), r.want.path),
+	} {
+		if code != 1 || out != "" || !strings.Contains(errb, want) {
+			t.Fatalf("uninstall that cannot delete the file: exit %d %q %q, want %q", code, out, errb, want)
+		}
+	}
+	if strings.Contains(errb, "is removed") {
+		t.Fatalf("it says the file is removed: %q", errb)
+	}
+	<-termed
+	if _, err := os.Lstat(r.want.path); err != nil {
+		t.Fatalf("the file: %v", err)
+	}
+}
+
+// A daemon that went on its own between uninstall's look and its signal was
+// not stopped by uninstall, and is said to be no longer running; the unit's
+// file goes, since nothing runs under it.
+func TestAnUninstallSaysADaemonThatWentOnItsOwnIsNoLongerRunning(t *testing.T) {
+	r := newUnitRig(t)
+	if _, errb, code := call(t, "serve", "install"); code != 0 {
+		t.Fatalf("install: exit %d %q", code, errb)
+	}
+	unreachableSupervisor(t)
+	release, err := holdwire.ClaimDaemon(r.terminals, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	old := signalTheDaemon
+	signalTheDaemon = func(terminals string) (*holdwire.Daemon, error) {
+		release()
+		return signalDaemon(terminals)
+	}
+	t.Cleanup(func() { signalTheDaemon = old })
+	playExit(t, func(time.Duration) bool { return true })
+	out, errb, code := call(t, "serve", "uninstall")
+	want := fmt.Sprintf("%s is removed, but %s: exit status 1: Failed to connect to user scope bus via local transport: "+
+		"$DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined; the rota daemon (pid %d) is no longer running, and 0 sessions keep running",
+		r.want.path, r.want.uninstall[0], os.Getpid())
+	if code != 1 || out != "" || strings.TrimSpace(errb) != "error: "+want {
+		t.Fatalf("uninstall after the daemon went: exit %d %q\n%q\nwant %q", code, out, errb, want)
+	}
+	if _, err := os.Lstat(r.want.path); !os.IsNotExist(err) {
+		t.Fatalf("unit still there: %v", err)
+	}
+}
+
+// A daemon holding the store that daemon.pid names no process for is not
+// signalled, and uninstall keeps the unit saying a rota daemon is still
+// running, never with a pid the file got wrong as its own: whether the file
+// names a process that is not the daemon, as when the daemon is this test
+// process and the file a stranger's, or the daemon changes between the look
+// and the signal, which only a stand-in can arrange.
+func TestAnUninstallKeepsTheUnitForADaemonItCannotTell(t *testing.T) {
+	r := newUnitRig(t)
+	if _, errb, code := call(t, "serve", "install"); code != 0 {
+		t.Fatalf("install: exit %d %q", code, errb)
+	}
+	unreachableSupervisor(t)
+	release, err := holdwire.ClaimDaemon(r.terminals, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	pidFile := holdwire.DaemonPIDFile(r.terminals)
+	raw, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d holdwire.Daemon
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatal(err)
+	}
+	d.ProcStart, d.ProcStartTicks = d.ProcStart.Add(-time.Hour), d.ProcStartTicks+1
+	if raw, err = json.Marshal(&d); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidFile, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	self := fmt.Sprintf("(pid %d)", os.Getpid())
+	for _, c := range []struct {
+		name string
+		why  string
+		play bool
+	}{
+		{"a stranger's pid", fmt.Sprintf("a rota daemon holds %s, but %s names no process this rota can check; nothing was signalled",
+			holdwire.DaemonLock(r.terminals), pidFile), false},
+		{"a daemon changed meanwhile", fmt.Sprintf("pid %d is no longer the rota daemon %s names; nothing was signalled", os.Getpid(), pidFile), true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if c.play {
+				old := signalTheDaemon
+				signalTheDaemon = func(string) (*holdwire.Daemon, error) { return nil, unnamedDaemon{c.why} }
+				t.Cleanup(func() { signalTheDaemon = old })
+			}
+			out, errb, code := call(t, "serve", "uninstall")
+			want := fmt.Sprintf("; a rota daemon is still running and could not be stopped (%s), so %s is kept: ", c.why, r.want.path)
+			if code != 1 || out != "" || !strings.Contains(errb, want) || strings.Contains(errb, "the rota daemon "+self) {
+				t.Fatalf("uninstall over a daemon it cannot tell: exit %d %q %q, want %q", code, out, errb, want)
+			}
+			if _, err := os.Lstat(r.want.path); err != nil {
+				t.Fatalf("the file was taken away: %v", err)
+			}
+		})
 	}
 }
 

@@ -450,30 +450,45 @@ func (c *cli) stopDaemon(all, yes bool) error {
 // still the process daemon.pid names — and waits for it to let go of the
 // store. Its sessions go on running; it lets go of them before its claim.
 func endDaemon(terminals string) error {
+	_, err := signalDaemon(terminals)
+	return err
+}
+
+// signalDaemon is endDaemon, and says which daemon it sent SIGTERM: nil when
+// it sent none, because none was running or the one that was went on its
+// own meanwhile. A daemon held by a process daemon.pid does not name, or
+// names no checkable process for, is an unnamedDaemon.
+func signalDaemon(terminals string) (*holdwire.Daemon, error) {
 	d, ok := daemonOf(terminals)
 	if !ok {
-		return nil
+		return nil, nil
 	}
 	if d.PID == 0 {
-		return fmt.Errorf("a rota daemon holds %s, but %s names no process this rota can check; nothing was signalled",
-			oneLine(holdwire.DaemonLock(terminals)), oneLine(holdwire.DaemonPIDFile(terminals)))
+		return nil, unnamedDaemon{fmt.Sprintf("a rota daemon holds %s, but %s names no process this rota can check; nothing was signalled",
+			oneLine(holdwire.DaemonLock(terminals)), oneLine(holdwire.DaemonPIDFile(terminals)))}
 	}
 	err := holdwire.Signal(d.PID, d.ProcStart, d.ProcStartTicks, d.BootID, syscall.SIGTERM)
 	switch {
 	case errors.Is(err, holdwire.ErrNotSameProcess) && !holdwire.Locked(holdwire.DaemonLock(terminals)):
-		return nil // it went on its own meanwhile
+		return nil, nil // it went on its own meanwhile
 	case errors.Is(err, holdwire.ErrNotSameProcess):
-		return fmt.Errorf("pid %d is no longer the rota daemon %s names; nothing was signalled", d.PID, oneLine(holdwire.DaemonPIDFile(terminals)))
+		return nil, unnamedDaemon{fmt.Sprintf("pid %d is no longer the rota daemon %s names; nothing was signalled", d.PID, oneLine(holdwire.DaemonPIDFile(terminals)))}
 	case err != nil:
-		return err
+		return nil, err
 	}
 	for deadline := time.Now().Add(daemonStopWait); holdwire.Locked(holdwire.DaemonLock(terminals)); time.Sleep(50 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			return fmt.Errorf("the rota daemon (pid %d) has not stopped within %s", d.PID, daemonStopWait)
+			return nil, fmt.Errorf("the rota daemon (pid %d) has not stopped within %s", d.PID, daemonStopWait)
 		}
 	}
-	return nil
+	return d, nil
 }
+
+// unnamedDaemon is a daemon holding the store that daemon.pid does not name
+// a process for, which so was not signalled.
+type unnamedDaemon struct{ why string }
+
+func (u unnamedDaemon) Error() string { return u.why }
 
 // stopAll is `rota serve stop --all`: every session ended, then the daemon.
 // With a daemon, it is asked to end each, by the same route as anybody's

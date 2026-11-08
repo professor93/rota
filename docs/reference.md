@@ -987,20 +987,27 @@ and systemd, once it reloads a unit whose file is gone, has no
 `KillMode=process` left for it: the daemon stopping then ends every
 session in the unit, as was measured. So when the supervisor fails,
 uninstall first stops the daemon as `rota serve stop` does, while the unit
-is still loaded as it was written, then deletes the file and, on Linux,
-the link `enable` made in `default.target.wants`, and asks for no reload,
-which could catch the daemon on its way out; systemd forgets the stopped
-unit at its next one. It exits `1`, naming what the supervisor said and
-the daemon it stopped: *<path> is removed, but systemctl --user disable
---now <unit>: …; the rota daemon (pid N) was stopped as rota serve stop
-stops one, and N sessions keep running*. With no daemon running there is
+is still loaded as it was written, and waits for its process to exit — it
+lets go of the store before it has finished serving what is in flight, for
+up to 10 seconds, and uninstall waits 12. Only then does it delete the
+file and, on Linux, the link `enable` made in `default.target.wants`, and
+it asks for no reload; systemd forgets the stopped unit at its next one.
+It exits `1`, naming what the supervisor said and what became of the
+daemon: *<path> is removed, but systemctl --user disable --now <unit>: …;
+the rota daemon (pid N) was stopped as rota serve stop stops one, and N
+sessions keep running*, or *the rota daemon (pid N) is no longer running*
+for one that went on its own before it was signalled. A file that cannot
+be deleted is named in the error, which still says what became of the
+daemon and ends *; <path> is kept*. With no daemon running there is
 nothing to stop, and the error is the supervisor's alone. A daemon that
-cannot be stopped either keeps the file and the link where they are, and
-uninstall says so and where to run it again: *…; the rota daemon (pid N)
-is still running and could not be stopped (…), so <path> is kept: with it
-gone, systemd would end the unit's sessions when the daemon stops; run
-rota serve uninstall again from a login that has a user bus* — on macOS,
-*launchd still has the agent loaded* and *a login in the Mac's GUI
+cannot be stopped, or whose process has not exited within those 12
+seconds, keeps the file and the link where they are, and uninstall says so
+and where to run it again: *…; the rota daemon (pid N) is still running
+and could not be stopped (…), so <path> is kept: with it gone, systemd
+would end the unit's sessions when the daemon stops; run rota serve
+uninstall again from a login that has a user bus* — *a rota daemon*, with
+no pid, when `daemon.pid` names no process this rota can check, and on
+macOS *launchd still has the agent loaded* and *a login in the Mac's GUI
 session*.
 
 Like `rota serve stop`, `install` and `uninstall` are refused inside a held
