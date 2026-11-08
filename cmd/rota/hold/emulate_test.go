@@ -75,7 +75,7 @@ func TestABatchOfRepeatsHoldsTheScreenBriefly(t *testing.T) {
 	start := time.Now()
 	r.c.print(t, in)
 	p.output(0, len(in))
-	sh, _ := p.screen(1)
+	sh, _ := p.caughtUp(1, int64(len(in)))
 	asked := time.Since(start)
 	answered(answers.String())
 	if took, limit := time.Since(start), slow*200*time.Millisecond; asked > limit || took > limit {

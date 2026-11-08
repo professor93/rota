@@ -3,12 +3,46 @@
 package hold
 
 import (
+	"time"
+
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/share"
 	"github.com/professor93/rota/internal/vtscan"
 )
 
 /* ----------------------------------------------------------- the emulator --- */
+
+// waitLock is a lock that can be waited for a while and then given up on: a
+// channel of one, whose waiters take it in the order they came.
+type waitLock chan struct{}
+
+func (l waitLock) lock()   { l <- struct{}{} }
+func (l waitLock) unlock() { <-l }
+
+func (l waitLock) tryLock() bool {
+	select {
+	case l <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// lockWithin takes the lock if it comes free within d, and says whether it
+// did.
+func (l waitLock) lockWithin(d time.Duration) bool {
+	if l.tryLock() {
+		return true
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case l <- struct{}{}:
+		return true
+	case <-t.C:
+		return false
+	}
+}
 
 func (s *Session) emulate() {
 	defer close(s.emDone)
@@ -20,8 +54,8 @@ func (s *Session) emulate() {
 			return
 		}
 		s.safely("the screen", func() {
-			s.em.mu.Lock()
-			defer s.em.mu.Unlock()
+			s.em.lock.lock()
+			defer s.em.lock.unlock()
 			s.catchUp()
 		})
 	}
@@ -30,7 +64,7 @@ func (s *Session) emulate() {
 // catchUp feeds the screen the ring up to the last ground point, cutting at
 // each cursor query to answer it with the cursor as of that byte, and at each
 // size the terminal took to take it there. The pieces are one batch, and
-// share one budget of repeats. The caller holds s.em.mu.
+// share one budget of repeats. The caller holds s.em.lock.
 //
 // A screen the ring has overtaken cannot know what it missed, so it is
 // retired for the session's life, said once, and the cursor is the corner
@@ -98,7 +132,7 @@ type catchBatch struct {
 
 // batch takes what the screen owes up to the last ground point, under s.mu,
 // and counts its dues as owed, last, once nothing more can go wrong. The
-// caller holds s.em.mu.
+// caller holds s.em.lock.
 func (s *Session) batch() (b catchBatch) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -139,7 +173,7 @@ func (s *Session) drew(n int) {
 const tooLarge = "the terminal is larger than a screen is kept for; viewers get the ring replayed"
 
 // sized takes the screen to the size the terminal took, or retires it for a
-// size larger than a screen is kept for. The caller holds s.em.mu.
+// size larger than a screen is kept for. The caller holds s.em.lock.
 func (s *Session) sized(cols, rows uint16) {
 	s.em.cols, s.em.rows = cols, rows
 	if s.em.retired {
@@ -157,7 +191,7 @@ func (s *Session) sized(cols, rows uint16) {
 // noticeLoss retires the screen for the session's life once its emulator
 // has panicked, and says so in one line with what it panicked with: the
 // Screen keeps the holder up, and the log says why viewers get the ring
-// replayed. The caller holds s.em.mu.
+// replayed. The caller holds s.em.lock.
 func (s *Session) noticeLoss() {
 	if s.em.retired {
 		return
@@ -173,16 +207,33 @@ func (s *Session) noticeLoss() {
 var putScreen = holdwire.PutScreen
 
 // maxBehind is how far the screen may be behind the CLI for a repaint to
-// wait for it: one read of output. Further behind, catching up could take
-// seconds, and the daemon has replayed the ring long before.
+// wait for it at all: one read of output. Further behind, catching up could
+// take minutes at a large size, and the daemon has replayed the ring long
+// before.
 const maxBehind = pumpRead
 
-// behind says whether the screen is further behind the CLI than a repaint
-// waits for, as of its last catch-up.
-func (s *Session) behind() bool {
+// repaintWait is how long a repaint waits for the emulator to finish what it
+// is drawing. The daemon waits half a second for an answer, and a fit asked
+// for after the repaint waits behind it. A variable so a test can make the
+// wait as long as the screen is held.
+var repaintWait = 200 * time.Millisecond
+
+// behind says whether the screen is more than limit bytes behind the CLI,
+// as of its last catch-up.
+func (s *Session) behind(limit int64) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.ground-s.drawn > maxBehind
+	return s.ground-s.drawn > limit
+}
+
+// drawLimit is the most a repaint draws itself before it answers: what the
+// emulator draws in about a third of a second at its slowest, a line feed
+// at the bottom of the screen for each byte, which costs it about five
+// nanoseconds a cell. That is one read of output at 80×24, and less on a
+// larger screen. The caller holds s.em.lock.
+func (s *Session) drawLimit() int64 {
+	cells := max(int64(s.em.cols)*int64(s.em.rows), 1)
+	return min(maxBehind, maxBehind*80*24/cells)
 }
 
 // repaint is a Screen payload: the screen once it has caught up, the offset
@@ -191,18 +242,16 @@ func (s *Session) behind() bool {
 // then it carries no repaint: the daemon replays the ring instead. Every
 // ScreenAsk gets an answer it can take.
 //
-// A screen far behind is answered at once, without waiting for the emulator
-// to finish what it is drawing: a flood at a large size can hold it for
-// minutes.
+// A repaint never waits long: a flood at a large size can hold the emulator
+// for minutes. A screen far behind is answered at once; one a little behind
+// is waited for repaintWait at most; and a repaint draws no more of the
+// backlog itself than drawLimit.
 func (s *Session) repaint(seq uint64) []byte {
-	if !s.em.mu.TryLock() {
-		if s.behind() {
-			return s.unpainted(seq)
-		}
-		s.em.mu.Lock()
+	if !s.em.lock.tryLock() && (s.behind(maxBehind) || !s.em.lock.lockWithin(s.wait)) {
+		return s.unpainted(seq)
 	}
-	defer s.em.mu.Unlock()
-	if s.behind() {
+	defer s.em.lock.unlock()
+	if s.behind(s.drawLimit()) {
 		return s.unpainted(seq)
 	}
 	s.catchUp()
