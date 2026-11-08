@@ -22,6 +22,7 @@ var Scrubbed = []string{
 	"VTE_VERSION", "KONSOLE_VERSION",
 	"COLUMNS", "LINES",
 	"CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CODEX_THREAD_ID",
+	"CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ATTENDED", "CODEX_SESSION_ID", "CODEX_TOOL_CALL_ID",
 }
 
 // Scrub returns env without the variables Scrubbed names. Names match
