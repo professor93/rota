@@ -311,7 +311,17 @@ func (s *Store) ready(ctx context.Context, a *rota.Account, mirror bool) (*rota.
 // prepare claims the account, brings its credential up to date, stages it,
 // saves the store, and returns the command with the claim still held. A
 // handover and a run are the same launch, differing in who waits for it.
+//
+// ctx decides whether a launch starts, never whether one under way finishes:
+// a refresh it makes goes on to its answer and the save after it whoever went
+// away meanwhile, as one the listing makes does (see Refresh). The CLI itself
+// is started, and stopped, by the caller's own ctx.
 func (s *Store) prepare(ctx context.Context, a *rota.Account, mirror bool) (*rota.Command, func(), error) {
+	if ctx.Err() != nil {
+		return nil, nil, fmt.Errorf("%s: not launched: %w", a, context.Cause(ctx))
+	}
+	ctx, done := detach(ctx)
+	defer done()
 	// One home, one account: a home another account also has holds a
 	// credential this one would read as its own, and write over.
 	if err := s.oneHomeOneAccount(a); err != nil {

@@ -28,7 +28,12 @@ import (
 // for it. That is the same trade `Refresh` already makes for a listing, and
 // it is the right way round: a token half-rotated by two writers is not
 // recoverable, while a wait of a second is.
+//
+// ctx decides what starts, as for Refresh: a server stopping lets the refresh
+// under way finish and be saved, for up to RefreshTimeout, and starts no other.
 func (s *Store) Maintain(ctx context.Context) []error {
+	ctx, done := detach(ctx)
+	defer done()
 	// Without the lock nothing may rotate, so all that is left is reading:
 	// see Refresh. A wait the provider asked for is kept as ever, and not
 	// said again on every sweep.
@@ -49,7 +54,12 @@ func (s *Store) Maintain(ctx context.Context) []error {
 		}
 		return err
 	}
+	var left error
 	for _, a := range s.Accounts {
+		if left = stopped(ctx); left != nil {
+			errs = append(errs, left)
+			break
+		}
 		if rota.SharedHome(a.Provider) {
 			// What a claude account changed is never taken as saved here:
 			// its home is written after the save its refresh makes, and the
@@ -144,6 +154,9 @@ func (s *Store) Maintain(ctx context.Context) []error {
 		if err := s.Save(); err != nil {
 			errs = append(errs, fmt.Errorf("tokens could not be saved: %w", err))
 		}
+	}
+	if left != nil {
+		return errs // said once, above
 	}
 	// Usage honours the five-minute cache and any wait a provider asked for,
 	// and saves whatever it changed.

@@ -53,7 +53,17 @@ import (
 // forced or not. The account keeps its last reading and its place:
 // a refusal is never a dead account, nor a reason to refuse a run. Each
 // reading not taken for it is one error saying so.
+//
+// ctx decides what starts, never what has started. A refresh under way when
+// ctx is done — an HTTP client hung up, a server stopping — goes on to its
+// answer, the save and the write into the home, for up to RefreshTimeout,
+// since its answer is the only copy of the token that replaces the one it
+// presented. Nothing that was not under way starts after that, and one error
+// says what was left to the next look. Rescue and Maintain do the same, and so
+// does a launch for its own refresh.
 func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Account) []error {
+	ctx, done := detach(ctx)
+	defer done()
 	return s.refresh(ctx, force, true, accounts)
 }
 
@@ -129,9 +139,21 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			report(false, fmt.Errorf("usage readings could not be read from the store: %w", err))
 		}
 	}
+	// left is whether whoever asked going away has been said already, once
+	// being enough (see stopped).
+	left := false
+	leave := func(err error) {
+		if !left {
+			report(false, err)
+		}
+		left = true
+	}
 	// Before any worker starts, because a rescue saves the store, and a save
 	// reads every account.
-	homes := s.lookIn(ctx, accounts, collect, report)
+	homes := s.lookIn(ctx, accounts, collect, func(changed bool, err error) {
+		left = left || errors.Is(err, errLeft)
+		report(changed, err)
+	})
 	now := rota.Now()
 	// The work is planned first, one account at a time, and set going only
 	// once the plan is whole: the plan writes into homes and saves the store,
@@ -144,6 +166,10 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 	}
 	var plain, renews []work
 	for _, a := range accounts {
+		if err := stopped(ctx); err != nil {
+			leave(err)
+			break
+		}
 		shared := rota.SharedHome(a.Provider)
 		h, kept := homes[a]
 		if kept && h == nil {
@@ -260,6 +286,13 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 			renews = nil
 		}
 	}
+	// Whoever asked may have gone while this was planned. None of it is under
+	// way yet: a renew has written into its home only what writeDue may, and
+	// the store says so on disk.
+	if err := stopped(ctx); err != nil && len(plain)+len(renews) > 0 {
+		leave(err)
+		plain, renews = nil, nil
+	}
 	for _, w := range slices.Concat(plain, renews) {
 		wg.Add(1)
 		go func() {
@@ -320,6 +353,8 @@ func (s *Store) refresh(ctx context.Context, force, sayWaits bool, accounts []*r
 // A rescue must not depend on what a person asked to see: --short, or a reading
 // that is still fresh, is no reason to leave a home signed out.
 func (s *Store) Rescue(ctx context.Context, accounts ...*rota.Account) []error {
+	ctx, done := detach(ctx)
+	defer done()
 	if len(accounts) == 0 {
 		accounts = s.Accounts
 	}
@@ -345,11 +380,23 @@ func (s *Store) Rescue(ctx context.Context, accounts ...*rota.Account) []error {
 // remarks and report what became of each.
 func (s *Store) lookIn(ctx context.Context, accounts []*rota.Account, warn func(string), report func(changed bool, err error)) map[*rota.Account]*claudeHome {
 	homes := make(map[*rota.Account]*claudeHome, len(accounts))
+	var gone error
 	for _, a := range accounts {
 		if !rota.SharedHome(a.Provider) || !s.loginInHome(a) {
 			continue
 		}
 		homes[a] = nil
+		// Whoever asked has gone: the homes not looked in yet are left as they
+		// are, nil like a home that could not be read, so nothing after this
+		// look takes them for homes that keep no login.
+		if gone == nil {
+			if gone = stopped(ctx); gone != nil {
+				report(false, gone)
+			}
+		}
+		if gone != nil {
+			continue
+		}
 		// A store without its lock tries no claim at all — even a moment's
 		// exclusive try can refuse a launch's shared one — and takes the home
 		// for busy instead.
