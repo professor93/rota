@@ -194,7 +194,7 @@ func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Accou
 	// which a home still holding the login just refreshed away always is.
 	again := false
 	for _, h := range renewed {
-		if err := h.writeRefreshed(ctx); err != nil {
+		if err := h.writeRefreshed(ctx, true); err != nil {
 			errs = append(errs, err)
 		}
 		again = true

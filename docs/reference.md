@@ -2385,10 +2385,14 @@ holding the account, a `daemon.lock` naming a live process, or a
 `sessions/<pid>.json` naming one — and a record nobody can read counts as
 alive. When nothing is alive, rota may refresh, and a refresh is followed at
 once — after the store is saved — by writing the new login into the home.
-Before a launch or a server's maintenance refreshes, a home holding another
-login or none is given the account's current one and the store is saved; when
-that save fails nothing is refreshed. There are two exceptions, a home whose daemon has given up and a
-store Claude Code blanked: see *Stranded* and *Blanked*, below.
+Before a launch or a server's maintenance refreshes, the store is saved, and
+when that save fails nothing is refreshed. A home holding no usable login, or
+the one rota wrote there and has refreshed away since, is given the account's
+current one first; a usable login rota cannot place, one made with `/login`
+inside the home say, is left as it is, because the account falls back on it
+should the provider refuse its own. There are two exceptions, a home whose
+daemon has given up and a store Claude Code blanked: see *Stranded* and
+*Blanked*, below.
 
 - **Reading.** Before anything uses the account's tokens, the home's store
   is read. A rotation by Claude Code keeps the login's own
@@ -2459,10 +2463,12 @@ store Claude Code blanked: see *Stranded* and *Blanked*, below.
   is spent, so a home that cannot then be read or written is an error naming
   the account. A write is tried a few times, under the refresh lock when there
   is one, what is owed is saved with the token, and the next look of any kind
-  finishes it with no other refresh. When a launch, a server's maintenance or
-  a rescue refreshes a login the store then cannot save, the login goes into
-  the home all the same, as the only copy left, and the next look reads it
-  back from there as a rotation.
+  finishes it with no other refresh. When the store cannot save a login rota
+  has just refreshed, for a launch, a server's maintenance or a rescue, the
+  login goes into the home all the same, as the only copy left, and the next
+  look reads it back from there as a rotation. Over a login rota cannot place
+  it does not go: the error then says that the new login is held by that
+  process alone.
   With Claude Code alive in the home, a launch joins the login that is there
   and rota says when the account's current one takes over — when those
   sessions end, or at once in one where you run `/login`; and when the home
