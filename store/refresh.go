@@ -40,9 +40,9 @@ import (
 // taken again for that one write, and nothing else (keepReadings).
 //
 // A usage endpoint that turns a reading away — 429, or a failure on its
-// side — is left alone for as long as it says, or for a backoff when it does
-// not (QuotaWait), by this store and every other opened on the same
-// directory, forced or not. The account keeps its last reading and its place:
+// side — is left alone for a backoff, or for longer when it says so
+// (QuotaWait), by this store and every other opened on the same directory,
+// forced or not. The account keeps its last reading and its place:
 // a refusal is never a dead account, nor a reason to refuse a run. Each
 // reading not taken for it is one error saying so.
 func (s *Store) Refresh(ctx context.Context, force bool, accounts ...*rota.Account) []error {
@@ -460,14 +460,14 @@ func (s *Store) NextReset() time.Time {
 // until then. Asked again after an hour, it can say so again.
 const QuotaWaitMax = time.Hour
 
-// quotaBackoff is the wait after a refusal that says nothing of how long:
-// a minute, twice that for each refusal in a row before it, up to
+// quotaBackoff is the least wait after a refusal, whatever it said of how
+// long: a minute, twice that for each refusal in a row before it, up to
 // QuotaWaitMax.
 const quotaBackoff = time.Minute
 
 // turnedAway reports whether err is the usage endpoint turning a reading away
 // for now — rate-limited, or failing on its side — and, when it is, records
-// on a when it may be asked again: when it said, or after the backoff.
+// on a when it may be asked again: after the backoff, or later if it said so.
 func turnedAway(a *rota.Account, err error) bool {
 	var he *rota.HTTPError
 	if !errors.As(err, &he) || he.Status != http.StatusTooManyRequests && he.Status < 500 {
@@ -478,12 +478,11 @@ func turnedAway(a *rota.Account, err error) bool {
 	if lapsed(a.QuotaWait, now) {
 		count = 1
 	}
-	wait := quotaBackoff << min(count-1, 12)
-	// A Retry-After that names no moment still to come — 0, or a date already
-	// past — says nothing of how long, and the backoff stands.
-	if he.RetryAfter.After(now) {
-		wait = he.RetryAfter.Sub(now)
-	}
+	// A Retry-After is the least the provider asks for, never the most: a
+	// short one — a second, or 0, or a date already past — gives way to the
+	// backoff, or a process that wakes at a wait's end, as rota serve does for
+	// a reset still pending, would ask a refusing endpoint every second.
+	wait := max(quotaBackoff<<min(count-1, 12), he.RetryAfter.Sub(now))
 	wait = min(wait, QuotaWaitMax)
 	a.QuotaWait = rota.QuotaWait{Until: now.Add(wait).UnixMilli(), Status: he.Status, Count: count}
 	return true

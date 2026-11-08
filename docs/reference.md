@@ -2831,12 +2831,12 @@ use.
 ### When the provider asks rota to wait
 
 A usage endpoint that turns a reading away — `429`, or a `5xx` failure of
-its own — is left alone until it may be asked again: for as long as its
-`Retry-After` says, in seconds or as a date, and without one — or with one
-that names no moment still to come, `0` or a date already past — for a
-minute, twice that for each refusal in a row, never more than an hour
-whatever it says. A refusal more than an hour after the last wait ran out
-starts again at a minute. The wait is kept in the store beside the reading,
+its own — is left alone until it may be asked again: for at least as long
+as its `Retry-After` says, in seconds or as a date, and for at least a
+minute, twice that for each refusal in a row, whatever it says — a shorter
+`Retry-After`, `0` or a date already past among them, gives way to that —
+but never more than an hour. A refusal more than an hour after the last wait
+ran out starts again at a minute. The wait is kept in the store beside the reading,
 so every rota process honours it: `rota list`, `list -r`, `?refresh=1`, a
 bare `rota run` choosing an account, the server's sweep, and `--with quota`
 after a run, which reads the store again first, so a wait recorded while
