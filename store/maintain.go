@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 
 	rota "github.com/professor93/rota/lib"
 )
@@ -108,13 +111,25 @@ func (s *Store) Maintain(ctx context.Context) []error {
 			// holding the previous login's file, would not be. A store that
 			// cannot be saved spends no token this sweep. A login held as a
 			// refresh token alone has no access token to write, and staging
-			// would refresh it on the way: it is only saved here, and goes
-			// into the home once refreshed below.
+			// would refresh it on the way: it goes into the home once
+			// refreshed below. Until then a home that does not hold it —
+			// empty, or holding a login it superseded, which adoption never
+			// reads back — is emptied and recorded as holding it, so the
+			// refreshed token written there is read back even if no save
+			// after the refresh succeeds. A home whose daemon is alive is the
+			// daemon's, and nothing in it is removed.
 			if rota.Flavor(a.Provider) == "codex" && a.Expired() {
-				if a.Token.Access != "" {
+				switch {
+				case a.Token.Access != "":
 					if _, err = rota.Stage(a, home); err != nil {
 						return
 					}
+				case !a.StagedCurrent() && !s.heldByDaemon(a):
+					if rerr := os.Remove(filepath.Join(home, "auth.json")); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) {
+						err = rerr
+						return
+					}
+					a.StagedWritten()
 				}
 				if serr := save(); serr != nil {
 					err = fmt.Errorf("not refreshed, the store could not be saved: %w", serr)

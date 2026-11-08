@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -252,6 +253,97 @@ func TestARunLeavesACodexLoginToItsDaemon(t *testing.T) {
 		if len(e.grants()) != c.refreshes || a.Token.Refresh != c.token {
 			t.Fatalf("%s: presented %v, token %q", c.what, e.grants(), a.Token.Refresh)
 		}
+	}
+}
+
+// savesAllowed is a memBackend that lets a number of saves through and then
+// fails every one; -1 lets them all through.
+type savesAllowed struct {
+	*memBackend
+	allow int
+}
+
+func (f *savesAllowed) Save(b []byte) error {
+	if f.allow == 0 {
+		return errors.New("the disk is full")
+	}
+	if f.allow > 0 {
+		f.allow--
+	}
+	return f.memBackend.Save(b)
+}
+
+// The save before a sweep's refresh succeeds and the one after it fails: the
+// new token is then nowhere but in the home, and the next sweep must read it
+// back rather than present the spent one again. That holds for an account
+// signed in and never run since, whose home is empty or holds the previous
+// login's file, whether its login is due or held as a refresh token alone;
+// and a home whose daemon is alive is left to the daemon, its file as it was.
+func TestASweepWhoseLastSaveFailsReadsItsRefreshBackFromTheHome(t *testing.T) {
+	for _, c := range []struct {
+		what   string
+		alone  bool
+		file   string // the refresh token of the file the home holds; "" none
+		daemon bool
+	}{
+		{"a due login, empty home", false, "", false},
+		{"a due login, the previous login's file", false, "r-prev", false},
+		{"a refresh token alone, empty home", true, "", false},
+		{"a refresh token alone, the previous login's file", true, "r-prev", false},
+		{"a refresh token alone, the previous login's file, its daemon alive", true, "r-prev", true},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			e := codexRefreshes(t)
+			b := &savesAllowed{memBackend: &memBackend{home: t.TempDir()}, allow: -1}
+			s, err := NewStore(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			a := s.add("codex")
+			due := time.Now().Add(time.Minute)
+			a.Extra = map[string]string{"id_token": "i", "account_id": "acct"}
+			a.Token = rota.Token{Access: codexJWT(due), Refresh: "r-old", ExpiresAt: due.UnixMilli()}
+			if c.file != "" {
+				a.Token.Refresh = c.file
+				if _, err := rota.Stage(a, s.Home(a)); err != nil {
+					t.Fatal(err)
+				}
+				a.Token.Refresh = "r-old"
+			}
+			if c.alone {
+				a.Token = rota.Token{Refresh: "r-old"}
+			}
+			a.Staged = "-" // signed in, never run
+			if c.daemon {
+				codexDaemonAt(t, s.Home(a), "app-server.pid", os.Getpid())
+			}
+			if err := s.Save(); err != nil {
+				t.Fatal(err)
+			}
+			b.allow = 1 // the save before the refresh, and none after it
+			s.Maintain(context.Background())
+			s.Close()
+			b.allow = -1
+
+			if c.daemon {
+				if got := e.grants(); len(got) != 0 || homeHolds(t, s.Home(a)) != c.file {
+					t.Fatalf("left to the daemon: presented %v, the home holds %q", got, homeHolds(t, s.Home(a)))
+				}
+				return
+			}
+			again, err := NewStore(b)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := again.Find(a.ID)
+			for range 2 {
+				again.Maintain(context.Background())
+			}
+			again.Close()
+			if p := e.grants(); !slices.Equal(p, []string{"r-old"}) || got.Dead || got.Token.Refresh != "r-rota-1" {
+				t.Fatalf("presented %v, dead=%v %q, token %q", p, got.Dead, got.DeadReason, got.Token.Refresh)
+			}
+		})
 	}
 }
 
