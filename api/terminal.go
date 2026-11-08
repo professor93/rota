@@ -1166,12 +1166,17 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 		scr = h.screen()
 	}
 	ts.mu.Lock()
-	ts.conns = append(ts.conns, tc)
 	ts.idleAt = time.Time{}
+	// The keyboard is taken before this connection joins the others, so
+	// they are told as they always were, and this one only after its hello,
+	// which is the first frame, always.
+	took := false
 	if !tc.watch && !ts.lookOnly && (ts.free() || ts.mine(tc)) {
 		ts.take(tc)
+		took = true
 		ts.audit("keyboard taken", "to", tc.name)
 	}
+	ts.conns = append(ts.conns, tc)
 	from := since
 	if replayAll {
 		from = ts.ring.Oldest()
@@ -1211,6 +1216,9 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 	}
 	ts.holderConn(hello)
 	tc.say(hello)
+	if took {
+		tc.say(ts.keyboardDoc())
+	}
 	if gap {
 		tc.say(map[string]any{"type": "gap", "from": from, "to": at})
 	}
@@ -1287,10 +1295,13 @@ func (ts *termSession) tellGap(doc map[string]any) {
 	}
 }
 
-func (ts *termSession) tellKeyboard() {
+func (ts *termSession) tellKeyboard() { ts.tell(ts.keyboardDoc()) }
+
+// keyboardDoc is the keyboard frame: who holds it now. Called with mu held.
+func (ts *termSession) keyboardDoc() map[string]any {
 	doc := map[string]any{"type": "keyboard", "holder": nameOrNil(ts.heldBy())}
 	ts.holderConn(doc)
-	ts.tell(doc)
+	return doc
 }
 
 // holderConn adds, on a held session, which connection holds the keyboard:
