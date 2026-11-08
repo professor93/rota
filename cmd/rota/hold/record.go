@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -208,6 +209,10 @@ type logFile struct {
 	path string
 	f    *os.File
 	size int64
+	// crash makes the file the one the Go runtime writes a fatal error or an
+	// unrecovered panic to, besides standard error, which a holder points at
+	// /dev/null: the file open now, and after a move the new one.
+	crash bool
 }
 
 func (l *logFile) Write(p []byte) (int, error) {
@@ -226,6 +231,9 @@ func (l *logFile) Write(p []byte) (int, error) {
 		l.f, l.size = f, 0
 		if fi, err := f.Stat(); err == nil {
 			l.size = fi.Size()
+		}
+		if l.crash {
+			_ = debug.SetCrashOutput(f, debug.CrashOptions{})
 		}
 	}
 	n, _ := l.f.Write(p)
