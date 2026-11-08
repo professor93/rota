@@ -209,23 +209,25 @@ func LongNote(a *rota.Account) string {
 }
 
 // LoginSoon is how close to its end a login has to be before a listing
-// mentions it: a few days, enough to sign in again at a convenient moment.
-const LoginSoon = 5 * 24 * time.Hour
+// mentions it: three days, enough to sign in again at a convenient moment.
+// A Claude login cannot be refreshed past its end by anybody, so the account
+// stops the moment its access token runs out after it.
+const LoginSoon = 72 * time.Hour
 
 // LoginNote is what a listing should say about when an account's login
-// ends, or "" when that is far off or unknown.
+// ends, or "" when that is far off or unknown. It counts whole hours, as the
+// STATUS cell does, and never fewer than one.
 func LoginNote(a *rota.Account) string {
 	t := a.LoginUntil()
 	if t.IsZero() || a.Dead {
 		return ""
 	}
 	day := t.Format(time.DateOnly)
-	switch left := time.Until(t); {
+	switch left := t.Sub(rota.Now()); {
 	case left <= 0:
 		return "its login ended on " + day + "; `rota login`, or /login in one of its windows, for a new one"
-	case left <= LoginSoon:
-		return fmt.Sprintf("its login ends on %s, in %d days; `rota login`, or /login in one of its windows, before then",
-			day, int(left/(24*time.Hour)))
+	case left < LoginSoon:
+		return fmt.Sprintf("login ends in %dh (%s); rota login %d before then", max(int(left.Hours()), 1), day, a.ID)
 	}
 	return ""
 }
@@ -243,9 +245,11 @@ func LoginStatus(a *rota.Account) string {
 	if t.IsZero() || a.Dead {
 		return ""
 	}
-	switch left := time.Until(t); {
+	// The clock the end is kept by, as LoginNote and the account's own
+	// LoginEnded read it, so the cell and the note never disagree.
+	switch left := t.Sub(rota.Now()); {
 	case left <= 0:
-		return "login ended " + Since(t)
+		return "login ended " + ago(-left)
 	case left < time.Hour:
 		return fmt.Sprintf("login ends in %dm", max(int(left.Minutes()), 1))
 	case left < 24*time.Hour:
@@ -280,8 +284,11 @@ func CreditNote(a *rota.Account) string {
 }
 
 // Since renders how long ago an instant was, for someone reading a list.
-func Since(t time.Time) string {
-	d := max(time.Since(t), 0)
+func Since(t time.Time) string { return ago(time.Since(t)) }
+
+// ago renders a time gone by the way Since does.
+func ago(d time.Duration) string {
+	d = max(d, 0)
 	switch {
 	case d < time.Minute:
 		return "just now"

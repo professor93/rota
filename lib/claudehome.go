@@ -319,21 +319,24 @@ func (c claudeProvider) Adopt(a *Account, home string) error {
 //     present the account's own refresh token first is the application's
 //     call, made before AdoptFS: see claudeCleared;
 //   - the account's own refresh token: in sync;
+//   - the login this package wrote there, or took from there, and the account
+//     has refreshed past since: behind, whatever end it carries. It stays
+//     recorded as that write — it is what proves the login there spent
+//     (ClaudeHomeSpent) — and the next staging writes the current one;
 //   - another refresh token of the same login: a rotation by Claude Code,
-//     taken when it is newer than what the account has. A refresh carries
-//     the login's refreshTokenExpiresAt through unchanged, so that is how a
-//     rotation is told apart, with no network call. One that is not newer is
-//     behind: the home does not hold the account's current login, and the
-//     next staging writes it. What this package itself wrote there before a
-//     refresh of its own stays recorded as that write — it is what proves
-//     the login there spent (ClaudeHomeSpent) — and any other older login is
-//     recorded as nothing of the account's;
+//     taken when it is newer than what the account has. The login's
+//     refreshTokenExpiresAt is its grant's own end, which a refresh of
+//     rota's never changes and one of Claude Code's moves only when the
+//     provider shortens the grant, so that is how a rotation is told apart,
+//     with no network call. One that is not newer is behind: the home does
+//     not hold the account's current login, the next staging writes it, and
+//     it is recorded as nothing of the account's;
 //   - a new login — another refreshTokenExpiresAt, or any living login in
-//     the home of a dead account — which somebody made by running /login
-//     inside that home. Nothing of it is taken here, because the home says
-//     nothing trustworthy about whose it is: it comes back as a *NewLogin
-//     for the application to check (NewLogin.Identify) and then Accept or
-//     Refuse.
+//     the home of a dead account but the one it wrote — which somebody made
+//     by running /login inside that home. Nothing of it is taken here,
+//     because the home says nothing trustworthy about whose it is: it comes
+//     back as a *NewLogin for the application to check (NewLogin.Identify)
+//     and then Accept or Refuse.
 func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 	if a.APIKey() {
 		// A key account keeps no login in its home, so nothing found there is
@@ -376,6 +379,16 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 		l.keep(a)
 		return nil
 	}
+	if fingerprint(l.RefreshToken) == a.Staged {
+		// Behind, and the very login this package wrote: the account has
+		// refreshed it away since. Staged already says the home does not
+		// hold the current login, and goes on saying which one it does hold,
+		// because that is the only proof that login is spent — a look at the
+		// home must not erase what the write that replaces it relies on. It
+		// is never a new login, whatever end it carries or whatever became of
+		// the account: taking it back would take a spent token.
+		return nil
+	}
 	switch {
 	case a.Dead:
 		// The login this account had is over, so a living one in its home
@@ -388,14 +401,6 @@ func (claudeProvider) AdoptFS(a *Account, fsys fs.FS) error {
 		return nil
 	case l.refreshUntil() != a.Extra[claudeRefreshUntil]:
 		return &NewLogin{Access: l.AccessToken, login: l}
-	}
-	if fingerprint(l.RefreshToken) == a.Staged {
-		// Behind, and the very login this package wrote: the account has
-		// refreshed it away since. Staged already says the home does not
-		// hold the current login, and goes on saying which one it does hold,
-		// because that is the only proof that login is spent — a look at the
-		// home must not erase what the write that replaces it relies on.
-		return nil
 	}
 	if int64(l.ExpiresAt) < a.Token.ExpiresAt {
 		// Behind: an older login, not this package's write. A Claude Code
@@ -469,7 +474,13 @@ func (n *NewLogin) Identify(ctx context.Context) (*Identity, error) {
 
 // Accept takes the login into the account — the application has found it
 // is this account's. A dead account is alive again: someone signed it in.
-func (n *NewLogin) Accept(a *Account) { n.login.adopt(a) }
+// That sign-in is a new grant, so it ends when it says and nothing the last
+// one said about its own end counts any more.
+func (n *NewLogin) Accept(a *Account) {
+	delete(a.Extra, claudeRefreshUntil)
+	delete(a.Extra, claudeLoginEnds)
+	n.login.adopt(a)
+}
 
 // Refuse records that the home holds somebody else's login. Nothing of it is
 // taken and the account's tokens stay exactly as they were; the home is
@@ -521,9 +532,11 @@ func (l *claudeLogin) refreshUntil() string {
 
 // keep copies into the account what the login carries beyond its tokens, so
 // a login written back later loses none of it. The plan is only ever added
-// to — a login that omits it has not changed plans — but when the login
-// itself ends is always the store's word, absent included, because it is
-// what tells this login from the next one.
+// to — a login that omits it has not changed plans — but the grant's own end
+// is always the store's word, absent included, because it is what tells this
+// login from the next one. The end in effect only ever comes earlier here: a
+// store that says a later end, or none, takes nothing away from what the
+// account already knows.
 func (l *claudeLogin) keep(a *Account) {
 	for k, v := range map[string]string{
 		claudeSubscription: l.SubscriptionType, claudeRateLimitTier: l.RateLimitTier, claudeClient: l.ClientID,
@@ -532,10 +545,17 @@ func (l *claudeLogin) keep(a *Account) {
 			a.setExtra(k, v)
 		}
 	}
+	end, known := a.loginEnd()
 	if v := l.refreshUntil(); v != "" {
 		a.setExtra(claudeRefreshUntil, v)
+		if home := int64(l.RefreshTokenExpiresAt); !known || home < end {
+			end, known = home, true
+		}
 	} else {
 		delete(a.Extra, claudeRefreshUntil)
+	}
+	if known {
+		a.setLoginEnd(end)
 	}
 }
 

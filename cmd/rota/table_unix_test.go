@@ -40,7 +40,7 @@ func TestListAtATerminalFitsItsWidth(t *testing.T) {
 				 "extra":{"refresh_token_expires_at":"%[2]d"}},
 				{"id":2,"provider":"claude","email":"b@x","order":2,"token":{"accessToken":"t"},"quotaAt":%[1]d,
 				 "dead":true,"deadReason":%[3]q}]}`,
-				now.UnixMilli(), now.Add(3*24*time.Hour+time.Hour).UnixMilli(), clearedReason))
+				now.UnixMilli(), now.Add(2*24*time.Hour+time.Hour).UnixMilli(), clearedReason))
 
 			cmd := exec.Command(os.Args[0], "list")
 			cmd.Env = append(os.Environ(), "ROTA_AS_RUN=1", "ROTA_HOME="+home, "COLUMNS="+c.columns)

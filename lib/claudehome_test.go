@@ -630,9 +630,9 @@ func TestRemoteControlIsClaudeCodesSetting(t *testing.T) {
 }
 
 // A fresh login is a new lineage: when the last one's refresh token ended
-// is forgotten, so it is neither written into Claude Code's store as this
-// one's nor makes a rotation of this login look like somebody else's.
-func TestAFreshLoginForgetsWhenTheLastOneEnded(t *testing.T) {
+// is replaced by this one's, so it is neither written into Claude Code's store
+// as this one's nor makes a rotation of this login look like somebody else's.
+func TestAFreshLoginReplacesWhenTheLastOneEnded(t *testing.T) {
 	f := newFakeServer(t, false)
 	setURL(t, &ClaudeEndpoints.Token, f.URL+"/token")
 	setURL(t, &ClaudeEndpoints.Profile, f.URL+"/profile")
@@ -648,9 +648,10 @@ func TestAFreshLoginForgetsWhenTheLastOneEnded(t *testing.T) {
 		t.Fatal(err)
 	}
 	a := livingClaude()
+	old := a.Extra[claudeRefreshUntil]
 	a.Apply(tok)
-	if _, ok := a.Extra[claudeRefreshUntil]; ok || a.Extra[claudeSubscription] != "max" {
-		t.Fatalf("the old expiry is forgotten, the plan kept: %v", a.Extra)
+	if v := a.Extra[claudeRefreshUntil]; v == "" || v == old || a.Extra[claudeSubscription] != "max" {
+		t.Fatalf("the old end is replaced by this login's, the plan kept: %v", a.Extra)
 	}
 }
 

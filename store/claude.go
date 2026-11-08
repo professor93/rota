@@ -533,7 +533,8 @@ func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 		// Nothing has changed: the home is as it was, and the next look tries again.
 		return changed, notThrough{fmt.Errorf("%s: %s, and rota could not refresh it just now, so the next look tries again: %w", a, what, err)}
 	}
-	if cleared && a.Dead && h.hold == "" {
+	// A login past its end was never presented, and its reason says so whole.
+	if cleared && a.Dead && h.hold == "" && !a.LoginEnded() {
 		a.DeadReason = fmt.Sprintf("Claude Code cleared the login in its home, and the provider refused rota's own refresh token too (%s)", a.DeadReason)
 	}
 	if !changed {
@@ -1425,8 +1426,11 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 	case !a.Dead:
 		return true, nil
 	case h.hold != "" && h.usable:
-		a.DeadReason = fmt.Sprintf("its own refresh token was refused (%s); a login made inside Claude Code in its home "+
-			"is waiting to be confirmed", refused)
+		// A login past its end was never presented, and its reason says so whole.
+		if !a.LoginEnded() {
+			a.DeadReason = fmt.Sprintf("its own refresh token was refused (%s); a login made inside Claude Code in its home "+
+				"is waiting to be confirmed", refused)
+		}
 		return true, nil
 	}
 	return true, err

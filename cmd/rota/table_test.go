@@ -674,7 +674,7 @@ func TestListFitsTheTerminalItIsOn(t *testing.T) {
 		 "extra":{"refresh_token_expires_at":"%[2]d"}},
 		{"id":2,"provider":"claude","email":"b@x","order":2,"token":{"accessToken":"t"},"quotaAt":%[1]d,
 		 "dead":true,"deadReason":%[3]q}]}`,
-		now.UnixMilli(), now.Add(3*24*time.Hour+time.Hour).UnixMilli(), clearedReason))
+		now.UnixMilli(), now.Add(2*24*time.Hour+time.Hour).UnixMilli(), clearedReason))
 
 	piped, _, code := call(t, "list")
 	if code != 0 {
@@ -699,7 +699,7 @@ func TestListFitsTheTerminalItIsOn(t *testing.T) {
 			t.Fatalf("a note wider than the terminal: %q\n%s", line, notes)
 		}
 	}
-	if !strings.Contains(notes, "/login in one of its") {
+	if !strings.Contains(notes, "rota login 1 before then") {
 		t.Fatalf("the login note is there:\n%s", notes)
 	}
 	if strings.Join(strings.Fields(notes), " ") != strings.Join(strings.Fields(piped[strings.Index(piped, "┘\n")+len("┘\n"):]), " ") {
