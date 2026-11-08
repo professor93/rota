@@ -474,7 +474,9 @@ decides from stored numbers — a stale one sends work to an account that is
 already spent. Nothing there is fatal: a provider that cannot be reached
 leaves its account exactly as it was, and the next sweep tries again.
 `--refresh-every 0` turns it off, and the command line still refreshes what
-it is about to use.
+it is about to use. A server that is stopping starts no sweep and no refresh,
+and waits up to 35 seconds for a refresh its sweep already has under way to be
+answered, saved and written into its home.
 
 ### One file for the server
 
@@ -3045,7 +3047,13 @@ refresh token for and no access token counts as expired, whatever its expiry
 says, and is refreshed by those same rules before anything uses it; until then
 no credential file is written for it. A refresh is never retried within one
 look: if the reply was lost, the retry would reuse a rotated token and kill the
-lineage. Treat `re-auth needed` as normal rather than as a fault. The refusal
+lineage. Nor is one given up on halfway. A refresh rota has started goes on to
+the provider's answer, the save and the write into the home even when whoever
+asked has gone — a client hanging up on `?refresh=1` or on a run, a server
+stopping, a cancelled context — for up to 35 seconds (the HTTP client's
+30-second ceiling and a margin), because by then the provider has replaced the
+token and its answer is the only copy of the new one; whatever had not started
+is left for the next look. Treat `re-auth needed` as normal rather than as a fault. The refusal
 that ended the lineage is kept: `rota
 list` shows it in parentheses after `re-auth needed` — `re-auth needed
 (invalid_grant: refresh token reused)` — and JSON carries it as `deadReason`.
@@ -3409,6 +3417,16 @@ a, added, _ := s.FinishLogin(ctx, l.ID, code)
 errs := s.Refresh(ctx, false)                 // quota for metered providers, cached; a provider's wait kept
 res, _ := s.Run(ctx, a, rota.Spec{Prompt: "hi"}, nil, os.Stdout)
 ```
+
+The store takes ctx as leave to start, never as a reason to drop a refresh
+half done. A refresh that `Refresh`, `Rescue`, `Maintain` or a launch (`Run`,
+`Start`, `Prepare`) has sent goes on to its answer, the save and the write into
+the home after ctx is done, for up to `store.RefreshTimeout()` (the client's
+ceiling and five seconds); nothing else is started after that, and `Refresh`,
+`Rescue` and `Maintain` return one error saying what was left. `rota.Refresh`
+itself honours ctx as every network verb does: an application calling it
+directly keeps the answer the same way, with `context.WithoutCancel` and a
+timeout of its own.
 
 ```go
 type Backend interface {
