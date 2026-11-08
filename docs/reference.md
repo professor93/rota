@@ -2588,11 +2588,22 @@ Code blanked: see *Stranded* and *Blanked*, below.
   keychain item. A file left beside a keychain item is stale and is removed,
   unless its login is the newer of the two: when the keychain refuses a write
   Claude Code keeps the login in the file, so that is the one rota reads, and
-  the older item is removed instead, when nothing is alive. A blanked item is
-  older than any file that holds a login, and a blanked file never wins: rota
-  takes the file's login, and since Claude Code reads the item and never the
-  file while an item exists, the blanked item goes even with something alive,
-  once what it kept beside the login is in the file.
+  the older item is removed instead, when nothing is alive. A file beside a
+  blanked item is the home's login only when it holds exactly the account's
+  refresh token and rota can show that token is the newest the home has held
+  (see *Blanked*): then rota takes it, and since Claude Code reads the item and
+  never the file while an item exists, the blanked item goes even with
+  something alive, once what it kept beside the login is in the file. A login
+  of another lineage there (a `refreshTokenExpiresAt` that is not the
+  account's) is somebody's `/login`, kept in the file because the keychain
+  refused it, and is read as the new login it is. Any other file there — most
+  likely rota's own earlier write, holding a token Claude Code has since spent
+  — is left where it is, behind the item, and the home is as blanked as the
+  item says. A blanked file never wins. Once rota has
+  taken Claude Code's first rotation from the keychain item, the file rota
+  wrote beside it goes, even with something alive, as long as it still holds
+  exactly what rota wrote and the item holds a usable, newer login with the
+  same `refreshTokenExpiresAt`.
   From the moment the provider answers a refresh of rota's, the home's login
   is spent, so a home that cannot then be read or written is an error naming
   the account. A write is tried a few times, under the refresh lock when there
@@ -2649,14 +2660,31 @@ Code blanked: see *Stranded* and *Blanked*, below.
   stranded. A launch heals it too: when the refresh does not get through it
   joins the home as it always did. A refusal goes as any refusal does: the home
   is read again first, a sibling's login is taken, and otherwise the account is
-  dead.
+  dead. The token is presented only when rota can show it is the newest the
+  home has held, as under *Blanked*; a home found stranded holds exactly that
+  token, so the look that finds it shows as much, except for a file beside a
+  blanked keychain item, which counts only as *Writing* says.
 - **Blanked.** When a refresh of its own comes back refused, Claude Code
   empties the login in its store, keeping everything else. That is its verdict,
   and it has been measured not to be final: a daemon reported no token for days
   on a login whose next refresh by rota worked. So when the login it blanked
   was the account's current one, and the account is not dead and holds its own
   refresh token, rota presents that token once before calling it dead, whether
-  the home is alive or quiet. Nothing in the home is at risk, because the home
+  the home is alive or quiet — but only when it can show that token is the
+  newest the home has held: a look found the home's store holding exactly that
+  token no more than two watcher intervals (ten minutes) before the look that
+  first found the home blanked. Claude Code refreshes on its own every eight
+  hours or so, and each refresh nobody saw spends rota's copy; presenting a
+  spent one would revoke the whole login, under any window, terminal or other
+  copy still holding its newest token. Every look that finds the home holding
+  exactly the account's token says when, by the token's fingerprint, never the
+  token; a watched home (*Watched*) is looked at every five minutes. When rota
+  cannot show its copy is current it presents nothing and the account is dead:
+  `Claude Code's refresh was refused and rota's copy is older than the home's
+  last look, so rota did not present it; rota login <id> makes a new login`.
+  Once the home is blanked Claude Code holds no login to rotate, so a rescue
+  that does not get through is made by a later look on the same terms, however
+  much later. Nothing in the home is at risk, because the home
   holds no login any more, and no status file is needed. On success the login
   goes in; rota expects whatever is running there to find it, and no live
   process has been observed doing so. On a refusal the account is dead, says
