@@ -533,8 +533,14 @@ func (h *claudeHome) rescue(ctx context.Context) (bool, error) {
 	}
 	if serr := h.s.saveFirmly(); serr != nil {
 		// A refusal not saved is still kept by this process (see spentTokens),
-		// so no later look of it presents the token again.
-		return true, fmt.Errorf("%s: refusing to go on: the store could not be saved after a token change: %w", a, serr)
+		// so no later look of it presents the token again. A login refreshed
+		// and not saved still goes into the home, where the next look reads
+		// it back, rather than nowhere: the one it replaced is spent.
+		serr = fmt.Errorf("%s: refusing to go on: the store could not be saved after a token change: %w", a, serr)
+		if err == nil && h.rescuing {
+			serr = errors.Join(serr, h.writeRefreshed(ctx))
+		}
+		return true, serr
 	}
 	if err != nil || !h.rescuing {
 		return true, err // refused, or a sibling got there first
@@ -1110,10 +1116,19 @@ func (h *claudeHome) stopDaemon() error {
 // That spent login is also why the write is made even if something started in
 // the home meanwhile (see mayWrite). What is owed a home with something alive in
 // it is mend's, and a blanked store's token is presented there and nowhere else.
+//
+// Before it refreshes, the home holds the login and the store says so on disk,
+// as for a codex login (see Maintain): a home that held an older login or none
+// is written first. A store that cannot be saved then spends no token. And when
+// the save after the refresh fails, the new login still goes into the home,
+// where the next look reads it back as a rotation, rather than nowhere.
 func (h *claudeHome) renew(ctx context.Context) (bool, error) {
 	a := h.a
 	if !a.Expired() || a.Dead || h.hold != "" || h.blanked || !h.quiet() {
 		return false, nil
+	}
+	if err := h.writeDue(ctx); err != nil {
+		return true, err
 	}
 	changed, err := h.refresh(ctx)
 	if err != nil || !changed || a.Dead || h.hold != "" {
@@ -1121,15 +1136,38 @@ func (h *claudeHome) renew(ctx context.Context) (bool, error) {
 	}
 	h.owe()
 	if err := h.s.Save(); err != nil {
-		return true, fmt.Errorf("refusing to go on: the store could not be saved after a token change: %w", err)
+		err = fmt.Errorf("refusing to go on: the store could not be saved after a token change: %w", err)
+		return true, errors.Join(err, h.writeRefreshed(ctx))
 	}
 	return true, h.writeRefreshed(ctx)
+}
+
+// writeDue makes the home hold the account's current login, which is due for a
+// refresh, and saves the store, before that refresh. Once the store on disk
+// says the home holds it, a refreshed login written into the home alone is read
+// back by the next look as the rotation it is; a home the store says holds an
+// older login, or none, would be passed over. Only while rota may write there.
+func (h *claudeHome) writeDue(ctx context.Context) error {
+	if !h.a.StagedCurrent() {
+		_, files, err := rota.StagePlan(ctx, h.a, h.home)
+		if err == nil {
+			err = h.seed(files)
+		}
+		if err != nil {
+			return fmt.Errorf("not refreshed, the login could not be written into its home first: %w", err)
+		}
+	}
+	if err := h.s.Save(); err != nil {
+		return fmt.Errorf("refusing to go on: not refreshed, the store could not be saved: %w", err)
+	}
+	return nil
 }
 
 // writeRefreshed puts a login rota has refreshed and saved into the home, when
 // it may. From here on the provider has answered and the home's login is spent,
 // so a home that cannot be read or written is an error for a person to see, and
-// the account goes on owing the write (see owesWrite).
+// the account goes on owing the write (see owesWrite). A login whose save
+// failed is written too, as the only copy left that the next look can find.
 func (h *claudeHome) writeRefreshed(ctx context.Context) error {
 	a := h.a
 	fsys, ok := h.read()

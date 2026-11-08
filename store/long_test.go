@@ -203,8 +203,17 @@ func TestALaunchWhoseLoginDiesOnRefreshFallsBackToItsLongToken(t *testing.T) {
 			t.Fatalf("and says it: %q", said)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(s.Home(a), ".credentials.json")); !os.IsNotExist(err) {
-		t.Fatalf("a dead login is never written into the home: %v", err)
+	// Before the refresh, the home was given the login it lacked, as a launch
+	// gives it, so that a refreshed one whose save failed could be read back
+	// from there (see renew). Nothing is written once the refusal says the
+	// login is dead: the home holds the login as it was before the refresh,
+	// and on Windows, where nothing is kept in the home, nothing.
+	want := "r"
+	if runtime.GOOS == "windows" {
+		want = ""
+	}
+	if r, _ := readLogin(t, s.Home(a)); r != want {
+		t.Fatalf("the home holds %q, not the login as it was before the refresh (%q)", r, want)
 	}
 }
 

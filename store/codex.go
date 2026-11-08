@@ -67,6 +67,38 @@ func codexDaemon(home string) (string, bool) {
 	return "", false
 }
 
+// codexDue reports whether a is a codex login due for a refresh, which goes
+// into its home and is saved before it is refreshed: by Maintain, and by a
+// run.
+func codexDue(a *rota.Account) bool {
+	return rota.Flavor(a.Provider) == "codex" && a.Expired()
+}
+
+// holdDue makes a codex home hold the account's login that is due, before it
+// is refreshed and the store saved, so that a token refreshed after that and
+// saved nowhere but the home is read back by the next adoption. A login held
+// as a refresh token alone has no access token to write, and staging would
+// refresh it on the way: it goes into the home once refreshed. Until then a
+// home that does not hold it — empty, or holding a login it superseded,
+// which adoption never reads back — is emptied and recorded as holding it,
+// so the refreshed token written there is read back even if no save after
+// the refresh succeeds. A home whose daemon is alive is the daemon's, and
+// nothing in it is removed.
+func (s *Store) holdDue(a *rota.Account) error {
+	home := s.Home(a)
+	switch {
+	case a.Token.Access != "":
+		_, err := rota.Stage(a, home)
+		return err
+	case !a.StagedCurrent() && !s.heldByDaemon(a):
+		if err := os.Remove(filepath.Join(home, "auth.json")); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		a.StagedWritten()
+	}
+	return nil
+}
+
 // heldByDaemon reports whether the account's login is held by a daemon its
 // CLI left running in its home, which then refreshes it in rota's place.
 func (s *Store) heldByDaemon(a *rota.Account) bool {

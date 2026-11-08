@@ -2515,8 +2515,10 @@ holding the account, a `daemon.lock` naming a live process, or a
 `sessions/<pid>.json` naming one — and a record nobody can read counts as
 alive. When nothing is alive, rota may refresh, and a refresh is followed at
 once — after the store is saved — by writing the new login into the home.
-There are two exceptions, a home whose daemon has given up and a store Claude
-Code blanked: see *Stranded* and *Blanked*, below.
+Before a launch or a server's maintenance refreshes, a home holding another
+login or none is given the account's current one and the store is saved; when
+that save fails nothing is refreshed. There are two exceptions, a home whose daemon has given up and a
+store Claude Code blanked: see *Stranded* and *Blanked*, below.
 
 - **Reading.** Before anything uses the account's tokens, the home's store
   is read. A rotation by Claude Code keeps the login's own
@@ -2587,7 +2589,10 @@ Code blanked: see *Stranded* and *Blanked*, below.
   is spent, so a home that cannot then be read or written is an error naming
   the account. A write is tried a few times, under the refresh lock when there
   is one, what is owed is saved with the token, and the next look of any kind
-  finishes it with no other refresh.
+  finishes it with no other refresh. When a launch, a server's maintenance or
+  a rescue refreshes a login the store then cannot save, the login goes into
+  the home all the same, as the only copy left, and the next look reads it
+  back from there as a rotation.
   With Claude Code alive in the home, a launch joins the login that is there
   and rota says when the account's current one takes over — when those
   sessions end, or at once in one where you run `/login`; and when the home
@@ -2910,10 +2915,12 @@ login as ever, and the CLI refreshes a token that is due when it starts. An
 `auth.json` that already holds the login rota would write is left as it is,
 so what Codex adds to the file stays and a rotation the daemon has just
 written is never written over. Once the daemon is gone the login is rota's to
-refresh again. A server's maintenance first writes the login into the home and
-saves the store, and refreshes nothing in a sweep that cannot save; what it
-refreshes is saved at once and then goes into the home, as a run's refresh
-does, so a daemon started there later reads the token that is still good. A
+refresh again. Before a run or a server's maintenance refreshes it, rota first
+writes the login into the home and saves the store, and refreshes nothing, and
+runs nothing, when that save fails. What it refreshes is saved at once and then
+goes into the home, so a daemon started there later reads the token that is
+still good; when that save fails it goes into the home all the same, where the
+next run or sweep reads it back, and the run does not start. A
 token read back from the home, or the store's own token found there, is
 recorded as the one the home holds, the same as one rota wrote, so a file rota
 has since refreshed past is never taken for a newer rotation and read back over
