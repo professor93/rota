@@ -53,7 +53,10 @@ type Config struct {
 	Cols, Rows    uint16
 	Scrollback    int
 	Log           func(msg string, args ...any)
-	OnExit        func(code int)
+	// OnExit is how the CLI ended, told as soon as it has: before its last
+	// output is read and before the daemon is told, so that a holder killed
+	// while it finishes leaves the ending recorded.
+	OnExit func(code int)
 }
 
 // The timings a test may shorten and the queue it may shrink.
@@ -336,13 +339,19 @@ func (s *Session) took(p []byte) {
 
 /* ---------------------------------------------------------------- the end --- */
 
-// life waits for the CLI to exit, then ends the session in order: the last
-// output read, a waiting send told, the Exit offered behind the output,
-// OnExit, Done.
+// life waits for the CLI to exit, then ends the session in order: OnExit,
+// a waiting send told, the last output read, the Exit offered behind the
+// output, Done.
 func (s *Session) life() {
 	defer s.end()
 	defer s.recovered("the session's end")
 	code := s.child.Wait()
+	// Recorded before anything else, all of which may take a while: a
+	// holder killed from here on leaves the session ended, not
+	// interrupted.
+	if s.cfg.OnExit != nil {
+		s.safely("OnExit", func() { s.cfg.OnExit(code) })
+	}
 	s.mu.Lock()
 	s.ending = true
 	waiting := make([]*sending, 0, len(s.sending))
@@ -401,9 +410,6 @@ func (s *Session) life() {
 	case <-time.After(exitFlush):
 		s.log("the screen did not stop in time")
 		go s.screen.Close()
-	}
-	if s.cfg.OnExit != nil {
-		s.safely("OnExit", func() { s.cfg.OnExit(code) })
 	}
 	s.log("the CLI ended", "code", code)
 }
