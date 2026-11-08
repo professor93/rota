@@ -285,18 +285,22 @@ func TestUninstallRemovesIt(t *testing.T) {
 
 // A store whose path has an escape and a bell in it is said with a space
 // for each in every line rota serve install, status, stop and uninstall
-// print, and status --json carries the path as it is.
+// print, and status --json carries the path as it is. The name is short,
+// so a held session's socket still fits under it, which install asks.
 func TestServeSaysADirtyStorePathCleaned(t *testing.T) {
 	shortHome(t)
-	store := filepath.Join(os.Getenv("ROTA_HOME"), "s\x1b]0;owned\x07")
+	store := filepath.Join(os.Getenv("ROTA_HOME"), "s\x1b\x07")
 	if err := os.Mkdir(store, 0o700); err != nil {
 		t.Fatal(err)
+	}
+	if err := holdwire.SocketsFit(filepath.Join(store, "terminals")); err != nil {
+		t.Skipf("no held session fits here: %v", err)
 	}
 	t.Setenv("ROTA_HOME", store)
 	unitHome(t, true)
 	recordUnits(t, nil)
 	unit := expectedCalls(t, store).path
-	drawn := strings.TrimSuffix(store, "s\x1b]0;owned\x07") + "s ]0;owned "
+	drawn := strings.TrimSuffix(store, "s\x1b\x07") + "s  "
 	for _, c := range []struct {
 		args []string
 		code int
