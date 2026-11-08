@@ -2519,9 +2519,12 @@ once — after the store is saved — by writing the new login into the home.
 Before rota refreshes — for a launch, a listing, usage read over HTTP or a
 server's maintenance — the store is saved, and when that save fails nothing is
 refreshed. A home holding no usable login, or the one rota wrote there and has
-refreshed away since, is given the account's current one first; a usable login
-rota cannot place, one made with `/login` inside the home say, is left as it
-is, because the account falls back on it should the provider refuse its own.
+refreshed away since, is given the account's current one first; a login held as
+a refresh token alone has nothing to give, so a home with no login in it is
+only recorded as holding it, and a blanked login there is taken out first. A
+usable login rota cannot place, one made with `/login` inside the home say, is
+left as it is, because the account falls back on it should the provider refuse
+its own.
 There are two exceptions, a home whose daemon has given up and a store Claude
 Code blanked: see *Stranded* and *Blanked*, below.
 
@@ -2924,7 +2927,9 @@ so what Codex adds to the file stays and a rotation the daemon has just
 written is never written over. Once the daemon is gone the login is rota's to
 refresh again. Before a run or a server's maintenance refreshes it, rota first
 writes the login into the home and saves the store, and refreshes nothing, and
-runs nothing, when that save fails. What it refreshes is saved at once and then
+runs nothing, when that save fails. A login held as a refresh token alone has
+no access token to write: an `auth.json` there that does not hold it is
+removed instead. What it refreshes is saved at once and then
 goes into the home, so a daemon started there later reads the token that is
 still good; when that save fails it goes into the home all the same, where the
 next run or sweep reads it back, and the run does not start. A
