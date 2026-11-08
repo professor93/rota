@@ -39,14 +39,18 @@ func TestScrubRemovesExactlyTheNamedVariables(t *testing.T) {
 	}
 }
 
-// The list is the brief's, name for name, so a variable is never dropped or
-// kept by accident of an edit here.
+// The list is written out name for name, so a variable is never dropped or
+// kept by accident of an edit there: the terminals' and multiplexers' names,
+// then the marks a claude run drops too, then Codex's.
 func TestTheScrubbedListIsTheMultiplexersTerminalsAndCLIs(t *testing.T) {
 	want := []string{"TMUX", "TMUX_PANE", "STY", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERM_SESSION_ID",
 		"ITERM_SESSION_ID", "KITTY_WINDOW_ID", "KITTY_PID", "WEZTERM_PANE", "WEZTERM_UNIX_SOCKET",
 		"ALACRITTY_WINDOW_ID", "ALACRITTY_SOCKET", "WT_SESSION", "WINDOWID", "VTE_VERSION", "KONSOLE_VERSION",
-		"COLUMNS", "LINES", "CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT", "CODEX_THREAD_ID",
-		"CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ATTENDED", "CODEX_SESSION_ID", "CODEX_TOOL_CALL_ID"}
+		"COLUMNS", "LINES",
+		"CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
+		"CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SPAWNED_BY_SERVER", "CLAUDE_CODE_REMOTE", "CLAUDE_CODE_REMOTE_SESSION_ID",
+		"CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE", "CLAUDE_CODE_ENVIRONMENT_KIND", "CLAUDE_CODE_CONTAINER_ID",
+		"CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_TOOL_CALL_ID"}
 	if !slices.Equal(Scrubbed, want) {
 		t.Fatalf("Scrubbed = %q", Scrubbed)
 	}

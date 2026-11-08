@@ -995,8 +995,11 @@ session the daemon holds rather than to the terminal it was typed at, and
 returns. The session starts in that folder, at the size of the terminal on
 standard input — 120×40 when it is not one — and from the command's own
 environment rather than the daemon's, less the variables that describe
-another terminal, and with a Claude Code directory it names relatively
-named absolutely, as for the daemon. The daemon chooses the account when none is named, as
+another terminal and the marks of a Claude Code or Codex session it was
+typed in (the claude ones listed under *[Providers](#providers)*, and
+`CODEX_THREAD_ID`, `CODEX_SESSION_ID` and `CODEX_TOOL_CALL_ID`), and with a
+Claude Code directory it names relatively named absolutely, as for the
+daemon. The daemon chooses the account when none is named, as
 for any session it holds. The CLI's own arguments go after `--` or `-i`; a
 prompt, or `-p`/`--print` among those arguments, is a usage error, since a
 held session has nobody to answer, and so is `--share`. `--label` names the
@@ -4237,7 +4240,7 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `internal/holdwire/` | What a holder and the daemon say to each other and keep on disk: the protocol, a session's request and record, the paths, the daemon's lock and pid file, the size bound, and stopping a holder from outside |
 | `internal/vtscan/` | Reading a terminal's bytes without being one: the modes a CLI sets, its title, the answers to its queries, and a viewer's own answers taken out of its typing |
 | `internal/ring/` | A terminal's scrollback, by absolute offset: the server's, and a holder's and its daemon's, counted by the same code |
-| `internal/termenv/` | The environment a held CLI starts from, without the variables that describe another terminal |
+| `internal/termenv/` | The environment a held CLI starts from, without the variables that describe another terminal or another CLI's session; the claude marks every claude route drops |
 | `internal/pty/` | The pseudo-terminal itself, on linux and macOS, and `Supported` everywhere else |
 | `api/playground.html` | The page served at `/playground` |
 | `api/terminal.html` | The page served at `/terminal` |

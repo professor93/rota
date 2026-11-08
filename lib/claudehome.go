@@ -10,7 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
+
+	"github.com/professor93/rota/internal/termenv"
 )
 
 // A claude account reaches Claude Code by one of two routes, and this file
@@ -104,7 +107,7 @@ func ClaudeCredentialVars() []string {
 // outranks the login whether they are there or not.
 // CLAUDE_CONFIG_DIR stays as well; a route that points Claude Code somewhere
 // sets it, and one that does not leaves the person's own.
-var claudeCompeting = []string{
+var claudeCompeting = slices.Concat([]string{
 	// A credential of another kind.
 	"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_AWS_API_KEY",
 	"ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
@@ -136,12 +139,11 @@ var claudeCompeting = []string{
 	"CLAUDE_CODE_ARTIFACTS_API_BASE_URL", "CLAUDE_CODE_ARTIFACTS_API_TOKEN", "CLAUDE_CODE_ARTIFACT_ASSET_BASE_URL",
 	"CLAUDE_CODE_ARTIFACT_LIVE_BASE_URL", "CLAUDE_CODE_ARTIFACT_SYNC_BASE_URL", "CLAUDE_CODE_ARTIFACT_VIEWER_BASE_URL",
 	"CLAUDE_CODE_MEMORY_API_BASE_URL", "CLAUDE_CODE_MEMORY_API_TOKEN", "CLAUDE_CODE_GB_BASE_URL", "VOICE_STREAM_BASE_URL",
+},
 	// The marks of a process another Claude Code started: a run on an account
-	// is not one by being started from one.
-	"CLAUDECODE", "CLAUDE_CODE_CHILD_SESSION", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_SESSION_ATTENDED",
-	"CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_SPAWNED_BY_SERVER", "CLAUDE_CODE_REMOTE", "CLAUDE_CODE_REMOTE_SESSION_ID",
-	"CLAUDE_CODE_REMOTE_ENVIRONMENT_TYPE", "CLAUDE_CODE_ENVIRONMENT_KIND", "CLAUDE_CODE_CONTAINER_ID",
-}
+	// is not one by being started from one. A held session drops the same
+	// list.
+	termenv.ClaudeMarks)
 
 // storedLoginPlatform is whether this platform takes the stored route at
 // all. Windows does not: rota keeps it on the environment route it has
