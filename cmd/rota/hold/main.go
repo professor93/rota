@@ -310,13 +310,46 @@ func (h *holder) plan(st *store.Store) (*plan, error) {
 		return nil, err
 	}
 	// Prepared for the folder the CLI starts in, whose project settings it
-	// reads, rather than for the holder's own.
+	// reads, rather than for the holder's own, and with the signals that would
+	// end this process held while it is.
+	st.Preparing = finishingOnSignal
 	path, env, release, err := st.PrepareIn(ctx, a, h.req.Cwd)
 	if err != nil {
 		return nil, err
 	}
 	return &plan{path: path, args: append([]string{}, h.req.Args...), env: env, release: release, account: a}, nil
 }
+
+// finishingOnSignal makes a launch with SIGHUP and SIGTERM taken, and reports
+// whether one came. Left to their default they would end the holder between
+// the provider's answer and the save, with the token it replaced already
+// spent; taken, the store finishes the refresh under way, the save and the
+// write into the home included, and starts nothing else, and no CLI is started.
+// A signal this process was started ignoring stays ignored. Once the launch is
+// made both go back to what they were, before the CLI starts.
+func finishingOnSignal(prepare func(context.Context)) (cut bool) {
+	var sigs []os.Signal
+	for _, sig := range []os.Signal{syscall.SIGHUP, syscall.SIGTERM} {
+		if !signal.Ignored(sig) {
+			sigs = append(sigs, sig)
+		}
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	if len(sigs) > 0 { // with none, NotifyContext would take every signal
+		stop()
+		ctx, stop = signal.NotifyContext(context.Background(), sigs...)
+	}
+	defer stop()
+	if prepareBegun != nil {
+		prepareBegun(ctx)
+	}
+	prepare(ctx)
+	return ctx.Err() != nil
+}
+
+// prepareBegun, when set, is told of a launch's context: how a test waits for a
+// signal to have been taken, rather than for a moment to have passed.
+var prepareBegun func(context.Context)
 
 // listen opens the session's socket, readable by its owner alone. A socket
 // already there is a holder's that is gone: this one holds the lock.

@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/vt"
 
+	"github.com/professor93/rota/internal/claudecode"
 	"github.com/professor93/rota/internal/fakecli"
 	"github.com/professor93/rota/internal/vtscan"
 )
@@ -26,6 +27,7 @@ import (
 // harness records.
 func TestMain(m *testing.M) {
 	fakecli.Maybe()
+	claudecode.StandIn() // no test here may reach a real keychain
 	os.Exit(m.Run())
 }
 
