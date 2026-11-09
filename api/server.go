@@ -20,6 +20,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -259,6 +260,9 @@ type Server struct {
 	// keeperDone closes when the background refresher has returned, so Stop
 	// can promise that nothing is still writing to the store afterwards.
 	keeperDone chan struct{}
+	// heldDone closes when the looks at held sessions' homes have ended; nil
+	// on a server that holds none.
+	heldDone chan struct{}
 	// sweeps is what the background refresher sweeps under. It ends when the
 	// server stops, or earlier, when its shutdown begins (StopRefreshing).
 	sweeps     context.Context
@@ -386,6 +390,10 @@ func New(opts Options) (*Server, error) {
 		s.keeperDone = make(chan struct{})
 		go s.keepFresh(opts.RefreshEvery)
 	}
+	if opts.HoldCommand != nil {
+		s.heldDone = make(chan struct{})
+		go s.keepHeldFresh(heldLookEvery())
+	}
 	// A daemon holds terminals whatever its routes say: they are reached
 	// over more than the routes this file registers.
 	if opts.Routes.Terminal || opts.HoldCommand != nil {
@@ -512,6 +520,86 @@ func (s *Server) nextReset() time.Time {
 // maintain is one sweep, and returns when the next window resets (see
 // keepFresh). It is deliberately unremarkable about failure: a provider that
 // is down leaves its account as it was, and the next sweep tries again.
+// heldLookEvery is how often keepHeldFresh looks, a function so that a test need
+// not wait for it.
+var heldLookEvery = func() time.Duration { return store.WatchEvery }
+
+// keepHeldFresh looks at the homes of the accounts held sessions run on: once as
+// the server starts, before any sweep, since a session may have run unwatched
+// while no daemon did, and every interval after that, as the watcher does for a
+// CLI started by hand. It has nothing to do with RefreshEvery, so a server with
+// its sweeps turned off still keeps up with a Claude Code left running for days:
+// a rescue is judged by how recently a look found the home in sync. It ends when
+// the sweeps do.
+func (s *Server) keepHeldFresh(every time.Duration) {
+	defer close(s.heldDone)
+	for s.sweeps.Err() == nil {
+		s.lookAtHeld()
+		select {
+		case <-s.sweeps.Done():
+		case <-time.After(every):
+		}
+	}
+}
+
+// lookAtHeld makes one look at the homes of the accounts held sessions run on.
+// It is the look rota list starts with and nothing more (store.Rescue): a
+// rotation there is followed, and anything presented is presented only on a
+// rescue's own terms. With no session held the store is not even opened.
+func (s *Server) lookAtHeld() {
+	defer func() {
+		// As for a sweep: on a timer, and not worth the server.
+		if v := recover(); v != nil {
+			s.log.Error("panic while looking at a held session's home", "panic", v)
+		}
+	}()
+	ids := s.heldAccounts()
+	if len(ids) == 0 {
+		return
+	}
+	st, err := s.openStore()
+	if err != nil {
+		s.log.Warn("looking at held sessions' homes: the store could not be opened", "err", err)
+		return
+	}
+	defer st.Close()
+	var accounts []*rota.Account
+	for _, id := range ids {
+		if a := st.Find(id); a != nil && rota.SharedHome(a.Provider) {
+			accounts = append(accounts, a)
+		}
+	}
+	if len(accounts) == 0 {
+		return // an empty list is every account, to Rescue
+	}
+	for _, err := range st.Rescue(s.sweeps, accounts...) {
+		if !store.Left(err) {
+			s.log.Warn("looking at a held session's home", "err", err)
+		}
+	}
+}
+
+// heldAccounts is the accounts of the held sessions still running.
+func (s *Server) heldAccounts() []int {
+	s.termsMu.Lock()
+	defer s.termsMu.Unlock()
+	var ids []int
+	for _, ts := range s.terms {
+		h, held := ts.back.(*heldTerm)
+		if !held || ts.account == 0 {
+			continue
+		}
+		h.mu.Lock()
+		live := h.state == heldLive
+		h.mu.Unlock()
+		if live {
+			ids = append(ids, ts.account)
+		}
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids)
+}
+
 func (s *Server) maintain() (reset time.Time) {
 	defer func() {
 		// A provider panicking on a timer would otherwise take the server
@@ -607,13 +695,16 @@ func (s *Server) settle() {
 			s.log.Warn("waiting for a refresh under way to be answered and saved before stopping", "at_most", limit)
 		}
 	}
-	if s.keeperDone != nil {
+	for _, done := range []chan struct{}{s.keeperDone, s.heldDone} {
+		if done == nil {
+			continue
+		}
 		select {
-		case <-s.keeperDone:
+		case <-done:
 		default:
 			waiting()
 			select {
-			case <-s.keeperDone:
+			case <-done:
 			case <-ctx.Done():
 				s.log.Warn("background refresh did not stop in time")
 				return

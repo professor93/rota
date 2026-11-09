@@ -3569,6 +3569,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
   `watch.log` in the store, moved aside to `watch.log.1` at one MiB. `--share`
   starts the same watcher; a question, a hermetic run, the HTTP API and Windows
   start none, and `rota serve` maintains accounts as it always did beside it.
+  A daemon (`rota serve start`) makes the same look for the claude accounts of
+  the sessions it holds, as it starts and every five minutes after, whatever
+  `refresh_every` says.
   No watcher has yet been seen rescuing a home under a live Claude Code.
 - **The refresh lock.** Every refresh rota makes of a login kept in a home — a
   launch's, a listing's, maintenance's, a run's on a token, and the rescues
