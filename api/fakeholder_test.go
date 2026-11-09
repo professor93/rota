@@ -82,6 +82,20 @@ func fakeHolder() {
 		fakeReady(holdwire.Ready{Error: "no request: " + err.Error(), Kind: holdwire.KindOther})
 		os.Exit(1)
 	}
+	if os.Getenv("FAKE_HOLDER_IGNORE_TERM") != "" {
+		signal.Ignore(syscall.SIGTERM)
+	}
+	if path := os.Getenv("FAKE_HOLDER_NOTE_TERM"); path != "" {
+		noted := make(chan os.Signal, 1)
+		signal.Notify(noted, syscall.SIGTERM)
+		go func() {
+			<-noted
+			_ = os.WriteFile(path, nil, 0o600)
+		}()
+	}
+	if path := os.Getenv("FAKE_HOLDER_PIDFILE"); path != "" {
+		_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600) // once the above are in place
+	}
 	if d, err := time.ParseDuration(os.Getenv("FAKE_HOLDER_SLOW")); err == nil {
 		time.Sleep(d)
 	}

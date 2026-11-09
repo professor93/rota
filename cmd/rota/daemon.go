@@ -61,6 +61,10 @@ var (
 	daemonStopWait = 60 * time.Second
 )
 
+// daemonHoldDeadline, when a test sets it, is what the daemon waits on for a
+// holder's answer in place of its thirty seconds.
+var daemonHoldDeadline func() <-chan time.Time
+
 // daemonGoodbye is the part of serveGrace a stopping daemon keeps for the
 // WebSockets it ends last, after its listeners have had the rest: their
 // goodbyes are written before the process exits.

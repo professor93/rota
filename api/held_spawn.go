@@ -17,6 +17,7 @@ import (
 	"github.com/professor93/rota/internal/ring"
 	"github.com/professor93/rota/internal/termenv"
 	rota "github.com/professor93/rota/lib"
+	"github.com/professor93/rota/store"
 	"github.com/professor93/rota/wire"
 )
 
@@ -188,11 +189,46 @@ func (s *Server) spawnHolder(req *holdwire.Request) (*exec.Cmd, *holdwire.Ready,
 			return nil, nil, fmt.Errorf("the holder of %s gave no answer: %w", req.ID, a.err)
 		}
 		return cmd, &a.r, nil
-	case <-time.After(holdReady):
-		_ = cmd.Process.Kill()
-		go func() { _ = cmd.Wait() }()
+	case <-s.holdDeadline():
+		s.giveUpOnHolder(cmd)
 		return nil, nil, fmt.Errorf("the holder of %s did not answer within %s", req.ID, holdReady)
 	}
+}
+
+// holdDeadline is what waiting for a holder's answer ends with.
+func (s *Server) holdDeadline() <-chan time.Time {
+	if s.opts.HoldDeadline != nil {
+		return s.opts.HoldDeadline()
+	}
+	return time.After(holdReady)
+}
+
+// holdKillAfter is how long a holder that has not answered has, once it is told
+// to stop, before it is killed: all a refresh under way may take, and a margin
+// for its save. A variable so that a test need not wait for it.
+var holdKillAfter = func() time.Duration { return store.RefreshTimeout() + stopMargin }
+
+// giveUpOnHolder tells a holder that has not answered in time to stop, and kills
+// it only once it has had all the time a refresh under way can take. It may be
+// preparing its account, with the provider's answer still to come: a SIGTERM
+// lets that finish, the save and the write into the home included, and starts
+// nothing else, where a SIGKILL would lose the new token with the one it
+// replaced already spent. The holder is this server's child until it is reaped
+// here, so its pid can be nobody else's while it is signalled.
+func (s *Server) giveUpOnHolder(cmd *exec.Cmd) {
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	go func() {
+		select {
+		case <-exited:
+		case <-time.After(s.killHolderAfter):
+			_ = cmd.Process.Kill()
+		}
+	}()
 }
 
 // heldRefusal is a holder's failure as the answer a terminal this server ran

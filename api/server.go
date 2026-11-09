@@ -100,6 +100,10 @@ type Options struct {
 	// terminals instead of ending them. Nil runs every terminal in this
 	// process, as a server always has.
 	HoldCommand func() *exec.Cmd
+	// HoldDeadline, when set, is what starting a held session waits on for its
+	// holder's answer in place of thirty seconds, so that a test can give up on
+	// a holder at the moment it chooses.
+	HoldDeadline func() <-chan time.Time
 }
 
 // Terminal configures the terminals a server may hold: how many, how much of
@@ -263,6 +267,8 @@ type Server struct {
 	// heldDone closes when the looks at held sessions' homes have ended; nil
 	// on a server that holds none.
 	heldDone chan struct{}
+	// killHolderAfter is holdKillAfter, read once as the server starts.
+	killHolderAfter time.Duration
 	// sweeps is what the background refresher sweeps under. It ends when the
 	// server stops, or earlier, when its shutdown begins (StopRefreshing).
 	sweeps     context.Context
@@ -374,6 +380,7 @@ func New(opts Options) (*Server, error) {
 		invites:  newInvites(),
 	}
 	s.sweeps, s.stopSweeps = context.WithCancel(ctx)
+	s.killHolderAfter = holdKillAfter()
 	// Before anything else starts: a server that may not be this store's
 	// daemon must leave nothing running behind its refusal.
 	if opts.HoldCommand != nil {
