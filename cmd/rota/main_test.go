@@ -357,7 +357,7 @@ func TestLoginRunsTheDelegatedFlowItself(t *testing.T) {
 		t.Fatalf("missing CLI: %d %q", code, errOut)
 	}
 
-	// An account rota holds a credential for has nothing to log into.
+	// An id nothing has is an account that does not exist, and says so.
 	if _, errOut, code := call(t, "login", "99"); code != 1 || !strings.Contains(errOut, "no such account") {
 		t.Fatalf("unknown account: %d %q", code, errOut)
 	}
@@ -388,8 +388,8 @@ func TestLoginIsOneCommandForEveryWayIn(t *testing.T) {
 		t.Fatalf("finish: %d %q", code, out)
 	}
 	// And an account id is the account, not a login id.
-	if _, errOut, code := call(t, "login", "1"); code == 0 || !strings.Contains(errOut, "rota holds its credential") {
-		t.Fatalf("account 1 signs in through rota, so it has nothing to log into: %d %q", code, errOut)
+	if _, errOut, code := call(t, "login", "1"); code == 0 || !strings.Contains(errOut, "rota login t-cli-fake") {
+		t.Fatalf("account 1 runs on a pasted key, so it has no sign-in to start: %d %q", code, errOut)
 	}
 	// The old spellings are gone.
 	if _, errOut, code := call(t, "auth", "claude"); code != 2 || !strings.Contains(errOut, "unknown command") {

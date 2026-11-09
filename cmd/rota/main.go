@@ -45,7 +45,9 @@ Usage:
   rota login <account-id> --token   a token from ` + "`claude setup-token`" + `,
                                 read the same way, as that account's long one
   rota login <login-id> [code]  finish that login (no code for device flows)
-  rota login <account-id>       sign an existing account in through its own CLI
+  rota login <account-id>       sign that account in again: a login only it can
+                                approve, or its own CLI's if that keeps its
+                                credentials
   rota list [provider] [-r]     accounts with usage (-r forces a quota refresh)
   rota list --sessions          ...and what the CLIs are running or could resume
   rota run [id] <prompt>        ask an account and print the answer
@@ -346,7 +348,8 @@ func looksLikeLoginID(s string) bool {
 //	rota login codex             start one there instead
 //	rota login --long            ask for a year-long token for an account already here
 //	rota login 4f2a1b [code]     finish the login with that id
-//	rota login 2 [options]       hand account 2 to its own CLI's login
+//	rota login 2                 sign account 2 in again, approved as account 2
+//	rota login 6 [options]       hand delegated account 6 to its own CLI's login
 //
 // This used to be two commands, auth and login, divided by something that is
 // rota's business rather than the person's: whether rota holds the account's
@@ -411,7 +414,8 @@ func (c *cli) login(args []string) error {
 	}
 	if numeric && s.Find(id) != nil {
 		// The delegated flow runs a vendor CLI a person will sit in front
-		// of, and takes the lock again afterwards, so it owns its own store.
+		// of, and takes the lock again afterwards, so signIn owns its own
+		// store, whichever kind of account this turns out to be.
 		s.Close()
 		return c.signIn(id, rest[1:])
 	}
@@ -436,7 +440,8 @@ const loginUsage = `usage: rota login [provider]             start a new account
        rota login --key [--label name]   an account on a Claude Console API key, read from stdin
        rota login <account-id> --token   a token from ` + "`claude setup-token`" + `, as its long-lived one
        rota login <login-id> [code]      finish that login
-       rota login <account-id> [options] sign it in through its own CLI
+       rota login <account-id>           sign it in again; only that account's approval finishes it
+       rota login <account-id> [options] one whose CLI keeps its own credentials, through that CLI
 
 `
 
@@ -474,6 +479,38 @@ func (c *cli) begin(s *store.Store, provider string, long bool) error {
 		return nil
 	}
 	fmt.Fprintf(c.out, "Open this and approve access as your %s account:\n\n  %s\n\n", l.Provider, l.URL)
+	c.thenFinish(l)
+	if l.Delegated {
+		fmt.Fprintf(c.out, "Or, without a key: rota login %s\n"+
+			"  — registers the account and prints one command that signs %s in itself,\n"+
+			"    keeping its own credentials in a directory rota reserves for it.\n", l.ID, l.Provider)
+	}
+	return nil
+}
+
+// beginFor starts a login that only this account's approval can finish. Which
+// account that is goes on the screen, because the browser it is opened in may
+// well be signed in as another.
+func (c *cli) beginFor(s *store.Store, a *rota.Account) error {
+	l, err := s.BeginLoginFor(context.Background(), a.ID)
+	if err != nil {
+		return err
+	}
+	if c.json {
+		return c.emit(l)
+	}
+	who := oneLine(a.Email)
+	if who == "" {
+		who = labelOf(a)
+	}
+	fmt.Fprintf(c.out, "Open this and approve access as %s, which is %s account %d; no other account's approval will finish it:\n\n  %s\n\n",
+		who, oneLine(a.Provider), a.ID, l.URL)
+	c.thenFinish(l)
+	return nil
+}
+
+// thenFinish says how a login of this kind is finished.
+func (c *cli) thenFinish(l *rota.Login) {
 	switch l.Kind {
 	case "device":
 		fmt.Fprintf(c.out, "Then, once approved: rota login %s\n", l.ID)
@@ -484,12 +521,6 @@ func (c *cli) begin(s *store.Store, provider string, long bool) error {
 	default:
 		fmt.Fprintf(c.out, "Then: rota login %s <code>\n", l.ID)
 	}
-	if l.Delegated {
-		fmt.Fprintf(c.out, "Or, without a key: rota login %s\n"+
-			"  — registers the account and prints one command that signs %s in itself,\n"+
-			"    keeping its own credentials in a directory rota reserves for it.\n", l.ID, l.Provider)
-	}
-	return nil
 }
 
 func (c *cli) finish(s *store.Store, id, code string) error {
@@ -2143,8 +2174,12 @@ func parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 	return positional, nil
 }
 
-// signIn hands an account whose vendor CLI holds its own credentials to that
-// CLI's own login.
+// signIn signs an existing account in again, and how depends on who keeps its
+// credential. When rota does, this starts an ordinary login that only that
+// account's approval finishes (beginFor), which is how a dead one comes back
+// by the id rota's own messages give. What has no sign-in to start, an API key
+// above all, is refused in words that say what to do instead. When the vendor
+// CLI keeps it, the account goes to that CLI's own login.
 //
 // rota runs the CLI's own login rather than printing it, because the part
 // that must not go wrong — pointing it at this account's private directory
@@ -2157,7 +2192,8 @@ func parseFlags(fs *flag.FlagSet, args []string) ([]string, error) {
 // so the account has a name instead of a random handle.
 func (c *cli) signIn(id int, extra []string) error {
 	// extra belongs to the vendor's login, which has options rota has no
-	// business knowing about — which region to sign in to, say.
+	// business knowing about — which region to sign in to, say. Without a
+	// vendor's login it belongs to nobody.
 	s, err := c.openStore()
 	if err != nil {
 		return err
@@ -2169,8 +2205,11 @@ func (c *cli) signIn(id int, extra []string) error {
 	}
 	plan, ok := rota.LoginPlanFor(a, s.Home(a))
 	if !ok {
-		return fmt.Errorf("account %d does not sign itself in: rota holds its credential, so it is signed in already",
-			id)
+		if len(extra) > 0 {
+			// Not repeated: it may be a credential typed in the wrong place.
+			return usageErr("usage: rota login <account-id> — account %d signs in through rota, so there is no vendor CLI to pass anything after the id to", id)
+		}
+		return c.beginFor(s, a)
 	}
 	// The same claim a run takes. This hands the home to the vendor's own
 	// login, which writes a new credential file over whatever is there — so of
