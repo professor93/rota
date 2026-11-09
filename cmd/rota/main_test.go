@@ -35,11 +35,6 @@ func TestMain(m *testing.M) {
 	// And no provider call a test did not stand in for reaches the real one:
 	// every endpoint of every provider, whatever account a test makes.
 	offline()
-	// Except that a test may name a stand-in for the rota processes it starts,
-	// which share nothing with this one but their environment.
-	if u := os.Getenv("ROTA_TEST_TOKEN_URL"); u != "" {
-		rota.ClaudeEndpoints.Token = u
-	}
 	// One test needs a real rota, in a process of its own, at a real
 	// terminal: sharing is about what happens between a window somebody is
 	// sitting at and the CLI under it, and nothing run inside `go test`

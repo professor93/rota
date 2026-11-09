@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,10 +17,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/professor93/rota/internal/claudecode"
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/proc"
 	"github.com/professor93/rota/internal/ring"
 	"github.com/professor93/rota/internal/share"
+	rota "github.com/professor93/rota/lib"
+	"github.com/professor93/rota/store"
 )
 
 // fakeHolder is `rota serve hold` played by this test binary, which TestMain
@@ -96,6 +100,9 @@ func fakeHolder() {
 	if path := os.Getenv("FAKE_HOLDER_PIDFILE"); path != "" {
 		_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())), 0o600) // once the above are in place
 	}
+	if url := os.Getenv("FAKE_HOLDER_PREPARE"); url != "" {
+		fakePrepare(&req, url)
+	}
 	if d, err := time.ParseDuration(os.Getenv("FAKE_HOLDER_SLOW")); err == nil {
 		time.Sleep(d)
 	}
@@ -130,6 +137,37 @@ func fakeHolder() {
 	f.print([]byte(os.Getenv("FAKE_HOLDER_PRINT")))
 	f.accept()
 	os.Exit(0)
+}
+
+// fakePrepare is a holder's prepare, on the real store against the provider at
+// tokenURL, with SIGTERM taken the way the real holder takes it while it
+// prepares (finishingOnSignal, tested on its own in cmd/rota/hold): a refresh
+// under way is finished and saved, and nothing else starts.
+func fakePrepare(req *holdwire.Request, tokenURL string) {
+	claudecode.StandIn()
+	rota.ClaudeEndpoints.Token = tokenURL
+	fail := func(err error) {
+		fakeReady(holdwire.Ready{Error: err.Error(), Kind: holdwire.KindOther})
+		os.Exit(1)
+	}
+	st, err := store.Open(os.Getenv("ROTA_HOME"))
+	if err != nil {
+		fail(err)
+	}
+	st.Preparing = func(prepare func(context.Context)) bool {
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM)
+		defer stop()
+		prepare(ctx)
+		return ctx.Err() != nil
+	}
+	_, _, release, err := st.PrepareIn(context.Background(), st.Find(req.Account), req.Cwd)
+	if err != nil {
+		st.Close()
+		fail(err)
+	}
+	release()
+	st.Close()
+	fail(errors.New("the fake holder prepares and goes no further"))
 }
 
 func fakeReady(r holdwire.Ready) {

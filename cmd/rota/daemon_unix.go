@@ -273,7 +273,7 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 	if err != nil {
 		return failed(err)
 	}
-	opts.Token, opts.Log, opts.HoldCommand, opts.HoldDeadline = tok, log, daemonHoldCommand(exe), daemonHoldDeadline
+	opts.Token, opts.Log, opts.HoldCommand = tok, log, daemonHoldCommand(exe)
 	srv, err := api.New(opts)
 	var running holdwire.DaemonRunning
 	if errors.As(err, &running) {

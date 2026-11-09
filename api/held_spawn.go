@@ -189,19 +189,15 @@ func (s *Server) spawnHolder(req *holdwire.Request) (*exec.Cmd, *holdwire.Ready,
 			return nil, nil, fmt.Errorf("the holder of %s gave no answer: %w", req.ID, a.err)
 		}
 		return cmd, &a.r, nil
-	case <-s.holdDeadline():
+	case <-holdDeadline():
 		s.giveUpOnHolder(cmd)
 		return nil, nil, fmt.Errorf("the holder of %s did not answer within %s", req.ID, holdReady)
 	}
 }
 
-// holdDeadline is what waiting for a holder's answer ends with.
-func (s *Server) holdDeadline() <-chan time.Time {
-	if s.opts.HoldDeadline != nil {
-		return s.opts.HoldDeadline()
-	}
-	return time.After(holdReady)
-}
+// holdDeadline is what waiting for a holder's answer ends with. A variable so
+// that a test can give up on a holder at the moment it chooses.
+var holdDeadline = func() <-chan time.Time { return time.After(holdReady) }
 
 // holdKillAfter is how long a holder that has not answered has, once it is told
 // to stop, before it is killed: all a refresh under way may take, and a margin

@@ -100,10 +100,6 @@ type Options struct {
 	// terminals instead of ending them. Nil runs every terminal in this
 	// process, as a server always has.
 	HoldCommand func() *exec.Cmd
-	// HoldDeadline, when set, is what starting a held session waits on for its
-	// holder's answer in place of thirty seconds, so that a test can give up on
-	// a holder at the moment it chooses.
-	HoldDeadline func() <-chan time.Time
 }
 
 // Terminal configures the terminals a server may hold: how many, how much of
