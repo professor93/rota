@@ -38,13 +38,14 @@ func (s *Store) BeginLongLogin(ctx context.Context, provider string) (*rota.Logi
 
 // BeginLoginFor starts an ordinary login for the account with this id and
 // parks it the same way, with the account's id on it (rota.Login.Account).
-// FinishLogin then signs in that account or nothing: see refuseBound.
+// FinishLogin then signs in that account or nothing: see boundAccount.
 //
 // It is for an account whose login rota holds, a dead one above all. What has
 // no sign-in to start is refused here, before anybody is sent to a browser: an
 // API key, a provider whose credential is a pasted key, a CLI that signs itself
-// in, and an account with no uuid or e-mail, which no approval could be matched
-// to. An account unknown here is rota.ErrNoAccount.
+// in, and an account with neither a uuid nor an e-mail, which no approval could
+// be matched to. An account with an e-mail and no uuid is held to that e-mail.
+// An account unknown here is rota.ErrNoAccount.
 func (s *Store) BeginLoginFor(ctx context.Context, id int) (*rota.Login, error) {
 	a := s.Find(id)
 	if a == nil {
@@ -113,7 +114,7 @@ func (s *Store) PendingLogin(id string) (*rota.Login, error) {
 // rather than a whole login; ErrAuthPending is passed through unchanged.
 //
 // A login begun for one account (BeginLoginFor) updates that account or
-// nothing, however the approval went: see refuseBound.
+// nothing, however the approval went: see boundAccount.
 func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Account, added bool, err error) {
 	m, err := s.loadPendings()
 	if err != nil {
@@ -136,7 +137,7 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 		return a, false, s.savePendings(m)
 	}
 	a = rota.MatchIdentity(s.Accounts, l.Provider, tok.Identity)
-	if err := s.refuseBound(l, tok, a); err != nil {
+	if a, err = s.boundAccount(l, tok, a); err != nil {
 		return nil, false, err
 	}
 	if a == nil {
@@ -160,46 +161,83 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 	return a, added, s.savePendings(m)
 }
 
-// refuseBound turns down a login begun for one account when anything but that
-// account approved it; approved is the account the approval resolved to, or
-// nil. A login that names no account is never refused here.
+// boundAccount is the account a finished login signs in, given the account
+// its approval resolved to by itself (approved, nil for none). A login that
+// names no account takes that answer as it stands. One begun for an account
+// signs in that account or is refused.
 //
 // Several accounts in one browser make approving as the wrong one the likely
 // mistake, and taking it would leave the account that was asked for dead while
-// the command looked done: the other account updated, or a new one made. So it
-// writes nothing and makes nothing.
+// the command looked done: the other account updated, or a new one made. So a
+// refusal writes nothing and makes nothing.
 //
 // The parked login is left alone, as attachLong leaves it and for the same
 // reason: approving again as the right account and pasting the new code
 // finishes the same login.
-func (s *Store) refuseBound(l *rota.Login, tok *rota.Token, approved *rota.Account) error {
+//
+// An account that has an e-mail and no uuid has nothing else to be held to, so
+// its e-mail is enough here, and the approval gives it its uuid. MatchIdentity
+// does not do that, and must not for a login that names nobody: there the
+// e-mail would decide whose account a stranger's login lands on.
+func (s *Store) boundAccount(l *rota.Login, tok *rota.Token, approved *rota.Account) (*rota.Account, error) {
 	if l.Account == 0 {
-		return nil
+		return approved, nil
 	}
 	named := s.Find(l.Account)
 	if named == nil {
-		return rota.Invalid("%s account %d, which this login was begun for, is no longer here; nothing was stored, and `rota login %s` starts a login of its own",
+		return nil, rota.Invalid("%s account %d, which this login was begun for, is no longer here; nothing was stored, and `rota login %s` starts a login of its own",
 			l.Provider, l.Account, l.Provider)
 	}
 	if approved == named {
-		return nil
+		return named, nil
+	}
+	id := tok.Identity
+	sameEmail := id != nil && id.Email != "" && id.Email == named.Email
+	if sameEmail && approved == nil && named.UUID == "" {
+		return named, nil
 	}
 	name := named.Email
 	if name == "" {
 		name = named.Label()
 	}
-	again := fmt.Sprintf("approve again as %s, then finish it with the new code: rota login %s <code>", name, l.ID)
-	id := tok.Identity
 	if id == nil || (id.UUID == "" && id.Email == "") {
-		return rota.Invalid("the %s approval named no account, so there is no telling whether it was account %d (%s); nothing was stored; %s",
-			l.Provider, named.ID, name, again)
+		return nil, rota.Invalid("the %s approval named no account, so there is no telling whether it was account %d (%s); nothing was stored; %s",
+			l.Provider, named.ID, name, approveAgain(l, name))
+	}
+	if sameEmail {
+		// Approving again would only be told this again.
+		out := fmt.Sprintf("`rota login %s` makes it an account of its own", l.Provider)
+		if approved != nil {
+			out = fmt.Sprintf("that approval is account %d's", approved.ID)
+		}
+		return nil, rota.Invalid("this login is for account %d, and the e-mail %s matches, but the provider's account id differs: %s here, %s approved; nothing was stored; %s, and `rota remove %d` drops the old one",
+			named.ID, name, idOrNone(named.UUID), idOrNone(id.UUID), out, named.ID)
 	}
 	if approved != nil {
-		return rota.Invalid("this login is for account %d (%s), but it was approved as %s, which is account %d; nothing was stored; %s",
-			named.ID, name, identityName(id), approved.ID, again)
+		return nil, rota.Invalid("this login is for account %d (%s), but it was approved as %s, which is account %d; nothing was stored; %s",
+			named.ID, name, identityName(id), approved.ID, approveAgain(l, name))
 	}
-	return rota.Invalid("this login is for account %d (%s), but it was approved as %s, which is not a %s account rota holds; nothing was stored and no account was added; %s",
-		named.ID, name, identityName(id), l.Provider, again)
+	return nil, rota.Invalid("this login is for account %d (%s), but it was approved as %s, which is not a %s account rota holds; nothing was stored and no account was added; %s",
+		named.ID, name, identityName(id), l.Provider, approveAgain(l, name))
+}
+
+// approveAgain is the next step after a refused approval, for this kind of
+// login: the page is said again because the first time may be long scrolled
+// away, and a device login has no code to paste.
+func approveAgain(l *rota.Login, name string) string {
+	if l.Kind == "device" {
+		return fmt.Sprintf("approve again as %s at %s, then run it again: rota login %s", name, l.URL, l.ID)
+	}
+	return fmt.Sprintf("approve again as %s at %s, then finish it with the new code: rota login %s <code>", name, l.URL, l.ID)
+}
+
+// idOrNone is a provider's account id in a sentence, where nothing at all
+// would read as a mistake in the sentence.
+func idOrNone(uuid string) string {
+	if uuid == "" {
+		return "none"
+	}
+	return uuid
 }
 
 // attachLong puts a long-lived token on the account whose identity approved

@@ -62,9 +62,11 @@ type accountsDoc struct {
 		ID         int    `json:"id"`
 		Dead       bool   `json:"dead"`
 		DeadReason string `json:"deadReason"`
+		Staged     string `json:"staged"`
 		Token      struct {
 			Access string `json:"accessToken"`
 		} `json:"token"`
+		Extra map[string]string `json:"extra"`
 	} `json:"accounts"`
 }
 
@@ -142,6 +144,40 @@ func TestLoginByAccountIDFinishedAsThatAccountRevivesIt(t *testing.T) {
 	}
 }
 
+// The case the command exists for: an account whose login has ended, with
+// everything rota remembered about that login, signed in anew. Nothing of the
+// old grant may outlive it.
+func TestLoginByAccountIDGivesAnEndedAccountANewGrant(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	past := time.Now().Add(-time.Hour).UnixMilli()
+	writeStore(t, home, fmt.Sprintf(`{"ordered":true,"nextId":13,"accounts":[
+		{"id":12,"provider":"claude","email":"a@b.c","uuid":"u12","order":1,"dead":true,"deadReason":"its login ended",
+		 "staged":"abcd","token":{"accessToken":"OLD","refreshToken":"R","expiresAt":1},
+		 "extra":{"refresh_token_expires_at":"%[1]d","login_ends_at":"%[1]d","refused_grant":"fp",
+		 "last_refusal":"{\"at\":1}","pending_refusal":"{\"at\":1}"}}]}`, past))
+	who := claudeApproves(t)
+	out, _, _ := call(t, "login", "12")
+	*who = approver{"u12", "a@b.c"}
+	out, errOut, code := call(t, "login", loginIDFrom(t, out), "CODE")
+	if code != 0 || !strings.Contains(out, "Refreshed claude account 12") {
+		t.Fatalf("%d %q %q", code, out, errOut)
+	}
+	a := readAccounts(t, home).Accounts[0]
+	if a.Dead || a.DeadReason != "" || a.Token.Access != "NEW-u12" || a.Staged != "-" {
+		t.Fatalf("not signed in anew: %+v", a)
+	}
+	end, err := strconv.ParseInt(a.Extra["refresh_token_expires_at"], 10, 64)
+	if err != nil || time.Until(time.UnixMilli(end)) < 29*24*time.Hour {
+		t.Fatalf("a new grant ends thirty days out: %q %v", a.Extra["refresh_token_expires_at"], err)
+	}
+	for _, k := range []string{"login_ends_at", "refused_grant", "last_refusal", "pending_refusal"} {
+		if v, ok := a.Extra[k]; ok {
+			t.Errorf("%s belonged to the login this one replaces: %q", k, v)
+		}
+	}
+}
+
 func TestLoginByAccountIDRefusesApprovalAsAnotherAccount(t *testing.T) {
 	home := seedTwoClaude(t)
 	who := claudeApproves(t)
@@ -157,6 +193,9 @@ func TestLoginByAccountIDRefusesApprovalAsAnotherAccount(t *testing.T) {
 	}
 	if strings.Contains(errOut, "NEW-u13") || strings.Contains(errOut, "R-u13") {
 		t.Fatalf("a token in the refusal: %q", errOut)
+	}
+	if u := regexp.MustCompile(`(?m)^  (\S+\?\S+)$`).FindStringSubmatch(out); u == nil || !strings.Contains(errOut, u[1]) {
+		t.Fatalf("the page to approve at again: %q", errOut)
 	}
 	after := readAccounts(t, home)
 	if fmt.Sprint(before) != fmt.Sprint(after) {

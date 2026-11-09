@@ -25,7 +25,12 @@ type boundWorld struct {
 
 func newBoundWorld(t *testing.T, provider string) *boundWorld {
 	t.Helper()
-	p := &fakeProvider{name: provider}
+	return newBoundWorldOfKind(t, provider, "")
+}
+
+func newBoundWorldOfKind(t *testing.T, provider, kind string) *boundWorld {
+	t.Helper()
+	p := &fakeProvider{name: provider, kind: kind}
 	rota.Register(p)
 	s := openTemp(t)
 	named := s.add(provider)
@@ -57,8 +62,9 @@ func (w *boundWorld) saved(t *testing.T) []byte {
 
 // refused finishes the world's login as this identity and insists it is turned
 // down without one thing changing: no account touched or added, nothing saved,
-// no credential in the words, and the parked login still there to finish.
-func (w *boundWorld) refused(t *testing.T, as *rota.Identity, words ...string) {
+// no credential in the words, and the parked login still there to finish. It
+// returns the refusal, for what a test wants to find absent from it.
+func (w *boundWorld) refused(t *testing.T, as *rota.Identity, words ...string) error {
 	t.Helper()
 	before, accounts, next := w.saved(t), len(w.s.Accounts), w.s.NextID
 	namedAccess, otherAccess := w.named.Token.Access, w.other.Token.Access
@@ -93,6 +99,7 @@ func (w *boundWorld) refused(t *testing.T, as *rota.Identity, words ...string) {
 	if l, err := w.s.PendingLogin(w.login.ID); err != nil || l == nil {
 		t.Fatalf("the parked login must stay: %v %v", l, err)
 	}
+	return err
 }
 
 // What a login names is remembered with it, and only a login begun for an
@@ -181,6 +188,93 @@ func TestFinishLoginRefusesWhenTheNamedAccountIsGone(t *testing.T) {
 	}
 	if l, _ := w.s.PendingLogin(w.login.ID); l == nil {
 		t.Fatal("the parked login must stay")
+	}
+}
+
+// An account known by its e-mail alone is held to that e-mail, since no uuid
+// could ever be compared with it, and it learns its uuid from the approval.
+func TestFinishLoginTakesTheNamedEmailWhenTheAccountHasNoUUID(t *testing.T) {
+	w := newBoundWorld(t, "t-bound-emailonly")
+	w.named.UUID = ""
+	if err := w.s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	w.refused(t, &rota.Identity{UUID: "u-new", Email: "stranger@x"}, "stranger@x", "account 1")
+
+	w.p.identity = &rota.Identity{UUID: "u-learned", Email: "named@x"}
+	a, added, err := w.s.FinishLogin(context.Background(), w.login.ID, "NEW")
+	if err != nil || added || a != w.named || a.Dead || a.UUID != "u-learned" || a.Token.Access != "NEW" {
+		t.Fatalf("a=%+v added=%v err=%v", a, added, err)
+	}
+	if len(w.s.Accounts) != 2 || w.s.NextID != 3 {
+		t.Fatalf("an account was made: %+v", w.s.Accounts)
+	}
+}
+
+// That is for the login that names the account. One that names nobody goes on
+// matching as it always did, and an approval by an account that is here
+// already is that account's, whatever its e-mail.
+func TestTheEmailAloneCountsOnlyForTheNamedAccount(t *testing.T) {
+	w := newBoundWorld(t, "t-bound-emailbare")
+	w.named.UUID = ""
+	w.other.Email = "named@x"
+	if err := w.s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	w.refused(t, &rota.Identity{UUID: "u-other", Email: "named@x"}, "account 2", "account 1")
+
+	l, err := w.s.BeginLogin(context.Background(), "t-bound-emailbare")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.p.identity = &rota.Identity{UUID: "u-third", Email: "named@x"}
+	a, added, err := w.s.FinishLogin(context.Background(), l.ID, "BARE")
+	if err != nil || !added || a == w.named || w.named.UUID != "" {
+		t.Fatalf("a bare login must still make an account: a=%+v added=%v err=%v", a, added, err)
+	}
+}
+
+// The same e-mail under another of the provider's ids is not the account, and
+// approving again would only say so again: the refusal shows the two ids and
+// the way out there really is.
+func TestFinishLoginSaysSoWhenOnlyTheEmailMatches(t *testing.T) {
+	w := newBoundWorld(t, "t-bound-recreated")
+	err := w.refused(t, &rota.Identity{UUID: "u-recreated", Email: "named@x"},
+		"named@x", "u-named", "u-recreated", "`rota login t-bound-recreated`", "`rota remove 1`")
+	if strings.Contains(err.Error(), "approve again") {
+		t.Fatalf("telling them to do again what cannot work: %v", err)
+	}
+}
+
+// When the same e-mail is another account already, the way out is that
+// account, and a login that would make one is not offered.
+func TestFinishLoginNamesTheAccountThatHasTheSameEmail(t *testing.T) {
+	w := newBoundWorld(t, "t-bound-twin")
+	w.other.Email = "named@x"
+	if err := w.s.Save(); err != nil {
+		t.Fatal(err)
+	}
+	err := w.refused(t, &rota.Identity{UUID: "u-other", Email: "named@x"}, "u-named", "u-other", "account 2", "`rota remove 1`")
+	if strings.Contains(err.Error(), "of its own") || strings.Contains(err.Error(), "approve again") {
+		t.Fatalf("offers what would not happen: %v", err)
+	}
+}
+
+// Whoever approved wrongly needs the page again, and a step that fits the
+// login: a device login has no code to paste.
+func TestTheRefusalGivesTheLinkAndTheStepForThisKindOfLogin(t *testing.T) {
+	stranger := &rota.Identity{UUID: "u-new", Email: "stranger@x"}
+
+	w := newBoundWorldOfKind(t, "t-bound-step", "")
+	w.refused(t, stranger, w.login.URL, "rota login "+w.login.ID+" <code>", "new code")
+
+	d := newBoundWorldOfKind(t, "t-bound-device", "device")
+	if d.login.Kind != "device" {
+		t.Fatalf("%+v", d.login)
+	}
+	err := d.refused(t, stranger, d.login.URL, "rota login "+d.login.ID)
+	if strings.Contains(err.Error(), "<code>") || strings.Contains(err.Error(), "new code") {
+		t.Fatalf("a device login has no code: %v", err)
 	}
 }
 
