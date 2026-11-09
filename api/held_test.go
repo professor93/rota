@@ -517,3 +517,36 @@ func TestALinkThatBreaksHereIsClosed(t *testing.T) {
 	raw, _ := os.ReadFile(holderLog)
 	t.Fatalf("the broken link was never closed at the daemon's end; the holder's log:\n%s", raw)
 }
+
+// `rota run --detach` names itself to the daemon in a header, and only that one
+// word gets through to the holder, which goes by it in the refresh journal.
+func TestTheHolderIsToldWhoAskedForTheSession(t *testing.T) {
+	for _, c := range []struct{ header, want string }{
+		{"", ""},
+		{holdwire.CallerDetach, holdwire.CallerDetach},
+		{"something-else", ""},
+	} {
+		log := filepath.Join(t.TempDir(), "request.json")
+		p := withHeld(t, []string{"FAKE_HOLDER_LOG=" + log})
+		var hdr []string
+		if c.header != "" {
+			hdr = []string{holdwire.CallerHeader, c.header}
+		}
+		if resp, raw := p.do("POST", "/v1/terminals", map[string]any{"account": 1, "cols": 80, "rows": 24}, hdr...); resp.StatusCode != 201 {
+			t.Fatalf("starting a terminal: %d %s", resp.StatusCode, raw)
+		}
+		raw, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var seen struct {
+			Request holdwire.Request `json:"request"`
+		}
+		if err := json.Unmarshal(raw, &seen); err != nil {
+			t.Fatal(err)
+		}
+		if seen.Request.Caller != c.want {
+			t.Errorf("header %q: the holder was told %q, want %q", c.header, seen.Request.Caller, c.want)
+		}
+	}
+}

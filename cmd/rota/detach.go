@@ -62,7 +62,7 @@ func (c *cli) detach(id int, rest []string, ask shareAsk, remote remoteAsk) erro
 	if err != nil {
 		return err
 	}
-	req := rotaclient.Create{Account: id, Args: args, Label: strings.TrimSpace(ask.label)}
+	req := rotaclient.Create{Account: id, Args: args, Label: strings.TrimSpace(ask.label), Caller: holdwire.CallerDetach}
 	if req.Env, err = absoluteDirs(store.HostEnv()); err != nil {
 		return err
 	}

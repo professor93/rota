@@ -1170,3 +1170,42 @@ func TestALookWhoseCallerLeftMidwaySaysSoInTheJournal(t *testing.T) {
 		})
 	}
 }
+
+// A launch goes by the name its caller gave it in the journal, and by "launch"
+// with none: a held session's holder, or `rota run --detach`, says so.
+func TestALaunchIsJournalledUnderItsCallersName(t *testing.T) {
+	storedRouteHere(t)
+	for _, c := range []struct{ name, path string }{
+		{"", "launch.renew"},
+		{"holder", "holder.renew"},
+		{"detach", "detach.renew"},
+	} {
+		t.Run(c.path, func(t *testing.T) {
+			onPath(t, "claude")
+			w := newLineageWorld(t, false)
+			w.clock.pass(9 * time.Hour)
+			ctx := context.Background()
+			if c.name != "" {
+				ctx = WithCaller(ctx, c.name)
+			}
+			_, _, release, err := w.s.Prepare(ctx, w.a)
+			if err != nil {
+				t.Fatal(err)
+			}
+			release()
+			journalSays(t, w.s, c.path, "presenting")
+			journalSays(t, w.s, c.path, "rotated")
+		})
+	}
+	t.Run("a token rota alone holds, on another provider", func(t *testing.T) {
+		rota.Register(fakeRefresher{&fakeProvider{name: "t-named",
+			refreshTok: &rota.Token{Access: jNewAccess, Refresh: jNewRefr, ExpiresAt: rota.NowMS() + 3_600_000}}})
+		s := openTemp(t)
+		a := s.add("t-named")
+		a.Token = rota.Token{Access: jAccess, Refresh: jRefresh, ExpiresAt: rota.NowMS() - 1}
+		if _, err := s.refreshForLaunch(WithCaller(context.Background(), "holder"), a); err != nil {
+			t.Fatal(err)
+		}
+		journalSays(t, s, "holder.renew", "rotated")
+	})
+}

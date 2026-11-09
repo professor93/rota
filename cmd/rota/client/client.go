@@ -437,6 +437,10 @@ type Create struct {
 
 	RemoteControl     bool
 	RemoteControlName string
+
+	// Caller, when set, says who is asking for the refresh journal
+	// (holdwire.CallerHeader).
+	Caller string
 }
 
 // createDoc is a Create as the daemon reads it: remote_control is true, or
@@ -463,7 +467,7 @@ func (c *Client) Create(r Create) (Session, error) {
 		in.RemoteControl = true
 	}
 	var s Session
-	if err := c.do(http.MethodPost, "/v1/terminals", in, &s); err != nil {
+	if err := c.doAs(r.Caller, http.MethodPost, "/v1/terminals", in, &s); err != nil {
 		return Session{}, err
 	}
 	return s, nil
@@ -508,6 +512,11 @@ func (r *Refusal) Error() string { return r.Message }
 // success is a *Refusal. A request with a body is a create or a send, which
 // wait on a holder, so it is given holderWait rather than requestWait.
 func (c *Client) do(method, path string, in, out any) error {
+	return c.doAs("", method, path, in, out)
+}
+
+// doAs is do, naming the caller to the daemon when there is one.
+func (c *Client) doAs(caller, method, path string, in, out any) error {
 	var body io.Reader
 	wait := requestWait
 	if in != nil {
@@ -525,6 +534,9 @@ func (c *Client) do(method, path string, in, out any) error {
 	}
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if caller != "" {
+		req.Header.Set(holdwire.CallerHeader, caller)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

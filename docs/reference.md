@@ -3613,7 +3613,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
     `version`, `account` (its id) and `provider`;
   - `path`, who refreshed or looked: `<who>.renew` for a refresh of a claude
     login kept in a home, or of another provider's login, where `<who>` is
-    `launch` (a run), `serve` (a server's maintenance), `list` (`rota list`),
+    `launch` (a run), `serve` (a server's maintenance), `daemon` (a daemon's
+    maintenance), `holder` (a held session being launched), `detach` (one
+    `rota run --detach` asked for), `list` (`rota list`),
     `choose` (the rotation choosing an account: `rota run` with no id, an API
     run or terminal with no id), `api` (the server's `?refresh=1`), the name a
     program gives the store with `store.WithCaller`, or `refresh` when it

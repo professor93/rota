@@ -305,7 +305,11 @@ func (h *holder) plan(st *store.Store) (*plan, error) {
 	if a == nil {
 		return nil, rota.WrapNoAccount(h.req.Account)
 	}
-	ctx := context.Background()
+	caller := "holder"
+	if h.req.Caller == holdwire.CallerDetach {
+		caller = holdwire.CallerDetach
+	}
+	ctx := store.WithCaller(context.Background(), caller)
 	if err := st.Launchable(ctx, a); err != nil {
 		return nil, err
 	}

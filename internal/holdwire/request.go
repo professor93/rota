@@ -33,7 +33,19 @@ type Request struct {
 	// place of the daemon's.
 	Env        []string `json:"env"`
 	Scrollback int      `json:"scrollback"`
+	// Caller, when set, is who asked for the session, by the name the refresh
+	// journal knows it by: CallerDetach, or nothing for "holder".
+	Caller string `json:"caller,omitempty"`
 }
+
+// CallerHeader is the request header a client names itself in when it asks a
+// daemon for a held session, and CallerDetach the one name a daemon takes from
+// it. A header, so that a daemon older than its client passes over it, where it
+// would refuse a JSON member it does not know.
+const (
+	CallerHeader = "X-Rota-Caller"
+	CallerDetach = "detach"
+)
 
 // Ready is the holder's one line of answer on its standard output: OK with
 // the holder's pid and when the credential inside will stop working, or why

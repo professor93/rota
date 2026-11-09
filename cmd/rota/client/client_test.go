@@ -298,6 +298,7 @@ func TestEnsureNeverStartsASecondDaemon(t *testing.T) {
 func TestCreateGetAndARefusedSend(t *testing.T) {
 	dir := terminals(t)
 	got := make(chan map[string]any, 1)
+	callers := make(chan string, 1)
 	doc := `{"id":"a1b2c3d4e5f60718","held":true,"name":"refactor","label":"refactor","kind":"account",
 		"cwd":"/src","started":"2026-11-07T10:00:00Z","ended":false,"state":"live","status":"running",
 		"pid":77,"account":{"id":0,"label":"","provider":""}}`
@@ -306,6 +307,7 @@ func TestCreateGetAndARefusedSend(t *testing.T) {
 			var body map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
 			got <- body
+			callers <- r.Header.Get(holdwire.CallerHeader)
 			w.WriteHeader(http.StatusCreated)
 			fmt.Fprint(w, doc)
 		})
@@ -340,11 +342,24 @@ func TestCreateGetAndARefusedSend(t *testing.T) {
 	if raw, _ := json.Marshal(<-got); string(raw) != want {
 		t.Fatalf("Create sent %s, want %s", raw, want)
 	}
+	if caller := <-callers; caller != "" {
+		t.Fatalf("nobody named, and the header says %q", caller)
+	}
 	if _, err := c.Create(Create{Account: 2, RemoteControl: true}); err != nil {
 		t.Fatal(err)
 	}
 	if raw, _ := json.Marshal(<-got); string(raw) != `{"account":2,"remote_control":true}` {
 		t.Fatalf("Create with an account and Remote Control unnamed sent %s", raw)
+	}
+	if caller := <-callers; caller != "" {
+		t.Fatalf("nobody named, and the header says %q", caller)
+	}
+	if _, err := c.Create(Create{Account: 3, Caller: holdwire.CallerDetach}); err != nil {
+		t.Fatal(err)
+	}
+	<-got
+	if caller := <-callers; caller != holdwire.CallerDetach {
+		t.Fatalf("the caller named goes in the header, and it says %q", caller)
 	}
 
 	if s, err := c.Get("a1b2c3d4e5f60718"); err != nil || s.Name != "refactor" {

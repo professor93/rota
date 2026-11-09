@@ -90,19 +90,25 @@ type callerKey struct{}
 // a store kept anywhere but in files keeps no journal. A name is lower-case
 // letters, digits, '_', '.' and '-', up to 40 of them; anything else is
 // "refresh", which still counts as a name given, and is also the name of a
-// caller that gives none to Refresh. rota names its own: "list" for `rota
-// list`, "choose" for the rotation choosing an account, "api" for the server's
-// ?refresh=1; Maintain is "serve" unless its caller named itself.
+// caller that gives none to Refresh. A launch under it (Run, Start, Prepare,
+// PrepareIn) goes by the name too, and by "launch" with none. rota names its
+// own: "list" for `rota list`, "choose" for the rotation choosing an account,
+// "api" for the server's ?refresh=1, "daemon" for a daemon's sweep, "holder" for
+// a held session's launch and "detach" for one `rota run --detach` asked for;
+// Maintain is "serve" unless its caller named itself.
 func WithCaller(ctx context.Context, name string) context.Context {
 	return context.WithValue(ctx, callerKey{}, codeOr(name, "refresh"))
 }
 
 // callerOf is the caller ctx names, "refresh" when it names none.
-func callerOf(ctx context.Context) string {
+func callerOf(ctx context.Context) string { return callerOr(ctx, "refresh") }
+
+// callerOr is the caller ctx names, otherwise when it names none.
+func callerOr(ctx context.Context, otherwise string) string {
 	if name, _ := ctx.Value(callerKey{}).(string); name != "" {
 		return name
 	}
-	return "refresh"
+	return otherwise
 }
 
 // withCallerOr is ctx naming name as its caller, unless it names one already.

@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/professor93/rota/internal/fakecli"
 	"github.com/professor93/rota/internal/holdwire"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/store"
@@ -203,5 +204,38 @@ func TestASignalIsAsItWasOnceThePrepareIsOver(t *testing.T) {
 	}
 	if ee := run("ignored"); ee != nil {
 		t.Fatalf("a signal started ignored did not stay ignored: %v", ee)
+	}
+}
+
+// A holder goes by "holder" in the refresh journal, and by "detach" when it was
+// started for `rota run --detach`; nothing else the daemon might say gets in.
+func TestAHolderNamesItselfInTheJournal(t *testing.T) {
+	for _, c := range []struct{ caller, path string }{
+		{"", "holder.renew"},
+		{holdwire.CallerDetach, "detach.renew"},
+		{"something-else", "holder.renew"},
+	} {
+		t.Run(c.path+"/"+c.caller, func(t *testing.T) {
+			t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+			bin := t.TempDir()
+			fakecli.Install(t, bin, "claude", fakecli.Spec{})
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			p := newHoldingProvider(t)
+			close(p.release)
+			dir, st := expiredAccount(t)
+			h := &holder{req: holdwire.Request{Kind: holdwire.KindAccount, Account: 1, Cwd: t.TempDir(), Caller: c.caller}}
+			pl, err := h.plan(st)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pl.release()
+			raw, err := os.ReadFile(filepath.Join(dir, "refresh.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(raw), `"path":"`+c.path+`"`) {
+				t.Fatalf("no %s line in:\n%s", c.path, raw)
+			}
+		})
 	}
 }

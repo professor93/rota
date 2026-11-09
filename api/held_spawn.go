@@ -67,6 +67,9 @@ func (s *Server) HoldsDaemon(terminals string) bool {
 func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd string, list func(*termSession) bool) (*termSession, error) {
 	hreq := holdwire.Request{ID: runID(), Kind: kind, Args: req.Args, Cwd: cwd, Env: req.Env,
 		Name: strings.TrimSpace(req.Label), Scrollback: s.opts.Terminal.Scrollback}
+	if r.Header.Get(holdwire.CallerHeader) == holdwire.CallerDetach {
+		hreq.Caller = holdwire.CallerDetach
+	}
 	hreq.Cols, hreq.Rows = boundSize(req.Cols, req.Rows)
 	st, a, err := s.chooseTerminal(r, kind, req.Account)
 	if err != nil {

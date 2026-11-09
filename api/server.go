@@ -526,7 +526,11 @@ func (s *Server) maintain() (reset time.Time) {
 		return time.Time{}
 	}
 	defer st.Close()
-	errs := st.Maintain(s.sweeps)
+	sweeps := s.sweeps
+	if s.opts.HoldCommand != nil {
+		sweeps = store.WithCaller(sweeps, "daemon") // and a foreground serve's are serve's
+	}
+	errs := st.Maintain(sweeps)
 	for _, e := range errs {
 		s.log.Warn("background refresh", "err", e)
 	}

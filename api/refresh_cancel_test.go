@@ -7,10 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -480,4 +482,29 @@ func TestChoosingATerminalAfterStopRefreshesNothing(t *testing.T) {
 	}
 	w.holds(t, 1, "R0")
 	w.presented(t)
+}
+
+// A sweep is journalled as the daemon's on a server that holds sessions, and as
+// serve's on one that does not.
+func TestASweepIsJournalledAsWhoSweeps(t *testing.T) {
+	for _, c := range []struct {
+		held bool
+		path string
+	}{{false, "serve.renew"}, {true, "daemon.renew"}} {
+		t.Run(c.path, func(t *testing.T) {
+			w := newCancelWorld(t, -1, "", "R0")
+			w.p.letGo()
+			if c.held {
+				w.api.opts.HoldCommand = func() *exec.Cmd { return nil }
+			}
+			w.api.maintain()
+			raw, err := os.ReadFile(filepath.Join(w.dir, "refresh.log"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(raw), `"path":"`+c.path+`"`) {
+				t.Fatalf("no %s line in:\n%s", c.path, raw)
+			}
+		})
+	}
 }

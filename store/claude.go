@@ -2211,6 +2211,7 @@ func (h *claudeHome) tidy() {
 // rota may, and build the account's world.
 func (h *claudeHome) launch(ctx context.Context, mirror bool) (*rota.Command, error) {
 	a := h.a
+	h.via = callerOr(ctx, "launch") + ".renew"
 	if !h.s.loginInHome(a) {
 		if keychainKept && !a.APIKey() && h.s.owns(a) && rota.JoinHome(a, h.home) != nil && !nameable(h.home) {
 			h.warn(fmt.Sprintf("%s: %s; it runs on a token in its environment, without Remote Control", a, h.s.whyNoLogin(a)))
@@ -2584,10 +2585,11 @@ func (h *claudeHome) envRun(ctx context.Context) (*rota.Command, error) {
 // keep in one: refreshed as it always was — never a dead one.
 func (s *Store) tokenRun(ctx context.Context, a *rota.Account) (*rota.Command, error) {
 	if !a.Dead && !a.LongValid() && a.Expired() {
-		if err := s.refreshGate(ctx, "launch", a); err != nil {
+		caller := callerOr(ctx, "launch")
+		if err := s.refreshGate(ctx, caller, a); err != nil {
 			return nil, err
 		}
-		if _, err := s.refreshLogged(ctx, "launch", a); err != nil {
+		if _, err := s.refreshLogged(ctx, caller, a); err != nil {
 			return nil, err
 		}
 	}

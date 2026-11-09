@@ -96,10 +96,11 @@ func (s *Store) refreshForLaunch(ctx context.Context, a *rota.Account) (bool, er
 	if a.LongValid() || a.Dead {
 		return false, nil
 	}
-	if err := s.refreshGate(ctx, "launch", a); err != nil {
+	caller := callerOr(ctx, "launch")
+	if err := s.refreshGate(ctx, caller, a); err != nil {
 		return false, err
 	}
-	return s.refreshLogged(ctx, "launch", a)
+	return s.refreshLogged(ctx, caller, a)
 }
 
 // mayLaunch decides whether a run may start on this account, and says out
