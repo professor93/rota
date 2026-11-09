@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -486,6 +487,9 @@ func TestChoosingATerminalAfterStopRefreshesNothing(t *testing.T) {
 // A sweep is journalled as the daemon's on a server that holds sessions, and as
 // serve's on one that does not.
 func TestASweepIsJournalledAsWhoSweeps(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a claude login stays on a token there, journalled as token.env whoever sweeps")
+	}
 	for _, c := range []struct {
 		held bool
 		path string
