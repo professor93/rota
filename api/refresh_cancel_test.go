@@ -457,3 +457,27 @@ func TestStopWaitsForARefreshLongerThanFiveSeconds(t *testing.T) {
 	w.holds(t, 1, "Ra+")
 	w.presented(t, "Ra")
 }
+
+// Choosing what a terminal runs, held or not, may refresh the accounts the
+// rotation reads. A server that has stopped starts no such refresh.
+func TestChoosingATerminalAfterStopRefreshesNothing(t *testing.T) {
+	w := newCancelWorld(t, -1, "", "R0")
+	w.api.Stop()
+	chosen := make(chan struct{})
+	go func() {
+		defer close(chosen)
+		r := httptest.NewRequest(http.MethodPost, "/v1/terminals", nil)
+		if st, _, err := w.api.chooseTerminal(r, termKindAccount, 0); err == nil {
+			st.Close()
+		}
+	}()
+	select {
+	case rt := <-w.p.arrived:
+		t.Fatalf("choosing a terminal after Stop presented %s", rt)
+	case <-chosen:
+	case <-time.After(10 * time.Second):
+		t.Fatal("choosing a terminal did not end")
+	}
+	w.holds(t, 1, "R0")
+	w.presented(t)
+}

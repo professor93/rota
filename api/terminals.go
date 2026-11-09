@@ -554,9 +554,12 @@ func (s *Server) chooseTerminal(r *http.Request, kind string, id int) (*store.St
 		}
 	}()
 	rotation.Backfill(st)
-	a, err := rotation.Choose(r.Context(), st, id)
+	// A server that has stopped starts no refresh (see Stop).
+	ctx, cancel := joinContexts(r.Context(), s.ctx)
+	defer cancel()
+	a, err := rotation.Choose(ctx, st, id)
 	if err == nil {
-		err = st.Launchable(r.Context(), a)
+		err = st.Launchable(ctx, a)
 	}
 	if err != nil {
 		return nil, nil, err
