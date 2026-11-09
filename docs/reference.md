@@ -180,7 +180,7 @@ rota login --key              # an account on a Claude Console API key, pasted, 
 rota login 2 --token          # paste a `claude setup-token` token as account 2's long-lived one
 rota login <login-id> <code>  # finish it with the code from the page
 rota login <login-id>         # finish a delegated login, which takes no code (grok)
-rota login 2                  # sign account 2 in through its own CLI
+rota login 2                  # sign account 2 in again: a URL only account 2 can approve
 rota list                     # every account, in rotation order, with usage
 rota list --short             # the same, reading no usage from any provider
 rota list --sessions          # ...and what is running, and what could resume
@@ -206,7 +206,7 @@ rota set 2                    # what account 2 is set to
 rota set 2 --cwd ~/src/api --config ~/.rota/api-memory
 rota set 2 --sessions own     # its conversations are nobody else's (shared by default)
 rota set 2 --long forget      # throw away its long-lived token
-rota login 6                  # sign in an account whose CLI keeps its own credentials
+rota login 6                  # an account whose CLI keeps its own credentials, through that CLI
 rota remove 2 5               # forget accounts, and the homes rota made for them
 rota serve 8787 --token=T     # serve the HTTP API and its playground
 rota serve --config ./server.toml   # one file instead of the flags below
@@ -245,8 +245,30 @@ Neither `--key` nor `--token` takes its credential on the command line, where
 every process on the machine and the shell's history could read it: written
 there, it is refused without being repeated.
 
-Anything after an account id is passed to the vendor CLI's own login
-(`--region mainland-cn`, say).
+An account id signs that account in again, and how depends on who keeps its
+credential. For an account whose login rota holds, dead or alive, it starts an
+ordinary login on that account's provider: it prints the URL and the account to
+approve as, and `Then: rota login <login-id> <code>` finishes it, as any login
+is finished (`--json` prints the login, with `account` set to the id). Only
+that account's approval finishes it. Approved as another account, as one rota
+does not hold, or by a reply that names nobody, or with the account removed
+meanwhile, it is refused, saying who approved and which account was named:
+nothing is written, no account is added, and the login stays parked, so
+approving again as the right account and giving the new code finishes the same
+login. Nothing may follow the id here, since there is no vendor CLI to pass it
+to. A claude account's running sessions keep their present login until they
+end, as after any login.
+
+Not every account has a sign-in to start, and those are refused with what to
+do instead. An account on an API key is given its key with `rota login --key`
+(a grok key, with `rota login grok`): the same key again is the same account,
+and a different one makes an account of its own. An account rota knows by no
+uuid or e-mail cannot be matched to any approval, so `rota login <provider>`
+signs in whoever approves as an account of its own, and `rota remove` drops the
+old one.
+
+For an account whose CLI keeps its own credentials, the id runs that CLI's own
+login, and anything after the id is passed to it (`--region mainland-cn`, say).
 
 **`rota list [provider]`**
 
@@ -466,11 +488,14 @@ One command, because the difference between the two it used to be — whether
 rota holds the credential or the vendor CLI keeps its own — is rota's business
 rather than yours. rota knows which an account needs, so the argument decides:
 a provider name starts a new account, a login id finishes one, and an account
-id hands that account to its own CLI's login. Opening the URL yourself is also
+id signs that account in again, by a login only it can approve or, when its CLI
+keeps its own credentials, by that CLI's login. Opening the URL yourself is also
 what makes a *second* account possible: a
 normal browser window reuses the session already signed in, so use a private
-window for the next one. Several logins can be open at once, across providers
-as well as within one; a rejected code costs one retry, not a whole login.
+window for the next one, and for `rota login <account-id>` a window signed in as
+the account it names. Several logins can be open at once, across providers
+as well as within one; a rejected code costs one retry, not a whole login, and
+so does approving as the wrong account.
 
 ## The HTTP API
 
@@ -670,7 +695,7 @@ see *Who is asking, and what they may do*.
 | `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
 | `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"long_until":"...","status":"long"}`, and an API key sent as `token` is refused with `400` by its prefix, without being sent anywhere. Neither comes back or is logged |
-| `POST` | `/v1/login/{id}` | control | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"long_until":"...","status":"long"}` |
+| `POST` | `/v1/login/{id}` | control | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"long_until":"...","status":"long"}`; a login `rota login <account-id>` began is refused unless that account approved it, and stays parked |
 | `POST` | `/v1/auth` | control | what `POST /v1/login` was called before the API and the command agreed on one word; kept working for anything already calling it |
 | `POST` | `/v1/auth/{id}` | control | likewise for `POST /v1/login/{id}` |
 | `POST` | `/v1/invites` | control | `{"ttl":"10m"}` → `{"url","expires"}` — a single-use link that signs somebody in as a watcher |
@@ -3807,9 +3832,9 @@ every other command; and a caller's sensible answer is to name another account
 or come back, not to queue.
 
 Everything that writes into that home takes the same claim: a run, the
-interactive handover, the maintenance below, and `rota login <id>`, which hands
-the home to the vendor's own login and is the one write certain to replace the
-credential file outright. `rota remove` refuses while an account is running
+interactive handover, the maintenance below, and, for an account whose CLI keeps
+its own credentials, `rota login <id>`, which hands the home to the vendor's own
+login and is the one write certain to replace the credential file outright. `rota remove` refuses while an account is running
 rather than deleting the directory its agent is authenticating from — nothing
 there is undoable once the files are gone, and for a delegated account that
 directory *is* the credential. Removing several checks the whole set before
@@ -4432,6 +4457,7 @@ s, _ := store.NewStore(myDatabaseBackend{})   // or your own bytes
 defer s.Close()
 
 l, _ := s.BeginLogin(ctx, "codex")            // parks the login for another process
+l, _ = s.BeginLoginFor(ctx, 2)                // ...or one only account 2's approval finishes
 a, added, _ := s.FinishLogin(ctx, l.ID, code)
 errs := s.Refresh(ctx, false)                 // quota for metered providers, cached; a provider's wait kept
 errs = s.Refresh(store.WithCaller(ctx, "mine"), false) // the same, journalled as mine.renew
