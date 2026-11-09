@@ -858,13 +858,16 @@ anything it started — `rota serve stop` is refused, with or without `--all`:
 the session*. It tells by the same rule the control socket lets such a caller
 only watch by, and is the same guard against accidents, not a wall.
 Elsewhere it sends the daemon SIGTERM — only while its pid
-is still the process `daemon.pid` names — and waits up to fifteen seconds for
-it to let go of the store. Within ten seconds the daemon closes its port and
-its control socket, giving what they are serving all but the last second to
-finish; then it ends every WebSocket either of them handed over, each told
-`1001` *the server is stopping*, lets go of every session, still running,
-and lets go of the store last; the last second is for those goodbyes to go
-out. It says `rota daemon stopped; N sessions keep running`. With no daemon
+is still the process `daemon.pid` names — and waits up to a minute for it to
+let go of the store. That is moments, as a rule; the minute is for a refresh
+under way, which is finished first, so that the provider's answer is saved
+and in its home before the daemon goes. Within ten seconds the daemon closes
+its port and its control socket, giving what they are serving all but the
+last second to finish; then it ends every WebSocket either of them handed
+over, each told `1001` *the server is stopping*, lets go of every session,
+still running, waits up to 45 seconds for any refresh still under way, and
+lets go of the store last; the last second of the ten is for those goodbyes
+to go out. It says `rota daemon stopped; N sessions keep running`. With no daemon
 it says `no rota daemon is running for <store>` and exits `0`.
 
 `rota serve stop --all` ends the sessions as well. At a terminal it asks
