@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/professor93/rota/internal/ring"
 	"github.com/professor93/rota/internal/share"
 )
 
@@ -215,7 +216,7 @@ func (s *Server) newShared(c *share.Conn, hello *share.HelloMsg) *termSession {
 		kind: termKindShared, account: hello.Account, label: hello.AccountLabel, provider: hello.Provider,
 		name: strings.TrimSpace(hello.Label), cwd: hello.Cwd, started: s.now(),
 		back: back, lookOnly: mode == share.ModeWatch,
-		cols: cols, rows: rows, ring: newOutRing(s.opts.Terminal.Scrollback),
+		cols: cols, rows: rows, ring: ring.New(s.opts.Terminal.Scrollback),
 	}
 	ts.idleAt = ts.started
 	back.ts = ts
@@ -281,6 +282,8 @@ func (sh *sharedTerm) hangUp() { _ = sh.conn.Send(share.Kill, nil) }
 func (sh *sharedTerm) end() { _ = sh.conn.Close() }
 
 func (sh *sharedTerm) close() { _ = sh.conn.Close() }
+
+func (sh *sharedTerm) detach() {}
 
 // describe says what only a shared terminal has: the rota answering for it,
 // whether it may be typed into, and whether that rota is still there.

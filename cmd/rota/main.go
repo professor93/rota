@@ -56,7 +56,10 @@ Usage:
                                 this machine show it on its terminal page
   rota run [id] --remote-control[=name]   open Claude Code with its own
                                 Remote Control on, as this account
-  rota send <run> "..."         send another message into a run started with --input
+  rota run [id] --detach        hand the CLI to a session the daemon holds,
+                                which runs on with no terminal open
+  rota send <run-or-session> "..."   send into a --input run, or type into
+                                a held session
   rota set <id> [flags]         where an account sits and what it reads:
                                 --order, --threshold, --cwd, --config,
                                 --sessions, --remote-control, --long forget,
@@ -68,6 +71,9 @@ Usage:
                                 came from; prints nothing secret
   rota serve passwd|token|invite   a person, a token or a watcher's link for
                                 that file; rota serve -h describes the three
+  rota serve start|stop|status  this store's daemon, which keeps sessions
+                                running with no terminal open; see serve -h
+  rota serve install|uninstall  run that daemon under systemd or launchd
   rota version                  which rota this is
 
 The id is optional: leave it out and rota takes the first account in the
@@ -105,7 +111,8 @@ Usage:
   rota login [provider]    add an account, or finish signing one in
   rota list                accounts, usage, health
   rota run [id] [flags]    ask with flags — or open the CLI itself
-  rota send <run> "..."    send more into a run started with --input
+  rota send <run-or-session> "..."
+                           send into a --input run, or type into a held session
   rota set <id> [flags]    order, threshold, cwd, config, sessions, long token
   rota remove <id>...      forget accounts
   rota serve [addr]        the HTTP API and its playground
@@ -627,14 +634,21 @@ func (c *cli) list(args []string) error {
 			doc["warnings"] = warnings
 		}
 		if withSessions {
-			rep := sessions.Scan(s, recent)
+			rep := scanSessions(s, recent)
 			doc["instances"] = rep.Instances
 			doc["sessions"] = rep.Sessions
 			if rep.Shared != nil {
 				doc["shared"] = rep.Shared
 			}
+			held, note := listHeld(s)
+			if note != "" {
+				rep.Notes = append(rep.Notes, note)
+			}
 			if len(rep.Notes) > 0 {
 				doc["notes"] = rep.Notes
+			}
+			if len(held) > 0 {
+				doc["held"] = held
 			}
 		}
 		return c.emit(doc)
@@ -649,7 +663,9 @@ func (c *cli) list(args []string) error {
 		c.sayLeftOut(g.render(c.out), width)
 		c.sayLongNotes(shown, width)
 		if withSessions {
-			c.showSessions(sessions.Scan(s, recent), width)
+			c.showSessions(scanSessions(s, recent), width)
+			held, note := listHeld(s)
+			c.showHeld(held, note, width)
 		}
 		for _, e := range errs {
 			warn(c.err, "%v", e)
@@ -691,7 +707,9 @@ func (c *cli) list(args []string) error {
 	}
 	c.sayLongNotes(shown, width)
 	if withSessions {
-		c.showSessions(sessions.Scan(s, recent), width)
+		c.showSessions(scanSessions(s, recent), width)
+		held, note := listHeld(s)
+		c.showHeld(held, note, width)
 	}
 	for _, e := range errs {
 		warn(c.err, "%v", e)
@@ -973,6 +991,13 @@ names the session. It turns the account's remote control setting on first
 could not work: one on a token rather than the account's own login, or one
 whose home still runs Claude Code from before the setting was on.
 
+--detach hands the CLI to a session this store's daemon holds instead of to
+this terminal, and returns: it starts in this folder, at this terminal's
+size, with this environment, and runs on with no terminal open. A daemon is
+started, on its control socket alone, when none runs. The CLI's arguments go
+after -- or -i, and it takes no prompt. --label names the session; rota list
+--sessions lists it and rota send types into it. linux and macOS.
+
 Conversations carry on: every run has a session id, and --resume <id>
 continues from it. On its own, --resume picks up the most recent
 conversation, which every provider can find without being told its id, and
@@ -990,6 +1015,7 @@ conversation, which every provider can find without being told its id, and
   rota run 2 --share                 the same, watchable on this machine's page
   rota run --share=watch --label api offered to be read, under that name
   rota run 2 --remote-control=laptop open it, controllable from claude.ai
+  rota run 2 --detach --label api    held by the daemon, with no terminal open
 
 Flags:
 `
@@ -1019,9 +1045,10 @@ func (c *cli) run(args []string) error {
 		rest = rest[1:]
 	}
 
-	// --share and --label are rota's own and belong to the handover, so they
-	// are taken out here rather than in the flag set a question is parsed
-	// with: two of the three ways to open a CLI never reach one.
+	// --share, --detach and --label are rota's own and belong to the
+	// handover, so they are taken out here rather than in the flag set a
+	// question is parsed with: two of the three ways to open a CLI never
+	// reach one.
 	rest, ask, err := takeShareFlags(rest)
 	if err != nil {
 		return err
@@ -1029,6 +1056,9 @@ func (c *cli) run(args []string) error {
 	rest, remote, err := takeRemoteControl(rest)
 	if err != nil {
 		return err
+	}
+	if ask.detach {
+		return c.detach(id, rest, ask, remote)
 	}
 
 	// Two ways to say "not rota's vocabulary": -- for the arguments that
@@ -1120,7 +1150,7 @@ var execProcess = execCLI
 // terminal become its own and there is no rota left. With --share rota stays
 // as the parent, because something does want it — a server on this machine,
 // so that the terminal can also be watched from the page.
-func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) error {
+func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) (err error) {
 	if ask.on {
 		// Before the account is prepared rather than after: a refusal is
 		// worth having before a token has been refreshed and a credential
@@ -1138,6 +1168,9 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) er
 	if err != nil {
 		return err
 	}
+	// An account another run has is named with the held session that has
+	// it, when that is what does.
+	defer func() { err = heldBusy(s, a, err) }()
 	more, err := c.remoteControl(s, a, remote)
 	if err != nil {
 		return err
@@ -1470,6 +1503,7 @@ func (c *cli) answer(id int, args []string) error {
 	} else {
 		res, err = s.Run(context.Background(), a, spec, nil, watch)
 	}
+	err = heldBusy(s, a, err)
 	_ = started.End()
 	if cut {
 		return c.interrupted(err)
@@ -2034,6 +2068,7 @@ or ask a running server for a link:
   rota serve token  <name> [--role control|watch]   a token and its [[tokens]] block
   rota serve invite [--ttl 10m]                     a single-use watcher's link
 
+` + daemonUsage + `
 Flags:
 `
 
@@ -2211,11 +2246,13 @@ var serveGrace = 10 * time.Second
 // serve runs the HTTP API and its playground. The token is mandatory: an
 // account runner anyone can reach is not something to start by accident.
 func (c *cli) serve(args []string) (err error) {
-	// Five of serve's words are not a server at all: two print a block to
-	// paste into its file, one asks a server already running for a link, and
-	// two are processes an interactive run starts beside its CLI. They live
-	// under serve because that is what they are about, and they are matched
-	// before the flags because none of them is an address.
+	// Some of serve's words are not a server at all: two print a block to
+	// paste into its file, one asks a server already running for a link,
+	// three are processes rota starts for itself, three start, stop and ask
+	// after the store's daemon, and two hand it to the system's supervisor
+	// and take it back. They live under serve because that is
+	// what they are about, and they are matched before the flags because
+	// none of them is an address.
 	if len(args) > 0 {
 		switch args[0] {
 		case "passwd":
@@ -2228,6 +2265,18 @@ func (c *cli) serve(args []string) (err error) {
 			return c.serveWatch(args[1:])
 		case "claim":
 			return c.serveClaim(args[1:])
+		case "hold":
+			return c.serveHold(args[1:])
+		case "start":
+			return c.serveStart(args[1:])
+		case "stop":
+			return c.serveStop(args[1:])
+		case "status":
+			return c.serveStatus(args[1:])
+		case "install":
+			return c.serveInstall(args[1:])
+		case "uninstall":
+			return c.serveUninstall(args[1:])
 		}
 	}
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
@@ -2386,49 +2435,10 @@ func (c *cli) serve(args []string) (err error) {
 		// agents this server starts are local processes with a shell.
 		say("warning: --token is visible to every process on this machine; put it in ROTA_TOKEN instead")
 	}
-	if len(opts.Roots) == 0 {
-		say("warning: no --root given, so a caller may name any directory on this machine")
+	for _, note := range serveNotes(&opts, listener, false) {
+		say(note)
 	}
-	loopback := strings.HasPrefix(listener.Addr, "127.0.0.1") || strings.HasPrefix(listener.Addr, "localhost")
-	if listener.Cert == "" && !loopback {
-		say("warning: no TLS off the loopback address; the bearer token travels in clear text")
-		if len(opts.Users) > 0 {
-			// A password is worse than a token in the clear: it is typed
-			// again elsewhere, and it is the one credential rota cannot
-			// replace for whoever chose it.
-			say("warning: [[users]] are configured without TLS; every password typed on the page travels in clear text too")
-		}
-	}
-	if opts.AllowDangerous {
-		say("warning: --allow-dangerous is on; callers may bypass every permission check")
-	}
-	if opts.AllowRawFlags {
-		say("warning: --allow-raw-flags is on; a caller can pass any vendor flag, which undoes --root and --allow-dangerous")
-	}
-	if !opts.Routes.Playground {
-		say("routes: the playground and the version at / are off")
-	}
-	if !opts.Routes.WebSocket {
-		say("routes: the WebSocket routes are off; a run that stays open is reached over the API instead")
-	}
-	if !opts.Routes.Health {
-		say("routes: /v1/health is off; nothing here answers without a credential")
-	}
-	if !opts.Routes.API {
-		say("routes: the API is off, so this server answers nothing")
-	}
-	server := &nethttp.Server{
-		Addr:    listener.Addr,
-		Handler: srv.Handler(),
-		// A slow client must not be able to hold a connection open for
-		// ever. There is no write deadline: a streamed run legitimately
-		// takes as long as the run does, and the run has its own timeout.
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       5 * time.Minute,
-		IdleTimeout:       2 * time.Minute,
-		ErrorLog:          slog.NewLogLogger(logger.Handler(), slog.LevelWarn),
-		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
-	}
+	server := newHTTPServer(listener.Addr, srv.Handler(), logger)
 
 	// Shut down on the first signal and wait for work in flight; a second
 	// signal stops waiting, for whoever is in a hurry.
@@ -2464,6 +2474,73 @@ func (c *cli) serve(args []string) (err error) {
 			return fmt.Errorf("shutting down: %w", err)
 		}
 		return nil
+	}
+}
+
+// serveNotes is what a server says about how it was configured, once, as it
+// starts listening on a port: every warning about who can reach it and what
+// they may do, and every group of routes that is off. Foreground serve says
+// these on stderr, after the --token warning only it can give; a daemon
+// that opens a port puts them in its log, naming the file's keys where
+// foreground serve names its flags, since a daemon has no such flags.
+func serveNotes(opts *api.Options, listener api.Listener, daemon bool) []string {
+	named := func(flag, key string) string {
+		if daemon {
+			return key
+		}
+		return flag
+	}
+	var out []string
+	if len(opts.Roots) == 0 {
+		out = append(out, "warning: no "+named("--root given", "runs.roots set")+", so a caller may name any directory on this machine")
+	}
+	loopback := strings.HasPrefix(listener.Addr, "127.0.0.1") || strings.HasPrefix(listener.Addr, "localhost")
+	if listener.Cert == "" && !loopback {
+		out = append(out, "warning: no TLS off the loopback address; the bearer token travels in clear text")
+		if len(opts.Users) > 0 {
+			// A password is worse than a token in the clear: it is typed
+			// again elsewhere, and it is the one credential rota cannot
+			// replace for whoever chose it.
+			out = append(out, "warning: [[users]] are configured without TLS; every password typed on the page travels in clear text too")
+		}
+	}
+	if opts.AllowDangerous {
+		out = append(out, "warning: "+named("--allow-dangerous", "runs.allow_dangerous")+" is on; callers may bypass every permission check")
+	}
+	if opts.AllowRawFlags {
+		out = append(out, "warning: "+named("--allow-raw-flags", "runs.allow_raw_flags")+" is on; a caller can pass any vendor flag, which undoes "+
+			named("--root", "runs.roots")+" and "+named("--allow-dangerous", "runs.allow_dangerous"))
+	}
+	if !opts.Routes.Playground {
+		out = append(out, "routes: the playground and the version at / are off")
+	}
+	if !opts.Routes.WebSocket {
+		out = append(out, "routes: the WebSocket routes are off; a run that stays open is reached over the API instead")
+	}
+	if !opts.Routes.Health {
+		out = append(out, "routes: /v1/health is off; nothing here answers without a credential")
+	}
+	if !opts.Routes.API {
+		out = append(out, "routes: the API is off, so this server answers nothing")
+	}
+	return out
+}
+
+// newHTTPServer is an HTTP server with serve's limits, for every listener
+// the API is served on: foreground serve's port, a daemon's port and its
+// control socket. A slow client must not be able to hold a connection open
+// for ever. There is no write deadline: a streamed run legitimately takes as
+// long as the run does, and the run has its own timeout. The TLS floor
+// matters only where it is served with TLS, which a unix socket never is.
+func newHTTPServer(addr string, h nethttp.Handler, log *slog.Logger) *nethttp.Server {
+	return &nethttp.Server{
+		Addr:              addr,
+		Handler:           h,
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		IdleTimeout:       2 * time.Minute,
+		ErrorLog:          slog.NewLogLogger(log.Handler(), slog.LevelWarn),
 	}
 }
 

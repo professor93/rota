@@ -67,7 +67,9 @@ func TestMain(m *testing.M) {
 	os.Setenv("HOME", person)
 	os.Setenv("USERPROFILE", person)
 	// Nor the person's Anthropic profiles: a claude launch looks for the
-	// active one by these two before it looks in the home.
+	// active one by these two before it looks in the home. A unit is written
+	// under XDG_CONFIG_HOME when it is set too: without it, under the HOME
+	// just made.
 	os.Unsetenv("ANTHROPIC_CONFIG_DIR")
 	os.Unsetenv("XDG_CONFIG_HOME")
 	dir, err := os.MkdirTemp("", "rota-claude")

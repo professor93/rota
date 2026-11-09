@@ -24,7 +24,9 @@ var heartbeat = 15 * time.Second
 // keepEnded is how long a finished run stays addressable. A reader that
 // reattaches a moment too late should be given the tail of the stream and the
 // event that closed it, rather than a 404 it cannot tell from a wrong id.
-const keepEnded = 5 * time.Minute
+// Ended terminals stay as long. It is a variable so a test about what comes
+// after it need not wait five minutes.
+var keepEnded = 5 * time.Minute
 
 // liveRun is one run that stays open, and everything the endpoints need to
 // reach it.

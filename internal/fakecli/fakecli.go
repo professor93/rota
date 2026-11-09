@@ -10,6 +10,7 @@ package fakecli
 
 import (
 	"bufio"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,8 +58,10 @@ type Spec struct {
 	// says it is ready and how big its window is, answers each line it reads
 	// with a transformed copy — so a test can tell the terminal's own echo
 	// from the program's output — says the new size whenever the window
-	// changes, prints as much as it is asked to on "noise N" and exits on
-	// "bye". Stdout is ignored in this mode.
+	// changes, prints as much as it is asked to on "noise N", writes the
+	// bytes "print <hex>" spells out, answers "env", "envhas" and
+	// "registry" (see ask) and exits on "bye". Stdout is ignored in this
+	// mode.
 	Tty bool `json:"tty,omitempty"`
 	// EchoHold holds the first turn, in echo mode, until this many further
 	// lines have arrived on stdin. A test about messages that arrive
@@ -81,10 +84,11 @@ type Spec struct {
 	// helper leaves it: the pipes stay open after the CLI is gone, and a
 	// signal to the CLI's group does not reach it.
 	Detach string `json:"detach,omitempty"`
-	// Ready names a file the fake writes its pid to once Term, Spawn and
-	// Detach are in force, so a test can signal it without racing its start.
-	// Before anything else, the fake also creates Ready+".ran", so a test can
-	// tell a fake that ran and failed from one that never ran at all: see Up.
+	// Ready names a file the fake writes its pid to once Term, Spawn,
+	// Detach and Linger are in force, so a test can signal it without racing
+	// its start. Before anything else, the fake also creates Ready+".ran", so
+	// a test can tell a fake that ran and failed from one that never ran at
+	// all: see Up.
 	Ready string `json:"ready,omitempty"`
 	// Exec is a program the fake becomes once it has read stdin to its end,
 	// by an exec from a thread other than its main one, as a Go CLI's
@@ -98,6 +102,11 @@ type Spec struct {
 	// N. It sits in the spec because the code under test, not the test,
 	// decides what environment a fake gets.
 	KilledRuns string `json:"killed_runs,omitempty"`
+	// Linger keeps a tty fake this long after its terminal hangs up or its
+	// input ends, taking no notice of the hang-up, as a CLI finishing its
+	// work does: a test can then see what outlives the process holding the
+	// other end of its terminal.
+	Linger string `json:"linger,omitempty"`
 }
 
 // Result is a Spec that answers as the claude CLI does in print mode: one
@@ -160,6 +169,13 @@ func Link(path string) error {
 	}
 	return warm(path)
 }
+
+// Warm is the run Link makes, for a path a test made to this test binary
+// some other way — a symbolic link, say, that it then starts as rota: on
+// macOS the path is run once, doing nothing, and waited for, so the look
+// macOS takes at a new path is over before the test starts it for real.
+// Elsewhere it does nothing.
+func Warm(path string) error { return warm(path) }
 
 func copyTo(self, path string) error {
 	src, err := os.Open(self)
@@ -400,13 +416,20 @@ func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) in
 			return 70
 		}
 	}
+	if spec.Linger != "" {
+		signal.Ignore(syscall.SIGHUP)
+	}
 	if spec.Ready != "" {
 		// Written whole and then named, so WaitReady never reads half a pid.
 		_ = os.WriteFile(spec.Ready+".tmp", []byte(strconv.Itoa(os.Getpid())), 0o600)
 		_ = os.Rename(spec.Ready+".tmp", spec.Ready)
 	}
 	if spec.Tty {
-		return atty(spec, stdin, stdout)
+		code := atty(spec, stdin, stdout)
+		if d, err := time.ParseDuration(spec.Linger); err == nil {
+			time.Sleep(d)
+		}
+		return code
 	}
 	if spec.Echo {
 		return echo(spec, stdin, stdout)
@@ -528,6 +551,24 @@ func atty(spec Spec, stdin io.Reader, stdout io.Writer) int {
 			say("noise done")
 			continue
 		}
+		// "print <hex>" writes exactly the bytes it spells, with no newline:
+		// how a test makes the fake draw what a full-screen program draws,
+		// escape sequences and all, without a full-screen program.
+		if h, ok := strings.CutPrefix(line, "print "); ok {
+			raw, err := hex.DecodeString(strings.TrimSpace(h))
+			mu.Lock()
+			if err != nil {
+				fmt.Fprintf(stdout, "bad print: %s\r\n", h)
+			} else {
+				_, _ = stdout.Write(raw)
+			}
+			mu.Unlock()
+			continue
+		}
+		if reply, ok := ask(line); ok {
+			say("%s", reply)
+			continue
+		}
 		switch line {
 		case "size":
 			size("size")
@@ -535,10 +576,26 @@ func atty(spec Spec, stdin io.Reader, stdout io.Writer) int {
 			say("bye")
 			return spec.Exit
 		default:
-			say("got:%s", line)
+			say("got:%s", visible(line))
 		}
 	}
 	return spec.Exit
+}
+
+// visible spells out each control byte of what was read as \xHH. Echoed
+// back raw, an escape sequence somebody typed would be acted on by the
+// terminal showing it, and a test reading the screen would see its effect
+// instead of the bytes that arrived.
+func visible(line string) string {
+	var b strings.Builder
+	for i := 0; i < len(line); i++ {
+		if c := line[i]; c < 0x20 || c == 0x7f {
+			fmt.Fprintf(&b, `\x%02x`, c)
+		} else {
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // echo plays a CLI with a streaming input: one turn per message, for as long

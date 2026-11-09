@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 
@@ -48,8 +47,9 @@ func takeRemoteControl(args []string) ([]string, remoteAsk, error) {
 	return out, ask, nil
 }
 
-// remoteControl readies an account for a session with Remote Control on, and
-// returns what to add to Claude Code's own arguments.
+// remoteControl readies an account for a session with Remote Control on, by
+// the store's one rule for it (store.ReadyRemoteControl), and returns what
+// to add to Claude Code's own arguments.
 //
 // The setting is turned on and saved first, because it is what gives the
 // account the configuration file Remote Control reads its identity from —
@@ -60,25 +60,17 @@ func (c *cli) remoteControl(s *store.Store, a *rota.Account, ask remoteAsk) ([]s
 	if !ask.on {
 		return nil, nil
 	}
+	// A flag this account cannot take at all, which is a usage error, said
+	// in the words it has always been said in.
 	if rota.Flavor(a.Provider) != "claude" {
 		return nil, usageErr("--remote-control is Claude Code's, and %s is a %s account", a, a.Provider)
 	}
-	if !a.RemoteControl {
-		on := *a
-		on.RemoteControl = true
-		if err := s.CheckRemoteControl(&on); err != nil {
-			return nil, err
-		}
-		a.RemoteControl = true
-		if err := s.Save(); err != nil {
-			return nil, err
-		}
+	turnedOn, err := s.ReadyRemoteControl(a)
+	if turnedOn {
 		fmt.Fprintf(c.err, "rota: remote control is on for %s from now on; `rota set %d --remote-control off` turns it off\n",
 			nameOf(a), a.ID)
 	}
-	if err := s.RemoteControlNow(a); errors.Is(err, rota.ErrBusy) {
-		return nil, fmt.Errorf("%w; until then Remote Control would act as the wrong account, so this session is not started", err)
-	} else if err != nil {
+	if err != nil {
 		return nil, err
 	}
 	// Last, so nothing in the arguments before it can be read as its name.

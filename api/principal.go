@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -42,8 +43,9 @@ func (have Role) allows(need Role) bool {
 type Principal struct {
 	Name string `json:"name"`
 	Role Role   `json:"role"`
-	// Via is "token" for a bearer token, "user" for a page sign-in, and
-	// "invite" for a watcher who followed a link.
+	// Via is "token" for a bearer token, "user" for a page sign-in,
+	// "invite" for a watcher who followed a link, and "local" for this
+	// machine's own user on the control socket (LocalHandler).
 	Via string `json:"via"`
 	// Expires is when a session dies. A bearer token has none and leaves it
 	// zero: it lasts as long as the file that names it.
@@ -115,6 +117,8 @@ var roleFor = map[string]Role{
 	"GET /v1/terminals/{id}":    RoleWatch,
 	"POST /v1/terminals":        RoleControl,
 	"DELETE /v1/terminals/{id}": RoleControl,
+	// Typing a message into a held session is typing.
+	"POST /v1/terminals/{id}/messages": RoleControl,
 	// The sockets. Attaching is reading a run; starting one is running it.
 	"GET /v1/runs/{id}/ws":     RoleWatch,
 	"GET /v1/accounts/{id}/ws": RoleControl,
@@ -160,12 +164,95 @@ func needs(pattern string) Role {
 	return RoleControl
 }
 
-// The two sentences a principal is refused with. They are constants because
+// localName is the control socket's principal, and the person it is for the
+// keyboard when nothing else is said.
+const localName = "local"
+
+// ReservedName refuses a name that no user and no token of a daemon may
+// have: local, the control socket's own principal. A user called that would
+// be the same person as the socket at a held session's keyboard, and either
+// would read as the socket wherever a name is shown — who holds a keyboard,
+// and every audit line. It is one sentence wherever a name is chosen: for a
+// daemon (ReservedNames), and in the commands that print a block for the
+// file. Any other name is nil.
+func ReservedName(name string) error {
+	if name == localName {
+		return fmt.Errorf("the name %q is reserved for the control socket's own principal; choose another", localName)
+	}
+	return nil
+}
+
+// ReservedNames refuses a user or a token called local, naming the entry,
+// for a server that has a control socket: one with HoldCommand, which New
+// asks this of, and a daemon's file before it is started. A server without
+// one, foreground `rota serve`, has no principal called local, and a file
+// whose user or token has that name serves there as it did before the
+// daemon.
+func ReservedNames(users []User, tokens []TokenPrincipal) error {
+	for i, u := range users {
+		if err := ReservedName(u.Name); err != nil {
+			return fmt.Errorf("%s: %w", entryName("users", i, u.Name), err)
+		}
+	}
+	for i, t := range tokens {
+		if err := ReservedName(t.Name); err != nil {
+			return fmt.Errorf("%s: %w", entryName("tokens", i, t.Name), err)
+		}
+	}
+	return nil
+}
+
+// personOf is who a principal is as a person, for the keyboard of a held
+// session: the same person on several devices types on whichever of them
+// without asking. A user signed in on the page is its name. The local
+// principal — the control socket, this machine's own terminal — is the one
+// user who may control when there is exactly one, the one auth.local_user
+// names when there are more, and local itself when nobody says. A bearer
+// token or an invite is "", which is never a person: a token is carried by
+// a program, and an invite by whoever was handed the link.
+func (s *Server) personOf(p *Principal) string {
+	if p == nil {
+		return ""
+	}
+	switch p.Via {
+	case "user":
+		return p.Name
+	case "local":
+		only, n := "", 0
+		for _, u := range s.users {
+			if u.role == RoleControl {
+				only, n = u.name, n+1
+			}
+		}
+		switch {
+		case n == 1:
+			return only
+		case s.opts.LocalUser != "":
+			return s.opts.LocalUser
+		}
+		return localName
+	}
+	return ""
+}
+
+// The sentences a principal is refused with. They are constants because
 // they are part of what this server answers, and a test reads them.
+// watchOnly is for a sign-in — a token, a page's user, an invite — and
+// callerWatchOnly for the local principal on the control socket, which is a
+// process of this machine's user and signed in to nothing.
 const (
-	watchOnly   = "this sign-in may only watch; nothing here can be changed from it"
-	crossSiteNo = "a request from another site cannot use this session"
+	watchOnly       = "this sign-in may only watch; nothing here can be changed from it"
+	callerWatchOnly = "this caller may only watch; nothing here can be changed from it"
+	crossSiteNo     = "a request from another site cannot use this session"
 )
+
+// watchOnlyFor is the sentence p is refused a change in.
+func watchOnlyFor(p *Principal) string {
+	if p != nil && p.Via == "local" {
+		return callerWatchOnly
+	}
+	return watchOnly
+}
 
 /* --------------------------------------------------- resolving a request --- */
 
@@ -222,21 +309,32 @@ func (s *Server) byToken(got string) *Principal {
 // guard is auth and authorization for one HTTP route: who is asking, whether
 // the request is theirs to make at all, and whether their role covers it.
 //
+// local is the principal LocalHandler serves every request as, and nil on
+// Handler. With one, nothing on the request is read at all — no token, no
+// cookie, and no Origin, whatever the principal is — so nothing on it is a
+// guess either. The Origin rule is skipped because of where the guard was
+// installed, never because of who the principal says it is: what reaches
+// LocalHandler is the control socket or an SSH channel, which no browser can
+// open, and there is no cookie for a page to ride on.
+//
 // The block on guesses applies to guesses, never to a credential that is
 // right: an address is shared by everyone behind a proxy, and the loopback
 // is reachable from any web page the operator visits, so a block that
 // refused the right token would let a stranger lock the operator out of
 // their own server. A wrong role is not a guess either — it is somebody who
 // proved who they are and asked for something else.
-func (s *Server) guard(pattern string, next http.HandlerFunc) http.HandlerFunc {
+func (s *Server) guard(pattern string, local *Principal, next http.HandlerFunc) http.HandlerFunc {
 	need := needs(pattern)
 	return func(w http.ResponseWriter, r *http.Request) {
-		p, guessed := s.resolve(r)
+		p, guessed := local, false
+		if p == nil {
+			p, guessed = s.resolve(r)
+		}
 		if p == nil {
 			s.refuseToken(w, r, guessed)
 			return
 		}
-		if !s.sameSite(w, r, p) {
+		if local == nil && !s.sameSite(w, r, p) {
 			return
 		}
 		if !p.Role.allows(need) {
@@ -254,10 +352,9 @@ func (s *Server) guard(pattern string, next http.HandlerFunc) http.HandlerFunc {
 // request is this server's. SameSite=Strict already stops the cross-site
 // cases browsers agree on; this is the second lock, for the ones they do not
 // — and it is cheap, because a browser puts Origin on every request that is
-// not a plain navigation. A bearer token is exempt: nothing attaches one to
-// a request but the code that meant to make it.
+// not a plain navigation. Who is exempt is originFree's to say.
 func (s *Server) sameSite(w http.ResponseWriter, r *http.Request, p *Principal) bool {
-	if p.Via == "token" || r.Method == http.MethodGet || r.Method == http.MethodHead {
+	if originFree(p) || r.Method == http.MethodGet || r.Method == http.MethodHead {
 		return true
 	}
 	if sameOrigin(r) {
@@ -268,6 +365,14 @@ func (s *Server) sameSite(w http.ResponseWriter, r *http.Request, p *Principal) 
 	fail(w, http.StatusForbidden, crossSiteNo)
 	return false
 }
+
+// originFree reports whether a principal is exempt from the Origin rule on
+// Handler, on a request and on a socket alike: it is one no browser can have
+// attached to a request by itself, so no page can have tricked it into one.
+// Only a bearer token is: it is put on a request only by the code that meant
+// to make it. LocalHandler never asks, since it reads no Origin for anybody,
+// so no principal is exempt here for arriving there.
+func originFree(p *Principal) bool { return p.Via == "token" }
 
 // sameOrigin reports whether this request says it came from this server's
 // own page. Origin is what a browser sends; Referer is the fallback for the
@@ -305,5 +410,5 @@ func crossSiteWrite(r *http.Request) bool {
 func (s *Server) refuseRole(w http.ResponseWriter, r *http.Request, p *Principal, need Role) {
 	s.log.Warn("refused by role", "name", p.Name, "role", p.Role, "needed", need,
 		"method", r.Method, "path", r.URL.Path, "ip", clientIP(r))
-	fail(w, http.StatusForbidden, watchOnly)
+	fail(w, http.StatusForbidden, watchOnlyFor(p))
 }

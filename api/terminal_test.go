@@ -507,6 +507,47 @@ func TestControlMayAttachToWatchAndThenMayNotType(t *testing.T) {
 
 /* ---------------------------------------------------------- the keyboard --- */
 
+// hello is the first frame, always. A control attach that takes a free
+// keyboard is told it holds it after its hello, on a terminal of a
+// foreground server and on a held session alike, and somebody already there
+// is told as before.
+func TestHelloComesFirstWhenAnAttachTakesTheKeyboard(t *testing.T) {
+	for _, c := range []struct {
+		what  string
+		start func(*testing.T) *terms
+	}{
+		{"a terminal", func(t *testing.T) *terms { return withTerminals(t) }},
+		{"a held session", func(t *testing.T) *terms { return withHeld(t, nil) }},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			p := c.start(t)
+			id := p.start(nil)["id"].(string)
+			looker := p.attach(id, p.watch, "")
+			looker.waitType("hello")
+
+			alice := p.attach(id, p.alice, "")
+			var docs []map[string]any
+			for len(docs) < 2 {
+				switch op, payload := alice.step(); op {
+				case opText:
+					docs = append(docs, alice.c.log[len(alice.c.log)-1])
+				case opClose:
+					t.Fatalf("the socket closed with %d:\n%s", closeCode(payload), alice.c.all())
+				}
+			}
+			if docs[0]["type"] != "hello" || docs[0]["holder"] != "alice" {
+				t.Fatalf("the first frame is %v, not alice's hello", docs[0])
+			}
+			if docs[1]["type"] != "keyboard" || docs[1]["holder"] != "alice" {
+				t.Fatalf("the frame after hello is %v, not the keyboard taken", docs[1])
+			}
+			looker.waitDoc("the keyboard taken", func(d map[string]any) bool {
+				return d["type"] == "keyboard" && d["holder"] == "alice"
+			})
+		})
+	}
+}
+
 // Asking, being refused, being given it, and taking it when nobody answers.
 func TestClaimingTheKeyboard(t *testing.T) {
 	p := withTerminals(t)

@@ -354,6 +354,9 @@ func (s *Server) beginInput(p *prepared, hold *held) (*liveRun, error) {
 			// What the readings are read from, beyond the result: the stream's
 			// tally, the account, and a fresh quota reading when one was asked for.
 			src := message.Sources{Tally: tally, Account: a, Threshold: rotation.Cutoff(a)}
+			// Read before anybody can see the run has ended, so whoever
+			// waited for that and then changed keepEnded changed it after.
+			keep := keepEnded
 			if with.Quota {
 				for _, e := range st.Refresh(s.ctx, true, a) {
 					s.log.Warn("quota reading failed", "account", a.ID, "err", e)
@@ -367,7 +370,7 @@ func (s *Server) beginInput(p *prepared, hold *held) (*liveRun, error) {
 			// Kept for a while after it ended, so a reader that reattaches late
 			// is given the tail and the terminal event rather than a 404 it
 			// could not tell from a wrong id.
-			time.AfterFunc(keepEnded, func() { s.dropRun(lr.id) })
+			time.AfterFunc(keep, func() { s.dropRun(lr.id) })
 		}()
 	}
 	defer func() {

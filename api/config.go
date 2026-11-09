@@ -90,6 +90,11 @@ type AuthSection struct {
 	// a per-user lifetime would be one more thing to get wrong in a file
 	// somebody edits by hand.
 	SessionTTL time.Duration `toml:"session_ttl"`
+	// LocalUser is the person the control socket's principal, local, is
+	// for the keyboard of a held session: the [[users]] entry it names,
+	// which may control. Empty is the only control user when there is
+	// exactly one, and local as a person of its own otherwise.
+	LocalUser string `toml:"local_user"`
 }
 
 // UserEntry is one person who may sign in on the page: a name, a role, and
@@ -146,6 +151,11 @@ type TerminalSection struct {
 	// long, so a CLI left running over a weekend is not still holding an
 	// account on Monday.
 	IdleTimeout time.Duration `toml:"idle_timeout"`
+	// KeepStopped is how long a held session that has stopped — ended, or
+	// interrupted by its holder going — stays listed with what is known
+	// about it, so it can be resumed or read about, before its record is
+	// forgotten.
+	KeepStopped time.Duration `toml:"keep_stopped"`
 	// Record keeps what each terminal printed — and never what was typed
 	// into it — under the store, up to RecordMaxBytes each.
 	Record         bool  `toml:"record"`
@@ -193,7 +203,8 @@ func DefaultConfig() *Config {
 		},
 		Terminal: TerminalSection{
 			MaxSessions: 8, ScrollbackBytes: defaultScrollback,
-			IdleTimeout: 12 * time.Hour, RecordMaxBytes: 50 << 20, Share: true,
+			IdleTimeout: 12 * time.Hour, KeepStopped: defaultKeepStopped,
+			RecordMaxBytes: 50 << 20, Share: true,
 		},
 		From: map[string]string{},
 	}
@@ -276,6 +287,9 @@ func (c *Config) Check() error {
 	if c.Auth.SessionTTL <= 0 {
 		return errors.New("auth.session_ttl must be longer than nothing")
 	}
+	if err := c.checkLocalUser(); err != nil {
+		return err
+	}
 	for _, d := range []struct {
 		key string
 		val time.Duration
@@ -300,6 +314,9 @@ func (c *Config) Check() error {
 	}
 	if c.Terminal.IdleTimeout <= 0 {
 		return errors.New("terminal.idle_timeout must be longer than nothing")
+	}
+	if c.Terminal.KeepStopped <= 0 {
+		return errors.New("terminal.keep_stopped must be longer than nothing")
 	}
 	if _, err := ListenAddr(c.Server.Listen); err != nil {
 		return fmt.Errorf("server.listen: %w", err)
@@ -403,6 +420,22 @@ func (c *Config) checkPrincipals() error {
 		}
 	}
 	return nil
+}
+
+// checkLocalUser refuses an auth.local_user that is not somebody who may
+// sign in and control: the local principal typing as a watcher, or as a
+// name nobody signs in with, would be a person the file never meant.
+func (c *Config) checkLocalUser() error {
+	name := c.Auth.LocalUser
+	if name == "" {
+		return nil
+	}
+	for _, u := range c.Users {
+		if u.Name == name && Role(u.Role) == RoleControl {
+			return nil
+		}
+	}
+	return fmt.Errorf("auth.local_user names %q, who is not a [[users]] entry that may control", name)
 }
 
 // entryName is how one entry of an array of tables is pointed at in a
@@ -537,6 +570,7 @@ func (c *Config) Serve() (Options, Listener, error) {
 		Users:          users,
 		Tokens:         tokens,
 		SessionTTL:     c.Auth.SessionTTL,
+		LocalUser:      c.Auth.LocalUser,
 		Roots:          roots,
 		AllowDangerous: c.Runs.AllowDangerous,
 		AllowRawFlags:  c.Runs.AllowRawFlags,
@@ -550,7 +584,8 @@ func (c *Config) Serve() (Options, Listener, error) {
 		Terminal: Terminal{
 			Shell: c.Terminal.Shell, MaxSessions: c.Terminal.MaxSessions,
 			Scrollback: c.Terminal.ScrollbackBytes, IdleTimeout: c.Terminal.IdleTimeout,
-			Record: c.Terminal.Record, RecordMax: c.Terminal.RecordMaxBytes,
+			KeepStopped: c.Terminal.KeepStopped,
+			Record:      c.Terminal.Record, RecordMax: c.Terminal.RecordMaxBytes,
 			Share: &share,
 		},
 	}, Listener{Addr: addr, Cert: c.TLS.Cert, Key: c.TLS.Key}, nil
@@ -623,6 +658,7 @@ func (c *Config) Print(w io.Writer, token string) error {
 	str("auth.token_file", c.Auth.TokenFile)
 	str("auth.token_env", c.Auth.TokenEnv)
 	span("auth.session_ttl", c.Auth.SessionTTL)
+	str("auth.local_user", c.Auth.LocalUser)
 
 	body.WriteString("\n[routes]\n")
 	yes("routes.api", c.Routes.API)
@@ -651,6 +687,7 @@ func (c *Config) Print(w io.Writer, token string) error {
 	num("terminal.max_sessions", c.Terminal.MaxSessions)
 	num("terminal.scrollback_bytes", c.Terminal.ScrollbackBytes)
 	span("terminal.idle_timeout", c.Terminal.IdleTimeout)
+	span("terminal.keep_stopped", c.Terminal.KeepStopped)
 	yes("terminal.record", c.Terminal.Record)
 	key("terminal.record_max_bytes", strconv.FormatInt(c.Terminal.RecordMaxBytes, 10))
 	yes("terminal.share", c.Terminal.Share)

@@ -136,6 +136,7 @@ let termSock = null;         // the one socket; there is never a second
 let termView = null;         // the emulator adapter
 let termSeen = false;        // a hello has arrived for this terminal
 let termOffset = 0;          // the absolute offset of the next byte
+let termPaint = false;       // the next binary frame is a held session's screen
 let termCols = 80, termRows = 24;
 let termKind = null;         // "account", "shell", or "shared"
 let termMode = null;         // for a shared one: "control" or "watch"
@@ -425,7 +426,10 @@ function termConnect() {
       return;
     }
     const bytes = new Uint8Array(e.data);
-    termOffset += bytes.byteLength;
+    // A held session's screen stands for the offset it was announced with,
+    // and is not output: only what follows it moves the offset on.
+    if (termPaint) termPaint = false;
+    else termOffset += bytes.byteLength;
     if (termView) termView.write(bytes);
   };
   sock.onclose = ev => {
@@ -455,6 +459,7 @@ function termFrame(doc) {
     case "hello":
       termSeen = true; termTries = 0; termWait = 0;
       termOffset = doc.offset || 0;
+      termPaint = doc.repaint === true;
       termKind = doc.kind || null; termMode = doc.mode || null;
       termCols = doc.cols || termCols; termRows = doc.rows || termRows;
       termHolder = doc.holder || null;
@@ -471,6 +476,18 @@ function termFrame(doc) {
       // longer has, and output a sharer could not get to this server at all.
       // The second carries its own count, because no offset moved for it.
       termMark("… " + (doc.bytes || ((doc.to || 0) - (doc.from || 0))) + " bytes were not kept …");
+      // The offsets go on from its end.
+      if (typeof doc.to === "number" && doc.to > termOffset) termOffset = doc.to;
+      break;
+    case "repaint":
+      // A held session's viewer that fell behind: what it missed is not
+      // sent, and the next binary frame is the screen as it is now, standing
+      // for this offset, at this size.
+      termOffset = doc.offset || 0;
+      termPaint = true;
+      termCols = doc.cols || termCols; termRows = doc.rows || termRows;
+      if ((termShared() || !termIHold()) && termView) termView.resize(termCols, termRows);
+      renderTermStrip();
       break;
     case "keyboard":
       termHolder = doc.holder || null;

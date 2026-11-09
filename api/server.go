@@ -19,10 +19,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os/exec"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/pty"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/rotation"
 	"github.com/professor93/rota/sessions"
@@ -78,9 +82,23 @@ type Options struct {
 	Tokens []TokenPrincipal
 	// SessionTTL is how long a page sign-in lasts. Zero is twelve hours.
 	SessionTTL time.Duration
+	// LocalUser is which of Users the control socket's principal, local,
+	// counts as for the keyboard of a held session when more than one of
+	// them may control. Empty with exactly one control user is that user,
+	// and with more is local, a person of its own.
+	LocalUser string
 	// Terminal is everything about the terminals this server holds. It does
 	// nothing unless Routes.Terminal is on.
 	Terminal Terminal
+	// HoldCommand makes this server a daemon whose terminals outlive it.
+	// Each terminal is started as the command it returns — `rota serve
+	// hold`, which keeps the CLI in a process of its own — with ROTA_HOME
+	// set to this server's store and in a session of its own; the request
+	// goes to its standard input. New then claims the store's daemon lock,
+	// and refuses where another daemon holds it, and Stop lets go of those
+	// terminals instead of ending them. Nil runs every terminal in this
+	// process, as a server always has.
+	HoldCommand func() *exec.Cmd
 }
 
 // Terminal configures the terminals a server may hold: how many, how much of
@@ -100,6 +118,10 @@ type Terminal struct {
 	// IdleTimeout ends a terminal nobody has been attached to for this long
 	// (default 12h). Zero is the default; negative never ends one.
 	IdleTimeout time.Duration
+	// KeepStopped is how long a daemon keeps listing a held session that
+	// has stopped, measured from when it stopped, before its directory is
+	// deleted (default 168h). Zero is the default; negative keeps every one.
+	KeepStopped time.Duration
 	// Record keeps each terminal's output — never its input — under the
 	// store, up to RecordMax bytes each (default 50 MiB).
 	Record    bool
@@ -207,6 +229,27 @@ type Server struct {
 	// knows where they are. Ended ones stay a few minutes, as runs do.
 	terms   map[string]*termSession
 	termsMu sync.Mutex
+	// starting is how many terminals have a place under max_sessions and
+	// are not listed yet, under termsMu. startMu makes counting the places
+	// and taking one a single step.
+	starting int
+	startMu  sync.Mutex
+	// pending are the held sessions on their way to terms, so nothing else
+	// takes the same one up meanwhile: true for a holder being started,
+	// which has its place in starting already, false for one being linked
+	// to again. unlinked are the running holders a sweep could not link
+	// to, said once in the log. stopping is Stop having begun: a session
+	// taken up after that is let go of rather than added. signalled are
+	// the running sessions a DELETE is stopping by signal, so another
+	// DELETE meanwhile signals nothing more. labels are the accounts' own
+	// names by id as the last sweep read them, for the sessions a record
+	// names by id alone, so describing one never waits on the store. All
+	// of these are termsMu's.
+	pending   map[string]bool
+	unlinked  map[string]bool
+	signalled map[string]bool
+	labels    map[int]string
+	stopping  bool
 	// share is the socket a terminal somebody is sitting at is offered
 	// over, or nil where the file said not to hold one.
 	share *shareSocket
@@ -220,6 +263,14 @@ type Server struct {
 	// server stops, or earlier, when its shutdown begins (StopRefreshing).
 	sweeps     context.Context
 	stopSweeps context.CancelFunc
+	// terminals is the store's terminals directory and unclaim lets go of
+	// its daemon lock, for a server with HoldCommand; both are empty
+	// otherwise.
+	terminals string
+	unclaim   func()
+	// claimed is the daemon claim being held: set by New with unclaim, and
+	// cleared by Stop just before it lets go (HoldsDaemon).
+	claimed atomic.Bool
 	// Who may ask for what: the users and tokens the configuration named,
 	// checked once here, and the two tables of live credentials a page
 	// hands out. All of it is read-only after New but the two tables, which
@@ -272,6 +323,9 @@ func New(opts Options) (*Server, error) {
 		// nothing could attach to one, or the other way round.
 		return nil, errors.New("api: the terminal needs the API and the WebSocket routes")
 	}
+	if opts.HoldCommand != nil && !pty.Supported {
+		return nil, fmt.Errorf("api: %w", holdwire.ErrPlatform)
+	}
 	if opts.Terminal.MaxSessions <= 0 {
 		opts.Terminal.MaxSessions = 8
 	}
@@ -282,6 +336,9 @@ func New(opts Options) (*Server, error) {
 		// Zero is "unset", not "ends at once": a negative timeout is how a
 		// caller says a terminal should outlive everything.
 		opts.Terminal.IdleTimeout = 12 * time.Hour
+	}
+	if opts.Terminal.KeepStopped == 0 {
+		opts.Terminal.KeepStopped = defaultKeepStopped
 	}
 	if opts.Terminal.RecordMax <= 0 {
 		opts.Terminal.RecordMax = 50 << 20
@@ -294,12 +351,18 @@ func New(opts Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	if opts.HoldCommand != nil {
+		if err := ReservedNames(opts.Users, opts.Tokens); err != nil {
+			return nil, fmt.Errorf("api: %w", err)
+		}
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		opts: opts, sem: make(chan struct{}, opts.MaxConcurrent), limit: newLimiter(),
 		log: log, ctx: ctx, cancel: cancel, forced: map[int]time.Time{},
 		runs:     map[string]*liveRun{},
 		terms:    map[string]*termSession{},
+		pending:  map[string]bool{},
 		users:    users,
 		tokens:   tokens,
 		decoy:    decoyFor(users),
@@ -307,12 +370,28 @@ func New(opts Options) (*Server, error) {
 		invites:  newInvites(),
 	}
 	s.sweeps, s.stopSweeps = context.WithCancel(ctx)
+	// Before anything else starts: a server that may not be this store's
+	// daemon must leave nothing running behind its refusal.
+	if opts.HoldCommand != nil {
+		if err := s.claimDaemon(); err != nil {
+			cancel()
+			return nil, err
+		}
+		// Every holder still running on the store is this daemon's from
+		// here, and every stopped session is listed, before the first
+		// request can ask.
+		s.sweepRecords()
+	}
 	if opts.RefreshEvery > 0 {
 		s.keeperDone = make(chan struct{})
 		go s.keepFresh(opts.RefreshEvery)
 	}
-	if opts.Routes.Terminal {
+	// A daemon holds terminals whatever its routes say: they are reached
+	// over more than the routes this file registers.
+	if opts.Routes.Terminal || opts.HoldCommand != nil {
 		go s.keepTerminals()
+	}
+	if opts.Routes.Terminal {
 		// Before anything is served: a terminal somebody is sitting at can
 		// be offered the moment this returns, and a socket opened later
 		// would refuse the sharer that was already waiting.
@@ -472,7 +551,14 @@ func (s *Server) maintain() (reset time.Time) {
 // one included, which http.Server.Shutdown does not wait for — so Stop waits
 // for them, up to store.RefreshTimeout and a margin: a process that exits
 // before the answer has lost the token that replaced the one presented.
+//
+// A held terminal is the exception: it is let go of, still running, for the
+// next daemon on the store to take up — and the daemon's claim on the store
+// goes last, once nothing of this one is left to compete with that daemon.
 func (s *Server) Stop() {
+	s.termsMu.Lock()
+	s.stopping = true
+	s.termsMu.Unlock()
 	// The socket first, so nothing new is offered to a server that is
 	// stopping, and the file it left behind goes with it.
 	if s.share != nil {
@@ -484,6 +570,10 @@ func (s *Server) Stop() {
 	s.StopRefreshing()
 	s.cancel()
 	s.settle()
+	if s.unclaim != nil {
+		s.claimed.Store(false)
+		s.unclaim()
+	}
 }
 
 // StopRefreshing ends the background refresher's sweeps: none starts after
@@ -584,22 +674,57 @@ func (s *Server) Handler() http.Handler {
 
 	if s.opts.Routes.API {
 		for pattern, h := range s.guarded() {
-			mux.Handle(pattern, s.guard(pattern, h))
+			mux.Handle(pattern, s.guard(pattern, nil, h))
 		}
 	}
 	if s.opts.Routes.WebSocket {
 		for pattern, h := range s.sockets() {
-			mux.Handle(pattern, s.wsAuth(pattern, h))
+			mux.Handle(pattern, s.wsAuth(pattern, nil, h))
 		}
 	}
 	return s.recover(mux)
 }
 
-// guarded is every route under /v1 that takes a principal, HTTP side. It is
-// a method rather than a literal inside Handler so that the role table can
-// be checked against it: a route added here without a row there is a failing
-// test rather than a route that quietly takes control.
-func (s *Server) guarded() map[string]http.HandlerFunc {
+// LocalHandler serves every route that takes a principal — the API, the
+// sockets and the terminals with their send, whatever Routes says — to p, and
+// to nobody else: whoever mounts it has already decided who is at the other
+// end, from something no request can forge. The control socket decides by
+// the socket's own permissions and the peer's process; an SSH server would
+// decide by the key. So no token, cookie or Origin is read here, whoever p
+// is, a wrong token is not a guess, and the role table alone says what p may
+// do.
+//
+// Beside those it answers /v1/health, and GET /v1/session with p, so a
+// client can ask whether it may change anything before it tries. Nothing a
+// browser alone uses is here — no page, its assets, the invite landing, or
+// signing in and out — because nothing that reaches this handler is a
+// browser.
+func (s *Server) LocalHandler(p *Principal) http.Handler {
+	local := *p // a copy: every request is this principal, whatever the caller does with p later
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /v1/health", s.health)
+	mux.HandleFunc("GET /v1/session", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, view(&local))
+	})
+	for pattern, h := range s.guardedIn(true) {
+		mux.Handle(pattern, s.guard(pattern, &local, h))
+	}
+	for pattern, h := range s.socketsIn(true) {
+		mux.Handle(pattern, s.wsAuth(pattern, &local, h))
+	}
+	return s.recover(mux)
+}
+
+// guarded is every route under /v1 that takes a principal, HTTP side, as
+// Handler registers it: the terminals only where that group is on.
+func (s *Server) guarded() map[string]http.HandlerFunc { return s.guardedIn(s.opts.Routes.Terminal) }
+
+// guardedIn is the table guarded and LocalHandler are both read from, with
+// the terminals or without. It is a method rather than a literal inside
+// Handler so that the role table can be checked against it: a route added
+// here without a row there is a failing test rather than a route that
+// quietly takes control.
+func (s *Server) guardedIn(terminal bool) map[string]http.HandlerFunc {
 	routes := map[string]http.HandlerFunc{
 		"GET /v1/schema":               s.schema,
 		"GET /v1/accounts":             s.listAccounts,
@@ -629,11 +754,12 @@ func (s *Server) guarded() map[string]http.HandlerFunc {
 	}
 	// A group that is off is not registered at all, so its paths answer 404
 	// like any path this server never had.
-	if s.opts.Routes.Terminal {
+	if terminal {
 		routes["GET /v1/terminals"] = s.listTerminals
 		routes["GET /v1/terminals/{id}"] = s.describeTerminal
 		routes["POST /v1/terminals"] = s.createTerminal
 		routes["DELETE /v1/terminals/{id}"] = s.killTerminal
+		routes["POST /v1/terminals/{id}/messages"] = s.sendTerminal
 	}
 	return routes
 }
@@ -641,13 +767,17 @@ func (s *Server) guarded() map[string]http.HandlerFunc {
 // sockets is the same three doors as a WebSocket: one run, carried both
 // ways. They are guarded apart because a browser cannot put a header on a
 // WebSocket, so the credential may arrive as a subprotocol or a cookie.
-func (s *Server) sockets() map[string]http.HandlerFunc {
+func (s *Server) sockets() map[string]http.HandlerFunc { return s.socketsIn(s.opts.Routes.Terminal) }
+
+// socketsIn is sockets with the terminal's socket or without, for Handler
+// and LocalHandler alike.
+func (s *Server) socketsIn(terminal bool) map[string]http.HandlerFunc {
 	routes := map[string]http.HandlerFunc{
 		"GET /v1/runs/{id}/ws":     s.attachWS,
 		"GET /v1/accounts/{id}/ws": s.startWS,
 		"GET /v1/ws":               s.startWS,
 	}
-	if s.opts.Routes.Terminal {
+	if terminal {
 		routes["GET /v1/terminals/{id}/ws"] = s.terminalWS
 	}
 	return routes

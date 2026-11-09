@@ -68,6 +68,7 @@ key = "/k.pem"
 token = "t"
 token_env = "OTHER"
 session_ttl = "2h"
+local_user = "inoyat"
 
 [routes]
 api = true
@@ -81,6 +82,7 @@ shell = true
 max_sessions = 2
 scrollback_bytes = 4096
 idle_timeout = "90m"
+keep_stopped = "36h"
 record = true
 record_max_bytes = 1024
 share = false
@@ -115,7 +117,7 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 	want := &Config{
 		Server: ServerSection{Listen: "0.0.0.0:1234", Quiet: true},
 		TLS:    TLSSection{Cert: "/c.pem", Key: "/k.pem"},
-		Auth:   AuthSection{Token: "t", TokenEnv: "OTHER", SessionTTL: 2 * time.Hour},
+		Auth:   AuthSection{Token: "t", TokenEnv: "OTHER", SessionTTL: 2 * time.Hour, LocalUser: "inoyat"},
 		Routes: RoutesSection{API: true},
 		Runs: RunsSection{
 			Timeout: 30 * time.Second, MaxConcurrent: 2, InputTimeout: 5 * time.Minute,
@@ -124,7 +126,8 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 		},
 		Terminal: TerminalSection{
 			Shell: true, MaxSessions: 2, ScrollbackBytes: 4096,
-			IdleTimeout: 90 * time.Minute, Record: true, RecordMaxBytes: 1024, Share: false,
+			IdleTimeout: 90 * time.Minute, KeepStopped: 36 * time.Hour,
+			Record: true, RecordMaxBytes: 1024, Share: false,
 		},
 		Store: StoreSection{Dir: "/srv/rota"},
 		Users: []UserEntry{{Name: "inoyat", Role: "control",
@@ -522,5 +525,126 @@ func TestPrintIsStillAFileWhenNothingIsSecret(t *testing.T) {
 	}
 	if err := back.Check(); err != nil {
 		t.Fatalf("what it printed is not a file it would serve with: %v", err)
+	}
+}
+
+// TestKeepStoppedIsADuration: how long a stopped held session stays listed
+// is a length of time like every other one here, written the way the parser
+// reads it back, refused when it is nothing, and handed to the server as
+// it was written.
+func TestKeepStoppedIsADuration(t *testing.T) {
+	var b bytes.Buffer
+	if err := DefaultConfig().Print(&b, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "\nkeep_stopped    = \"168h\"") {
+		t.Fatalf("the default is not printed as 168h:\n%s", b.String())
+	}
+	if _, err := LoadConfig(write(t, "[terminal]\nkeep_stopped = \"0s\"\n")); err == nil ||
+		!strings.Contains(err.Error(), "terminal.keep_stopped must be longer than nothing") {
+		t.Fatalf("0s answers %v", err)
+	}
+	c, err := LoadConfig(write(t, "[terminal]\nkeep_stopped = \"72h\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts, _, err := c.Serve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Terminal.KeepStopped != 72*time.Hour {
+		t.Fatalf("72h came through as %v", opts.Terminal.KeepStopped)
+	}
+	if c.From["terminal.keep_stopped"] != "file" {
+		t.Fatalf("the file's own key is %q", c.From["terminal.keep_stopped"])
+	}
+}
+
+// TestLocalUserMustBeAControlUser: auth.local_user says which person the
+// local principal is, so it names somebody who may sign in and may control,
+// or the file is refused. Named rightly, it reaches the server and is
+// printed like every other key.
+func TestLocalUserMustBeAControlUser(t *testing.T) {
+	user := func(name, role string) string {
+		return "[[users]]\nname = \"" + name + "\"\nrole = \"" + role + "\"\npassword = \"" + goodHash() + "\"\n"
+	}
+	for _, c := range []struct{ name, body, who string }{
+		{"nobody by that name", "[auth]\nlocal_user = \"ghost\"\n" + user("me", "control"), "ghost"},
+		{"a watcher", "[auth]\nlocal_user = \"viewer\"\n" + user("me", "control") + user("viewer", "watch"), "viewer"},
+		{"a token's name", "[auth]\nlocal_user = \"ci\"\n[[tokens]]\nname = \"ci\"\nrole = \"control\"\nsha256 = \"" +
+			strings.Repeat("ab", 32) + "\"\n", "ci"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			_, err := LoadConfig(write(t, c.body))
+			want := `auth.local_user names "` + c.who + `", who is not a [[users]] entry that may control`
+			if err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("%q answers %v, want %q", c.body, err, want)
+			}
+		})
+	}
+	c, err := LoadConfig(write(t, "[auth]\nlocal_user = \"you\"\n"+user("me", "control")+user("you", "control")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts, _, err := c.Serve()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.LocalUser != "you" {
+		t.Fatalf("local_user came through as %q", opts.LocalUser)
+	}
+	var b bytes.Buffer
+	if err := DefaultConfig().Print(&b, ""); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(b.String(), "\nlocal_user      = \"\"") {
+		t.Fatalf("local_user is not printed:\n%s", b.String())
+	}
+}
+
+// TestLocalIsTheSoleControlUser: the principal on the control socket is a
+// person for the keyboard's sake — the one user who may control when there
+// is exactly one, the one local_user names when there are more, and itself
+// when neither says. A user is who signed in; a token or an invite is
+// nobody.
+func TestLocalIsTheSoleControlUser(t *testing.T) {
+	server := func(local string, users ...User) *Server {
+		t.Helper()
+		s, err := New(Options{Token: "x", Dir: t.TempDir(), RefreshEvery: -1, Users: users, LocalUser: local})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(s.Stop)
+		return s
+	}
+	person := func(name string, role Role) User { return User{Name: name, Role: role, Password: cheapHash()} }
+	local := &Principal{Name: "local", Role: RoleControl, Via: "local"}
+
+	if got := server("", person("me", RoleControl), person("viewer", RoleWatch)).personOf(local); got != "me" {
+		t.Errorf("with one control user, local is %q, want me", got)
+	}
+	two := server("", person("me", RoleControl), person("you", RoleControl))
+	if got := two.personOf(local); got != "local" {
+		t.Errorf("with two control users and no local_user, local is %q, want local", got)
+	}
+	if got := server("you", person("me", RoleControl), person("you", RoleControl)).personOf(local); got != "you" {
+		t.Errorf("with local_user = you, local is %q, want you", got)
+	}
+	if got := server("").personOf(local); got != "local" {
+		t.Errorf("with nobody to sign in, local is %q, want local", got)
+	}
+	for _, c := range []struct {
+		p    *Principal
+		want string
+	}{
+		{&Principal{Name: "me", Role: RoleControl, Via: "user"}, "me"},
+		{&Principal{Name: "viewer", Role: RoleWatch, Via: "user"}, "viewer"},
+		{&Principal{Name: "token", Role: RoleControl, Via: "token"}, ""},
+		{&Principal{Name: "invite-abcdef", Role: RoleWatch, Via: "invite"}, ""},
+		{nil, ""},
+	} {
+		if got := two.personOf(c.p); got != c.want {
+			t.Errorf("%+v is the person %q, want %q", c.p, got, c.want)
+		}
 	}
 }

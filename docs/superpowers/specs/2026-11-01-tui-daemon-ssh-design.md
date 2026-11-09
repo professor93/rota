@@ -163,9 +163,13 @@ screen, a scrollback ring and a socket. It:
   the account's run claim lives with it. Like `terminals.go:225-238`, it calls
   `Launchable` first and closes the store after. rota cannot rewrite a login
   under a running session.
-- calls `store.KeepClaimsAcrossExec()` before starting the child, because the
-  claim is close-on-exec: without this a killed holder would free the claim while
-  the CLI lives, and a codex token could burn. The claim ends when the CLI does.
+- calls `store.KeepClaimsAcrossExec()` before starting a claude child, because
+  the claim is close-on-exec: without this a killed holder would free the claim
+  while the CLI lives. A codex child is kept from the claim (`lend.Lends`), as
+  an interactive codex run's CLI is: Codex's app-server daemon would inherit it
+  and keep the account claimed after the session ended. The holder, which lives
+  exactly as long as the CLI, keeps that claim itself. The claim ends when the
+  CLI does.
 - listens on `<store>/terminals/<id>/sock`, directory 0700, socket 0600.
   It accepts one daemon link, and a new link replaces the old only when it
   comes from the process that holds the daemon lock; anything else is refused.
@@ -488,8 +492,8 @@ only while it runs.
   says who can reach it. `0.0.0.0` is offered last, with that warning.
 - A non-loopback address gets HTTPS with a certificate made for this run, and
   rota prints its fingerprint to compare. Plain HTTP on a non-loopback address
-  follows the owner's answer on the decisions page; rota's rule for the server
-  is TLS.
+  is refused, with no flag to allow it: the owner chose HTTPS only on
+  2026-11-04, matching rota's rule for the server.
 - The link carries a random secret of 256 bits, in the path, and any other path
   answers 404. It ends after one accepted login, after 10 minutes, or on Ctrl-C,
   whichever comes first, and the listener closes with it.
@@ -657,7 +661,8 @@ one of them shipped; where a rule and an earlier section differ, this one wins.
   secrets: `TMUX`, host terminal ids, and the marks a CLI puts on what it
   starts — `CLAUDECODE`, `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`,
   `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_CODE_ENTRYPOINT`, `CODEX_THREAD_ID`,
-  `CODEX_SESSION_ID`, `CODEX_TOOL_CALL_ID`. An account's CLI also gets its
+  `CODEX_SESSION_ID`, `CODEX_TOOL_CALL_ID`; the claude marks are one list
+  (`termenv.ClaudeMarks`) with lib's `claudeCompeting`. An account's CLI also gets its
   provider's own drop list (lib's `claudeCompeting` and `codexCompeting`),
   which names exactly everything that would sign it in some other way, send it
   elsewhere, or say it is nested. `run --detach` and New from the
