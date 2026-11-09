@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,6 +36,50 @@ func (s *Store) BeginLongLogin(ctx context.Context, provider string) (*rota.Logi
 	return s.park(rota.BeginLong(ctx, provider))
 }
 
+// BeginLoginFor starts an ordinary login for the account with this id and
+// parks it the same way, with the account's id on it (rota.Login.Account).
+// FinishLogin then signs in that account or nothing: see refuseBound.
+//
+// It is for an account whose login rota holds, a dead one above all. What has
+// no sign-in to start is refused here, before anybody is sent to a browser: an
+// API key, a provider whose credential is a pasted key, a CLI that signs itself
+// in, and an account with no uuid or e-mail, which no approval could be matched
+// to. An account unknown here is rota.ErrNoAccount.
+func (s *Store) BeginLoginFor(ctx context.Context, id int) (*rota.Login, error) {
+	a := s.Find(id)
+	if a == nil {
+		return nil, rota.WrapNoAccount(id)
+	}
+	switch {
+	case a.APIKey():
+		return nil, rota.Invalid("account %d runs on an API key, so it has no sign-in to start; `rota login --key` takes a key: "+
+			"this one again is this account, and a different one makes an account of its own", a.ID)
+	case a.Delegated:
+		return nil, signsItselfIn(a)
+	case a.UUID == "" && a.Email == "":
+		return nil, rota.Invalid("rota knows account %d by no uuid or e-mail, so no approval could be matched to it; "+
+			"`rota login %s` signs in whoever approves, as an account of its own, and `rota remove %d` drops this one",
+			a.ID, a.Provider, a.ID)
+	}
+	l, err := rota.Begin(ctx, a.Provider)
+	if err != nil {
+		return nil, err
+	}
+	switch l.Kind {
+	case "apikey":
+		return nil, rota.Invalid("account %d runs on a %s key, so it has no sign-in to start; `rota login %s` takes a key: "+
+			"this one again is this account, and a different one makes an account of its own", a.ID, a.Provider, a.Provider)
+	case "delegated":
+		return nil, signsItselfIn(a)
+	}
+	l.Account = a.ID
+	return s.park(l, nil)
+}
+
+func signsItselfIn(a *rota.Account) error {
+	return rota.Invalid("account %d signs in through its own CLI, so rota has no sign-in to start for it", a.ID)
+}
+
 func (s *Store) park(l *rota.Login, err error) (*rota.Login, error) {
 	if err != nil {
 		return nil, err
@@ -66,6 +111,9 @@ func (s *Store) PendingLogin(id string) (*rota.Login, error) {
 //
 // A rejected code leaves the parked login alone, so a typo costs one retry
 // rather than a whole login; ErrAuthPending is passed through unchanged.
+//
+// A login begun for one account (BeginLoginFor) updates that account or
+// nothing, however the approval went: see refuseBound.
 func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Account, added bool, err error) {
 	m, err := s.loadPendings()
 	if err != nil {
@@ -88,6 +136,9 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 		return a, false, s.savePendings(m)
 	}
 	a = rota.MatchIdentity(s.Accounts, l.Provider, tok.Identity)
+	if err := s.refuseBound(l, tok, a); err != nil {
+		return nil, false, err
+	}
 	if a == nil {
 		a = s.add(l.Provider)
 		added = true
@@ -107,6 +158,48 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 	}
 	delete(m, id)
 	return a, added, s.savePendings(m)
+}
+
+// refuseBound turns down a login begun for one account when anything but that
+// account approved it; approved is the account the approval resolved to, or
+// nil. A login that names no account is never refused here.
+//
+// Several accounts in one browser make approving as the wrong one the likely
+// mistake, and taking it would leave the account that was asked for dead while
+// the command looked done: the other account updated, or a new one made. So it
+// writes nothing and makes nothing.
+//
+// The parked login is left alone, as attachLong leaves it and for the same
+// reason: approving again as the right account and pasting the new code
+// finishes the same login.
+func (s *Store) refuseBound(l *rota.Login, tok *rota.Token, approved *rota.Account) error {
+	if l.Account == 0 {
+		return nil
+	}
+	named := s.Find(l.Account)
+	if named == nil {
+		return rota.Invalid("%s account %d, which this login was begun for, is no longer here; nothing was stored, and `rota login %s` starts a login of its own",
+			l.Provider, l.Account, l.Provider)
+	}
+	if approved == named {
+		return nil
+	}
+	name := named.Email
+	if name == "" {
+		name = named.Label()
+	}
+	again := fmt.Sprintf("approve again as %s, then finish it with the new code: rota login %s <code>", name, l.ID)
+	id := tok.Identity
+	if id == nil || (id.UUID == "" && id.Email == "") {
+		return rota.Invalid("the %s approval named no account, so there is no telling whether it was account %d (%s); nothing was stored; %s",
+			l.Provider, named.ID, name, again)
+	}
+	if approved != nil {
+		return rota.Invalid("this login is for account %d (%s), but it was approved as %s, which is account %d; nothing was stored; %s",
+			named.ID, name, identityName(id), approved.ID, again)
+	}
+	return rota.Invalid("this login is for account %d (%s), but it was approved as %s, which is not a %s account rota holds; nothing was stored and no account was added; %s",
+		named.ID, name, identityName(id), l.Provider, again)
 }
 
 // attachLong puts a long-lived token on the account whose identity approved

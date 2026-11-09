@@ -41,6 +41,13 @@ type Login struct {
 	// told again, and cannot finish a long login as an ordinary one by
 	// forgetting to say so.
 	Long bool `json:"long,omitzero"`
+	// Account is the id of the account this login was begun for, when it was
+	// begun for one (zero otherwise). Nothing here reads it: Complete says who
+	// approved and the id means something only to whoever keeps the accounts.
+	// It travels with the login so that whoever finishes it, often another
+	// process, can hold the approval to that account. The store's
+	// BeginLoginFor sets it, and its FinishLogin refuses anybody else.
+	Account int `json:"account,omitzero"`
 	// CreatedAt is unix ms, for callers that expire old logins.
 	CreatedAt int64 `json:"createdAt"`
 }
