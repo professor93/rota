@@ -135,7 +135,10 @@ func systemdUnit(exe, store string, env []string) string {
 	if d := envValue(env, "CLAUDE_CONFIG_DIR"); d != "" {
 		b.WriteString(`Environment="CLAUDE_CONFIG_DIR=` + unitEscape(d) + "\"\n")
 	}
-	b.WriteString("KillMode=process\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n")
+	// TimeoutStopSec, as the plist's ExitTimeOut: a stopping daemon may be
+	// waiting for a refresh's answer, and the manager's default is the
+	// administrator's to change.
+	b.WriteString("KillMode=process\nTimeoutStopSec=60\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n")
 	return b.String()
 }
 

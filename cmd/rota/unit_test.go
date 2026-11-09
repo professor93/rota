@@ -62,6 +62,7 @@ ExecStart=/usr/local/bin/rota serve start --foreground
 Environment="PATH=/usr/bin:/bin"
 Environment="ROTA_HOME=/s/.rota"
 KillMode=process
+TimeoutStopSec=60
 Restart=on-failure
 RestartSec=5
 
