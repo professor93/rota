@@ -106,6 +106,7 @@ func TestThePlistKeepsSessions(t *testing.T) {
 		"<key>ROTA_HOME</key>\n\t\t<string>/s/&lt;r&gt;</string>",
 		"<key>CLAUDE_CONFIG_DIR</key>\n\t\t<string>/c&amp;d</string>",
 		"<key>AbandonProcessGroup</key>\n\t<true/>",
+		"<key>ExitTimeOut</key>\n\t<integer>60</integer>",
 		"<key>RunAtLoad</key>\n\t<true/>",
 		"<key>SuccessfulExit</key>\n\t\t<false/>",
 		"<key>ProcessType</key>\n\t<string>Interactive</string>",

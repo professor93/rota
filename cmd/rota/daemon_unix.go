@@ -330,6 +330,10 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 	stop()
 	began := time.Now()
 	log.Info("rota daemon stopping; its sessions go on running")
+	// No sweep starts while the listeners wait for what they are serving, as
+	// for a foreground serve; Stop, below, waits for any refresh still under
+	// way before this process is gone.
+	srv.StopRefreshing()
 	// The listeners first, together: neither takes another connection, and
 	// what each is serving has serveGrace, less the goodbye, to finish. The
 	// control socket goes while this daemon still holds the claim, so no

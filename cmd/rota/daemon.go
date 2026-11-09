@@ -53,10 +53,12 @@ like stop and uninstall, is refused inside a held session.
 
 // daemonReady is how long serve start waits for the daemon it started to
 // answer, and daemonStopWait how long serve stop waits for it to let go of
-// the store. Variables so a test can watch either run out.
+// the store: long enough for what a stopping daemon may be finishing, the
+// listeners' serveGrace and then a refresh under way (store.RefreshTimeout, and
+// a margin for its save). Variables so a test can watch either run out.
 var (
 	daemonReady    = 10 * time.Second
-	daemonStopWait = 15 * time.Second
+	daemonStopWait = 60 * time.Second
 )
 
 // daemonGoodbye is the part of serveGrace a stopping daemon keeps for the

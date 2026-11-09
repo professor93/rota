@@ -177,6 +177,9 @@ func launchdPlist(label, exe, store string, env []string) string {
 	// into by people.
 	str("ProcessType", "Interactive")
 	b.WriteString("\t<key>AbandonProcessGroup</key>\n\t<true/>\n")
+	// launchd kills what has not exited twenty seconds after SIGTERM by
+	// default, and a stopping daemon may be waiting for a refresh's answer.
+	b.WriteString("\t<key>ExitTimeOut</key>\n\t<integer>60</integer>\n")
 	str("StandardOutPath", "/dev/null")
 	str("StandardErrorPath", "/dev/null")
 	b.WriteString("</dict>\n</plist>\n")
