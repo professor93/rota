@@ -414,6 +414,9 @@ func (h *held) take() func() {
 // joinContexts returns a context cancelled when either parent is.
 func joinContexts(a, b context.Context) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(a)
+	if b.Err() != nil {
+		cancel() // AfterFunc would, in a goroutine of its own: what starts under ctx must not run ahead of that
+	}
 	stop := context.AfterFunc(b, cancel)
 	return ctx, func() {
 		stop()

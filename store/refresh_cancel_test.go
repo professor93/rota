@@ -574,3 +574,19 @@ func TestARescueWhoseCallerHasGoneSendsNothing(t *testing.T) {
 		})
 	}
 }
+
+// Joined to something already gone, a context is done at once, with its cause,
+// not a moment later: what is gated on it must not get in first.
+func TestAContextJoinedToSomethingGoneIsDoneAtOnce(t *testing.T) {
+	why := errors.New("the reason it went")
+	gone, cancel := context.WithCancelCause(context.Background())
+	cancel(why)
+	for i := 0; i < 1000; i++ {
+		ctx, stop := joinContexts(context.Background(), gone)
+		err, cause := ctx.Err(), context.Cause(ctx)
+		stop()
+		if err == nil || !errors.Is(cause, why) {
+			t.Fatalf("join %d: %v, cause %v", i, err, cause)
+		}
+	}
+}

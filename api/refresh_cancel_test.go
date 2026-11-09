@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -506,5 +505,20 @@ func TestASweepIsJournalledAsWhoSweeps(t *testing.T) {
 				t.Fatalf("no %s line in:\n%s", c.path, raw)
 			}
 		})
+	}
+}
+
+// Joined to a server that has already stopped, a context is done at once, not a
+// moment later: a refresh gated on it must not get in first.
+func TestAContextJoinedToAStoppedServerIsDoneAtOnce(t *testing.T) {
+	gone, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 1000; i++ {
+		ctx, stop := joinContexts(context.Background(), gone)
+		err := ctx.Err()
+		stop()
+		if err == nil {
+			t.Fatalf("join %d was not done yet", i)
+		}
 	}
 }

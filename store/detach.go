@@ -184,6 +184,9 @@ func codexRepairs(a *rota.Account) bool {
 // also, and is called once the work is over.
 func joinContexts(ctx, also context.Context) (context.Context, func()) {
 	both, cancel := context.WithCancelCause(ctx)
+	if also.Err() != nil {
+		cancel(context.Cause(also)) // AfterFunc would, in a goroutine of its own: what starts under both must not run ahead of that
+	}
 	unhook := context.AfterFunc(also, func() { cancel(context.Cause(also)) })
 	return both, func() {
 		unhook()
