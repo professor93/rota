@@ -45,9 +45,9 @@ Usage:
   rota login <account-id> --token   a token from ` + "`claude setup-token`" + `,
                                 read the same way, as that account's long one
   rota login <login-id> [code]  finish that login (no code for device flows)
-  rota login <account-id>       sign that account in again: a login only it can
-                                approve, or its own CLI's if that keeps its
-                                credentials
+  rota login <account-id>       sign that account in again: a login only its
+                                approval finishes, or its own CLI's if that
+                                keeps its credentials
   rota list [provider] [-r]     accounts with usage (-r forces a quota refresh)
   rota list --sessions          ...and what the CLIs are running or could resume
   rota run [id] <prompt>        ask an account and print the answer

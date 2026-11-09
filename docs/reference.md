@@ -180,7 +180,7 @@ rota login --key              # an account on a Claude Console API key, pasted, 
 rota login 2 --token          # paste a `claude setup-token` token as account 2's long-lived one
 rota login <login-id> <code>  # finish it with the code from the page
 rota login <login-id>         # finish a delegated login, which takes no code (grok)
-rota login 2                  # sign account 2 in again: a URL only account 2 can approve
+rota login 2                  # sign account 2 in again: only account 2's approval finishes it
 rota list                     # every account, in rotation order, with usage
 rota list --short             # the same, reading no usage from any provider
 rota list --sessions          # ...and what is running, and what could resume
@@ -250,14 +250,19 @@ credential. For an account whose login rota holds, dead or alive, it starts an
 ordinary login on that account's provider: it prints the URL and the account to
 approve as, and `Then: rota login <login-id> <code>` finishes it, as any login
 is finished (`--json` prints the login, with `account` set to the id). Only
-that account's approval finishes it. Approved as another account, as one rota
-does not hold, or by a reply that names nobody, or with the account removed
-meanwhile, it is refused, saying who approved and which account was named:
-nothing is written, no account is added, and the login stays parked, so
-approving again as the right account and giving the new code finishes the same
-login. Nothing may follow the id here, since there is no vendor CLI to pass it
-to. A claude account's running sessions keep their present login until they
-end, as after any login.
+that account's approval finishes it. Approved as another account or as one rota
+does not hold, it is refused, saying who approved and which account was named.
+A reply that names nobody is refused, naming the account, and a login whose
+account has been removed meanwhile is refused, saying so. Nothing is written, no
+account is added, and the login stays parked; a refusal that can be put right
+by approving gives the URL again, and approving as the right account and giving
+the new code finishes the same login. An account rota knows by an e-mail and no uuid takes the approval of
+that e-mail, and learns its uuid from it. The same e-mail under a different
+account id at the provider is not the account, so approving again would not
+help: the refusal shows both ids, `rota login <provider>` makes it an account of
+its own, and `rota remove <id>` drops the old one. Nothing may follow the id
+here, since there is no vendor CLI to pass it to. A claude account's running
+sessions keep their present login until they end, as after any login.
 
 Not every account has a sign-in to start, and those are refused with what to
 do instead. An account on an API key is given its key with `rota login --key`
