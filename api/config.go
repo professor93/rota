@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,12 +44,13 @@ type Config struct {
 	Routes   RoutesSection   `toml:"routes"`
 	Runs     RunsSection     `toml:"runs"`
 	Terminal TerminalSection `toml:"terminal"`
+	SSH      SSHSection      `toml:"ssh"`
 	Store    StoreSection    `toml:"store"`
 	// Users and Tokens are the principals besides the one bearer token: the
-	// people who sign in on the page, and the tokens a script carries. They
-	// are arrays of tables rather than more keys under [auth] because each
-	// one is a thing with a name and a role, and [auth] is about one
-	// credential this server has always had.
+	// people who sign in on the page or over SSH, and the tokens a script
+	// carries. They are arrays of tables rather than more keys under [auth]
+	// because each one is a thing with a name and a role, and [auth] is
+	// about one credential this server has always had.
 	Users  []UserEntry  `toml:"users"`
 	Tokens []TokenEntry `toml:"tokens"`
 
@@ -97,8 +101,9 @@ type AuthSection struct {
 	LocalUser string `toml:"local_user"`
 }
 
-// UserEntry is one person who may sign in on the page: a name, a role, and
-// a password nobody can read back out of the file.
+// UserEntry is one person who may sign in: a name, a role, and a password
+// nobody can read back out of the file, or the public keys they sign in
+// with over SSH, or both.
 //
 // The password is stored derived — see passwd.go for the shape — and rota
 // never writes this file: `rota serve passwd <name>` prints the block to
@@ -108,6 +113,15 @@ type UserEntry struct {
 	Name     string `toml:"name"`
 	Role     string `toml:"role"`
 	Password string `toml:"password,secret"`
+	// SSHKeys are the public keys this person signs in with over SSH, each
+	// one line as authorized_keys writes it: "<type> <base64> [comment]",
+	// with nothing before the type, because rota reads no options. A user
+	// with keys needs no password; one without a password signs in over
+	// SSH and never on the page, and Serve leaves them out of
+	// Options.Users. One key is one person's, so the same key under two
+	// users is refused. A public key is not a secret, and is printed as
+	// written.
+	SSHKeys []string `toml:"ssh_keys"`
 }
 
 // TokenEntry is one more bearer token, with a role of its own: a CI job that
@@ -168,6 +182,32 @@ type TerminalSection struct {
 	Share bool `toml:"share"`
 }
 
+// SSHSection is the SSH server, which reaches the held sessions from a
+// terminal anywhere: `ssh -p 2222 host attach <id>`. It runs inside `rota
+// serve` and the daemon `rota serve start` starts, never inside a daemon a
+// session started by itself, and only when Enabled.
+//
+// A person signs in with a key their [[users]] entry lists in ssh_keys and
+// with nothing else: no password, no keyboard-interactive. Whoever signs in
+// as a control user can run commands on this machine as the user the server
+// runs as, as on the page.
+type SSHSection struct {
+	// Enabled turns the SSH server on. It is off unless the file says so,
+	// and on with no [[users]] entry holding ssh_keys is refused, since
+	// nobody could sign in.
+	Enabled bool `toml:"enabled"`
+	// Listen is where it listens, written as server.listen is: a host:port,
+	// or a bare port for every interface. An address other than the
+	// loopback needs no certificate, because SSH encrypts by itself.
+	Listen string `toml:"listen"`
+	// HostKey is the path of the server's own ed25519 private key, which an
+	// ssh client remembers this server by. It is absolute. Empty is
+	// ssh_host_ed25519_key in the store, made on first use; a file named
+	// here must already exist. Either is refused unless only its owner can
+	// read it.
+	HostKey string `toml:"host_key"`
+}
+
 // RunsSection is everything about the CLIs this server starts.
 type RunsSection struct {
 	Timeout        time.Duration `toml:"timeout"`
@@ -206,6 +246,7 @@ func DefaultConfig() *Config {
 			IdleTimeout: 12 * time.Hour, KeepStopped: defaultKeepStopped,
 			RecordMaxBytes: 50 << 20, Share: true,
 		},
+		SSH:  SSHSection{Listen: "127.0.0.1:2222"},
 		From: map[string]string{},
 	}
 }
@@ -282,6 +323,9 @@ func (c *Config) Check() error {
 		return err
 	}
 	if err := c.checkPrincipals(); err != nil {
+		return err
+	}
+	if err := c.checkSSH(); err != nil {
 		return err
 	}
 	if c.Auth.SessionTTL <= 0 {
@@ -383,6 +427,10 @@ func loopback(addr string) bool {
 // the person reading it is looking at a file with several of these in it.
 func (c *Config) checkPrincipals() error {
 	seen := map[string]bool{}
+	// listed is who listed each key first, by the key's body, and where: one
+	// key is one person, whatever its comment says.
+	type place struct{ user, n int }
+	listed := map[string]place{}
 	for i, u := range c.Users {
 		at := entryName("users", i, u.Name)
 		if u.Name == "" {
@@ -395,11 +443,26 @@ func (c *Config) checkPrincipals() error {
 		if _, err := parseRole(u.Role); err != nil {
 			return fmt.Errorf("%s: role: %w", at, err)
 		}
-		if u.Password == "" {
+		if u.Password == "" && len(u.SSHKeys) == 0 {
 			return fmt.Errorf("%s: password is empty; make one with `rota serve passwd %s`", at, u.Name)
 		}
-		if _, err := parsePassword(u.Password); err != nil {
-			return fmt.Errorf("%s: password: %w", at, err)
+		if u.Password != "" {
+			if _, err := parsePassword(u.Password); err != nil {
+				return fmt.Errorf("%s: password: %w", at, err)
+			}
+		}
+		for k, line := range u.SSHKeys {
+			blob, err := parseSSHKey(line)
+			if err != nil {
+				return fmt.Errorf("%s: ssh_keys #%d: %w", at, k+1, err)
+			}
+			if first, ok := listed[string(blob)]; ok {
+				if first.user == i {
+					return fmt.Errorf("%s: ssh_keys #%d is also #%d; write each key once", at, k+1, first.n+1)
+				}
+				return fmt.Errorf("%s: ssh_keys #%d is also %q's; one key is one person", at, k+1, c.Users[first.user].Name)
+			}
+			listed[string(blob)] = place{i, k}
 		}
 	}
 	seen = map[string]bool{}
@@ -422,6 +485,97 @@ func (c *Config) checkPrincipals() error {
 	return nil
 }
 
+// checkSSH says what is wrong with the [ssh] section. Off, it asks nothing
+// of where it would listen or of who has keys, so a file may list its keys
+// first and turn SSH on later; a host key is a path either way, and one
+// that depends on where the server was started is refused at once.
+func (c *Config) checkSSH() error {
+	if c.SSH.Enabled {
+		if strings.TrimSpace(c.SSH.Listen) == "" {
+			return errors.New("ssh.listen is empty; write a host:port such as 127.0.0.1:2222")
+		}
+		if _, err := ListenAddr(c.SSH.Listen); err != nil {
+			return fmt.Errorf("ssh.listen: %w", err)
+		}
+		keyed := false
+		for _, u := range c.Users {
+			keyed = keyed || len(u.SSHKeys) > 0
+		}
+		if !keyed {
+			return errors.New("ssh.enabled is true, and no [[users]] entry has ssh_keys, so nobody could sign in")
+		}
+	}
+	if p := c.SSH.HostKey; p != "" && !filepath.IsAbs(p) {
+		return fmt.Errorf("ssh.host_key must be an absolute path, not %q", p)
+	}
+	return nil
+}
+
+// sshKeyTypes are the public keys a person may list: ed25519, ECDSA on the
+// three NIST curves, the two security-key kinds, and RSA. Certificates and
+// DSA are not among them.
+var sshKeyTypes = []string{
+	"ssh-ed25519",
+	"ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+	"sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com",
+	"ssh-rsa",
+}
+
+// parseSSHKey reads one ssh_keys line and gives the key's body, which is
+// what says whether two lines are one key. It checks the line's shape, its
+// type, and that the body names the type the line says, with the standard
+// library alone; the SSH server parses each key again, fully, when it
+// starts. No refusal repeats the key.
+func parseSSHKey(line string) ([]byte, error) {
+	f := strings.Fields(line)
+	if strings.ContainsAny(line, "\r\n") || len(f) < 2 {
+		return nil, errors.New(`is not "<type> <base64> [comment]"`)
+	}
+	if !slices.Contains(sshKeyTypes, f[0]) {
+		// Options come first and the key after them: a type further along,
+		// with a body after it, is a key behind options.
+		for _, w := range f[1 : len(f)-1] {
+			if slices.Contains(sshKeyTypes, w) {
+				return nil, errors.New("options before the key, such as from=, are not read; give the key alone")
+			}
+		}
+		return nil, fmt.Errorf("%q is not a key type rota takes; use ssh-ed25519, ecdsa-sha2-nistp256/384/521, "+
+			"ssh-rsa, or a security key's sk- type", f[0])
+	}
+	blob, err := base64.StdEncoding.DecodeString(f[1])
+	if err != nil {
+		return nil, errors.New("its base64 does not decode")
+	}
+	inner, ok := sshKeyName(blob)
+	if !ok {
+		return nil, errors.New("its base64 holds no key")
+	}
+	if inner != f[0] {
+		return nil, fmt.Errorf("says it is %s and holds a %s key", f[0], inner)
+	}
+	return blob, nil
+}
+
+// sshKeyName is the first string of a key's SSH wire form, which is its
+// type: a four-byte big-endian length, then that many bytes. A length no
+// type has, or bytes that are not printable, are no key at all.
+func sshKeyName(blob []byte) (string, bool) {
+	if len(blob) < 4 {
+		return "", false
+	}
+	n := binary.BigEndian.Uint32(blob)
+	if n == 0 || n > 64 || uint64(n) > uint64(len(blob)-4) {
+		return "", false
+	}
+	name := blob[4 : 4+n]
+	for _, b := range name {
+		if b <= ' ' || b > '~' {
+			return "", false
+		}
+	}
+	return string(name), true
+}
+
 // checkLocalUser refuses an auth.local_user that is not somebody who may
 // sign in and control: the local principal typing as a watcher, or as a
 // name nobody signs in with, would be a person the file never meant.
@@ -436,6 +590,27 @@ func (c *Config) checkLocalUser() error {
 		}
 	}
 	return fmt.Errorf("auth.local_user names %q, who is not a [[users]] entry that may control", name)
+}
+
+// localUser is auth.local_user, or, when it is empty and the one user who
+// may control signs in by key alone, that user. The server is not given
+// such a user, so it cannot find them as the only controller by itself,
+// and the keyboard would not follow them from SSH to this machine's own
+// terminal.
+func (c *Config) localUser() string {
+	if c.Auth.LocalUser != "" {
+		return c.Auth.LocalUser
+	}
+	only, n := UserEntry{}, 0
+	for _, u := range c.Users {
+		if Role(u.Role) == RoleControl {
+			only, n = u, n+1
+		}
+	}
+	if n == 1 && only.Password == "" {
+		return only.Name
+	}
+	return ""
 }
 
 // entryName is how one entry of an array of tables is pointed at in a
@@ -527,6 +702,11 @@ type Listener struct {
 // command: only it knows what was typed on the command line, and only it
 // knows where a server's own output goes — server.log_file is checked here
 // and opened there.
+//
+// A user with no password signs in over SSH alone, so they are left out of
+// Options.Users: the page answers their name as one it has never heard of.
+// [ssh] and every user's keys are read from the configuration itself by
+// whatever runs the SSH server.
 func (c *Config) Serve() (Options, Listener, error) {
 	if err := c.Check(); err != nil {
 		return Options{}, Listener{}, err
@@ -556,6 +736,9 @@ func (c *Config) Serve() (Options, Listener, error) {
 		WebSocket: c.Routes.WebSocket, Health: c.Routes.Health, Terminal: c.Routes.Terminal}
 	users := make([]User, 0, len(c.Users))
 	for _, u := range c.Users {
+		if u.Password == "" {
+			continue
+		}
 		users = append(users, User{Name: u.Name, Role: Role(u.Role), Password: u.Password})
 	}
 	// Taken into a variable of its own because the option is a pointer: the
@@ -570,7 +753,7 @@ func (c *Config) Serve() (Options, Listener, error) {
 		Users:          users,
 		Tokens:         tokens,
 		SessionTTL:     c.Auth.SessionTTL,
-		LocalUser:      c.Auth.LocalUser,
+		LocalUser:      c.localUser(),
 		Roots:          roots,
 		AllowDangerous: c.Runs.AllowDangerous,
 		AllowRawFlags:  c.Runs.AllowRawFlags,
@@ -692,6 +875,11 @@ func (c *Config) Print(w io.Writer, token string) error {
 	key("terminal.record_max_bytes", strconv.FormatInt(c.Terminal.RecordMaxBytes, 10))
 	yes("terminal.share", c.Terminal.Share)
 
+	body.WriteString("\n[ssh]\n")
+	yes("ssh.enabled", c.SSH.Enabled)
+	str("ssh.listen", c.SSH.Listen)
+	str("ssh.host_key", c.SSH.HostKey)
+
 	body.WriteString("\n[store]\n")
 	str("store.dir", c.Store.Dir)
 
@@ -700,6 +888,13 @@ func (c *Config) Print(w io.Writer, token string) error {
 		str(fmt.Sprintf("users.%d.name", i), u.Name)
 		str(fmt.Sprintf("users.%d.role", i), u.Role)
 		str(fmt.Sprintf("users.%d.password", i), u.Password)
+		if len(u.SSHKeys) > 0 {
+			quoted := make([]string, 0, len(u.SSHKeys))
+			for _, k := range u.SSHKeys {
+				quoted = append(quoted, quote(k))
+			}
+			key(fmt.Sprintf("users.%d.ssh_keys", i), "["+strings.Join(quoted, ", ")+"]")
+		}
 	}
 	for i, t := range c.Tokens {
 		body.WriteString("\n[[tokens]]\n")
