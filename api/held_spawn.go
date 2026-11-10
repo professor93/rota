@@ -216,11 +216,11 @@ var holdKillAfter = func() time.Duration { return store.RefreshTimeout() + stopM
 //
 // One that goes on regardless, having lost the signal as an older holder could
 // when it came just as its prepare ended, may become a session, which a sweep
-// links to and lists and somebody may be at work in by then. A holder writes its record only once its prepare is
-// over and its CLI has started, so one with a record has no refresh under way,
-// and it is left to live as any session does. One that writes it between the
-// look and the kill is killed with a CLI that started a moment before, which
-// nobody had been told of.
+// links to and lists and somebody may be at work in by then. A holder writes
+// its record only once its prepare is over and its CLI has started, so one
+// with a record has no refresh under way, and it is left to live as any
+// session does. One that writes it between the look and the kill is killed
+// with a CLI that started a moment before, which nobody had been told of.
 func (s *Server) giveUpOnHolder(cmd *exec.Cmd, id string) {
 	_ = cmd.Process.Signal(syscall.SIGTERM)
 	exited := make(chan struct{})
