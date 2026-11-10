@@ -1,10 +1,16 @@
 package api
 
 import (
+	"net"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/professor93/rota/internal/events"
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/ring"
+	"github.com/professor93/rota/internal/share"
 )
 
 // The latches of a held session's attention, looked at with a clock that
@@ -89,28 +95,76 @@ func TestDoneIsBusyThenIdle(t *testing.T) {
 }
 
 // A CLI that rings its bell in a loop is said to have rung it at most once
-// each attnBell: the bells in between are dropped, not saved up. A session
-// whose registry speaks for it rings no bell (Review Focus 4).
+// each attnBell. What rang in between is said once, as the window ends, so
+// a second ring that meant something is late but never lost. A session
+// whose registry has said anything of its own rings no bell (Review Focus
+// 4).
 func TestBellsAreRateLimited(t *testing.T) {
 	attnRun(t, "three bells in thirty seconds", []attnStep{
 		{in: attnIn{Now: attnAt(0), Bells: 1}, reason: "bell"},
 		{in: attnIn{Now: attnAt(10 * time.Second), Bells: 2}},
 		{in: attnIn{Now: attnAt(20 * time.Second), Bells: 3}},
-		{in: attnIn{Now: attnAt(30 * time.Second), Bells: 3}},
-		{in: attnIn{Now: attnAt(31 * time.Second), Bells: 4}, reason: "bell"},
-		{in: attnIn{Now: attnAt(32 * time.Second), Bells: 4}},
+		{in: attnIn{Now: attnAt(29 * time.Second), Bells: 3}},
+		{in: attnIn{Now: attnAt(30 * time.Second), Bells: 3}, reason: "bell"},
+		{in: attnIn{Now: attnAt(31 * time.Second), Bells: 3}},
+		{in: attnIn{Now: attnAt(40 * time.Second), Bells: 4}},
+		{in: attnIn{Now: attnAt(60 * time.Second), Bells: 4}, reason: "bell"},
+		{in: attnIn{Now: attnAt(2 * time.Minute), Bells: 4}},
+		{in: attnIn{Now: attnAt(3 * time.Minute), Bells: 5}, reason: "bell"},
+	})
+	attnRun(t, "a ring held back, and a registry that speaks before it is said", []attnStep{
+		{in: attnIn{Now: attnAt(0), Bells: 1}, reason: "bell"},
+		{in: attnIn{Now: attnAt(5 * time.Second), Bells: 2}},
+		{in: attnIn{Now: attnAt(10 * time.Second), Bells: 2, Registry: attnReg("working", "")}},
+		{in: attnIn{Now: attnAt(30 * time.Second), Bells: 2, Registry: attnReg("working", "")}},
+		{in: attnIn{Now: attnAt(time.Minute), Bells: 3, Registry: attnReg("working", "")}},
 	})
 	attnRun(t, "bells beside a registry", []attnStep{
 		{in: attnIn{Now: attnAt(0), Bells: 1, Registry: attnReg("working", "")}},
 		{in: attnIn{Now: attnAt(time.Minute), Bells: 2, Registry: attnReg("working", "")}},
 	})
+	attnRun(t, "bells beside a registry that has only asked", []attnStep{
+		{in: attnIn{Now: attnAt(0), Registry: attnReg("idle", "permission")}, reason: "permission"},
+		{in: attnIn{Now: attnAt(time.Second), Bells: 1, Registry: attnReg("idle", "")}},
+		{in: attnIn{Now: attnAt(time.Minute), Bells: 2, Registry: attnReg("idle", "")}},
+	})
 }
 
 // A title that goes from a working glyph to ✳, and stays there attnTitle,
-// says the session is idle again. ✳ alone says nothing, nor does a title
-// beside a registry that has said something of its own; one that has only
-// ever said idle leaves the title to speak.
+// says the session is idle again. ✳ alone says nothing, nor does a glyph
+// that is part of a word, nor a title beside a registry that has said a
+// status other than idle. A registry that has only ever said idle leaves
+// the title to speak, a wait or not: while it waits the title is that
+// wait's, and the work after the answer is what arms it again.
 func TestTheTitleTurningIdle(t *testing.T) {
+	attnRun(t, "Claude Code 2.1.318: idle only, one permission, then finished", []attnStep{
+		{in: attnIn{Now: attnAt(0), Title: "⠂ Task", Registry: attnReg("idle", "")}},
+		{in: attnIn{Now: attnAt(time.Second), Title: "⠂ Task", Registry: attnReg("idle", "permission")}, reason: "permission"},
+		{in: attnIn{Now: attnAt(2 * time.Second), Title: "✳ Task", Registry: attnReg("idle", "permission")}},
+		{in: attnIn{Now: attnAt(10 * time.Second), Title: "✳ Task", Registry: attnReg("idle", "permission")}},
+		{in: attnIn{Now: attnAt(11 * time.Second), Title: "✳ Task", Registry: attnReg("idle", "")}},
+		{in: attnIn{Now: attnAt(15 * time.Second), Title: "✳ Task", Registry: attnReg("idle", "")}},
+		{in: attnIn{Now: attnAt(16 * time.Second), Title: "⠂ Task", Registry: attnReg("idle", "")}},
+		{in: attnIn{Now: attnAt(20 * time.Second), Title: "✳ Task", Registry: attnReg("idle", "")}},
+		{in: attnIn{Now: attnAt(22 * time.Second), Title: "✳ Task", Registry: attnReg("idle", "")}, reason: "title"},
+	})
+	attnRun(t, "a title that works and rests while the registry waits", []attnStep{
+		{in: attnIn{Now: attnAt(0), Title: "⠂ Task", Registry: attnReg("idle", "permission")}, reason: "permission"},
+		{in: attnIn{Now: attnAt(time.Second), Title: "⠂ Task", Registry: attnReg("idle", "permission")}},
+		{in: attnIn{Now: attnAt(2 * time.Second), Title: "✳ Task", Registry: attnReg("idle", "permission")}},
+		{in: attnIn{Now: attnAt(time.Minute), Title: "✳ Task", Registry: attnReg("idle", "permission")}},
+		{in: attnIn{Now: attnAt(2 * time.Minute), Title: "✳ Task", Registry: attnReg("idle", "")}},
+	})
+	attnRun(t, "a glyph that is part of a word", []attnStep{
+		{in: attnIn{Now: attnAt(0), Title: "·project"}},
+		{in: attnIn{Now: attnAt(time.Second), Title: "✳ Task"}},
+		{in: attnIn{Now: attnAt(time.Minute), Title: "✳ Task"}},
+	})
+	attnRun(t, "✳ that is part of a word", []attnStep{
+		{in: attnIn{Now: attnAt(0), Title: "⠂ Task"}},
+		{in: attnIn{Now: attnAt(time.Second), Title: "✳Task"}},
+		{in: attnIn{Now: attnAt(time.Minute), Title: "✳Task"}},
+	})
 	for _, glyph := range []string{"⠂", "⠐", "✢", "✶", "✻", "✽", "·"} {
 		attnRun(t, glyph+" then ✳", []attnStep{
 			{in: attnIn{Now: attnAt(0), Title: glyph + " Task"}},
@@ -165,6 +219,11 @@ func TestQuietAfterActivity(t *testing.T) {
 		{in: attnIn{Now: attnAt(29 * time.Second), LastActive: act, Registry: attnReg("working", "")}},
 		{in: attnIn{Now: attnAt(30 * time.Second), LastActive: act, Registry: attnReg("working", "")}, quiet: true},
 		{in: attnIn{Now: attnAt(time.Hour), LastActive: act, Registry: attnReg("working", "")}},
+	})
+	attnRun(t, "a registry that has only asked", []attnStep{
+		{in: attnIn{Now: attnAt(-time.Second), Registry: attnReg("idle", "permission")}, reason: "permission"},
+		{in: attnIn{Now: attnAt(29 * time.Second), LastActive: act, Registry: attnReg("idle", "")}},
+		{in: attnIn{Now: attnAt(30 * time.Second), LastActive: act, Registry: attnReg("idle", "")}, reason: "quiet", quiet: true},
 	})
 	attnRun(t, "a title that speaks", []attnStep{
 		{in: attnIn{Now: attnAt(29 * time.Second), LastActive: act, Title: "✳ Task"}},
@@ -291,5 +350,279 @@ func TestEchoIsNotActivity(t *testing.T) {
 	h.noteOutput(20, attnAt(attnStart))
 	if !h.activeAt.Equal(attnAt(attnStart)) {
 		t.Fatalf("output attnStart after the first left activeAt at %v", h.activeAt)
+	}
+}
+
+// What a terminal says by itself, focus in and out and the mouse, is not
+// somebody typing: it never puts off what a session has to say. Anything
+// else from a viewer is.
+func TestFocusAndMouseReportsAreNotTyping(t *testing.T) {
+	for _, c := range []struct {
+		p       string
+		reports bool
+	}{
+		{"\x1b[I", true},
+		{"\x1b[O", true},
+		{"\x1b[O\x1b[I", true},
+		{"\x1b[M !!", true},
+		{"\x1b[M#àá", true}, // UTF-8 coordinates (1005)
+		{"\x1b[<0;10;5M", true},
+		{"\x1b[<35;120;40m", true},
+		{"\x1b[<0;10;5M\x1b[<0;10;5m\x1b[O", true},
+		{"\x1b[32;10;5M", true}, // urxvt (1015)
+		{"a", false},
+		{"\x1b[A", false},
+		{"\x1b", false},
+		{"\x1b[I" + "a", false},
+		{"\x1b[<0;10M", false},
+		{"\x1b[M!", false},
+		{"\x1b[200~text\x1b[201~", false},
+		{"", false},
+	} {
+		if got := attnReportsOnly([]byte(c.p)); got != c.reports {
+			t.Errorf("%q read as reports only: %t, want %t", c.p, got, c.reports)
+		}
+	}
+
+	pp := attnPipe(t, false)
+	tc := &termConn{}
+	for _, p := range []string{"\x1b[I", "\x1b[<0;10;5M", "\x1b[O"} {
+		pp.forward(time.Second)
+		if err := pp.h.typeFrom(tc, []byte(p)); err != nil {
+			t.Fatal(err)
+		}
+		if typed, key := pp.held(func(h *heldTerm) (time.Time, time.Time) { return h.typedAt, h.keyAt }); !typed.IsZero() || !key.Equal(pp.s.now()) {
+			t.Fatalf("%q left typedAt %v and keyAt %v", p, typed, key)
+		}
+	}
+	pp.forward(time.Second)
+	if err := pp.h.typeFrom(tc, []byte("y")); err != nil {
+		t.Fatal(err)
+	}
+	if typed, _ := pp.held(func(h *heldTerm) (time.Time, time.Time) { return h.typedAt, h.keyAt }); !typed.Equal(pp.s.now()) {
+		t.Fatalf("a viewer typing y left typedAt at %v", typed)
+	}
+}
+
+/* --------------------------------------------- a held session on a pipe --- */
+
+// attnPiped is a held session on a bare server, linked over a pipe whose
+// far end the test writes the holder's frames into. The server's clock is
+// frozen at attnT0 and moves only by forward.
+type attnPiped struct {
+	t   *testing.T
+	s   *Server
+	h   *heldTerm
+	ts  *termSession
+	far *share.Conn
+	mu  sync.Mutex
+	at  time.Time
+	off int64
+}
+
+// attnPipe makes one. Its link is read by heldTerm.read, as a holder's is,
+// and whatever this end sends down it, keystrokes and pongs, is taken and
+// thrown away at the far end.
+func attnPipe(t *testing.T, adopted bool) *attnPiped {
+	t.Helper()
+	pp := &attnPiped{t: t, at: attnT0}
+	s := &Server{terms: map[string]*termSession{}}
+	s.clock.set(func() time.Time { pp.mu.Lock(); defer pp.mu.Unlock(); return pp.at })
+	s.events = events.NewRing(64, s.now)
+	near, far := net.Pipe()
+	h := &heldTerm{s: s, conn: share.NewConn(near, 0), state: heldLive,
+		asks: map[uint64]chan *heldScreen{}, left: make(chan struct{})}
+	if adopted {
+		// As adopt makes one: the record's guess at the registry, linked now.
+		h.adopted, h.linkedAt = true, s.now()
+		h.reg = holdwire.Registry{SessionID: "conv-1", Name: "secret plans"}
+	}
+	ts := &termSession{s: s, id: "0123456789abcdef", name: "piped", account: 2,
+		back: h, cols: 80, rows: 24, ring: ring.New(1 << 16)}
+	h.ts = ts
+	s.terms[ts.id] = ts
+	pp.s, pp.h, pp.ts, pp.far = s, h, ts, share.NewConn(far, 0)
+	read := make(chan struct{})
+	go func() {
+		defer close(read)
+		h.read(h.conn)
+	}()
+	go func() {
+		for {
+			if _, _, err := pp.far.Read(); err != nil {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		pp.far.Close()
+		h.conn.Close()
+		<-read
+	})
+	return pp
+}
+
+func (pp *attnPiped) forward(d time.Duration) {
+	pp.mu.Lock()
+	pp.at = pp.at.Add(d)
+	pp.mu.Unlock()
+}
+
+// held reads two of the session's times under its lock.
+func (pp *attnPiped) held(read func(*heldTerm) (time.Time, time.Time)) (time.Time, time.Time) {
+	pp.h.mu.Lock()
+	defer pp.h.mu.Unlock()
+	return read(pp.h)
+}
+
+// activeAt is the session's last activity.
+func (pp *attnPiped) activeAt() time.Time {
+	at, _ := pp.held(func(h *heldTerm) (time.Time, time.Time) { return h.activeAt, h.linkedAt })
+	return at
+}
+
+// until waits for ok to hold, which takes whatever lock it reads under.
+func (pp *attnPiped) until(what string, ok func() bool) {
+	pp.t.Helper()
+	for end := time.Now().Add(5 * time.Second); !ok(); time.Sleep(time.Millisecond) {
+		if time.Now().After(end) {
+			pp.t.Fatalf("the session never came to %s", what)
+		}
+	}
+}
+
+// print sends text as the holder's next output, and waits for the server
+// to have taken it in.
+func (pp *attnPiped) print(text string) {
+	pp.t.Helper()
+	if err := pp.far.Send(holdwire.Output, holdwire.PutOutput(pp.off, []byte(text))); err != nil {
+		pp.t.Fatal(err)
+	}
+	pp.off += int64(len(text))
+	pp.until("offset "+strconv.FormatInt(pp.off, 10), func() bool { return pp.ts.end() == pp.off })
+}
+
+// resize sends the holder's word that the CLI took a size, and waits for
+// the server to have taken it in.
+func (pp *attnPiped) resize(cols, rows uint16) {
+	pp.t.Helper()
+	if err := pp.far.SendJSON(holdwire.Resized, holdwire.SizeMsg{Cols: cols, Rows: rows}); err != nil {
+		pp.t.Fatal(err)
+	}
+	pp.until("the new size", func() bool {
+		pp.ts.mu.Lock()
+		defer pp.ts.mu.Unlock()
+		return pp.ts.cols == cols && pp.ts.rows == rows
+	})
+}
+
+// state sends the holder's State, and waits for the server to have it.
+func (pp *attnPiped) state(st holdwire.StateMsg) {
+	pp.t.Helper()
+	pp.h.mu.Lock()
+	pp.h.stated = false // to see this one arrive
+	pp.h.mu.Unlock()
+	if err := pp.far.SendJSON(holdwire.State, st); err != nil {
+		pp.t.Fatal(err)
+	}
+	pp.until("the state sent", func() bool {
+		pp.h.mu.Lock()
+		defer pp.h.mu.Unlock()
+		return pp.h.stated
+	})
+}
+
+// said is what the server published, as type and reason.
+func (pp *attnPiped) said() []string {
+	var out []string
+	for _, e := range published(pp.s) {
+		out = append(out, e.Type+" "+e.Reason)
+	}
+	return out
+}
+
+// The holder's frames, read as a link reads them and timed by the server's
+// clock: output after the start is activity and heldQuiet later the session
+// is said to have gone quiet; output right after a resize or a keystroke is
+// the redraw or the echo, and is not activity.
+func TestReadWeighsOutputOnTheServersClock(t *testing.T) {
+	pp := attnPipe(t, false)
+	pp.print("start")
+	if at, linked := pp.held(func(h *heldTerm) (time.Time, time.Time) { return h.activeAt, h.linkedAt }); !at.IsZero() || !linked.Equal(attnT0) {
+		t.Fatalf("the first output left activeAt %v and linkedAt %v", at, linked)
+	}
+	pp.forward(attnStart)
+	pp.print("work")
+	if at := pp.activeAt(); !at.Equal(pp.s.now()) {
+		t.Fatalf("output attnStart after the first left activeAt at %v", at)
+	}
+	pp.forward(heldQuiet)
+	pp.s.attendAll(pp.s.now())
+	if got := pp.said(); len(got) != 2 || got[0] != "session.attention quiet" || got[1] != "session.quiet " {
+		t.Fatalf("heldQuiet after its last activity the session said %v", got)
+	}
+	active := pp.activeAt()
+
+	pp.forward(time.Minute)
+	pp.resize(100, 30)
+	pp.forward(time.Second)
+	pp.print("redraw")
+	if at := pp.activeAt(); !at.Equal(active) {
+		t.Fatalf("output a second after a resize was taken for activity at %v", at)
+	}
+	pp.forward(attnFit)
+	pp.print("more")
+	if active = pp.activeAt(); !active.Equal(pp.s.now()) {
+		t.Fatalf("output attnFit after a resize left activeAt at %v", active)
+	}
+
+	pp.forward(time.Second)
+	if err := pp.h.typeFrom(nil, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	pp.print("x")
+	if at := pp.activeAt(); !at.Equal(active) {
+		t.Fatalf("the echo of a keystroke was taken for activity at %v", at)
+	}
+	pp.forward(time.Second)
+	pp.print("answer")
+	if at := pp.activeAt(); !at.Equal(pp.s.now()) {
+		t.Fatalf("output a second after a keystroke left activeAt at %v", at)
+	}
+}
+
+// A session a daemon took up is not looked at until its holder has said
+// its state: its baseline is what the holder says, not the record's guess,
+// so a wait under way when the daemon started is not said again (Review
+// Focus 4).
+func TestAnAdoptedSessionWaitsForItsHoldersState(t *testing.T) {
+	pp := attnPipe(t, true)
+	for range 3 {
+		pp.s.attendAll(pp.s.now())
+		pp.forward(time.Minute)
+	}
+	pp.h.mu.Lock()
+	looked := pp.h.attn.looked
+	pp.h.mu.Unlock()
+	if looked || len(pp.said()) != 0 {
+		t.Fatalf("a session whose holder has said nothing yet was looked at (%t) and said %v", looked, pp.said())
+	}
+	waiting := func(w string) holdwire.StateMsg {
+		return holdwire.StateMsg{Title: "✳ x", Registry: &holdwire.Registry{SessionID: "conv-1", Status: "idle", WaitingFor: w}}
+	}
+	pp.state(waiting("permission"))
+	pp.s.attendAll(pp.s.now())
+	pp.forward(time.Minute)
+	pp.s.attendAll(pp.s.now())
+	if got := pp.said(); len(got) != 0 {
+		t.Fatalf("the wait under way when it was taken up was said: %v", got)
+	}
+	pp.state(waiting(""))
+	pp.s.attendAll(pp.s.now())
+	pp.state(waiting("permission"))
+	pp.s.attendAll(pp.s.now())
+	got := published(pp.s, events.SessionAttention)
+	if len(got) != 1 || got[0].Reason != "permission" || got[0].Name != "piped" || got[0].Account != 2 {
+		t.Fatalf("a new wait was published as %+v", got)
 	}
 }

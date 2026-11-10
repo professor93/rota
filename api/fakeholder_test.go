@@ -69,6 +69,8 @@ import (
 //	                              session that is busy for a while
 //	FAKE_HOLDER_RESIZE=none       take no resize and answer none, as a holder
 //	                              whose CLI is ending
+//	FAKE_HOLDER_STATE_AFTER=<path> send the State a link opens with only once
+//	                              path exists, as a holder slow to say it
 //
 // The conversation and its folder are written into meta.json as well, as a
 // real holder keeps them there for a session that has stopped.
@@ -327,7 +329,7 @@ func (f *fake) serve(c net.Conn) {
 	w := holdwire.WelcomeMsg{Major: major, Features: []string{holdwire.FeatScreen, holdwire.FeatState, holdwire.FeatSend, holdwire.FeatStop},
 		Version: "fake", Oldest: f.ring.Oldest(), End: f.ring.End(), Cols: f.cols, Rows: f.rows}
 	f.mu.Unlock()
-	if conn.SendJSON(holdwire.Welcome, w) != nil || conn.SendJSON(holdwire.State, f.state()) != nil {
+	if conn.SendJSON(holdwire.Welcome, w) != nil || f.attnLinkState(conn) != nil {
 		return
 	}
 	conn.Clear()
@@ -614,6 +616,35 @@ func (f *fake) attnSay(word, arg string) {
 	if f.link != nil {
 		_ = f.link.SendJSON(holdwire.State, *st)
 	}
+}
+
+// attnLinkState sends the State a link opens with, as the real holder does
+// right after the Welcome: what the typed lines last reported, else the
+// environment's. With FAKE_HOLDER_STATE_AFTER it is sent only once that
+// path exists, and the link goes on meanwhile.
+func (f *fake) attnLinkState(conn *share.Conn) error {
+	now := func() holdwire.StateMsg {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.attnState != nil {
+			return *f.attnState
+		}
+		return f.state()
+	}
+	gate := os.Getenv("FAKE_HOLDER_STATE_AFTER")
+	if _, err := os.Stat(gate); gate == "" || err == nil {
+		return conn.SendJSON(holdwire.State, now())
+	}
+	go func() {
+		for {
+			if _, err := os.Stat(gate); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		_ = conn.SendJSON(holdwire.State, now())
+	}()
+	return nil
 }
 
 // exit is the CLI having ended with code: the link is told, the record says

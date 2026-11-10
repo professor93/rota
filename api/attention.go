@@ -22,14 +22,19 @@ import (
 //   - the registry waiting for its person: permission when what it waits
 //     for names a permission, question otherwise;
 //   - the registry's status going from anything but idle to idle: done;
-//   - with no registry that speaks: a bell, at most one each attnBell;
-//   - with no registry that speaks: the title going from a working glyph
-//     to ✳ and staying there attnTitle: title;
-//   - with neither a registry nor a title that speaks: quiet.
+//   - with no registry that has said anything of its own: a bell, at most
+//     one each attnBell, and one more as that window ends for what rang
+//     within it;
+//   - with no registry that has said a status other than idle: the title
+//     going from a working glyph to ✳ and staying there attnTitle: title;
+//   - with neither such a registry nor a title that speaks: quiet.
 //
-// A registry speaks once it has said something of its own: that it waits
-// for something, or a status other than idle. One that has only ever said
-// idle may be one the CLI keeps without using, and leaves the rest on.
+// A registry that has waited for something speaks for the bell; one that
+// has said a status other than idle, which is when done can be said, speaks
+// for the title and for quiet as well. One that has only ever said idle, as
+// Claude Code 2.1.318's does, leaves the title to say that a turn ended,
+// after a permission as before one. While a registry waits, the title is
+// that wait's and says nothing of its own.
 //
 // Each thing is said once. A daemon that takes up a running session starts
 // from what it finds, so a restart says nothing again. While somebody has
@@ -86,18 +91,22 @@ type attnIn struct {
 type attention struct {
 	// looked is a first look taken.
 	looked bool
-	// speaks is a registry that has said something of its own, and titled
-	// a title that has ever had a glyph: either then speaks for the
-	// session, and what it does not say is not guessed at.
-	speaks, titled bool
+	// asks is a registry that has waited for something, works one that has
+	// said a status other than idle, and titled a title that has ever had a
+	// glyph. Each speaks for the session in its way, and what they do not
+	// say is not guessed at: either registry turns the bell off, works the
+	// title too, and works or titled the quiet reason.
+	asks, works, titled bool
 	// asked is the kind of wait last said, "" once it stopped waiting.
 	asked string
 	// busy is a status other than idle seen since done was last said.
 	busy bool
 	// bells is how many bells have been weighed, and rang when one was last
-	// said.
+	// said; owed is a ring weighed within attnBell of that, said when the
+	// window ends.
 	bells uint64
 	rang  time.Time
+	owed  bool
 	// spun is a working glyph seen in the title since title was last said,
 	// and idleSince when the title has been idle since, zero while not.
 	spun      bool
@@ -116,12 +125,11 @@ func (a *attention) step(in attnIn) (reason string, quiet bool) {
 	if in.Registry != nil {
 		reg = *in.Registry
 	}
-	working := reg.Status != "" && reg.Status != "idle"
-	if working || reg.WaitingFor != "" {
-		a.speaks = true
+	if reg.Status != "" && reg.Status != "idle" {
+		a.works, a.busy = true, true
 	}
-	if working {
-		a.busy = true
+	if reg.WaitingFor != "" {
+		a.asks = true
 	}
 	asked := attnKind(reg.WaitingFor)
 	if asked == "" {
@@ -138,8 +146,10 @@ func (a *attention) step(in attnIn) (reason string, quiet bool) {
 	default:
 		a.idleSince = time.Time{}
 	}
-	if a.speaks {
-		a.bells = in.Bells // the registry speaks: a bell says nothing more
+	if asked != "" {
+		// While the registry waits, the title is that wait's prompt and no
+		// signal of its own: the work after the answer arms it again.
+		a.spun, a.idleSince = false, time.Time{}
 	}
 
 	if in.Adopted && !a.looked {
@@ -157,9 +167,9 @@ func (a *attention) step(in attnIn) (reason string, quiet bool) {
 
 	waiting := asked != "" && asked != a.asked
 	done := a.busy && reg.Status == "idle"
-	rings := !a.speaks && in.Bells > a.bells
-	bell := rings && (a.rang.IsZero() || in.Now.Sub(a.rang) >= attnBell)
-	title := !a.speaks && a.spun && !a.idleSince.IsZero() && in.Now.Sub(a.idleSince) >= attnTitle
+	rings := !a.asks && !a.works && in.Bells > a.bells
+	bell := (rings || a.owed) && !a.asks && !a.works && (a.rang.IsZero() || in.Now.Sub(a.rang) >= attnBell)
+	title := !a.works && a.spun && !a.idleSince.IsZero() && in.Now.Sub(a.idleSince) >= attnTitle
 	quiet = !in.LastActive.IsZero() && !in.LastActive.Equal(a.quietOf) && in.Now.Sub(in.LastActive) >= heldQuiet
 	switch {
 	case waiting:
@@ -170,7 +180,7 @@ func (a *attention) step(in attnIn) (reason string, quiet bool) {
 		reason = "bell"
 	case title:
 		reason = "title"
-	case quiet && !a.speaks && !a.titled:
+	case quiet && !a.works && !a.titled:
 		reason = "quiet"
 	}
 	if waiting {
@@ -180,12 +190,16 @@ func (a *attention) step(in attnIn) (reason string, quiet bool) {
 		a.busy = false
 	}
 	if rings {
-		// A bell within attnBell of the last one said is dropped, not kept
-		// for later: a CLI ringing in a loop is said once each attnBell.
 		a.bells = in.Bells
-		if bell {
-			a.rang = in.Now
-		}
+	}
+	// A ring within attnBell of the last one said is owed, and said once as
+	// the window ends: a CLI ringing in a loop is said once each attnBell,
+	// and a second ring that meant something is late, not lost.
+	switch {
+	case bell:
+		a.rang, a.owed = in.Now, false
+	case rings:
+		a.owed = true
 	}
 	if title {
 		a.spun, a.idleSince = false, time.Time{}
@@ -216,10 +230,14 @@ const (
 	attnIdle
 )
 
-// attnGlyph is which of the glyphs title begins with, as vtscan.CleanTitle
-// strips them.
+// attnGlyph is which of the glyphs title begins with, by vtscan.CleanTitle's
+// rule: one standing alone, or before a space. One that runs into a word is
+// part of the word.
 func attnGlyph(title string) int {
-	r, _ := utf8.DecodeRuneInString(title)
+	r, n := utf8.DecodeRuneInString(title)
+	if rest := title[n:]; rest != "" && rest[0] != ' ' {
+		return attnNoGlyph
+	}
 	switch {
 	case r == '✳':
 		return attnIdle
@@ -227,6 +245,71 @@ func attnGlyph(title string) int {
 		return attnWorking
 	}
 	return attnNoGlyph
+}
+
+// attnReportsOnly reports whether p is nothing but what a terminal says by
+// itself rather than what somebody types: focus in and out (CSI I, CSI O)
+// and mouse reports, X10 or UTF-8 (CSI M and three characters), SGR
+// (CSI < n;n;n M or m) or urxvt (CSI n;n;n M). A viewer whose page sends
+// only those is not typing, and puts nothing off.
+func attnReportsOnly(p []byte) bool {
+	if len(p) == 0 {
+		return false
+	}
+	for len(p) > 0 {
+		n := attnReport(p)
+		if n == 0 {
+			return false
+		}
+		p = p[n:]
+	}
+	return true
+}
+
+// attnReport is the length of the report p begins with, 0 for none.
+func attnReport(p []byte) int {
+	if len(p) < 3 || p[0] != 0x1b || p[1] != '[' {
+		return 0
+	}
+	switch p[2] {
+	case 'I', 'O':
+		return 3
+	case 'M':
+		n := 3
+		for range 3 {
+			if n >= len(p) {
+				return 0
+			}
+			_, w := utf8.DecodeRune(p[n:])
+			n += w
+		}
+		return n
+	}
+	i := 2
+	sgr := p[i] == '<'
+	if sgr {
+		i++
+	}
+	for param := 1; ; param++ {
+		start := i
+		for i < len(p) && p[i] >= '0' && p[i] <= '9' {
+			i++
+		}
+		if i == start || i == len(p) {
+			return 0
+		}
+		if p[i] != ';' {
+			if param != 3 {
+				return 0
+			}
+			break
+		}
+		i++
+	}
+	if p[i] == 'M' || (sgr && p[i] == 'm') {
+		return i + 1
+	}
+	return 0
 }
 
 // noteOutput weighs output at offset off, arriving at now, as activity or

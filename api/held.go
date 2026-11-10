@@ -229,9 +229,10 @@ func (h *heldTerm) typeFrom(tc *termConn, p []byte) error {
 	seq := h.seq
 	h.typed[seq%heldTyped] = typist{seq: seq, tc: tc}
 	// A keystroke's echo is not activity, and a viewer typing is somebody
-	// there, whom nothing is said to for a while (attention.go).
+	// there, whom nothing is said to for a while (attention.go). Focus and
+	// mouse reports are their terminal's, not their typing.
 	h.keyAt = h.s.now()
-	if tc != nil {
+	if tc != nil && !attnReportsOnly(p) {
 		h.typedAt = h.keyAt
 	}
 	h.mu.Unlock()

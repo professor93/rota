@@ -19,6 +19,20 @@ import (
 // every second as well, so these wait for what is said rather than assume
 // whose look said it, and look at the same clock the tick does.
 
+// attnWithHeld is withHeld with nothing on PATH but the fakes the harness
+// put ahead of it: no test here runs a CLI, and none may find a real one.
+func attnWithHeld(t *testing.T, env []string) *terms {
+	t.Helper()
+	before := os.Getenv("PATH")
+	p := withHeld(t, env)
+	fakes := strings.TrimSuffix(os.Getenv("PATH"), string(os.PathListSeparator)+before)
+	if fakes == "" || fakes == os.Getenv("PATH") {
+		t.Fatalf("the harness put no fakes ahead of PATH: %q", os.Getenv("PATH"))
+	}
+	t.Setenv("PATH", fakes)
+	return p
+}
+
 // attnHeld is the held session id on s.
 func attnHeld(t *testing.T, s *Server, id string) *heldTerm {
 	t.Helper()
@@ -97,6 +111,8 @@ func attnAttend(t *testing.T, s *Server, id string, now func() time.Time, want .
 // person typing is still there and nothing may be said.
 func attnType(t *testing.T, p *terms, tm *term, h *heldTerm, forward func(time.Duration), line string, ok func(*heldTerm) bool) {
 	t.Helper()
+	id := h.ts.id
+	before := attnReasons(attnSaid(p.api, id))
 	tm.typeIn(line + "\r")
 	attnUntil(t, h, "what "+line+" reports", ok)
 	h.mu.Lock()
@@ -106,8 +122,14 @@ func attnType(t *testing.T, p *terms, tm *term, h *heldTerm, forward func(time.D
 		t.Fatalf("typing %q left typedAt at %v, want %v", line, typed, p.api.now())
 	}
 	p.api.attendAll(p.api.now())
+	if got := attnReasons(attnSaid(p.api, id)); !slices.Equal(got, before) {
+		t.Fatalf("as %q was typed the session said %v, after %v", line, got, before)
+	}
 	forward(attnTyping - time.Second)
 	p.api.attendAll(p.api.now())
+	if got := attnReasons(attnSaid(p.api, id)); !slices.Equal(got, before) {
+		t.Fatalf("%v after %q was typed the session said %v, after %v", attnTyping-time.Second, line, got, before)
+	}
 	forward(time.Second)
 }
 
@@ -116,7 +138,7 @@ func attnType(t *testing.T, p *terms, tm *term, h *heldTerm, forward func(time.D
 // its conversation's, and only once the typing that led to it is
 // attnTyping ago.
 func TestAttentionReachesTheBus(t *testing.T) {
-	p := withHeld(t, []string{"FAKE_HOLDER_CONVERSATION_NAME=secret plans"})
+	p := attnWithHeld(t, []string{"FAKE_HOLDER_CONVERSATION_NAME=secret plans"})
 	work := filepath.Join(p.root, "work")
 	if err := os.Mkdir(work, 0o700); err != nil {
 		t.Fatal(err)
@@ -152,10 +174,10 @@ func TestAttentionReachesTheBus(t *testing.T) {
 }
 
 // A bell and a title, with no registry to speak for the session, are said
-// as their own reasons; and a bell rung again within attnBell is not said
-// again.
+// as their own reasons; and a bell rung again within attnBell is said once
+// that window ends, not at once.
 func TestABellAndATitleReachTheBus(t *testing.T) {
-	p := withHeld(t, nil)
+	p := attnWithHeld(t, nil)
 	id := p.start(nil)["id"].(string)
 	h := attnHeld(t, p.api, id)
 	forward := p.frozenClock()
@@ -164,31 +186,64 @@ func TestABellAndATitleReachTheBus(t *testing.T) {
 
 	attnType(t, p, tm, h, forward, "bell", func(h *heldTerm) bool { return h.bells == 1 })
 	attnAttend(t, p.api, id, p.api.now, "bell")
+	// Said when the clock read attnTyping; the second ring comes attnTyping
+	// after that, and is said attnBell after the first was.
 	attnType(t, p, tm, h, forward, "bell", func(h *heldTerm) bool { return h.bells == 2 })
 	attnAttend(t, p.api, id, p.api.now, "bell")
-	attnType(t, p, tm, h, forward, "title ⠂ Tidy", func(h *heldTerm) bool { return h.title == "⠂ Tidy" })
+	forward(attnBell - attnTyping - time.Second)
 	attnAttend(t, p.api, id, p.api.now, "bell")
+	forward(time.Second)
+	attnAttend(t, p.api, id, p.api.now, "bell", "bell")
+
+	attnType(t, p, tm, h, forward, "title ⠂ Tidy", func(h *heldTerm) bool { return h.title == "⠂ Tidy" })
+	attnAttend(t, p.api, id, p.api.now, "bell", "bell")
 	attnType(t, p, tm, h, forward, "title ✳ Tidy", func(h *heldTerm) bool { return h.title == "✳ Tidy" })
-	got := attnAttend(t, p.api, id, p.api.now, "bell", "title")
-	if got[0].Text != "rang its bell" || got[1].Text != "is idle again" {
-		t.Errorf("the bell and the title were said as %q and %q", got[0].Text, got[1].Text)
+	got := attnAttend(t, p.api, id, p.api.now, "bell", "bell", "title")
+	if got[0].Text != "rang its bell" || got[2].Text != "is idle again" {
+		t.Errorf("the bell and the title were said as %q and %q", got[0].Text, got[2].Text)
 	}
 }
 
 // A daemon that takes up a session already waiting for its person says
-// nothing about it: the daemon before said it. What changes after that is
-// said (Review Focus 4).
+// nothing about it: the daemon before said it. Its first look waits for
+// what the holder says, which here it says late, so the record's guess is
+// never taken for the baseline. What changes after that is said (Review
+// Focus 4).
 func TestARestartSaysNothingAboutAWaitingSession(t *testing.T) {
-	p := withHeld(t, []string{"FAKE_HOLDER_WAITING=permission", "FAKE_HOLDER_TITLE=✳ x"})
+	gate := filepath.Join(t.TempDir(), "state")
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p := attnWithHeld(t, []string{"FAKE_HOLDER_WAITING=permission", "FAKE_HOLDER_TITLE=✳ x",
+		"FAKE_HOLDER_PRINT=hello", "FAKE_HOLDER_STATE_AFTER=" + gate})
 	id := p.start(nil)["id"].(string)
 	h := attnHeld(t, p.api, id)
 	attnUntil(t, h, "waiting", func(h *heldTerm) bool { return h.reg.WaitingFor == "permission" })
 	attnAttend(t, p.api, id, p.api.now, "permission")
 
+	if err := os.Remove(gate); err != nil {
+		t.Fatal(err)
+	}
 	q := p.restart()
 	h = attnHeld(t, q.api, id)
-	attnUntil(t, h, "its first state", func(h *heldTerm) bool { return h.stated })
 	forward := q.frozenClock()
+	for range 3 {
+		q.api.attendAll(q.api.now())
+		forward(time.Minute)
+	}
+	h.mu.Lock()
+	adopted, replayTo, linked, stated, looked := h.adopted, h.replayTo, h.linkedAt, h.stated, h.attn.looked
+	h.mu.Unlock()
+	if !adopted || replayTo != int64(len("hello")) || linked.IsZero() {
+		t.Errorf("the session was taken up as adopted %t, replaying to %d, linked at %v", adopted, replayTo, linked)
+	}
+	if stated || looked {
+		t.Fatalf("before its holder said its state, the session was looked at (%t, stated %t)", looked, stated)
+	}
+	if err := os.WriteFile(gate, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	attnUntil(t, h, "its first state", func(h *heldTerm) bool { return h.stated })
 	for range 3 {
 		q.api.attendAll(q.api.now())
 		forward(time.Hour)
