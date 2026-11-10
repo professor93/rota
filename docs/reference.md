@@ -2194,9 +2194,11 @@ the CLI to draw again, so a CLI that redraws itself when it is resized, as
 a full-screen one does, is all there after a fit back, and one that does
 not shows only what it printed since. Otherwise the fresh screen shows
 what a replayed viewer sees, or the end of it, and what the CLI drew
-before that is lost to it. A viewer already attached is not repainted when
-the screen comes back: its next `repaint` is the fresh screen, as is the
-`hello` of the next attach. What a held session's viewer is replayed — on
+before that is lost to it. A viewer attached meanwhile is repainted once
+it is, as one that fell behind is, and the `hello` of the next attach has
+the fresh screen too; a holder from an older rota does not say when its
+screen comes back, so its viewers get it at their next `repaint`. What a
+held session's viewer is replayed — on
 attaching, or after a repaint — comes in frames of at most 64 KiB, each
 with its own write deadline, and one viewer is repainted at most four
 times a second. Documents still arrive, and the ones that came while it

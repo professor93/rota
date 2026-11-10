@@ -433,7 +433,7 @@ func (s *Session) beat(l *link) {
 
 // stateLocked is the State now. The caller holds s.mu.
 func (s *Session) stateLocked() holdwire.StateMsg {
-	m := holdwire.StateMsg{Title: s.title, Bells: s.bells, Modes: s.modes}
+	m := holdwire.StateMsg{Title: s.title, Bells: s.bells, Modes: s.modes, Screen: s.kept}
 	if s.reg != nil {
 		r := *s.reg
 		m.Registry = &r

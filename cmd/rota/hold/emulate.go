@@ -98,6 +98,7 @@ func (s *Session) catchUp(limited bool) bool {
 	if live && from > s.em.off {
 		s.em.retired, live = true, false
 		s.screen.Close()
+		s.setKept(false)
 		s.log("the screen fell a whole ring behind its CLI and is retired; viewers get the ring replayed until it is quiet",
 			"behind", from-s.em.off)
 	}
@@ -220,6 +221,7 @@ func (s *Session) sized(z sized) {
 	if !holdwire.ScreenFits(z.cols, z.rows) {
 		s.em.retired = true
 		s.screen.Close()
+		s.setKept(false)
 		s.log(tooLarge, "cols", z.cols, "rows", z.rows, "cells", holdwire.MaxScreenCells)
 		return
 	}
@@ -237,6 +239,7 @@ func (s *Session) noticeLoss() {
 	}
 	if why := s.screen.Lost(); why != "" {
 		s.em.retired, s.em.broken = true, true
+		s.setKept(false)
 		s.log("the screen's emulator panicked and is retired; viewers get the ring replayed", "panic", why)
 	}
 }
@@ -287,11 +290,19 @@ func (s *Session) renew() time.Duration {
 		return 0
 	default:
 	}
-	s.screen, s.drawn = fresh, start
+	// The State says so in the same hold, so a daemon that asks for the
+	// screen on hearing it finds this one: what it has yet to draw is no
+	// more than a repaint draws itself.
+	s.screen, s.drawn, s.kept = fresh, start, true
+	s.gen++
+	l := s.link
 	s.mu.Unlock()
 	s.em.retired, s.em.off = false, start
 	s.log("the screen is kept again", "cols", cols, "rows", rows, "from", start)
 	nudge(s.emWake)
+	if l != nil {
+		l.nudge()
+	}
 	return 0
 }
 
