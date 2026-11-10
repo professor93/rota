@@ -32,12 +32,52 @@ func TestBeginningALoginOverHTTPKeepsItsStateToItself(t *testing.T) {
 	for _, body := range []map[string]any{{"provider": "claude"}, {"provider": "claude", "long": true}, {}} {
 		resp, raw := h.do("POST", "/v1/login", body)
 		doc := beginReply(t, raw)
-		if resp.StatusCode != 200 || doc["id"] == "" || doc["url"] == "" || doc["kind"] != "code" || doc["provider"] != "claude" {
+		id, _ := doc["id"].(string)
+		url, _ := doc["url"].(string)
+		created, _ := doc["createdAt"].(float64)
+		if resp.StatusCode != 200 || id == "" || url == "" || created <= 0 || doc["kind"] != "code" || doc["provider"] != "claude" {
 			t.Fatalf("%v: %d %s", body, resp.StatusCode, raw)
 		}
 		if _, ok := doc["state"]; ok || strings.Contains(string(raw), "verifier") {
 			t.Fatalf("%v: the state went out: %s", body, raw)
 		}
+		if _, ok := doc["delegated"]; ok {
+			t.Fatalf("%v: delegated is said only when it is so: %s", body, raw)
+		}
+	}
+	// A login that can also be delegated says so: the playground offers the
+	// keyless route on it.
+	resp, raw := h.do("POST", "/v1/login", map[string]any{"provider": "grok"})
+	if doc := beginReply(t, raw); resp.StatusCode != 200 || doc["delegated"] != true || doc["kind"] != "apikey" {
+		t.Fatalf("%d %s", resp.StatusCode, raw)
+	}
+}
+
+// addAccounts puts these accounts in the harness's store beside the ones it
+// was made with.
+func addAccounts(t *testing.T, dir string, accounts ...map[string]any) {
+	t.Helper()
+	path := filepath.Join(dir, "accounts.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Accounts []map[string]any `json:"accounts"`
+		NextID   int              `json:"nextId"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	for _, a := range accounts {
+		doc.Accounts = append(doc.Accounts, a)
+		if id := int(a["id"].(float64)); id >= doc.NextID {
+			doc.NextID = id + 1
+		}
+	}
+	out, _ := json.Marshal(doc)
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -46,9 +86,15 @@ func TestBeginningALoginOverHTTPKeepsItsStateToItself(t *testing.T) {
 func TestBeginningALoginForAnAccountOverHTTP(t *testing.T) {
 	h := newHarness(t, Options{})
 	seedUUID(t, h.dir, 1, "u1")
+	addAccounts(t, h.dir,
+		map[string]any{"id": float64(5), "provider": "claude", "uuid": "key-5", "credential": "apikey",
+			"token": map[string]any{"accessToken": "sk-ant-api-xxxxWXYZ"}},
+		map[string]any{"id": float64(6), "provider": "grok", "uuid": "grok-6", "delegated": true,
+			"token": map[string]any{}})
 	resp, raw := h.do("POST", "/v1/login", map[string]any{"account": 1})
 	doc := beginReply(t, raw)
-	if resp.StatusCode != 200 || doc["account"] != float64(1) || doc["kind"] != "code" || doc["url"] == "" {
+	url, _ := doc["url"].(string)
+	if resp.StatusCode != 200 || doc["account"] != float64(1) || doc["kind"] != "code" || url == "" {
 		t.Fatalf("%d %s", resp.StatusCode, raw)
 	}
 	if _, ok := doc["state"]; ok {
@@ -67,14 +113,22 @@ func TestBeginningALoginForAnAccountOverHTTP(t *testing.T) {
 	for _, c := range []struct {
 		body map[string]any
 		code int
+		says string
 	}{
-		{map[string]any{"account": 99}, 404},
-		{map[string]any{"account": 1, "long": true}, 400},
-		{map[string]any{"account": 1, "provider": "codex"}, 400},
-		{map[string]any{"account": -1}, 400},
+		{map[string]any{"account": 99}, 404, "no such account"},
+		{map[string]any{"account": 1, "long": true}, 400, "takes no long or provider"},
+		{map[string]any{"account": 1, "provider": "codex"}, 400, "takes no long or provider"},
+		{map[string]any{"account": -1}, 400, "account's id"},
+		// Accounts with no sign-in for rota to start.
+		{map[string]any{"account": 5}, 400, "rota login --key"},
+		{map[string]any{"account": 6}, 400, "its own CLI"},
 	} {
-		if resp, raw := h.do("POST", "/v1/login", c.body); resp.StatusCode != c.code {
+		resp, raw := h.do("POST", "/v1/login", c.body)
+		if resp.StatusCode != c.code || !strings.Contains(string(raw), c.says) {
 			t.Errorf("%v: %d %s", c.body, resp.StatusCode, raw)
+		}
+		if strings.Contains(string(raw), "WXYZ") {
+			t.Errorf("%v: part of a key in the answer: %s", c.body, raw)
 		}
 	}
 }

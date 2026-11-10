@@ -130,14 +130,20 @@ func TestLoginJSONKeepsTheLoginsStateToItself(t *testing.T) {
 	for _, args := range [][]string{{"--json", "login"}, {"--json", "login", "12"}, {"--json", "login", "--long"}} {
 		out, errOut, code := call(t, args...)
 		var doc map[string]any
-		if err := json.Unmarshal([]byte(out), &doc); code != 0 || err != nil || doc["url"] == "" || doc["kind"] != "code" {
+		err := json.Unmarshal([]byte(out), &doc)
+		id, _ := doc["id"].(string)
+		url, _ := doc["url"].(string)
+		created, _ := doc["createdAt"].(float64)
+		if code != 0 || err != nil || id == "" || url == "" || created <= 0 || doc["kind"] != "code" {
 			t.Fatalf("%v: %d %v %q %q", args, code, err, out, errOut)
 		}
 		if _, ok := doc["state"]; ok || strings.Contains(out, "verifier") {
 			t.Fatalf("%v: the state went out: %s", args, out)
 		}
-		if p := parked(t, home); !strings.Contains(p, `"verifier"`) {
-			t.Fatalf("%v: the state must still be parked: %s", args, p)
+		// This login's own state, not an earlier one's.
+		var m map[string]rota.Login
+		if err := json.Unmarshal([]byte(parked(t, home)), &m); err != nil || m[id].State["verifier"] == "" {
+			t.Fatalf("%v: the state must still be parked: %v %s", args, err, parked(t, home))
 		}
 	}
 }
