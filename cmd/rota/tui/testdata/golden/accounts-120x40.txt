@@ -1,0 +1,18 @@
+#   id   account                  5h                       7d                       reset               state
+1   1    work@example.c…  claude  ▕██████████░░│░░░▏  62%  ▕███░░░░░░░░░│░░░▏  21%  1h 3m (21:20)       ok
+2   2    home@example.c…  claude  ▕██░░░░░░░░░░░░░░▏  12%  ▕█░░░░░░░░░░░░░░░▏   7%  4h 10m (00:27)      ok
+3   3    cdx@example.com  codex   ▕███████████████░▏  95%                           2h 0m (22:17)       dead: l signs in
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+work@example.com  claude  id 1
+  5h              ▕██████████░░│░░░▏  62%  1h 3m (21:20)
+  7d              ▕███░░░░░░░░░│░░░▏  21%  4d 2h (Sat 22:17)
+  status          ok
+  threshold       75%
+  place           1
+  credential      login
+  login until     2026-11-30 20:17 (20d left)
+  checked         2m ago
+  folder          not set
+  config          not set
+  sessions        shared
+  remote control  off
