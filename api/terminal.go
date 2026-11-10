@@ -221,6 +221,7 @@ type termFrame struct {
 type termConn struct {
 	id    string
 	name  string
+	via   string // how the principal signed in (Principal.Via): with name, the person a viewer event is about
 	role  Role
 	watch bool // this connection may never hold the keyboard
 	// refusal is the sentence a change this role does not cover is refused
@@ -284,7 +285,7 @@ func newTermConn(c *wsConn, p *Principal, watch bool, at time.Time) *termConn {
 		depth = 1
 	}
 	return &termConn{
-		id: runID(), name: p.Name, role: p.Role, watch: watch, since: at, refusal: watchOnlyFor(p),
+		id: runID(), name: p.Name, via: p.Via, role: p.Role, watch: watch, since: at, refusal: watchOnlyFor(p),
 		c: c, out: make(chan termFrame, depth),
 		gone: make(chan struct{}), drained: make(chan struct{}),
 	}
@@ -750,6 +751,26 @@ type termSession struct {
 	// left is a held terminal this server has let go of, still running: it
 	// is the next daemon's, and nothing here ends it any more.
 	left bool
+
+	// What its events need (events_sessions.go). stoppedBy is who asked it
+	// to end, and stoppedIdle that it was the idle timeout (stop); endWhy
+	// and endText are how it is to say it ended (endingAs). unsaid is a
+	// session never said to have started, which says nothing of its end
+	// either. present is who is attached, by person (viewerCame). tokenSaid
+	// is its token's end having been said, or having been over when it was
+	// taken up. onToken is a claude session on a token rather than on its
+	// account's stored login, and longToken one on a long-lived token: both
+	// are set once when the session is made, and say whether and in which
+	// words its token's end is said (hardEnd).
+	stoppedBy   string
+	stoppedIdle bool
+	endWhy      string
+	endText     string
+	unsaid      bool
+	present     map[string]*presence
+	tokenSaid   bool
+	onToken     bool
+	longToken   bool
 }
 
 /* ------------------------------------------------------------ the keyboard --- */
@@ -1177,6 +1198,7 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 		ts.audit("keyboard taken", "to", tc.name)
 	}
 	ts.conns = append(ts.conns, tc)
+	ts.viewerCame(tc)
 	from := since
 	if replayAll {
 		from = ts.ring.Oldest()
@@ -1242,6 +1264,9 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 // grace, so a reconnect gets it back rather than finding somebody typing.
 func (ts *termSession) detach(tc *termConn) {
 	ts.mu.Lock()
+	if ts.attached(tc) {
+		ts.viewerWent(tc)
+	}
 	out := ts.conns[:0]
 	for _, c := range ts.conns {
 		if c != tc {
@@ -1472,6 +1497,14 @@ func (ts *termSession) over() bool {
 // A held terminal this server let go of returns from its far end without an
 // ending: it has not ended, it has stopped being this server's.
 func (ts *termSession) run() {
+	// A token already over as the session is taken up — an adopted one's,
+	// that ended under the daemon before or while none ran — is where this
+	// server starts from, not news (R6).
+	ts.mu.Lock()
+	if !ts.tokenUntil.IsZero() && !ts.s.now().Before(ts.tokenUntil) {
+		ts.tokenSaid = true
+	}
+	ts.mu.Unlock()
 	code := ts.back.run(ts)
 	ts.mu.Lock()
 	left := ts.left
@@ -1530,6 +1563,7 @@ func (ts *termSession) finish(code int) {
 		// had been offered.
 		ts.audit("terminal unshared", "exit", code)
 	}
+	ts.sessionEnded(code)
 	// The pump has returned, so everything this terminal printed is in the
 	// ring and in the recording; both are finished with here.
 	if ts.rec != nil {
@@ -1553,13 +1587,17 @@ func (ts *termSession) finish(code int) {
 // server has no process to signal — and the sharer hangs up the child it is
 // holding. The insisting ending is this server letting go of the link, which
 // is all it can do to a machine it does not own.
-func (ts *termSession) kill(by string) {
+func (ts *termSession) kill(by string) { ts.stop(by, false) }
+
+// stop is kill, saying whether it is the idle timeout's: a fact of its own,
+// set with killing, since by is a name and anybody may be called idle.
+func (ts *termSession) stop(by string, idle bool) {
 	ts.mu.Lock()
 	if ts.ended || ts.killing || ts.left {
 		ts.mu.Unlock()
 		return
 	}
-	ts.killing = true
+	ts.killing, ts.stoppedBy, ts.stoppedIdle = true, by, idle
 	back := ts.back
 	ts.mu.Unlock()
 	if by != "" {
@@ -1833,12 +1871,16 @@ func (s *Server) liveTerminals() int {
 // than the idle timeout. A terminal is meant to outlive a browser tab, not
 // to outlive the person: a CLI left running for a week is an account being
 // held and a machine being used for nothing.
+//
+// It also says which sessions' tokens have ended, first, so that a server
+// with no idle timeout says that too.
 func (s *Server) sweepTerminals() {
+	now := s.now()
+	s.tokensEnded(now)
 	limit := s.opts.Terminal.IdleTimeout
 	if limit <= 0 {
 		return
 	}
-	now := s.now()
 	for _, ts := range s.everyTerminal() {
 		// A held session is exempt: a long task left alone is what it is
 		// for, and it keeps running whether or not anybody watches.
@@ -1848,7 +1890,7 @@ func (s *Server) sweepTerminals() {
 		ts.mu.Unlock()
 		if idle {
 			ts.audit("terminal idle", "for", short(limit))
-			ts.kill("idle")
+			ts.stop(byIdle, true)
 		}
 	}
 }
