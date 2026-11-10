@@ -100,9 +100,6 @@ func fakeSleepAndExit() {
 	if s := os.Getenv("FAKE_SLEEP"); s != "" {
 		d, _ := time.ParseDuration(s)
 		time.Sleep(d)
-		if m := os.Getenv("FAKE_MARK"); m != "" {
-			os.WriteFile(filepath.Join(m, fmt.Sprintf("slept-%d", os.Getpid())), []byte(time.Now().Format(time.RFC3339Nano)), 0o600)
-		}
 	}
 	fmt.Fprintln(os.Stderr, "stderr-line")
 	if c := os.Getenv("FAKE_EXIT"); c != "" {
@@ -112,9 +109,6 @@ func fakeSleepAndExit() {
 }
 
 func fakeClaude() {
-	if m := os.Getenv("FAKE_MARK"); m != "" {
-		os.WriteFile(filepath.Join(m, fmt.Sprintf("start-%d", os.Getpid())), []byte(time.Now().Format(time.RFC3339Nano)), 0o600)
-	}
 	args := os.Args[1:]
 	prompt, _ := io.ReadAll(os.Stdin)
 	var files []string
