@@ -58,7 +58,13 @@ const maxBody = 8 << 20
 // Client is a connection to one store's daemon. Each request opens a
 // connection of its own, so a client left idle holds nothing open.
 type Client struct {
-	sock string
+	// said is what a sentence calls what this client talks to: the rota
+	// daemon on its socket, or the one in this process.
+	said string
+	// dial opens one connection to whatever serves this client: the
+	// daemon's socket, or a handler in this process. Every request and
+	// every attach goes through it.
+	dial func(ctx context.Context) (net.Conn, error)
 	http *http.Client
 }
 
@@ -131,14 +137,22 @@ func dial(terminals string, wait time.Duration) (*Client, error) {
 }
 
 func newClient(sock string) *Client {
-	return &Client{sock: sock, http: &http.Client{
+	return dialledBy("the rota daemon on "+sock, func(ctx context.Context) (net.Conn, error) { return dialOwn(ctx, sock) })
+}
+
+// dialledBy is a client whose every connection is dial's, and which says
+// said where a sentence names what it is talking to.
+func dialledBy(said string, dial func(ctx context.Context) (net.Conn, error)) *Client {
+	c := &Client{said: said, dial: dial}
+	c.http = &http.Client{
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return dialOwn(ctx, sock)
+				return c.dial(ctx)
 			},
 		},
-	}}
+	}
+	return c
 }
 
 // owner is the user whose daemon a control socket must be: the one this
@@ -189,7 +203,7 @@ func (c *Client) Health() error {
 		return err
 	}
 	if !doc.OK {
-		return fmt.Errorf("the rota daemon on %s says it is not serving", c.sock)
+		return fmt.Errorf("%s says it is not serving", c.said)
 	}
 	return nil
 }
@@ -540,12 +554,12 @@ func (c *Client) doAs(caller, method, path string, in, out any) error {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("the rota daemon on %s: %w", c.sock, err)
+		return fmt.Errorf("%s: %w", c.said, err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
-		return fmt.Errorf("the rota daemon on %s: %w", c.sock, err)
+		return fmt.Errorf("%s: %w", c.said, err)
 	}
 	if resp.StatusCode/100 != 2 {
 		var e struct {
