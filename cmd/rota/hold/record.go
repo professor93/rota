@@ -100,7 +100,7 @@ func (h *holder) readRegistry(last *Registry) *Registry {
 		return last
 	}
 	f, err := parseRegistry(raw)
-	if err != nil || !f.belongsTo(h.child.Pid(), h.childStart) {
+	if err != nil || !f.belongsTo(h.child.Pid(), h.childStart, h.childTicks) {
 		return last
 	}
 	reg := f.Registry
@@ -127,8 +127,8 @@ func (h *holder) readRegistry(last *Registry) *Registry {
 }
 
 // registryOf is where Claude Code started with env keeps the record of the
-// session that is pid. Its times are in UTC whatever env's TZ says, so where
-// the record is is all there is to know.
+// session that is pid. Its start is in UTC, or in ticks, whatever env's TZ
+// says, so where the record is is all there is to know.
 func registryOf(env []string, pid int) string {
 	home := lookup(env, "CLAUDE_CONFIG_DIR")
 	if home == "" {

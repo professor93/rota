@@ -104,9 +104,10 @@ type holder struct {
 	tokenUntil time.Time
 
 	// The CLI's own registry, for claude: where it is, and when the CLI
-	// started.
+	// started, by the clock and, on Linux, in clock ticks since boot.
 	registry   string
 	childStart time.Time
+	childTicks int64
 }
 
 // plan is what to run: the executable, its arguments and environment, and
@@ -168,7 +169,10 @@ func (h *holder) start(in io.Reader, open func() (*store.Store, error)) error {
 	started := time.Now()
 	h.log("the CLI started", "pid", h.child.Pid(), "path", p.path, "cols", cols, "rows", rows)
 	if h.childStart, err = proc.StartTime(h.child.Pid()); err != nil {
-		h.log("the CLI's start time could not be read: its registry will not be believed, and the daemon cannot tell it from another process with its pid", "err", err)
+		h.log("the CLI's start time could not be read: the daemon cannot tell it from another process with its pid, and on macOS its registry will not be believed", "err", err)
+	}
+	if h.childTicks, err = proc.StartTicks(h.child.Pid()); err != nil {
+		h.log("the CLI's start in ticks could not be read: on Linux its registry will not be believed", "err", err)
 	}
 
 	if err := h.listen(); err != nil {

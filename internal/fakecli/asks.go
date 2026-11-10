@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/professor93/rota/internal/proc"
@@ -53,37 +55,42 @@ func ask(line string) (string, bool) {
 	return "", false
 }
 
-// writeRegistry writes a session file shaped like one Claude Code 2.1.318
-// writes: every key it has, with this process's own pid and start. The start
-// is what Claude Code writes, the output of `ps -o lstart= -p <pid>` under
-// LC_ALL=C TZ=UTC: the start in UTC, as ANSIC lays it out, whatever zone the
-// fake runs in. waitingFor is null unless a word says what is waited for. The
-// file is written beside its place and renamed in, so a reader never sees half
-// of one.
+// writeRegistry writes a session file shaped like one Claude Code writes,
+// with the keys of a 2.1.318 file and pidDomain, about this process: its
+// own pid, its start and the pid space it runs in. procStart and pidDomain
+// are what Claude Code's build for this system writes (see procStart and
+// proc.PidDomain); where rota knows no pid space, none is written.
+// startedAt is when the fake first made the file. waitingFor is null unless
+// a word says what is waited for. The file is written beside its place and
+// renamed in, so a reader never sees half of one.
 func writeRegistry(status string, waiting []string) error {
 	pid := os.Getpid()
-	start, err := proc.StartTime(pid)
+	start, err := procStart(pid)
 	if err != nil {
-		start = time.Now()
+		return err
 	}
 	var waitingFor any
 	if len(waiting) > 0 {
 		waitingFor = waiting[0]
 	}
 	cwd, _ := os.Getwd()
-	raw, err := json.Marshal(map[string]any{
+	rec := map[string]any{
 		"pid":        pid,
-		"procStart":  start.UTC().Format(time.ANSIC),
+		"procStart":  start,
 		"sessionId":  fmt.Sprintf("fake-%d", pid),
 		"cwd":        cwd,
 		"name":       "fake",
 		"status":     status,
 		"waitingFor": waitingFor,
 		"kind":       "interactive",
-		"startedAt":  start.UnixMilli(),
+		"startedAt":  madeAt(),
 		"updatedAt":  time.Now().UnixMilli(),
 		"version":    "2.1.318",
-	})
+	}
+	if domain := proc.PidDomain(); domain != "" {
+		rec["pidDomain"] = domain
+	}
+	raw, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
@@ -100,4 +107,31 @@ func writeRegistry(status string, waiting []string) error {
 		return err
 	}
 	return os.Rename(path+".tmp", path)
+}
+
+// madeAt is when the fake first made its session file, in milliseconds
+// since the epoch: Claude Code's startedAt, written when the session starts
+// and kept as the file is rewritten.
+var madeAt = sync.OnceValue(func() int64 { return time.Now().UnixMilli() })
+
+// procStart is this process's start as Claude Code's build for this system
+// writes it into procStart. On Linux it is field 22 of /proc/<pid>/stat,
+// the start in clock ticks since boot, as digits (2.1.319). Elsewhere it is
+// the output of `ps -o lstart= -p <pid>` under LC_ALL=C TZ=UTC, as the
+// macOS build writes it (2.1.317 to 2.1.322): the start in UTC as ANSIC
+// lays it out, whatever zone the fake runs in, and now where no start can
+// be read.
+func procStart(pid int) (string, error) {
+	if runtime.GOOS == "linux" {
+		ticks, err := proc.StartTicks(pid)
+		if err != nil {
+			return "", err
+		}
+		return strconv.FormatInt(ticks, 10), nil
+	}
+	start, err := proc.StartTime(pid)
+	if err != nil {
+		start = time.Now()
+	}
+	return start.UTC().Format(time.ANSIC), nil
 }

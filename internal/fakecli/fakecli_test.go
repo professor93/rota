@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -131,27 +132,32 @@ func TestTheTtyFakeSaysWhatItsEnvironmentHolds(t *testing.T) {
 		keys = append(keys, k)
 	}
 	slices.Sort(keys)
-	if want := []string{"cwd", "kind", "name", "pid", "procStart", "sessionId", "startedAt", "status", "updatedAt", "version", "waitingFor"}; !slices.Equal(keys, want) {
-		t.Fatalf("a registry file has the keys %v, want %v", keys, want)
+	wantKeys := []string{"cwd", "kind", "name", "pid", "procStart", "sessionId", "startedAt", "status", "updatedAt", "version", "waitingFor"}
+	if proc.PidDomain() != "" {
+		wantKeys = append(wantKeys, "pidDomain")
+		slices.Sort(wantKeys)
+	}
+	if !slices.Equal(keys, wantKeys) {
+		t.Fatalf("a registry file has the keys %v, want %v", keys, wantKeys)
 	}
 	if reg["sessionId"] != "fake-"+strconv.Itoa(os.Getpid()) || reg["status"] != "waiting" ||
 		reg["waitingFor"] != "permission" || reg["kind"] != "interactive" || reg["version"] != "2.1.318" ||
 		reg["name"] != "fake" || reg["pid"] != float64(os.Getpid()) {
 		t.Fatalf("the last line wrote %s", raw)
 	}
-	start, err := time.Parse(time.ANSIC, reg["procStart"].(string))
-	if err != nil {
-		t.Fatalf("procStart is not ANSIC: %v", err)
-	}
-	if d := time.Since(start); d < -time.Second || d > time.Hour {
-		t.Fatalf("procStart %v is not this process's own start", start)
+	if start, _ := reg["procStart"].(string); start == "" {
+		t.Fatalf("no procStart: %s", raw)
 	}
 }
 
-// The fake writes procStart as Claude Code does, the output of
-// `ps -o lstart= -p <pid>` under LC_ALL=C TZ=UTC: its own start in UTC, laid
-// out as ANSIC, whatever zone it runs in.
-func TestTheFakeWritesItsStartInUTC(t *testing.T) {
+// The fake writes procStart and pidDomain as Claude Code's build for this
+// system does, whatever zone it runs in: on Linux the tick since boot it
+// started at, field 22 of /proc/<pid>/stat, and "linux:<machine-id>:<pid
+// namespace>"; on macOS the output of `ps -o lstart= -p <pid>` under
+// LC_ALL=C TZ=UTC, its own start in UTC laid out as ANSIC, and "darwin".
+// startedAt is when it first made the file, and stays so as it is
+// rewritten.
+func TestTheFakeWritesItsStartAsClaudeCodeDoesHere(t *testing.T) {
 	if !inZones(t) {
 		return
 	}
@@ -159,20 +165,52 @@ func TestTheFakeWritesItsStartInUTC(t *testing.T) {
 	if err != nil {
 		t.Skipf("no start time here: %v", err)
 	}
+	var want, domain string
+	switch runtime.GOOS {
+	case "linux":
+		ticks, err := proc.StartTicks(os.Getpid())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want, domain = strconv.FormatInt(ticks, 10), proc.PidDomain()
+		if !strings.HasPrefix(domain, "linux:") {
+			t.Fatalf("this machine's pid space is %q", domain)
+		}
+	case "darwin":
+		want, domain = started.UTC().Format(time.ANSIC), "darwin"
+	default:
+		t.Skipf("Claude Code's start is not written on %s", runtime.GOOS)
+	}
 	home := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", home)
-	var out bytes.Buffer
-	atty(Spec{Tty: true}, strings.NewReader("registry idle\nbye\n"), &out)
-	raw, err := os.ReadFile(filepath.Join(home, "sessions", strconv.Itoa(os.Getpid())+".json"))
-	if err != nil {
-		t.Fatal(err)
+	type file struct {
+		ProcStart, PidDomain string
+		StartedAt            int64
 	}
-	var reg struct{ ProcStart string }
-	if err := json.Unmarshal(raw, &reg); err != nil {
-		t.Fatal(err)
+	write := func(line string) file {
+		t.Helper()
+		var out bytes.Buffer
+		atty(Spec{Tty: true}, strings.NewReader(line+"\nbye\n"), &out)
+		raw, err := os.ReadFile(filepath.Join(home, "sessions", strconv.Itoa(os.Getpid())+".json"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var f file
+		if err := json.Unmarshal(raw, &f); err != nil {
+			t.Fatal(err)
+		}
+		return f
 	}
-	if want := started.UTC().Format(time.ANSIC); reg.ProcStart != want {
-		t.Fatalf("procStart %q, want %q, this process's start in UTC", reg.ProcStart, want)
+	first := write("registry idle")
+	if first.ProcStart != want || first.PidDomain != domain {
+		t.Fatalf("procStart %q and pidDomain %q, want %q and %q, as Claude Code writes them here", first.ProcStart, first.PidDomain, want, domain)
+	}
+	if made := time.UnixMilli(first.StartedAt); made.Before(started.Add(-2*time.Second)) || made.After(time.Now()) {
+		t.Fatalf("startedAt %v is not a moment since this process started at %v", made, started)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if again := write("registry waiting permission"); again != first {
+		t.Fatalf("rewritten, the file says %+v; it said %+v", again, first)
 	}
 }
 

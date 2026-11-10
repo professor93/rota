@@ -249,9 +249,12 @@ func TestAHeldSessionIsWarnedAboutTheSettingsOfItsOwnFolder(t *testing.T) {
 // conversation it names. What each read does with another claude's file, or
 // with none, is tested a read at a time in package hold
 // (TestEachRegistryReadKeepsTheConversationItKnows), where no poll has to be
-// waited for. The holder and its CLI run in a zone other than UTC, so that
-// the fake's procStart and the holder's reading of it must both be in UTC,
-// as Claude Code writes it, for the two to meet.
+// waited for. The fake writes its procStart and pidDomain as Claude Code
+// does on the system the test runs on, and the holder reads them so, with
+// no seam: on Linux the tick the CLI started at, on macOS its start in UTC.
+// The holder and its CLI run in a zone other than UTC, so that on macOS the
+// fake's procStart and the holder's reading of it must both be in UTC for
+// the two to meet.
 func TestTheConversationComesFromTheRegistry(t *testing.T) {
 	for _, zone := range []string{"Asia/Tashkent", "America/New_York"} {
 		t.Run(zone, func(t *testing.T) {

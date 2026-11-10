@@ -5,10 +5,14 @@ import (
 	"errors"
 	"math"
 	"path/filepath"
+	"runtime"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/proc"
 )
 
 // Registry is what Claude Code says about one of its sessions: which
@@ -23,16 +27,30 @@ type Registry = holdwire.Registry
 type registryFile struct {
 	Registry
 	PID int
-	// ProcStart is the writer's own start, zero when the file gave none in
-	// the layout Claude Code writes it in.
+	// ProcStart and ProcTicks are the writer's own start, as Claude Code's
+	// macOS build writes it, a time, and as its Linux build does, clock
+	// ticks since boot. Each is zero when the file gave none in its form.
 	ProcStart time.Time
+	ProcTicks int64
+	// PidDomain is the pid space the writer says it ran in, empty when the
+	// file names none.
+	PidDomain string
 }
 
-// registrySlack is how far a file's procStart may be from the child's start
-// and still be the child's. procStart holds whole seconds and the child's
-// start may not, so a second either way is the reading's own error; a pid
-// reused by another claude later is minutes or hours off.
+// registrySlack is how far a macOS file's procStart may be from the
+// child's start and still be the child's. procStart holds whole seconds and
+// the child's start may not, so a second either way is the reading's own
+// error; a pid reused by another claude later is minutes or hours off.
 const registrySlack = time.Second
+
+var (
+	// startsInTicks says whether a file written here gives its writer's
+	// start in clock ticks since boot, as Claude Code's Linux build writes
+	// it, rather than as a time, as its macOS build does.
+	startsInTicks = runtime.GOOS == "linux"
+	// ourPidDomain is this machine's pid space as Claude Code names it.
+	ourPidDomain = sync.OnceValue(proc.PidDomain)
+)
 
 // waitingUnknown is what a waitingFor nobody can name reads as. The file
 // says the session waits, so it waits: Enter is never typed at a prompt rota
@@ -77,20 +95,40 @@ func parseRegistry(b []byte) (registryFile, error) {
 		},
 		PID: int(number(m["pid"])),
 	}
-	// procStart is what `ps -o lstart= -p <pid>` prints under LC_ALL=C
-	// TZ=UTC, which is how Claude Code 2.1.317 to 2.1.322 write it on Linux
-	// and macOS alike: the writer's start in UTC, whatever zone it runs in.
-	if t, err := time.Parse(time.ANSIC, str(m["procStart"])); err == nil {
+	// procStart is the writer's start as Claude Code's build for its system
+	// writes it. On macOS (2.1.317 to 2.1.322) it is what `ps -o lstart= -p
+	// <pid>` prints under LC_ALL=C TZ=UTC: the start in UTC, whatever zone
+	// it runs in. On Linux (as 2.1.319 writes it) it is field 22 of
+	// /proc/<pid>/stat: the start in clock ticks since boot, as digits.
+	start := str(m["procStart"])
+	if strings.Trim(start, "0123456789") == "" {
+		if n, err := strconv.ParseInt(start, 10, 64); err == nil && n > 0 {
+			f.ProcTicks = n
+		}
+	} else if t, err := time.Parse(time.ANSIC, start); err == nil {
 		f.ProcStart = t
 	}
+	f.PidDomain = str(m["pidDomain"])
 	return f, nil
 }
 
 // belongsTo says whether the file is the one written by the child that is
-// pid and started at start: its procStart is within registrySlack of that
-// start, and it names no other pid.
-func (f registryFile) belongsTo(pid int, start time.Time) bool {
-	if f.ProcStart.IsZero() || start.IsZero() || (f.PID != 0 && f.PID != pid) {
+// pid and started at start, or at tick ticks: it names no other pid and no
+// other pid space, and its procStart is the child's start in the form
+// Claude Code writes on this system, on Linux the very tick and on macOS a
+// time within registrySlack. A start in the other system's form, or none,
+// is never the child's: a session that cannot tell its file for its own
+// learns nothing from it, never another session's conversation. A file
+// that names no pid space, as one from a build older than the field does,
+// is judged by its start alone.
+func (f registryFile) belongsTo(pid int, start time.Time, ticks int64) bool {
+	if (f.PID != 0 && f.PID != pid) || (f.PidDomain != "" && f.PidDomain != ourPidDomain()) {
+		return false
+	}
+	if startsInTicks {
+		return f.ProcTicks > 0 && f.ProcTicks == ticks
+	}
+	if f.ProcStart.IsZero() || start.IsZero() {
 		return false
 	}
 	d := f.ProcStart.Sub(start)
