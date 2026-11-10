@@ -25,8 +25,8 @@ a { color: inherit; word-break: break-all; }
 <body>
 <main>
 <h1>Sign in{{with .Provider}} to {{.}}{{end}}</h1>
-{{- if .Done}}
-<p class="good">{{.Done}}</p>
+{{- if .Accepted}}
+<p class="good">{{or .Done "Signed in."}}</p>
 <p class="muted">This page has closed. You can close this tab.</p>
 {{- else if .Closed}}
 {{- with .Error}}
@@ -53,7 +53,7 @@ a { color: inherit; word-break: break-all; }
 <input id="value" name="value" type="{{.Type}}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" autofocus required>
 <button type="submit">Submit</button>
 </form>
-<p class="muted">This page closes at {{.Ends}}{{with .In}} ({{.}}){{end}}, after one login, or after five wrong tries.</p>
+<p class="muted">This page closes at {{.Ends}}{{with .In}} ({{.}}){{end}}, after one login, or after {{.Max}} wrong tries.</p>
 {{- end}}
 </main>
 </body>

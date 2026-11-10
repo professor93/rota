@@ -1,6 +1,7 @@
 package loginpage
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
@@ -217,6 +218,15 @@ func TestTheLinkCarriesTheSecretAndNothingElseAnswers(t *testing.T) {
 			}
 		}
 	}
+	code, h := optionsStar(t, p)
+	if code != http.StatusNotFound {
+		t.Errorf("OPTIONS *: %d, want 404", code)
+	}
+	for k, v := range wantHeaders {
+		if got := h.Get(k); got != v {
+			t.Errorf("OPTIONS *: %s is %q, want %q", k, got, v)
+		}
+	}
 	if n := tries(p); n != 0 {
 		t.Errorf("the wrong paths counted %d tries", n)
 	}
@@ -234,6 +244,25 @@ func TestTheLinkCarriesTheSecretAndNothingElseAnswers(t *testing.T) {
 	if strings.Contains(strings.ToLower(page), "<script") {
 		t.Errorf("the page carries a script:\n%s", page)
 	}
+}
+
+// optionsStar sends a raw "OPTIONS * HTTP/1.1", which no http.Client can.
+func optionsStar(t *testing.T, p *Page) (int, http.Header) {
+	t.Helper()
+	u, _ := url.Parse(p.URL)
+	conn, err := net.DialTimeout("tcp", u.Host, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	fmt.Fprintf(conn, "OPTIONS * HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", u.Host)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("OPTIONS *: %v", err)
+	}
+	resp.Body.Close()
+	return resp.StatusCode, resp.Header
 }
 
 func TestThePageSaysWhatItIsFor(t *testing.T) {
@@ -354,6 +383,32 @@ func TestTheValueGoesInTheBodyAndIsNeverEchoed(t *testing.T) {
 		t.Errorf("an empty value counted %d tries", n)
 	}
 	open(t, q)
+
+	// A claude code is pasted as code#state and only code reaches the
+	// provider, whose reply may quote it, or the state, or a URL's code=.
+	const half, state = "ac_9f8eD7c6B5a4", "st_Zy98Xw76vU54"
+	for _, quote := range []string{
+		"Invalid authorization code " + half,
+		"state " + state + " does not match",
+		`{"error":"invalid_grant","error_description":"code=` + half + `&state=x"}`,
+	} {
+		r := serve(t, Options{Submit: func(context.Context, string) (string, error) {
+			return "", Final(errors.New(quote))
+		}})
+		_, body := submit(t, r, half+"#"+state)
+		e := ended(t, r)
+		for _, part := range []string{half, state} {
+			if strings.Contains(body, part) {
+				t.Errorf("%q: the page shows %s:\n%s", quote, part, body)
+			}
+			if strings.Contains(e.Message, part) {
+				t.Errorf("%q: the end's message holds %s: %q", quote, part, e.Message)
+			}
+		}
+	}
+	if got := scrub("a code ab#cd and abcdefgh", "ab#cd"); got != "a code … and abcdefgh" {
+		t.Errorf("parts under 8 characters are taken out of other text: %q", got)
+	}
 }
 
 func TestAKeyShapedErrorIsUnsecreted(t *testing.T) {
@@ -519,13 +574,25 @@ func TestTheFirstAcceptedLoginEndsIt(t *testing.T) {
 	refused(t, p)
 }
 
+func TestAnAcceptanceWithNothingToSayStillSaysSignedIn(t *testing.T) {
+	p := serve(t, Options{Submit: func(context.Context, string) (string, error) {
+		return "", nil
+	}})
+	code, body := submit(t, p, "good")
+	if code != http.StatusOK || strings.Contains(body, "<form") || !strings.Contains(body, "Signed in.") {
+		t.Errorf("an acceptance with an empty done answered %d:\n%s", code, body)
+	}
+	if e := ended(t, p); e.Why != Accepted {
+		t.Fatalf("ended %+v", e)
+	}
+}
+
 func TestTheTimeLimitEndsIt(t *testing.T) {
-	old := lifetime
-	lifetime = 100 * time.Millisecond
+	restore := swap(t, &lifetime, 100*time.Millisecond)
 	start := time.Now()
 	p := serve(t, Options{})
 	e := ended(t, p)
-	lifetime = old
+	restore()
 	if e.Why != TimedOut {
 		t.Fatalf("ended %+v, want TimedOut", e)
 	}
@@ -592,11 +659,10 @@ func TestLoopbackIsPlainAndElsewhereIsTLS(t *testing.T) {
 		t.Fatalf("loopback serves %s with fingerprint %q", p.URL, p.Fingerprint)
 	}
 
-	old := tlsFor
-	tlsFor = func(netip.Addr) bool { return true }
+	restore := swap(t, &tlsFor, func(netip.Addr) bool { return true })
 	before := time.Now()
 	tp := serve(t, Options{Ends: before.Add(3 * time.Minute)})
-	tlsFor = old
+	restore()
 	checkTLS(t, tp, netip.MustParseAddr("127.0.0.1"), before, before.Add(3*time.Minute))
 
 	if os.Getenv("ROTA_TEST_LAN") == "" {
@@ -834,6 +900,9 @@ func TestNothingIsLogged(t *testing.T) {
 	if srv.ErrorLog == nil || srv.ErrorLog.Writer() != io.Discard {
 		t.Error("the server's ErrorLog does not write to io.Discard")
 	}
+	if !srv.DisableGeneralOptionsHandler {
+		t.Error("OPTIONS * is answered by net/http, not by the page")
+	}
 	if srv.ReadHeaderTimeout != 10*time.Second || srv.ReadTimeout != 30*time.Second ||
 		srv.WriteTimeout != 30*time.Second || srv.IdleTimeout != 30*time.Second ||
 		srv.MaxHeaderBytes != 8<<10 {
@@ -850,12 +919,11 @@ func TestNothingIsLogged(t *testing.T) {
 	}))
 	defer log.SetOutput(os.Stderr)
 
-	old := tlsFor
-	tlsFor = func(netip.Addr) bool { return true }
+	restore := swap(t, &tlsFor, func(netip.Addr) bool { return true })
 	p := serve(t, Options{Submit: func(context.Context, string) (string, error) {
 		panic("SECRET-VALUE")
 	}})
-	tlsFor = old
+	restore()
 	if l := p.s.srv.ErrorLog; l == nil || l.Writer() != io.Discard {
 		t.Error("the page's server logs")
 	}
@@ -878,6 +946,18 @@ func TestNothingIsLogged(t *testing.T) {
 	if buf.Len() != 0 {
 		t.Errorf("something was logged:\n%s", buf.String())
 	}
+}
+
+// swap sets *p to v for the test, and returns a restore that the test's
+// end also runs.
+func swap[T any](t *testing.T, p *T, v T) (restore func()) {
+	t.Helper()
+	old := *p
+	*p = v
+	var once sync.Once
+	restore = func() { once.Do(func() { *p = old }) }
+	t.Cleanup(restore)
+	return restore
 }
 
 type writerFunc func([]byte) (int, error)

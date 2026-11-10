@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -64,9 +65,11 @@ type Options struct {
 	// Lifetime from now. Zero is no end of its own.
 	Ends time.Time
 	// Submit is given each value pasted, trimmed and never empty, one at a
-	// time. Its done is shown and ends the page as Accepted. An error is
-	// shown, with the value taken out of it, and counts a try, unless it is
-	// Final, which ends the page as Refused. ctx ends with the page.
+	// time. Its done is shown ("Signed in." when empty) and ends the page as
+	// Accepted. An error is shown, with the value and its parts taken out of
+	// it, and counts a try, unless it is Final, which ends the page as
+	// Refused. ctx ends with the page, and the page's end waits for Submit
+	// to return, so Submit must honour ctx and keep a deadline of its own.
 	Submit func(ctx context.Context, value string) (done string, err error)
 	// Now is the clock the page's end and certificate read; nil is time.Now.
 	Now func() time.Time
@@ -329,8 +332,10 @@ func newServer(h http.Handler, cfg *tls.Config) *http.Server {
 		WriteTimeout:      30 * time.Second,
 		IdleTimeout:       30 * time.Second,
 		MaxHeaderBytes:    8 << 10,
-		ErrorLog:          log.New(io.Discard, "", 0),
-		TLSNextProto:      map[string]func(*http.Server, *tls.Conn, http.Handler){},
+		// OPTIONS * then reaches the page, which answers 404 with its headers.
+		DisableGeneralOptionsHandler: true,
+		ErrorLog:                     log.New(io.Discard, "", 0),
+		TLSNextProto:                 map[string]func(*http.Server, *tls.Conn, http.Handler){},
 	}
 }
 
@@ -438,7 +443,7 @@ func (s *state) post(w http.ResponseWriter, r *http.Request) {
 	done, err := s.o.Submit(s.ctx, value)
 	if err == nil {
 		msg := scrub(done, value)
-		s.last(w, http.StatusOK, view{Done: msg})
+		s.last(w, http.StatusOK, view{Accepted: true, Done: msg})
 		s.conclude(Accepted, msg)
 		return
 	}
@@ -455,7 +460,7 @@ func (s *state) post(w http.ResponseWriter, r *http.Request) {
 	}
 	s.tries++
 	if s.tries >= MaxTries {
-		s.last(w, http.StatusForbidden, view{Error: msg, Closed: "Five wrong tries closed this page."})
+		s.last(w, http.StatusForbidden, view{Error: msg, Closed: strconv.Itoa(MaxTries) + " wrong tries closed this page."})
 		s.conclude(Tries, msg)
 		return
 	}
@@ -475,11 +480,13 @@ type view struct {
 	Action, Label, Type         string
 	Ends, In                    string
 	Error, Done, Closed         string
-	Left                        int
+	Accepted                    bool
+	Left, Max                   int
 }
 
 func (s *state) render(w http.ResponseWriter, code int, v view) {
 	v.Provider, v.Approve = s.o.Provider, s.o.Approve
+	v.Max = MaxTries
 	v.Action = s.path
 	switch s.o.Want {
 	case Code:
@@ -509,7 +516,10 @@ func (s *state) render(w http.ResponseWriter, code int, v view) {
 }
 
 // scrub is msg with value taken out, in the spellings an error may quote it
-// in, and with anything shaped like an Anthropic credential removed.
+// in, then every part of it 8 or more characters long, longest first, and
+// then anything shaped like an Anthropic credential. A part is what lies
+// between '#'s, or a run of [A-Za-z0-9_-]: a claude code is pasted as
+// code#state and only code reaches the provider, whose reply may quote it.
 func scrub(msg, value string) string {
 	quoted := strconv.Quote(value)
 	js, _ := json.Marshal(value)
@@ -525,5 +535,26 @@ func scrub(msg, value string) string {
 			msg = strings.ReplaceAll(msg, v, "…")
 		}
 	}
+	for _, part := range parts(value) {
+		msg = strings.ReplaceAll(msg, part, "…")
+	}
 	return wire.Unsecret(msg)
+}
+
+// parts is value's parts of 8 or more characters, longest first.
+func parts(value string) []string {
+	word := func(r rune) bool {
+		return r == '_' || r == '-' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z'
+	}
+	all := append(strings.Split(value, "#"), strings.FieldsFunc(value, func(r rune) bool { return !word(r) })...)
+	var out []string
+	seen := map[string]bool{}
+	for _, p := range all {
+		if len(p) >= 8 && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	slices.SortStableFunc(out, func(a, b string) int { return len(b) - len(a) })
+	return out
 }
