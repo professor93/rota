@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>rota login{{with .Provider}}: {{.}}{{end}}</title>
+<style>
+:root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fafaf8; --muted: #6b6b70; --line: #d6d6d2; --bad: #b3261e; --good: #1e7b34; }
+@media (prefers-color-scheme: dark) { :root { --fg: #ececea; --bg: #18181a; --muted: #a0a0a6; --line: #3a3a3e; --bad: #f2867f; --good: #7fd18f; } }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 32px 16px; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 32rem; margin: 0 auto; }
+h1 { font-size: 1.4rem; margin: 0 0 1rem; }
+p { margin: 0 0 1rem; }
+.muted { color: var(--muted); font-size: .9rem; }
+.bad { color: var(--bad); }
+.good { color: var(--good); }
+label { display: block; font-weight: 600; margin-bottom: .4rem; }
+input { width: 100%; padding: .6rem .7rem; font: inherit; font-family: ui-monospace, Menlo, monospace; color: var(--fg); background: transparent; border: 1px solid var(--line); border-radius: 6px; }
+button { margin-top: .8rem; padding: .55rem 1.2rem; font: inherit; font-weight: 600; border: 1px solid var(--line); border-radius: 6px; background: var(--fg); color: var(--bg); cursor: pointer; }
+a { color: inherit; word-break: break-all; }
+</style>
+</head>
+<body>
+<main>
+<h1>Sign in{{with .Provider}} to {{.}}{{end}}</h1>
+{{- if .Accepted}}
+<p class="good">{{or .Done "Signed in."}}</p>
+<p class="muted">This page has closed. You can close this tab.</p>
+{{- else if .Closed}}
+{{- with .Error}}
+<p class="bad">{{.}}</p>
+{{- end}}
+<p class="bad">{{.Closed}}</p>
+<p class="muted">You can close this tab.</p>
+{{- else}}
+{{- with .Approve}}
+<p>Approve as <strong>{{.}}</strong>.</p>
+{{- end}}
+{{- with .LoginURL}}
+<p>1. Open <a href="{{.}}" rel="noreferrer" target="_blank">the sign-in page</a> and approve.</p>
+<p>2. Paste the code it shows here.</p>
+{{- end}}
+{{- with .Error}}
+<p class="bad">{{.}}</p>
+{{- end}}
+{{- if .Left}}
+<p class="muted">{{.Left}} {{if eq .Left 1}}try{{else}}tries{{end}} left.</p>
+{{- end}}
+<form method="post" action="{{.Action}}">
+<label for="value">{{.Label}}</label>
+<input id="value" name="value" type="{{.Type}}" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" autofocus required>
+<button type="submit">Submit</button>
+</form>
+<p class="muted">This page closes at {{.Ends}}{{with .In}} ({{.}}){{end}}, after one login, or after {{.Max}} wrong tries.</p>
+{{- end}}
+</main>
+</body>
+</html>
