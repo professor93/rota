@@ -200,14 +200,17 @@ func (a *askTab) editing() bool { return a.area.Focused() }
 
 func (a *askTab) Typing() bool { return a.editing() }
 
+// Busy names what quitting would end, as the shell's quit ask lists it
+// ("press q again to quit; the open answer ends too"): the run kept open,
+// or the open answer, one still streaming.
 func (a *askTab) Busy() string {
 	switch r := a.run; {
 	case r == nil:
 		return ""
 	case r.open != "":
-		return "a run is open"
+		return "the run kept open"
 	}
-	return "an answer is streaming"
+	return "the open answer"
 }
 
 // Leave closes a run kept open, which outlives its stream until it is

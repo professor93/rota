@@ -295,7 +295,7 @@ func TestAKeptOpenRunTakesMoreMessages(t *testing.T) {
 	if qs := askQuestions(b); len(qs) != 1 || !qs[0].Input {
 		t.Fatalf("asked %+v", qs)
 	}
-	if a.Busy() != "a run is open" || !strings.Contains(askView(t, m, 80, 20), "run open") {
+	if a.Busy() != "the run kept open" || !strings.Contains(askView(t, m, 80, 20), "run open") {
 		t.Errorf("Busy is %q:\n%s", a.Busy(), askView(t, m, 80, 20))
 	}
 	// The run has answered and is idle: esc leaves the field, and
@@ -349,7 +349,7 @@ func TestEscStopsAnAnswer(t *testing.T) {
 	m := askModel(t, b)
 	a := askOf(t, m)
 	run(t, m, askAsk("long one")...)
-	if a.Busy() != "an answer is streaming" {
+	if a.Busy() != "the open answer" {
 		t.Fatalf("Busy is %q", a.Busy())
 	}
 	run(t, m, press("esc")...)
