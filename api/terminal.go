@@ -761,7 +761,10 @@ type termSession struct {
 	// taken up. onToken is a claude session on a token rather than on its
 	// account's stored login, and longToken one on a long-lived token: both
 	// are set once when the session is made, and say whether and in which
-	// words its token's end is said (hardEnd).
+	// words its token's end is said (hardEnd). adoptedAt is when this server
+	// took the session up from a daemon before, zero for one it started, and
+	// set before it is listed: the start of viewerCame's window for pages
+	// coming back.
 	stoppedBy   string
 	stoppedIdle bool
 	endWhy      string
@@ -771,6 +774,7 @@ type termSession struct {
 	tokenSaid   bool
 	onToken     bool
 	longToken   bool
+	adoptedAt   time.Time
 }
 
 /* ------------------------------------------------------------ the keyboard --- */

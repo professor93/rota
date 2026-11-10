@@ -201,8 +201,11 @@ func (ts *termSession) endedWords(why, by string, idle bool, code int, age time.
 // that has ended: it stays listed for a while, and replays. Called with
 // ts.mu held.
 //
-// A daemon that restarts says it again of a person whose page reconnects to
-// it: R6's cost for now; its baseline belongs where a session is adopted.
+// On a session this server took up from a daemon before (adoptedAt), a
+// person who comes within twice viewerSettle of that is counted and not
+// said: their page was attached to that daemon, which said they joined, and
+// is coming back. Somebody new in that window is not said either, since
+// nothing tells the two apart; whoever comes later is.
 func (ts *termSession) viewerCame(tc *termConn) {
 	if tc.via == "local" || ts.ended {
 		return
@@ -215,13 +218,15 @@ func (ts *termSession) viewerCame(tc *termConn) {
 		}
 		p = &presence{}
 		ts.present[key] = p
-		to := "control"
-		if tc.watch || ts.lookOnly || !tc.role.allows(RoleControl) {
-			to = "watch"
+		if back := !ts.adoptedAt.IsZero() && ts.s.now().Sub(ts.adoptedAt) < 2*viewerSettle; !back {
+			to := "control"
+			if tc.watch || ts.lookOnly || !tc.role.allows(RoleControl) {
+				to = "watch"
+			}
+			ts.s.emit(events.Event{Type: events.ViewerJoined, Account: ts.account, Session: ts.id,
+				Name: ts.eventName(), Reason: tc.via, Viewer: tc.name,
+				Text: "has " + tc.name + " attached, to " + to})
 		}
-		ts.s.emit(events.Event{Type: events.ViewerJoined, Account: ts.account, Session: ts.id,
-			Name: ts.eventName(), Reason: tc.via, Viewer: tc.name,
-			Text: "has " + tc.name + " attached, to " + to})
 	}
 	p.n++
 	if p.timer != nil {
@@ -312,28 +317,47 @@ func (ts *termSession) hardEnd() bool {
 	return rota.Flavor(ts.provider) == "claude" || ts.longToken
 }
 
-// runsOn sets what ts's credential is, from a, the account as chosen, and
-// until, the time its holder says that credential lasts: onToken by
-// onTokenFor, and longToken from a. A terminal this server runs reads both
-// from its plan instead, which knows its environment.
-func (ts *termSession) runsOn(a *rota.Account, until time.Time) {
-	ts.tokenUntil, ts.onToken = until, onTokenFor(a, until)
-	ts.longToken = a != nil && a.LongValid()
+// runsOn sets what a held session's credential is, from e, its account's
+// (as chosen, or as a sweep read it for a session taken up), and until, the
+// time its holder says that credential lasts: onToken by e.onToken, and
+// longToken from e. A terminal this server runs reads both from its plan
+// instead, which knows its environment.
+func (ts *termSession) runsOn(e accountEnds, until time.Time) {
+	ts.tokenUntil, ts.onToken = until, e.onToken(until)
+	ts.longToken = e.long
 }
 
-// onTokenFor reports whether a held claude session on account a runs on a
-// token rather than on a's stored login, from until, the time its holder
+// accountEnds is what a session's words need of the account it runs on: its
+// provider, when its stored login ends, and whether it holds a long-lived
+// token still good. It holds no credential, so a sweep keeps one for every
+// account (readLabels). The zero value is no account.
+type accountEnds struct {
+	provider   string
+	loginUntil time.Time
+	long       bool
+}
+
+// endsOf is a's accountEnds as of now, and the zero value for nil.
+func endsOf(a *rota.Account) accountEnds {
+	if a == nil {
+		return accountEnds{}
+	}
+	return accountEnds{provider: a.Provider, loginUntil: a.LoginUntil(), long: a.LongValid()}
+}
+
+// onToken reports whether a held claude session on this account runs on a
+// token rather than on its stored login, from until, the time its holder
 // says its credential lasts: a session on the stored login lasts as long as
 // the login does (holdwire.LoginUntil), and one on a token as long as the
 // token. The holder says only until, so this is inferred, and only the words
 // of a token's end depend on it: a prepare in the holder that moved the
-// login's end reads as a token. A session of any other flavor is on its
-// token whatever this says.
-func onTokenFor(a *rota.Account, until time.Time) bool {
-	if a == nil || until.IsZero() || rota.Flavor(a.Provider) != "claude" {
+// login's end, or a login since, reads as a token. A session of any other
+// flavor is on its token whatever this says.
+func (e accountEnds) onToken(until time.Time) bool {
+	if until.IsZero() || rota.Flavor(e.provider) != "claude" {
 		return false
 	}
-	return !until.Equal(a.LoginUntil())
+	return !until.Equal(e.loginUntil)
 }
 
 // tokenInEnv reports whether a claude CLI with this environment runs on a

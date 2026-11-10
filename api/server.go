@@ -245,12 +245,14 @@ type Server struct {
 	// the running sessions a DELETE is stopping by signal, so another
 	// DELETE meanwhile signals nothing more. labels are the accounts' own
 	// names by id as the last sweep read them, for the sessions a record
-	// names by id alone, so describing one never waits on the store. All
-	// of these are termsMu's.
+	// names by id alone, so describing one never waits on the store, and
+	// ends what their credentials were then, for the sessions it takes up.
+	// All of these are termsMu's.
 	pending   map[string]bool
 	unlinked  map[string]bool
 	signalled map[string]bool
 	labels    map[int]string
+	ends      map[int]accountEnds
 	stopping  bool
 	// share is the socket a terminal somebody is sitting at is offered
 	// over, or nil where the file said not to hold one.

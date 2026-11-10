@@ -147,7 +147,7 @@ func (s *Server) heldSession(hreq *holdwire.Request, cwd string, a *rota.Account
 		name: hreq.Name, cwd: cwd, started: s.now(),
 		back: h, cols: cols, rows: rows, ring: ring.NewAt(s.opts.Terminal.Scrollback, w.Oldest),
 	}
-	ts.runsOn(a, ready.TokenUntil)
+	ts.runsOn(endsOf(a), ready.TokenUntil)
 	ts.idleAt = ts.started
 	h.ts = ts
 	return ts

@@ -3,6 +3,7 @@ package api
 import (
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -355,6 +356,49 @@ func TestNoViewerLeavesAnEndedSession(t *testing.T) {
 	sessQuiet(t, h.api, ts.id, 10*viewerSettle, events.ViewerLeft)
 }
 
+// A person who attaches to a session this server took up from a daemon
+// before, within twice the settle of taking it up, is counted and not said:
+// their page was attached to that daemon, which said they joined, and is
+// reconnecting. One who attaches later is said, one counted that way is said
+// to leave like anybody else, and a session this server started has no such
+// window.
+func TestAViewerBackAfterARestartIsNotSaidAgain(t *testing.T) {
+	setFor(t, &viewerSettle, 20*time.Millisecond)
+	h := eventsServer(t)
+	var mu sync.Mutex
+	at := time.Now()
+	h.api.clock.set(func() time.Time { mu.Lock(); defer mu.Unlock(); return at })
+	forward := func(d time.Duration) { mu.Lock(); at = at.Add(d); mu.Unlock() }
+	ts := sessIn(h.api, at.Add(-time.Hour), func(ts *termSession) { ts.adoptedAt = at })
+
+	forward(2*viewerSettle - time.Millisecond)
+	alice := sessConn("alice", "user", RoleControl, false)
+	ts.attach(alice, 0, true)
+	if got := sessOf(h.api, events.ViewerJoined, ts.id); len(got) != 0 {
+		t.Fatalf("alice, back within the window, joined %+v", got)
+	}
+	forward(time.Millisecond)
+	ts.attach(sessConn("bob", "user", RoleControl, false), 0, true)
+	if got := sessOf(h.api, events.ViewerJoined, ts.id); len(got) != 1 || got[0].Viewer != "bob" {
+		t.Fatalf("bob, after the window, joined %+v", got)
+	}
+	ts.detach(alice)
+	for end := time.Now().Add(5 * time.Second); len(sessOf(h.api, events.ViewerLeft, ts.id)) == 0; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("alice's leaving was never said")
+		}
+	}
+	if e := sessOf(h.api, events.ViewerLeft, ts.id)[0]; e.Viewer != "alice" {
+		t.Fatalf("alice left as %+v", e)
+	}
+
+	started := sessIn(h.api, h.api.now())
+	started.attach(sessConn("alice", "user", RoleControl, false), 0, true)
+	if got := sessOf(h.api, events.ViewerJoined, started.id); len(got) != 1 {
+		t.Fatalf("alice, on a session this server started, joined %+v", got)
+	}
+}
+
 /* --------------------------------------------------------------- tokens --- */
 
 // A session's token ending is said once, as account.dead with reason
@@ -515,7 +559,7 @@ func TestASessionKnowsWhatItRunsOn(t *testing.T) {
 		{"codex", &rota.Account{Provider: "codex"}, end, false},
 		{"no account", nil, end, false},
 	} {
-		if got := onTokenFor(c.a, c.until); got != c.want {
+		if got := endsOf(c.a).onToken(c.until); got != c.want {
 			t.Errorf("%s: on a token is %v, want %v", c.what, got, c.want)
 		}
 	}

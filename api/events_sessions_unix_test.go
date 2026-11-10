@@ -261,3 +261,114 @@ func TestATerminalNeverListedSaysNothing(t *testing.T) {
 		t.Fatalf("a terminal never listed said %+v", got)
 	}
 }
+
+// A person whose page was attached to the daemon before is not said to join
+// again when it reconnects to the next one, within twice the settle of that
+// daemon taking the session up; a person who attaches after that is.
+func TestARestartSaysNoViewerAgain(t *testing.T) {
+	p := sessFakesOnly(t, func() *terms { return withHeld(t, nil) })
+	id := p.start(nil)["id"].(string)
+	p.attach(id, p.alice, "").waitType("hello")
+	if e := sessWait(t, p.api, events.ViewerJoined, id, 5*time.Second); e.Viewer != "alice" {
+		t.Fatalf("alice joined as %+v", e)
+	}
+	q := p.restart()
+	forward := q.frozenClock()
+	q.attach(id, q.alice, "").waitType("hello")
+	sessQuiet(t, q.api, id, 200*time.Millisecond, events.ViewerJoined)
+	forward(2 * viewerSettle)
+	q.attach(id, q.bob, "").waitType("hello")
+	if e := sessWait(t, q.api, events.ViewerJoined, id, 5*time.Second); e.Viewer != "bob" {
+		t.Fatalf("after the window, %+v joined", e)
+	}
+	if got := sessOf(q.api, events.ViewerJoined, id); len(got) != 1 {
+		t.Fatalf("the next daemon said %+v", got)
+	}
+}
+
+// sessOnEnds makes the harness's store three claude accounts: 1 with no
+// stored login, so its sessions run on a token; 3 whose stored login ends at
+// until; and 5 on a long-lived token that ends then. It starts a held
+// session on each, whose holder (FAKE_HOLDER_TOKEN_UNTIL) says that what it
+// runs on lasts until then, and returns their ids by account.
+func sessOnEnds(t *testing.T, p *terms, until time.Time) map[int]string {
+	t.Helper()
+	blob := fmt.Sprintf(`{"accounts":[
+	 {"id":1,"provider":"claude","email":"a@x","token":{"accessToken":"tok-1"}},
+	 {"id":3,"provider":"claude","email":"b@x","token":{"accessToken":"tok-3"},"extra":{"refresh_token_expires_at":"%d"}},
+	 {"id":5,"provider":"claude","email":"long@x","token":{"accessToken":"tok-5"},"long":{"accessToken":"long-token-5555","expiresAt":%d}}]}`,
+		until.UnixMilli(), until.UnixMilli())
+	if err := os.WriteFile(filepath.Join(p.dir, "accounts.json"), []byte(blob), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[int]string{}
+	for _, a := range []int{1, 3, 5} {
+		doc := p.sessStart(p.alice, map[string]any{"account": a, "cols": 80, "rows": 24, "label": fmt.Sprintf("s%d", a)})
+		ids[a] = doc["id"].(string)
+		sessWait(t, p.api, events.SessionStarted, ids[a], 5*time.Second)
+	}
+	return ids
+}
+
+// sessTokensEnd moves s's frozen clock to a minute before until, where
+// nothing is said of any session's token, and then past it, where two
+// sweeps say each one's end once, in the words of what it runs on.
+func sessTokensEnd(t *testing.T, s *Server, forward func(time.Duration), until time.Time, ids map[int]string) {
+	t.Helper()
+	forward(until.Sub(s.now()) - time.Minute)
+	s.sweepTerminals()
+	for _, id := range ids {
+		if got := sessOf(s, events.AccountDead, id); len(got) != 0 {
+			t.Fatalf("a minute before the end, %s said %+v", id, got)
+		}
+	}
+	forward(2 * time.Minute)
+	s.sweepTerminals()
+	s.sweepTerminals()
+	for a, c := range map[int]struct{ name, words string }{
+		1: {"a@x", "the token it was started with ended at "},
+		3: {"b@x", "its login ended at "},
+		5: {"long@x", "the token it was started with ended at "},
+	} {
+		got := sessOf(s, events.AccountDead, ids[a])
+		want := fmt.Sprintf("can no longer be reached from s%d: %s%s", a, c.words, sessUTC(until))
+		if len(got) != 1 || got[0].Reason != "token" || got[0].Account != a || got[0].Name != c.name || got[0].Text != want {
+			t.Errorf("account %d's session said %+v, want once %q", a, got, want)
+		}
+	}
+	if ts := s.findTerminal(ids[5]); ts == nil || !ts.longToken {
+		t.Error("the session on a long-lived token is not known to be on one")
+	}
+}
+
+// A held session's token, or its login, ending is said once, in the words
+// of what it runs on, from what its holder said when it started.
+func TestAHeldSessionsTokenEndIsSaidOnce(t *testing.T) {
+	until := time.Now().Add(72 * time.Hour).Truncate(time.Millisecond)
+	p := sessFakesOnly(t, func() *terms {
+		return withHeld(t, []string{"FAKE_HOLDER_TOKEN_UNTIL=" + until.Format(time.RFC3339Nano)})
+	})
+	ids := sessOnEnds(t, p, until)
+	sessTokensEnd(t, p.api, p.frozenClock(), until, ids)
+}
+
+// So is an adopted session's, from the record its holder wrote and from its
+// account as the daemon that took it up read it; the daemon that let it go
+// said nothing of it.
+func TestAnAdoptedSessionsTokenEndIsSaidOnce(t *testing.T) {
+	until := time.Now().Add(72 * time.Hour).Truncate(time.Millisecond)
+	p := sessFakesOnly(t, func() *terms {
+		return withHeld(t, []string{"FAKE_HOLDER_TOKEN_UNTIL=" + until.Format(time.RFC3339Nano)})
+	})
+	ids := sessOnEnds(t, p, until)
+	q := p.restart()
+	for _, id := range ids {
+		if doc := q.describe(id); doc["state"] != heldLive {
+			t.Fatalf("the next daemon did not take %s up: %v", id, doc)
+		}
+	}
+	sessTokensEnd(t, q.api, q.frozenClock(), until, ids)
+	if got := published(p.api, events.AccountDead); len(got) != 0 {
+		t.Fatalf("the daemon that let them go said %+v", got)
+	}
+}
