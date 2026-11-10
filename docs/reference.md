@@ -4143,10 +4143,13 @@ that names no account at all. So log the account in normally first.
 `rota list` says nothing about the token for eleven months, then one line
 while it is within thirty days of expiry, and one more if it lapses — after
 which those runs are back on the eight-hour token. It says the same about the
-ordinary login in its last 72 hours, when its end is known (*Token
-lifetimes*) — `login ends in 47h (2026-11-10); rota login 13 before then`, the
-date in UTC like the reason a login that has ended gives —
-and the STATUS column says so too — `ok (login ends in
+ordinary login in its last seven days, when its end is known (*Token
+lifetimes*) — `login ends in 5d 12h (2026-11-10); rota login 13 before then`,
+in hours alone in its last day, the date in UTC like the reason a login that
+has ended gives. A week, because with several accounts there is one to sign
+in again every few days, and three days' notice is too little to plan them.
+The STATUS column says so too in the last three days, when Claude Code's own
+warning starts — `ok (login ends in
 1d)`, then `ok (login ended 3h ago)` once it is over, because sessions that
 outlive a login stop making progress and cannot recover by themselves. `--json` and `GET /v1/accounts` carry `long_until` and `login_until`
 (RFC 3339); the token itself is never printed, logged or sent anywhere.

@@ -163,6 +163,33 @@ func TestListSaysInTheStatusCellWhenALoginEnds(t *testing.T) {
 	}
 }
 
+// A login's last week is said under the table, a week being the notice
+// signing several accounts in again wants; the STATUS cell waits for its last
+// three days, as Claude Code's own warning does.
+func TestListNotesALoginInItsLastWeek(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	now := time.Now()
+	end := now.Add(5*24*time.Hour + 12*time.Hour + 30*time.Minute)
+	writeStore(t, home, fmt.Sprintf(`{"ordered":true,"nextId":3,"accounts":[
+		{"id":1,"provider":"claude","email":"a@x","order":1,"token":{"accessToken":"t"},"quotaAt":%[1]d,
+		 "extra":{"refresh_token_expires_at":"%[2]d"}},
+		{"id":2,"provider":"claude","email":"b@x","order":2,"token":{"accessToken":"t"},"quotaAt":%[1]d,
+		 "extra":{"refresh_token_expires_at":"%[3]d"}}]}`,
+		now.UnixMilli(), end.UnixMilli(), now.Add(8*24*time.Hour).UnixMilli()))
+	out, _, code := call(t, "list")
+	if code != 0 {
+		t.Fatalf("%d %q", code, out)
+	}
+	note := fmt.Sprintf("claude/a@x: login ends in 5d 12h (%s); rota login 1 before then", end.UTC().Format(time.DateOnly))
+	if !strings.Contains(out, note) {
+		t.Fatalf("the note, five and a half days ahead:\n%s", out)
+	}
+	if strings.Contains(out, "b@x: login") || strings.Contains(out, "(login ends") {
+		t.Fatalf("eight days away is not said, and STATUS waits for the last three:\n%s", out)
+	}
+}
+
 // An account marked dead by a rota that kept no reason does not read as if
 // nothing were known: the cell says that much.
 func TestListSaysSoWhenNoReasonWasKept(t *testing.T) {

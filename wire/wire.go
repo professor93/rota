@@ -209,15 +209,17 @@ func LongNote(a *rota.Account) string {
 }
 
 // LoginSoon is how close to its end a login has to be before a listing
-// mentions it: three days, enough to sign in again at a convenient moment.
-// A Claude login cannot be refreshed past its end by anybody, so the account
-// stops the moment its access token runs out after it.
-const LoginSoon = 72 * time.Hour
+// mentions it: a week. A Claude login cannot be refreshed past its end by
+// anybody, so the account stops the moment its access token runs out after
+// it; and with several accounts there is a login to make again every few
+// days, which three days' notice is too little to plan.
+const LoginSoon = 7 * 24 * time.Hour
 
 // LoginNote is what a listing should say about when an account's login
-// ends, or "" when that is far off or unknown. It counts whole hours, as the
-// STATUS cell does, and never fewer than one. Its date is UTC's, like the
-// reason an account gives once its login has ended.
+// ends, or "" when that is far off or unknown. It counts whole days and
+// hours, "5d 12h", and hours alone in the last day, never fewer than one.
+// Its date is UTC's, like the reason an account gives once its login has
+// ended.
 func LoginNote(a *rota.Account) string {
 	t := a.LoginUntil()
 	if t.IsZero() || a.Dead {
@@ -228,7 +230,11 @@ func LoginNote(a *rota.Account) string {
 	case left <= 0:
 		return "its login ended on " + day + "; `rota login`, or /login in one of its windows, for a new one"
 	case left < LoginSoon:
-		return fmt.Sprintf("login ends in %dh (%s); rota login %d before then", max(int(left.Hours()), 1), day, a.ID)
+		in := fmt.Sprintf("%dh", max(int(left.Hours()), 1))
+		if h := int(left.Hours()); h >= 24 {
+			in = fmt.Sprintf("%dd %dh", h/24, h%24)
+		}
+		return fmt.Sprintf("login ends in %s (%s); rota login %d before then", in, day, a.ID)
 	}
 	return ""
 }
