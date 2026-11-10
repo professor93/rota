@@ -3,6 +3,7 @@
 package hold
 
 import (
+	"bytes"
 	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
@@ -44,20 +45,31 @@ func (l waitLock) lockWithin(d time.Duration) bool {
 	}
 }
 
+// emulate is the emulator's goroutine: woken by output and by sizes, and,
+// while a retired screen waits for a quiet moment, by a timer.
 func (s *Session) emulate() {
 	defer close(s.emDone)
 	defer s.recovered("the screen")
+	later := time.NewTimer(time.Hour)
+	later.Stop()
+	defer later.Stop()
 	for {
 		select {
 		case <-s.emWake:
+		case <-later.C:
 		case <-s.finished:
 			return
 		}
+		var wait time.Duration
 		s.safely("the screen", func() {
 			s.em.lock.lock()
 			defer s.em.lock.unlock()
 			s.catchUp(false)
+			wait = s.renew()
 		})
+		if wait > 0 {
+			later.Reset(wait)
+		}
 	}
 }
 
@@ -71,8 +83,8 @@ func (s *Session) emulate() {
 // screen takes on the way.
 //
 // A screen the ring has overtaken cannot know what it missed, so it is
-// retired for the session's life, said once, and the cursor is the corner
-// from then on, as it is for a screen whose emulator panicked.
+// retired, said once, and the cursor is the corner until renew keeps it
+// again, as it is for good for a screen whose emulator panicked.
 func (s *Session) catchUp(limited bool) bool {
 	defer s.noticeLoss()
 	b, ok := s.batch(limited)
@@ -86,7 +98,7 @@ func (s *Session) catchUp(limited bool) bool {
 	if live && from > s.em.off {
 		s.em.retired, live = true, false
 		s.screen.Close()
-		s.log("the screen fell a whole ring behind its CLI and is retired; viewers get the ring replayed",
+		s.log("the screen fell a whole ring behind its CLI and is retired; viewers get the ring replayed until it is quiet",
 			"behind", from-s.em.off)
 	}
 	if live {
@@ -104,7 +116,7 @@ func (s *Session) catchUp(limited bool) bool {
 		// did, and is answered at the size before.
 		if len(sizes) > 0 && (len(dues) == 0 || sizes[0].end < dues[0].end) {
 			feed(sizes[0].end)
-			s.sized(sizes[0].cols, sizes[0].rows)
+			s.sized(sizes[0])
 			live = live && !s.em.retired
 			sizes = sizes[1:]
 			continue
@@ -190,36 +202,128 @@ func (s *Session) drew(n int) {
 
 // tooLarge is what the log says of a terminal larger than a screen is kept
 // for.
-const tooLarge = "the terminal is larger than a screen is kept for; viewers get the ring replayed"
+const tooLarge = "the terminal is larger than a screen is kept for; viewers get the ring replayed until it is made smaller"
 
-// sized takes the screen to the size the terminal took, or retires it for a
-// size larger than a screen is kept for. The caller holds s.em.lock.
-func (s *Session) sized(cols, rows uint16) {
-	s.em.cols, s.em.rows = cols, rows
+// sized takes the screen to the size the terminal took where the ring had
+// reached z.end, or retires it for a size larger than a screen is kept for.
+// The caller holds s.em.lock.
+func (s *Session) sized(z sized) {
+	s.em.cols, s.em.rows, s.em.sizedAt = z.cols, z.rows, z.end
 	if s.em.retired {
 		return
 	}
-	if !holdwire.ScreenFits(cols, rows) {
+	if !holdwire.ScreenFits(z.cols, z.rows) {
 		s.em.retired = true
 		s.screen.Close()
-		s.log(tooLarge, "cols", cols, "rows", rows, "cells", holdwire.MaxScreenCells)
+		s.log(tooLarge, "cols", z.cols, "rows", z.rows, "cells", holdwire.MaxScreenCells)
 		return
 	}
-	s.screen.Resize(int(cols), int(rows))
+	s.screen.Resize(int(z.cols), int(z.rows))
 }
 
 // noticeLoss retires the screen for the session's life once its emulator
 // has panicked, and says so in one line with what it panicked with: the
 // Screen keeps the holder up, and the log says why viewers get the ring
-// replayed. The caller holds s.em.lock.
+// replayed. A fresh emulator would be fed the same CLI's output, so renew
+// leaves it retired. The caller holds s.em.lock.
 func (s *Session) noticeLoss() {
 	if s.em.retired {
 		return
 	}
 	if why := s.screen.Lost(); why != "" {
-		s.em.retired = true
+		s.em.retired, s.em.broken = true, true
 		s.log("the screen's emulator panicked and is retired; viewers get the ring replayed", "panic", why)
 	}
+}
+
+// renewAfter is how long the CLI must have printed nothing before a retired
+// screen is kept again: a moment, so that a fresh one is not started in the
+// middle of the flood that overtook the last.
+var renewAfter = time.Second
+
+// renew keeps a retired screen again once it can be: when its emulator did
+// not panic, the terminal is within the budget, and the CLI has been quiet
+// for renewAfter. It says how long until it may be, or 0.
+//
+// The fresh screen knows only what it is fed, and nobody asks the CLI to
+// draw again: a SIGWINCH with no change of size is nothing to a CLI on Node,
+// which redraws only when the size it reads has changed, and a resize there
+// and back would have it draw twice, once at a size nobody asked for, in
+// front of everybody watching. So the fresh screen starts on the last of the
+// ring, as a viewer replayed the ring sees it: no further back than the
+// emulator draws in a moment at that size (drawLimit) and than the terminal
+// took its size, since what came before was printed for another size, and
+// at the start of a line or a sequence, so that it never starts inside one.
+// What the CLI drew in answer to the size that fits, when it took that size
+// a moment ago, is all there. The caller holds s.em.lock.
+func (s *Session) renew() time.Duration {
+	if !s.em.retired || s.em.broken || !holdwire.ScreenFits(s.em.cols, s.em.rows) {
+		return 0
+	}
+	cols, rows := s.em.cols, s.em.rows
+	start, alt, wait, ok := s.renewFrom(drawLimit(int64(cols) * int64(rows)))
+	if !ok {
+		return wait
+	}
+	// Made without s.mu, which the pump takes for every read: at the budget
+	// an emulator is 52 MB.
+	fresh := NewScreen(int(cols), int(rows))
+	if alt {
+		fresh.Write([]byte("\x1b[?1049h"))
+	}
+	if !fresh.OK() {
+		s.em.broken = true
+		s.log("the screen's emulator panicked and is retired; viewers get the ring replayed", "panic", fresh.Lost())
+		return 0
+	}
+	s.mu.Lock()
+	select {
+	case <-s.finished:
+		// life closes the screen it finds once finished is closed.
+		s.mu.Unlock()
+		fresh.Close()
+		return 0
+	default:
+	}
+	s.screen, s.drawn = fresh, start
+	s.mu.Unlock()
+	s.em.retired, s.em.off = false, start
+	s.log("the screen is kept again", "cols", cols, "rows", rows, "from", start)
+	nudge(s.emWake)
+	return 0
+}
+
+// renewFrom is where a fresh screen starts, at most limit bytes behind the
+// last ground point, and whether the CLI was on its alternate screen there;
+// or, while the CLI has not been quiet for long enough, how long until it
+// has. The caller holds s.em.lock.
+func (s *Session) renewFrom(limit int64) (start int64, alt bool, wait time.Duration, ok bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	select {
+	case <-s.finished:
+		return 0, false, 0, false
+	default:
+	}
+	if wait := s.renewAfter - time.Since(s.lastOut); wait > 0 {
+		return 0, false, wait, false
+	}
+	ground := s.ground
+	start = max(s.ring.Oldest(), s.em.sizedAt, ground-limit)
+	// Where the terminal took its size, or where the CLI began, is a
+	// boundary already.
+	if start < ground && start != s.em.sizedAt && start != 0 {
+		data, from := s.ring.Read(start)
+		i := bytes.IndexAny(data[:ground-from], "\n\x1b")
+		if i < 0 {
+			// Nothing to start on: the next output wakes the emulator.
+			return 0, false, 0, false
+		}
+		if start = from + int64(i); data[i] == '\n' {
+			start++
+		}
+	}
+	return start, s.gmodes.AltScreen, 0, true
 }
 
 // putScreen makes a Screen payload. It is a variable so a test can make one

@@ -414,8 +414,8 @@ func TestTheExitReachesTheLinkLast(t *testing.T) {
 	if code := <-r.exits; code != 3 || r.s.Code() != 3 {
 		t.Fatalf("OnExit %d, Code %d", code, r.s.Code())
 	}
-	if r.s.screen.OK() || r.s.screen.Lost() != "" {
-		t.Fatalf("the screen outlived its session: OK %v, lost %q", r.s.screen.OK(), r.s.screen.Lost())
+	if sc := r.s.screenNow(); sc.OK() || sc.Lost() != "" {
+		t.Fatalf("the screen outlived its session: OK %v, lost %q", sc.OK(), sc.Lost())
 	}
 	p.eof()
 }
@@ -431,8 +431,9 @@ func TestUnknownFramesAreIgnored(t *testing.T) {
 
 // A screen that falls a whole ring behind is retired, said once, and the
 // session carries on: replays instead of repaints, and the cursor answered
-// from the corner.
+// from the corner, until its CLI has been quiet for a moment.
 func TestAScreenARingBehindIsRetired(t *testing.T) {
+	renewing(t, time.Hour)
 	r := newRig(t, 1024, newFakeChild())
 	claim(t, r.terminals)
 	r.c.reads()
@@ -479,7 +480,7 @@ func TestAScreenTooBigToRepaintIsReplayed(t *testing.T) {
 	if h.OK || repaint != "" || h.Offset != int64(len(out)) || h.Cols != 500 || h.Rows != 400 {
 		t.Fatalf("a screen too big to repaint answered %+v with %d bytes", h, len(repaint))
 	}
-	if !r.s.screen.OK() {
+	if !r.s.screenNow().OK() {
 		t.Fatal("a repaint too big for a frame retired the screen")
 	}
 	p.send(holdwire.Ping, nil)
@@ -758,39 +759,33 @@ func TestAResizeNeverWaitsForTheScreen(t *testing.T) {
 }
 
 // A terminal larger than a screen is kept for has none: past the budget the
-// screen is retired for the session's life, said once, and lets go of its
-// emulator, and a repaint says OK=false so the daemon replays the ring. One
-// started that large never has one.
+// screen is retired, said once, and lets go of its emulator, and a repaint
+// says OK=false so the daemon replays the ring, also once it is fitted back
+// until its CLI has been quiet for a moment (TestARetiredScreenComesBackOnItsOwn).
+// One started that large has none.
 func TestAScreenPastItsBudgetIsReplayed(t *testing.T) {
+	renewing(t, time.Hour)
 	r := newRig(t, 0, newFakeChild())
 	claim(t, r.terminals)
 	p := r.link(t)
 	p.since(0)
-	resize := func(cols, rows uint16) {
-		t.Helper()
-		p.json(holdwire.Resize, holdwire.SizeMsg{Cols: cols, Rows: rows})
-		var got holdwire.SizeMsg
-		p.decode(holdwire.Resized, &got)
-		if got.Cols != cols || got.Rows != rows {
-			t.Fatalf("asked %dx%d, resized to %+v", cols, rows, got)
-		}
-	}
-	resize(500, 400)
+	p.fit(500, 400)
 	r.c.print(t, "hi")
 	if h, repaint := p.screen(1); !h.OK || h.Cols != 500 || h.Rows != 400 || !strings.Contains(repaint, "hi") {
 		t.Fatalf("at the budget the screen answered %+v with %d bytes", h, len(repaint))
 	}
-	resize(500, 401)
+	p.fit(500, 401)
 	if h, repaint := p.screen(2); h.OK || repaint != "" || h.Cols != 500 || h.Rows != 401 {
 		t.Fatalf("past the budget the screen answered %+v with %d bytes", h, len(repaint))
 	}
-	resize(80, 24)
+	p.fit(80, 24)
 	if h, _ := p.screen(3); h.OK || h.Cols != 80 || h.Rows != 24 {
 		t.Fatalf("back within the budget the screen answered %+v", h)
 	}
-	r.s.screen.mu.Lock()
-	kept := r.s.screen.em != nil
-	r.s.screen.mu.Unlock()
+	sc := r.s.screenNow()
+	sc.mu.Lock()
+	kept := sc.em != nil
+	sc.mu.Unlock()
 	if kept {
 		t.Fatal("a retired screen kept its emulator")
 	}
