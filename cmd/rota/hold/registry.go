@@ -56,13 +56,8 @@ func registryPath(home string, pid int) string {
 // 2.1.318 writes there, leaves only its own field empty, as does a string
 // longer than maxField. Only a file that is
 // not one JSON object — one caught half written — is an error, so the caller
-// keeps what it last knew. loc is the zone the writer's procStart is in:
-// Claude Code writes it in its own local time, so the caller passes the zone
-// of the child's TZ, or time.Local when that names none.
-func parseRegistry(b []byte, loc *time.Location) (registryFile, error) {
-	if loc == nil {
-		loc = time.Local
-	}
+// keeps what it last knew.
+func parseRegistry(b []byte) (registryFile, error) {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(b, &m); err != nil {
 		return registryFile{}, err
@@ -82,9 +77,10 @@ func parseRegistry(b []byte, loc *time.Location) (registryFile, error) {
 		},
 		PID: int(number(m["pid"])),
 	}
-	// procStart is a wall clock with no zone. belongsTo compares wall clocks,
-	// so the hour a clock goes back cannot shift the reading.
-	if t, err := time.ParseInLocation(time.ANSIC, str(m["procStart"]), loc); err == nil {
+	// procStart is what `ps -o lstart= -p <pid>` prints under LC_ALL=C
+	// TZ=UTC, which is how Claude Code 2.1.317 to 2.1.322 write it on Linux
+	// and macOS alike: the writer's start in UTC, whatever zone it runs in.
+	if t, err := time.Parse(time.ANSIC, str(m["procStart"])); err == nil {
 		f.ProcStart = t
 	}
 	return f, nil
@@ -92,23 +88,13 @@ func parseRegistry(b []byte, loc *time.Location) (registryFile, error) {
 
 // belongsTo says whether the file is the one written by the child that is
 // pid and started at start: its procStart is within registrySlack of that
-// start, and it names no other pid. The two starts are compared as wall
-// clocks in the file's zone, as the file wrote them, so a start in the
-// repeated hour of a clock going back matches in either of its two offsets.
+// start, and it names no other pid.
 func (f registryFile) belongsTo(pid int, start time.Time) bool {
 	if f.ProcStart.IsZero() || start.IsZero() || (f.PID != 0 && f.PID != pid) {
 		return false
 	}
-	d := wall(f.ProcStart).Sub(wall(start.In(f.ProcStart.Location())))
+	d := f.ProcStart.Sub(start)
 	return d >= -registrySlack && d <= registrySlack
-}
-
-// wall is t's clock reading in its own zone, as a time in UTC, so that two
-// readings differ by what the clocks say whatever the zone did between them.
-func wall(t time.Time) time.Time {
-	y, mo, d := t.Date()
-	h, mi, sec := t.Clock()
-	return time.Date(y, mo, d, h, mi, sec, t.Nanosecond(), time.UTC)
 }
 
 // str is a JSON string's value, and empty for anything else and for a

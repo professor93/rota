@@ -11,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/professor93/rota/internal/proc"
 )
 
 func TestMain(m *testing.M) {
@@ -137,13 +139,80 @@ func TestTheTtyFakeSaysWhatItsEnvironmentHolds(t *testing.T) {
 		reg["name"] != "fake" || reg["pid"] != float64(os.Getpid()) {
 		t.Fatalf("the last line wrote %s", raw)
 	}
-	start, err := time.ParseInLocation(time.ANSIC, reg["procStart"].(string), time.Local)
+	start, err := time.Parse(time.ANSIC, reg["procStart"].(string))
 	if err != nil {
 		t.Fatalf("procStart is not ANSIC: %v", err)
 	}
 	if d := time.Since(start); d < -time.Second || d > time.Hour {
 		t.Fatalf("procStart %v is not this process's own start", start)
 	}
+}
+
+// The fake writes procStart as Claude Code does, the output of
+// `ps -o lstart= -p <pid>` under LC_ALL=C TZ=UTC: its own start in UTC, laid
+// out as ANSIC, whatever zone it runs in.
+func TestTheFakeWritesItsStartInUTC(t *testing.T) {
+	if !inZones(t) {
+		return
+	}
+	started, err := proc.StartTime(os.Getpid())
+	if err != nil {
+		t.Skipf("no start time here: %v", err)
+	}
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	var out bytes.Buffer
+	atty(Spec{Tty: true}, strings.NewReader("registry idle\nbye\n"), &out)
+	raw, err := os.ReadFile(filepath.Join(home, "sessions", strconv.Itoa(os.Getpid())+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg struct{ ProcStart string }
+	if err := json.Unmarshal(raw, &reg); err != nil {
+		t.Fatal(err)
+	}
+	if want := started.UTC().Format(time.ANSIC); reg.ProcStart != want {
+		t.Fatalf("procStart %q, want %q, this process's start in UTC", reg.ProcStart, want)
+	}
+}
+
+// zones are local zones the fake is also tested in, neither of them UTC, so
+// that a time written as local time cannot pass for one in UTC.
+var zones = []string{"Asia/Tashkent", "America/New_York"}
+
+// zoneRun names the zone a test binary started by inZones runs in.
+const zoneRun = "ROTA_TEST_ZONE"
+
+// inZones runs the calling test again in a test binary of its own under each
+// of zones, as TZ names them, and says whether this run is one of those, the
+// only kind that goes on to test. A zone the machine has no data for is
+// skipped.
+func inZones(t *testing.T) bool {
+	t.Helper()
+	if z := os.Getenv(zoneRun); z != "" {
+		if _, off := time.Date(2026, time.November, 10, 12, 0, 0, 0, time.UTC).In(time.Local).Zone(); off == 0 {
+			t.Fatalf("TZ=%s gave a local zone at UTC's offset", z)
+		}
+		return true
+	}
+	name := t.Name()
+	for _, z := range zones {
+		t.Run(z, func(t *testing.T) {
+			if _, err := time.LoadLocation(z); err != nil {
+				t.Skipf("no zone data for %s: %v", z, err)
+			}
+			cmd := exec.Command(os.Args[0], "-test.run=^"+name+"$", "-test.count=1", "-test.v")
+			cmd.Env = append(os.Environ(), "TZ="+z, zoneRun+"="+z)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("under TZ=%s: %v\n%s", z, err, out)
+			}
+			if !strings.Contains(string(out), "--- PASS: "+name) {
+				t.Fatalf("under TZ=%s the test did not run:\n%s", z, out)
+			}
+		})
+	}
+	return false
 }
 
 // TestTheTtyFakeWritesANullWaitingForWhenNotWaiting: a registry line with no

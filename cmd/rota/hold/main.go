@@ -103,10 +103,9 @@ type holder struct {
 	unsignal   func()
 	tokenUntil time.Time
 
-	// The CLI's own registry, for claude: where it is, the zone its
-	// procStart is written in, and when the CLI started.
+	// The CLI's own registry, for claude: where it is, and when the CLI
+	// started.
 	registry   string
-	zone       *time.Location
 	childStart time.Time
 }
 
@@ -194,7 +193,7 @@ func (h *holder) start(in io.Reader, open func() (*store.Store, error)) error {
 		m.Args = holdwire.StoredArgs(a.Provider, h.req.Args)
 		h.tokenUntil = holdwire.LoginUntil(a, p.env)
 		if rota.Flavor(a.Provider) == "claude" {
-			h.registry, h.zone = registryOf(env, h.child.Pid())
+			h.registry = registryOf(env, h.child.Pid())
 		}
 	} else {
 		m.Args = append([]string{}, h.req.Args...)

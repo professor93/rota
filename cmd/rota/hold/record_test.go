@@ -53,51 +53,21 @@ func TestTheHolderLogMovesAsideAtItsCap(t *testing.T) {
 }
 
 // TestTheRegistryIsLookedForWhereTheCLILooks: Claude Code keeps its registry
-// under CLAUDE_CONFIG_DIR, or ~/.claude without it, and writes its times in
-// TZ's zone, the last TZ given winning as getenv reads it.
+// under CLAUDE_CONFIG_DIR, or ~/.claude without it, the last one given
+// winning as getenv reads it.
 func TestTheRegistryIsLookedForWhereTheCLILooks(t *testing.T) {
-	path, _ := registryOf([]string{"HOME=/h", "CLAUDE_CONFIG_DIR=/c"}, 7)
-	if path != filepath.Join("/c", "sessions", "7.json") {
+	if path := registryOf([]string{"HOME=/h", "CLAUDE_CONFIG_DIR=/c"}, 7); path != filepath.Join("/c", "sessions", "7.json") {
 		t.Fatalf("with CLAUDE_CONFIG_DIR: %s", path)
 	}
-	if path, _ = registryOf([]string{"HOME=/h"}, 7); path != filepath.Join("/h", ".claude", "sessions", "7.json") {
+	if path := registryOf([]string{"CLAUDE_CONFIG_DIR=/a", "CLAUDE_CONFIG_DIR=/c"}, 7); path != filepath.Join("/c", "sessions", "7.json") {
+		t.Fatalf("with it given twice: %s", path)
+	}
+	if path := registryOf([]string{"HOME=/h"}, 7); path != filepath.Join("/h", ".claude", "sessions", "7.json") {
 		t.Fatalf("without it: %s", path)
 	}
-	if path, _ = registryOf([]string{"PATH=/bin"}, 7); path != "" {
+	if path := registryOf([]string{"PATH=/bin"}, 7); path != "" {
 		t.Fatalf("with neither there is nowhere to look: %s", path)
 	}
-
-	ny, err := time.LoadLocation("America/New_York")
-	if err != nil {
-		t.Skipf("no zone database here: %v", err)
-	}
-	type zoneCase struct {
-		env  []string
-		want *time.Location
-	}
-	cases := []zoneCase{
-		{nil, time.Local},
-		{[]string{"TZ="}, time.UTC},
-		{[]string{"TZ=:UTC"}, time.UTC},
-		{[]string{"TZ=Europe/Paris", "TZ=America/New_York"}, ny},
-		{[]string{"TZ=:America/New_York"}, ny},
-		{[]string{"TZ=Not/A_Zone"}, time.Local},
-	}
-	if file := "/usr/share/zoneinfo/America/New_York"; fileExists(file) {
-		cases = append(cases, zoneCase{[]string{"TZ=:" + file}, ny})
-	}
-	for _, c := range cases {
-		got := zoneOf(c.env)
-		probe := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-		if got.String() != c.want.String() && probe.In(got).Format(time.RFC3339) != probe.In(c.want).Format(time.RFC3339) {
-			t.Errorf("%v: zone %s, want %s", c.env, got, c.want)
-		}
-	}
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
 }
 
 // holder.log is opened as the daemon's log is: never through a link, never

@@ -16,8 +16,13 @@ import (
 // One read of the registry is one poll of it, so what a poll does with a
 // file is tested here a read at a time, with nothing to wait for: a file an
 // hour off is some other claude's and changes nothing, the child's own is
-// recorded, and a file that has gone keeps what was recorded.
+// recorded, and a file that has gone keeps what was recorded. Each file is
+// written as Claude Code writes it, its procStart in UTC whatever the zone
+// the CLI and the holder run in.
 func TestEachRegistryReadKeepsTheConversationItKnows(t *testing.T) {
+	if !inZones(t) {
+		return
+	}
 	const pid = 48213
 	start := time.Now().Truncate(time.Second)
 	dir := t.TempDir()
@@ -27,14 +32,15 @@ func TestEachRegistryReadKeepsTheConversationItKnows(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := &holder{
-		registry: registryPath(home, pid), zone: time.Local, childStart: start,
-		child: &ptyChild{cmd: &exec.Cmd{Process: &os.Process{Pid: pid}}},
-		rec:   rec, sess: &Session{},
+		childStart: start,
+		child:      &ptyChild{cmd: &exec.Cmd{Process: &os.Process{Pid: pid}}},
+		rec:        rec, sess: &Session{},
 		log: func(msg string, args ...any) { t.Errorf("the holder logged %q %v", msg, args) },
 	}
+	h.registry = registryOf(append(os.Environ(), "CLAUDE_CONFIG_DIR="+home), pid)
 	write := func(started time.Time, session string) {
 		t.Helper()
-		raw := `{"pid":` + strconv.Itoa(pid) + `,"procStart":"` + started.Local().Format(time.ANSIC) +
+		raw := `{"pid":` + strconv.Itoa(pid) + `,"procStart":"` + started.UTC().Format(time.ANSIC) +
 			`","sessionId":"` + session + `","cwd":"/work","name":"` + session + `-name","status":"idle","waitingFor":null}`
 		if err := os.MkdirAll(filepath.Dir(h.registry), 0o700); err != nil {
 			t.Fatal(err)

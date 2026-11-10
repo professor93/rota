@@ -921,7 +921,7 @@ func TestTheEndingIsRecordedFirst(t *testing.T) {
 func TestTheStateFitsWhateverTheRegistrySays(t *testing.T) {
 	r := newRig(t, 0, newFakeChild())
 	claim(t, r.terminals)
-	f, err := parseRegistry(fixtureWith(t, "name", strings.Repeat("\x01", 200<<10)), nil)
+	f, err := parseRegistry(fixtureWith(t, "name", strings.Repeat("\x01", 200<<10)))
 	if err != nil {
 		t.Fatal(err)
 	}

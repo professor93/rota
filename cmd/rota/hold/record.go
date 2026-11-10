@@ -99,7 +99,7 @@ func (h *holder) readRegistry(last *Registry) *Registry {
 	if err != nil {
 		return last
 	}
-	f, err := parseRegistry(raw, h.zone)
+	f, err := parseRegistry(raw)
 	if err != nil || !f.belongsTo(h.child.Pid(), h.childStart) {
 		return last
 	}
@@ -127,8 +127,9 @@ func (h *holder) readRegistry(last *Registry) *Registry {
 }
 
 // registryOf is where Claude Code started with env keeps the record of the
-// session that is pid, and the zone it writes that record's times in.
-func registryOf(env []string, pid int) (string, *time.Location) {
+// session that is pid. Its times are in UTC whatever env's TZ says, so where
+// the record is is all there is to know.
+func registryOf(env []string, pid int) string {
 	home := lookup(env, "CLAUDE_CONFIG_DIR")
 	if home == "" {
 		if h := lookup(env, "HOME"); h != "" {
@@ -136,51 +137,20 @@ func registryOf(env []string, pid int) (string, *time.Location) {
 		}
 	}
 	if home == "" {
-		return "", nil
+		return ""
 	}
-	return registryPath(home, pid), zoneOf(env)
+	return registryPath(home, pid)
 }
 
-// zoneOf is the zone a program started with env reads its local time in:
-// TZ's, as the C library reads it, or this process's own when TZ names none
-// that can be loaded.
-func zoneOf(env []string) *time.Location {
-	tz, set := lookupOK(env, "TZ")
-	if !set {
-		return time.Local
-	}
-	tz = strings.TrimPrefix(tz, ":")
-	if tz == "" || tz == "UTC" {
-		return time.UTC
-	}
-	if filepath.IsAbs(tz) {
-		if raw, err := readSmall(tz, maxRegistry); err == nil {
-			if loc, err := time.LoadLocationFromTZData(tz, raw); err == nil {
-				return loc
-			}
-		}
-		return time.Local
-	}
-	if loc, err := time.LoadLocation(tz); err == nil {
-		return loc
-	}
-	return time.Local
-}
-
-func lookup(env []string, name string) string {
-	v, _ := lookupOK(env, name)
-	return v
-}
-
-// lookupOK is the value env gives name, the last one where it gives several,
+// lookup is the value env gives name, the last one where it gives several,
 // as the C library's getenv would see the environment rota builds.
-func lookupOK(env []string, name string) (string, bool) {
+func lookup(env []string, name string) string {
 	for i := len(env) - 1; i >= 0; i-- {
 		if k, v, ok := strings.Cut(env[i], "="); ok && k == name {
-			return v, true
+			return v
 		}
 	}
-	return "", false
+	return ""
 }
 
 // readSmall reads a file of at most max bytes; a larger one is an error,

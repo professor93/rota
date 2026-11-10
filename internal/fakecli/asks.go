@@ -54,10 +54,12 @@ func ask(line string) (string, bool) {
 }
 
 // writeRegistry writes a session file shaped like one Claude Code 2.1.318
-// writes: every key it has, with this process's own pid and start, the start
-// in local time as ANSIC lays it out. waitingFor is null unless a word says
-// what is waited for. The file is written beside its place and renamed in, so
-// a reader never sees half of one.
+// writes: every key it has, with this process's own pid and start. The start
+// is what Claude Code writes, the output of `ps -o lstart= -p <pid>` under
+// LC_ALL=C TZ=UTC: the start in UTC, as ANSIC lays it out, whatever zone the
+// fake runs in. waitingFor is null unless a word says what is waited for. The
+// file is written beside its place and renamed in, so a reader never sees half
+// of one.
 func writeRegistry(status string, waiting []string) error {
 	pid := os.Getpid()
 	start, err := proc.StartTime(pid)
@@ -71,7 +73,7 @@ func writeRegistry(status string, waiting []string) error {
 	cwd, _ := os.Getwd()
 	raw, err := json.Marshal(map[string]any{
 		"pid":        pid,
-		"procStart":  start.Local().Format(time.ANSIC),
+		"procStart":  start.UTC().Format(time.ANSIC),
 		"sessionId":  fmt.Sprintf("fake-%d", pid),
 		"cwd":        cwd,
 		"name":       "fake",
