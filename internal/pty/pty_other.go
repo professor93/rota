@@ -18,6 +18,9 @@ const Supported = false
 // whoever reads it wondering whether they mistyped something.
 func Start(*exec.Cmd, uint16, uint16) (*os.File, error) { return nil, unsupported() }
 
+// Open refuses too: there is no pair to open.
+func Open() (master, slave *os.File, err error) { return nil, nil, unsupported() }
+
 // Resize refuses for the same reason, and is here so that a caller compiles
 // everywhere and fails in one place.
 func Resize(*os.File, uint16, uint16) error { return unsupported() }
