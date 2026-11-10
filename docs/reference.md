@@ -2183,18 +2183,23 @@ it was. A screen that failed is retired for the rest of the session. Any
 other is kept again on its own once the session is within 200,000 cells and
 the CLI has printed nothing for a second, and the log says so. The fresh
 screen starts on the last of the scrollback: no further back than the
-session last changed size, nor than it can draw in a moment, 32 KiB at
-80×24 and less on a larger screen, and at the start of a line or of an
-escape sequence. The holder does not ask the CLI to draw again, so a CLI
-that redraws itself when it is resized, as a full-screen one does, is all
-there after a fit back; of any other, the fresh screen shows what a
-replayed viewer sees, or the end of it, and what the CLI drew before that
-is lost to it. A viewer already attached is not repainted when the screen
-comes back: its next `repaint` is the fresh screen, as is the `hello` of
-the next attach. What a held session's viewer is replayed — on attaching,
-or after a repaint — comes in frames of at most 64 KiB, each with its own write deadline, and one viewer is
-repainted at most four times a second. Documents still arrive, and the ones
-that came while it was behind arrive after the repaint; a viewer owed more
+session last changed size, which a fit to the size it has does not do, nor
+than it can draw in a moment, 32 KiB at 80×24 and less on a larger screen.
+There it starts just past the last switch to or from the alternate screen,
+or else at the first escape sequence, or else at the start of a line; it
+does not start inside a string the CLI has not finished, nor before the
+CLI has printed anything since the size changed. The holder does not ask
+the CLI to draw again, so a CLI that redraws itself when it is resized, as
+a full-screen one does, is all there after a fit back, and one that does
+not shows only what it printed since. Otherwise the fresh screen shows
+what a replayed viewer sees, or the end of it, and what the CLI drew
+before that is lost to it. A viewer already attached is not repainted when
+the screen comes back: its next `repaint` is the fresh screen, as is the
+`hello` of the next attach. What a held session's viewer is replayed — on
+attaching, or after a repaint — comes in frames of at most 64 KiB, each
+with its own write deadline, and one viewer is repainted at most four
+times a second. Documents still arrive, and the ones that came while it
+was behind arrive after the repaint; a viewer owed more
 documents than it has room for (64 waiting to be written, or 1024 waiting
 for its repaint) is closed with `1013` after all, since a repaint does not
 say them again.
