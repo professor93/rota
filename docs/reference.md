@@ -3282,11 +3282,17 @@ holding the account, a `daemon.lock` naming a live process, or a
 alive. A record whose pid has since gone to another process does not: each
 record carries its writer's start, `procStart`, and a process at that pid
 that started more than two minutes after it is not the writer, as after a
-crash or a reboot. On Linux, where a start time moves when the clock is set,
-such a process still counts while its command line names claude; a record
-with no `procStart`, and one on Windows, are judged by the pid alone. When
-nothing is alive, rota may refresh, and a refresh is followed at
-once — after the store is saved — by writing the new login into the home.
+crash or a reboot. procStart is believed only when the record's own
+`startedAt`, the moment it was made, agrees with it to within minutes, and
+only of a record whose `pidDomain` is this machine's pid space: a record
+written on another host or in another container that shares the home is
+judged by its pid alone. On Linux, where a start time moves when the clock
+is set, a later process still counts while its command line, its command
+name or the program it runs names claude, or when none of them can be read.
+A record with no `procStart` or `startedAt`, and one on Windows, are judged
+by the pid alone. When nothing is alive, rota may refresh, and a refresh is
+followed at once — after the store is saved — by writing the new login into
+the home.
 Before rota refreshes — for a launch, a listing, usage read over HTTP or a
 server's maintenance — the store is saved, and when that save fails nothing is
 refreshed. A home holding no usable login, or the one rota wrote there and has

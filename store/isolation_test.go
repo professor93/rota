@@ -300,7 +300,7 @@ func TestALinkForANameNoLongerSharedWaitsForAQuietHome(t *testing.T) {
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"telemetry", "statsig"} {
+	for _, name := range []string{"telemetry", "statsig", ".oauth_refresh.lock.owner"} {
 		if err := os.Symlink(filepath.Join(src, name), filepath.Join(dst, name)); err != nil {
 			t.Fatal(err)
 		}
@@ -309,6 +309,9 @@ func TestALinkForANameNoLongerSharedWaitsForAQuietHome(t *testing.T) {
 	if _, err := s.command(a, true); err != nil {
 		t.Fatal(err)
 	}
+	// The refresh lock's owner record beside the person's lock is no
+	// directory a daemon has open, and goes at once.
+	absent(t, filepath.Join(dst, ".oauth_refresh.lock.owner"))
 	linksTo(t, filepath.Join(dst, "telemetry"), filepath.Join(src, "telemetry"))
 	linksTo(t, filepath.Join(dst, "statsig"), filepath.Join(src, "statsig"))
 	linksTo(t, filepath.Join(dst, "projects"), filepath.Join(src, "projects"))

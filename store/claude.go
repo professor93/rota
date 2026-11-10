@@ -357,10 +357,11 @@ var hostedKinds = []string{"bg", "daemon", "daemon-worker"}
 // never shared with anybody's.
 //
 // A record naming a pid that is no longer running, or that has since been
-// given to a process started after the record's writer (see recycled), is a
-// leftover and says nothing. A record that cannot be read could be anything, and counts as
-// alive: the two mistakes do not cost the same, and a home wrongly thought
-// quiet has its login written over underneath a running process.
+// given to a process started after the record's writer (see recycled), is
+// a leftover and says nothing. A record that cannot be read could be
+// anything, and counts as alive: the two mistakes do not cost the same, and
+// a home wrongly thought quiet has its login written over underneath a
+// running process.
 func claudeLiveThings(home string) []liveThing {
 	var live []liveThing
 	if what, ok := daemonAlive(home); ok {
@@ -418,16 +419,18 @@ func daemonAlive(home string) (string, bool) {
 }
 
 // record is what a liveness record says: the pid it names, the kind of
-// session, and when its writer started, as the writer read it.
+// session, when its writer started as the writer read it, when it made the
+// record (milliseconds since the epoch), and the pid space it wrote in.
 type record struct {
-	pid             int
-	kind, procStart string
+	pid                        int
+	kind, procStart, pidDomain string
+	startedAt                  int64
 }
 
 // running reports whether the process a Claude Code record names is still
 // the one that wrote it: its pid is alive, and was not given to a later
 // process (see recycled).
-func (r record) running() bool { return proc.Alive(r.pid) && !recycled(r.pid, r.procStart) }
+func (r record) running() bool { return proc.Alive(r.pid) && !recycled(r) }
 
 // readRecord reads what a liveness record says.
 func readRecord(raw []byte, err error) (record, bool) {
@@ -438,17 +441,29 @@ func readRecord(raw []byte, err error) (record, bool) {
 		PID       float64        `json:"pid"`
 		Kind      string         `json:"kind"`
 		ProcStart jsontext.Value `json:"procStart"`
+		StartedAt jsontext.Value `json:"startedAt"`
+		PIDDomain jsontext.Value `json:"pidDomain"`
 	}
 	if rota.UnmarshalLenient(raw, &rec) != nil || rec.PID <= 0 {
 		return record{}, false
 	}
-	// A procStart that is not a string is no start, not an unreadable
-	// record: the record was read as well as it ever was.
-	var procStart string
-	if len(rec.ProcStart) > 0 && rota.UnmarshalLenient(rec.ProcStart, &procStart) != nil {
-		procStart = ""
+	// A field that is not what Claude Code writes there is missing, not an
+	// unreadable record: the record was read as well as it ever was.
+	var startedAt float64
+	if len(rec.StartedAt) > 0 && (rota.UnmarshalLenient(rec.StartedAt, &startedAt) != nil || startedAt < 0 || startedAt > 1e15) {
+		startedAt = 0
 	}
-	return record{pid: int(rec.PID), kind: rec.Kind, procStart: procStart}, true
+	return record{pid: int(rec.PID), kind: rec.Kind, procStart: jsonString(rec.ProcStart),
+		pidDomain: jsonString(rec.PIDDomain), startedAt: int64(startedAt)}, true
+}
+
+// jsonString is a JSON string's value, and empty for anything else.
+func jsonString(v jsontext.Value) string {
+	var s string
+	if len(v) == 0 || rota.UnmarshalLenient(v, &s) != nil {
+		return ""
+	}
+	return s
 }
 
 // things is everything alive in the home, a rota run holding the account

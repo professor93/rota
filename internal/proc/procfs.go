@@ -9,12 +9,13 @@ import (
 	"time"
 )
 
-// Procfs is a Linux /proc, read through Read. How each of its files is read
-// is written once, here, and built everywhere, so a test can be the kernel
-// on any system; on Linux the functions this package exports read the real
-// one.
+// Procfs is a Linux /proc, read through Read, its links through Link. How
+// each of its files is read is written once, here, and built everywhere, so
+// a test can be the kernel on any system; on Linux the functions this
+// package exports read the real one.
 type Procfs struct {
 	Read func(name string) ([]byte, error)
+	Link func(name string) (string, error)
 }
 
 // clockTicks is USER_HZ, the unit of /proc/<pid>/stat's start time. The
@@ -95,6 +96,31 @@ func (p Procfs) Cmdline(pid int) ([]string, error) {
 		return nil, nil
 	}
 	return strings.Split(string(raw), "\x00"), nil
+}
+
+// Names is every name a process goes by: its arguments (Cmdline), the
+// command name the kernel keeps for it (/proc/<pid>/comm, which a process
+// may set as its title), and the program it runs (the target of
+// /proc/<pid>/exe, which a renamed link or a wrapper's exec does not hide).
+// Whatever of these cannot be read is left out, as another user's exe
+// usually is; only when none can be read is it an error.
+func (p Procfs) Names(pid int) ([]string, error) {
+	args, err := p.Cmdline(pid)
+	names := args
+	if comm, cerr := p.Read("/proc/" + strconv.Itoa(pid) + "/comm"); cerr == nil {
+		names = append(names, strings.TrimRight(string(comm), "\n"))
+		err = nil
+	}
+	if p.Link != nil {
+		if exe, lerr := p.Link("/proc/" + strconv.Itoa(pid) + "/exe"); lerr == nil {
+			names = append(names, exe)
+			err = nil
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return names, nil
 }
 
 // stat is /proc/<pid>/stat's fields from the third on. The second is the

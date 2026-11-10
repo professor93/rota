@@ -2,6 +2,7 @@ package proc
 
 import (
 	"io/fs"
+	"slices"
 	"strconv"
 	"testing"
 	"time"
@@ -109,5 +110,41 @@ func TestACommandLineIsItsArgumentsAtTheirNuls(t *testing.T) {
 	}
 	if _, err := p.Cmdline(12); err == nil {
 		t.Fatal("a process that is not there has a command line")
+	}
+}
+
+// A process goes by its arguments, its command name and the program it
+// runs; what cannot be read is left out, and only a process none of whose
+// names can be read is an error.
+func TestAProcessGoesByEveryNameThatCanBeRead(t *testing.T) {
+	files := map[string]string{
+		"/proc/10/cmdline": "/opt/ai/bin/cc\x00--resume\x00",
+		"/proc/10/comm":    "claude\n",
+		"/proc/11/comm":    "sshd\n",
+	}
+	links := map[string]string{"/proc/10/exe": "/home/me/.local/share/claude/versions/2.1.322"}
+	p := Procfs{
+		Read: func(name string) ([]byte, error) {
+			if body, ok := files[name]; ok {
+				return []byte(body), nil
+			}
+			return nil, fs.ErrPermission
+		},
+		Link: func(name string) (string, error) {
+			if to, ok := links[name]; ok {
+				return to, nil
+			}
+			return "", fs.ErrPermission
+		},
+	}
+	names, err := p.Names(10)
+	if want := []string{"/opt/ai/bin/cc", "--resume", "claude", "/home/me/.local/share/claude/versions/2.1.322"}; err != nil || !slices.Equal(names, want) {
+		t.Fatalf("names %q, %v, want %q", names, err, want)
+	}
+	if names, err := p.Names(11); err != nil || !slices.Equal(names, []string{"sshd"}) {
+		t.Fatalf("another user's process: %q, %v", names, err)
+	}
+	if _, err := p.Names(12); err == nil {
+		t.Fatal("a process none of whose names can be read has some")
 	}
 }

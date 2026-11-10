@@ -153,10 +153,12 @@ func (s *Store) mirrorClaude(a *rota.Account, quiet bool) (string, error) {
 	// While anything is alive here a link is not taken away because its name
 	// stopped being shared: the daemon has that directory open through it.
 	// Conversation links still follow the sessions setting as they always
-	// have.
+	// have. What sits beside a lock is a file nothing holds open, and a link
+	// to the person's would be read and written as the home's own, so it
+	// goes at once.
 	hold := func(string) bool { return false }
 	if !quiet {
-		hold = func(name string) bool { return !keepsConversations(name) }
+		hold = func(name string) bool { return !keepsConversations(name) && !strings.Contains(name, ".lock.") }
 	}
 	blocked, err := relink(dst, want, func(string) bool { return true }, hold)
 	if err != nil {
