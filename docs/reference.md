@@ -487,25 +487,28 @@ with `-i` or `--`, stdout belongs to the CLI. Either way the CLI's exit
 status becomes rota's.
 
 Login is one command and never opens a browser. `rota login` prints a URL and
-a short id; open the URL yourself and approve. When both its input and the
-output the URL goes to are a terminal, on Linux and macOS, the same command
-then waits for what finishes the login: the code from the page, read as it is
-typed, since it is good once and for nothing without what stays on this
-machine; a key, with the echo off; and for a device login nothing at all, since
-rota asks the provider by itself until it is approved, or until the provider
-refuses it. The prompt says how much of its 15 minutes the login has left. A
-code that is not accepted, and an approval by the wrong account, are said and
-asked for again on the same login; where approving again cannot help, because
-the account was removed meanwhile or its e-mail approved under another of the
+a short id; open the URL yourself and approve. When its input, the output the
+URL goes to and the error output its prompt goes to are all a terminal, on
+Linux and macOS, the same command then waits for the code from the page, read
+as it is typed, since it is good once and for nothing without what stays on
+this machine. (A provider whose login is a pasted key would have it read with
+the echo off, and one whose login is a device approval would be asked by
+itself until it is approved or refused; no provider rota ships logs in either
+way.) The prompt says how much of its 15 minutes the login has left. A code
+that is not accepted, and an approval by the wrong account, are said and asked
+for again on the same login; where approving again cannot help, because the
+account was removed meanwhile or its e-mail approved under another of the
 provider's ids, the wait stops with that error. An empty line asks again. `^D`
 ends the wait and not the login, exiting 1, and `^C` does the same with 130:
 the login stays open, and the line that finishes it later is printed. A login
 another rota finishes meanwhile, following that line in a second shell, ends
-the wait as a success and says so; one that runs out says so and exits 1. A
-delegated login is still the vendor CLI's to finish, and grok's, which can also
-be finished without a key, is not waited for either. In a pipe, a script or CI,
-with the output in a file, and always with `--json`, a login is two steps: pass
-the code back with `rota login <login-id> <code>`.
+the wait as a success and says so; one that is gone with no account signed in
+by it, its file damaged or the store removed, says that and exits 1; one that
+runs out says so and exits 1. A delegated login is still the vendor CLI's to
+finish, and grok's, which can also be finished without a key, is not waited
+for either. In a pipe, a script or CI, with the output in a file, and always
+with `--json`, a login is two steps: pass the code back with
+`rota login <login-id> <code>`.
 
 One command, because the difference between the two it used to be — whether
 rota holds the credential or the vendor CLI keeps its own — is rota's business
@@ -4481,7 +4484,7 @@ defer s.Close()
 
 l, _ := s.BeginLogin(ctx, "codex")            // parks the login for another process
 l, _ = s.BeginLoginFor(ctx, 2)                // ...or one only account 2's approval finishes
-a, added, err := s.FinishLogin(ctx, l.ID, code) // kept for store.PendingTTL; store.Unfinishable(err): stop asking
+a, added, _ := s.FinishLogin(ctx, l.ID, code)
 errs := s.Refresh(ctx, false)                 // quota for metered providers, cached; a provider's wait kept
 errs = s.Refresh(store.WithCaller(ctx, "mine"), false) // the same, journalled as mine.renew
 res, _ := s.Run(ctx, a, rota.Spec{Prompt: "hi"}, nil, os.Stdout)
