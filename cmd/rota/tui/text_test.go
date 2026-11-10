@@ -53,18 +53,22 @@ func textNFD(s string) string {
 
 func TestCleanDropsControlsAndKeys(t *testing.T) {
 	for in, want := range map[string]string{
-		// A whole escape sequence goes, as a space: a CSI, an SGR, an OSC
-		// to its BEL or ST, an ESC pair, and the C1 forms.
+		// A whole escape sequence goes: as a space between two words, and as
+		// nothing beside a blank, at either end or after another sequence. A
+		// CSI, an SGR, an OSC to its BEL or ST, an ESC pair, the C1 forms.
 		"a\x1b[2Jb\nc\x07":     "a b c",
-		"\x1b[1;31mred\x1b[0m": " red ",
+		"\x1b[1;31mred\x1b[0m": "red",
+		"is\x1b[2J locked":     "is locked",
+		"a\x1b[1m\x1b[2mb":     "a b",
+		"a\x1b[1m\x1b[2m":      "a",
 		// DCS (a sixel picture), SOS, PM and APC go to their ST or BEL.
-		"\x1bPq#0;2;0;0;0\x1b\\x":                   " x",
-		"\x1bXsos\x1b\\x":                           " x",
-		"\x1b^pm\x07x":                              " x",
-		"\x1b_apc\x1b\\x":                           " x",
-		"\x1b]0;title\x07x":                         " x",
-		"\x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\": " link ",
-		"\x1b7saved\x1b(B":                          " saved ",
+		"y\x1bPq#0;2;0;0;0\x1b\\x":                  "y x",
+		"y\x1bXsos\x1b\\x":                          "y x",
+		"y\x1b^pm\x07x":                             "y x",
+		"y\x1b_apc\x1b\\x":                          "y x",
+		"y\x1b]0;title\x07x":                        "y x",
+		"\x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\": "link",
+		"\x1b7saved\x1b(B":                          "saved",
 		"c1\u009b2Kx":                               "c1 x",
 		"c1\u009d2;t\u009cx":                        "c1 x",
 		"tab\there":                                 "tab here",
@@ -234,6 +238,12 @@ func TestTextKeysInEveryArrangement(t *testing.T) {
 	b1, b2 := key[:21], key[21:]
 	for _, c := range []struct{ name, in string }{
 		{"whole", "x " + key},
+		// Beside a blank or at an end a sequence leaves no space, only its
+		// seam.
+		{"ESC takes the s after a space", "x \x1b" + key},
+		{"ESC takes the s at the start", "\x1b" + key},
+		{"split by CSI, a CSI at the end", "x " + b1 + "\x1b[0m" + b2 + "\x1b[0m"},
+		{"split by CSI beside a space", "x \x1b[1m" + b1 + "\x1b[0m" + b2},
 		{"CSI glued", "\x1b[2J" + key},
 		{"split by CSI", "x " + b1 + "\x1b[0m" + b2},
 		{"split by BEL", "x " + b1 + "\x07" + b2},
@@ -294,7 +304,7 @@ func TestTextRedactIsWireUnsecret(t *testing.T) {
 			b.WriteString(alpha[r.IntN(len(alpha))])
 		}
 		s := b.String()
-		got, _ := textRedact(" "+s, []int{0}, []string{""})
+		got, _ := textRedact(" "+s, []textSeam{{at: 0, space: true}})
 		if want := " " + wire.Unsecret(s); got != want {
 			t.Fatalf("textRedact(%q) = %q, wire.Unsecret gives %q", s, got, want)
 		}

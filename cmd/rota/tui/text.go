@@ -17,7 +17,8 @@ import (
 // is never taken as a command by the terminal, and is as wide to every
 // measure that lays the screen out as it is to the terminal that draws it.
 //
-//   - Every escape sequence goes whole, as a space: a CSI (ESC [, or the
+//   - Every escape sequence goes whole, as a space between two words and
+//     as nothing beside a space or at either end: a CSI (ESC [, or the
 //     C1 CSI as a character or as the lone byte 0x9b) to its final byte, an
 //     OSC and the other string sequences to their BEL or ST, and any other
 //     ESC with what it takes (textEscapes). A key the sequence's parameters
@@ -25,10 +26,8 @@ import (
 //     whole, and a key whose characters a sequence took is read with them
 //     put back (textRedact); each is taken out. What is not: a key with two
 //     sequences inside its "sk-ant-", one taking a character of it and the
-//     other putting characters of its own in, as x ESC s ESC [0m k-ant-….
-//     Whoever can place those can as well print the key without its
-//     prefix, which no redaction by shape stops; redaction is for a key
-//     echoed by accident, and no accident puts sequences inside a prefix.
+//     other putting characters of its own in (x ESC s ESC [0m k-ant-…):
+//     whoever can place those can as well print a key with no prefix.
 //   - Every C0 control, DEL and every C1 control left is dropped. A
 //     newline, a tab and the other line breaks become a space. A byte that
 //     is not UTF-8 becomes "?".
@@ -36,20 +35,15 @@ import (
 //     terminal may reorder a row by, the zero width space, the soft hyphen,
 //     the byte order mark. Only the joiners, ZWJ and ZWNJ, stay; they are
 //     part of what they join.
-//   - The variation selectors VS15 and VS16 are dropped: every emoji takes
-//     the presentation it has by default, so it is as wide to rota's
-//     tables as to x/ansi whatever follows it.
-//   - Hangul spelled out letter by letter, as macOS writes Korean file
-//     names, is put back together into its syllables (textHangul), which
-//     loses nothing.
+//   - VS15 and VS16 are dropped: an emoji keeps its default presentation.
+//   - Hangul spelled out in letters, as macOS writes Korean file names, is
+//     put back into its syllables (textHangul), losing nothing.
 //   - Each character is then made as wide to Bubble Tea's renderer as to a
 //     terminal that counts graphemes, and to rota's own tables, and a mark
-//     with nothing to sit on is dropped (see textSame). Where they disagree,
+//     with nothing to sit on is dropped (textSamePasses). Where they disagree,
 //     a character keeps its first letter or becomes "?": an emoji its first
-//     picture, and a syllable of an Indic script (Devanagari, Bengali,
-//     Tamil, Malayalam) its first consonant, its vowel signs and conjuncts
-//     dropped, as F9 rules. No other way keeps such a word one width to
-//     both the renderer and a terminal counting graphemes.
+//     picture, an Indic syllable its first consonant, as F9 rules, since
+//     nothing else keeps it one width to both.
 //   - Whatever is shaped like an Anthropic key is taken out (wire.Unsecret).
 //
 // clean of what clean gave is the same text.
@@ -58,20 +52,21 @@ func clean(s string) string {
 	return s
 }
 
-// textClean is clean, with the passes textSame took over it and the bytes
-// it looked at again to place joined letters: the work a test holds to
-// linear in s, which a clock under load could not.
+// textClean is clean, with the passes and the bytes looked at again that
+// textSamePasses and textRedact report: work a test holds linear in s.
 func textClean(s string) (out string, passes, scanned int) {
 	// A control stands between words as a space does, so a key just after
 	// one is taken out before the control goes, and a key that dropping
 	// controls joins up is taken out after.
-	s, seams, ate := textEscapes(wire.Unsecret(s))
+	s, seams := textEscapes(wire.Unsecret(s))
 	var b strings.Builder
 	b.Grow(len(s))
-	kept := seams[:0] // where the spaces that stand for sequences are now
+	kept := seams[:0] // the seams, at where they are now
 	for i := 0; i < len(s); {
-		if len(seams) > 0 && seams[0] == i {
-			kept = append(kept, b.Len())
+		for len(seams) > 0 && seams[0].at == i {
+			sm := seams[0]
+			sm.at = b.Len()
+			kept = append(kept, sm)
 			seams = seams[1:]
 		}
 		r, n := utf8.DecodeRuneInString(s[i:])
@@ -89,7 +84,11 @@ func textClean(s string) (out string, passes, scanned int) {
 			b.WriteRune(r)
 		}
 	}
-	red, looked := textRedact(b.String(), kept, ate)
+	for _, sm := range seams { // at the end of s
+		sm.at = b.Len()
+		kept = append(kept, sm)
+	}
+	red, looked := textRedact(b.String(), kept)
 	out, passes, scanned = textSamePasses(textHangul(red))
 	return wire.Unsecret(out), passes, scanned + looked
 }
@@ -104,25 +103,29 @@ func textKeyByte(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
 }
 
-// textRedact is s, in which each space at seams stands for an escape
-// sequence and ate[n] holds the key characters the n-th one took, with
-// every key taken out that either of two readings finds: the sequences
-// gone, so a key a sequence split shows as neither half, and each
-// sequence's key characters put back, so a key whose "s" or "-a" a
-// sequence took is found too. A key starts where s starts, after a
+// textRedact is s, in which each seam marks where an escape sequence stood
+// (on the space that stands for it, or between two bytes where none does)
+// and holds the key characters the sequence took, with every key taken out
+// that either of two readings finds: the sequences gone, so a key a
+// sequence split shows as neither half, and each sequence's key characters
+// put back, so a key whose "s" or "-a" a sequence took is found too. A key starts where s starts, after a
 // character that is not a letter or digit, after a seam or inside one, as
 // wire.Unsecret has it, so a key a sequence was glued to is taken out too.
 // Its replacement is wire.Unsecret's. The second result is how many bytes
 // of key bodies it read: each once, as a body is read only where a key
 // starts.
-func textRedact(s string, seams []int, ate []string) (string, int) {
+func textRedact(s string, seams []textSeam) (string, int) {
 	if len(seams) == 0 {
 		return s, 0
 	}
 	looked := 0
-	seam := make(map[int]string, len(seams))
-	for n, i := range seams {
-		seam[i] = ate[n]
+	ateAt := make(map[int]string, len(seams)) // what the seams at a place took
+	space := make(map[int]bool, len(seams))   // a seam's own space
+	for _, sm := range seams {
+		ateAt[sm.at] += sm.ate
+		if sm.space {
+			space[sm.at] = true
+		}
 	}
 	type span struct{ from, to int } // in s
 	var spans []span
@@ -131,15 +134,15 @@ func textRedact(s string, seams []int, ate []string) (string, int) {
 		var j strings.Builder
 		at := make([]int, 0, len(s))
 		var eaten []bool
-		for i := 0; i < len(s); i++ {
-			if k, ok := seam[i]; ok {
-				if keep {
-					for x := 0; x < len(k); x++ {
-						j.WriteByte(k[x])
-						at = append(at, i)
-						eaten = append(eaten, true)
-					}
+		for i := 0; i <= len(s); i++ {
+			if k := ateAt[i]; keep {
+				for x := 0; x < len(k); x++ {
+					j.WriteByte(k[x])
+					at = append(at, i)
+					eaten = append(eaten, true)
 				}
+			}
+			if i == len(s) || space[i] {
 				continue
 			}
 			j.WriteByte(s[i])
@@ -153,8 +156,7 @@ func textRedact(s string, seams []int, ate []string) (string, int) {
 				break
 			}
 			start := k + off
-			_, after := seam[at[start]-1]
-			word := start == 0 || eaten[start] || after || !(textKeyByte(js[start-1]) && js[start-1] != '_' && js[start-1] != '-')
+			word := start == 0 || eaten[start] || space[at[start]-1] || !(textKeyByte(js[start-1]) && js[start-1] != '_' && js[start-1] != '-')
 			if !word {
 				k = start + 1
 				continue
@@ -165,7 +167,13 @@ func textRedact(s string, seams []int, ate []string) (string, int) {
 			}
 			looked += end - start
 			if end-start-len(textKey) >= 16 {
-				spans = append(spans, span{at[start], at[end-1] + 1})
+				// A key ending on what a sequence took ends at the seam,
+				// past its space if it has one.
+				to := at[end-1] + 1
+				if eaten[end-1] && !space[at[end-1]] {
+					to--
+				}
+				spans = append(spans, span{at[start], to})
 				k = end
 				continue
 			}
@@ -194,8 +202,21 @@ func textRedact(s string, seams []int, ate []string) (string, int) {
 	return b.String(), looked
 }
 
-// textEscapes is s with each escape sequence in it replaced by a space, and
-// where in what it gives those spaces are, in order. ECMA-48 delimits the
+// textSeam is where an escape sequence stood in what textEscapes gives: at
+// the space that stands for it (space), or where the bytes after it start,
+// and the key characters it took (ate).
+type textSeam struct {
+	at    int
+	space bool
+	ate   string
+}
+
+// textBlank is a byte that is or becomes a space.
+func textBlank(c byte) bool { return c == ' ' || c == '\t' || c == '\n' }
+
+// textEscapes is s with each escape sequence in it replaced by a space
+// where it stood between two words, and by nothing beside a blank, at
+// either end, or after another sequence, and its seams, in order. ECMA-48 delimits the
 // sequences:
 //   - ESC [, or CSI (U+009B, or 0x9b alone, which a terminal reading eight
 //     bits takes as CSI): parameter bytes 0x30-0x3F, intermediate bytes
@@ -206,24 +227,44 @@ func textRedact(s string, seams []int, ate []string) (string, int) {
 //
 // A sequence cut short goes as far as it got. Anything else, a lone ESC
 // among them, is left for clean's control pass to drop. The scan is linear.
-func textEscapes(s string) (string, []int, []string) {
+func textEscapes(s string) (string, []textSeam) {
 	const esc = 0x1b
 	var b strings.Builder
-	var seams []int
-	var ate []string
-	done := 0 // how much of s is in b; 0 while nothing was replaced
+	var seams []textSeam
+	waiting := 0  // seams at the end of seams whose place is not known yet
+	blank := true // what b ends with is blank, or b is empty
+	done, any := 0, false
+	// settle places the waiting seams before what comes next: on a space
+	// of their own when that is a word after a word, else on nothing.
+	settle := func(next string) {
+		if waiting == 0 {
+			return
+		}
+		spaced := next != "" && !blank && !textBlank(next[0])
+		for x := len(seams) - waiting; x < len(seams); x++ {
+			seams[x].at, seams[x].space = b.Len(), spaced && x == len(seams)-waiting
+		}
+		if spaced {
+			b.WriteByte(' ')
+			blank = true
+		}
+		waiting = 0
+	}
 	put := func(from, to int) {
-		b.WriteString(s[done:from])
-		seams = append(seams, b.Len())
+		if from > done {
+			settle(s[done:from])
+			b.WriteString(s[done:from])
+			blank = textBlank(s[from-1])
+		}
 		var k []byte
 		for x := from; x < to; x++ {
 			if textKeyByte(s[x]) {
 				k = append(k, s[x])
 			}
 		}
-		ate = append(ate, string(k))
-		b.WriteByte(' ')
-		done = to
+		seams = append(seams, textSeam{ate: string(k)})
+		waiting++
+		done, any = to, true
 	}
 	// csi is where the CSI whose parameters start at i ends.
 	csi := func(i int) int {
@@ -292,15 +333,17 @@ func textEscapes(s string) (string, []int, []string) {
 			i += n
 		}
 	}
-	if done == 0 {
-		return s, nil, nil
+	if !any {
+		return s, nil
 	}
+	settle(s[done:])
 	b.WriteString(s[done:])
-	return b.String(), seams, ate
+	return b.String(), seams
 }
 
-// textSame is s with every character the measures disagree on replaced by
-// one they agree on: its first rune, or "?" when they disagree on that too.
+// textSamePasses is s with every character the measures disagree on
+// replaced by one they agree on: its first rune, or "?" when they disagree
+// on that too.
 //
 // Bubble Tea's renderer lays a row out by adding up its runes' widths
 // (ansi.WcWidth), as a terminal does that was never asked to count
@@ -322,16 +365,8 @@ func textEscapes(s string) (string, []int, []string) {
 // whatever is left of the cell. A first letter that would join what follows
 // it into a new grapheme (a Prepend letter, a Hangul initial) is "?"
 // instead, which joins nothing, so one pass leaves text a second pass does
-// not change, and the work is linear in s. The second pass is the proof,
-// and a guard.
-func textSame(s string) string {
-	s, _, _ = textSamePasses(s)
-	return s
-}
-
-// textSamePasses is textSame, how many passes it took (1 when s was
-// already clean, 2 when it was not), and how many bytes it looked at again
-// to place joined letters (textAlone).
+// not change, and the work is linear in s; the second pass is the proof.
+// It says how many passes it took and the bytes it looked at again.
 func textSamePasses(s string) (out string, passes, scanned int) {
 	for passes = 1; ; passes++ {
 		t, n := textPass(s)
@@ -343,7 +378,7 @@ func textSamePasses(s string) (out string, passes, scanned int) {
 	}
 }
 
-// textPass is one pass of textSame, and the bytes textAlone looked at.
+// textPass is one pass of textSamePasses, and the bytes textAlone looked at.
 func textPass(s string) (string, int) {
 	scanned := 0
 	alone := func(c, rest string) bool {

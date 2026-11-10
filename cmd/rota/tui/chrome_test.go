@@ -474,8 +474,8 @@ func TestChromeCleansWhatOthersSay(t *testing.T) {
 			t.Errorf("view %d draws what it was given as it was:\n%q", i, v)
 		}
 	}
-	if p := plain(m); !strings.Contains(p, "eve[2J sk-ant-[not repeated] · control") || !strings.Contains(p, "Ask[2J") ||
-		!strings.Contains(p, "the answer[2J sk-ant-[not repeated] ends too") {
+	if p := plain(m); !strings.Contains(p, "eve sk-ant-[not repeated] · control") || !strings.Contains(p, " Ask ") ||
+		strings.Contains(p, "[2J") || !strings.Contains(p, "the answer sk-ant-[not repeated] ends too") {
 		t.Errorf("what was cleaned is not drawn:\n%s", p)
 	}
 }
@@ -675,7 +675,7 @@ func TestToastsStackAndFade(t *testing.T) {
 	// What a toast says is drawn through clean: no escape, no key.
 	secret := "sk-ant-api03-" + strings.Repeat("A", 40)
 	run(t, m, toastMsg{Text: "bad\x1b[2J\nnews " + secret, Level: levelErr})
-	if v := m.View().Content; strings.Contains(v, "\x1b[2J") || strings.Contains(v, secret) || !strings.Contains(plain(m), "bad[2J news sk-ant-[not repeated]") {
+	if v := m.View().Content; strings.Contains(v, "\x1b[2J") || strings.Contains(v, secret) || !strings.Contains(plain(m), "bad news sk-ant-[not repeated]") {
 		t.Errorf("the toast was not cleaned:\n%q", v)
 	}
 }

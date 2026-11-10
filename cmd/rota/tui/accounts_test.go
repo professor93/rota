@@ -227,14 +227,14 @@ func TestALabelNeverEscapesItsCell(t *testing.T) {
 					}
 				}
 				lines := strings.Split(ansi.Strip(styled), "\n")
-				// The bold the note asked for is shown as text, so it was
-				// never taken as bold.
-				if sel == 3 && w == 120 && !strings.Contains(ansi.Strip(styled), "note            quota note[1m sk-ant-") {
+				// The bold the note asked for went whole, beside the space
+				// that was there, so it was never taken as bold.
+				if sel == 3 && w == 120 && !strings.Contains(ansi.Strip(styled), "note            quota note sk-ant-") {
 					t.Errorf("the note is not shown as the text it holds:\n%s", ansi.Strip(styled))
 				}
 				// A label too long for the title is cut, not the provider
 				// and the id after it.
-				if sel == 3 && !strings.Contains(ansi.Strip(styled), "…  claude[31m  id 4\n") {
+				if sel == 3 && !strings.Contains(ansi.Strip(styled), "…  claude  id 4\n") {
 					t.Errorf("the title of a long label lost its provider or id:\n%s", ansi.Strip(styled))
 				}
 				for _, l := range lines {
@@ -994,7 +994,7 @@ func TestAccountsSaysWhyTheAccountsCannotBeRead(t *testing.T) {
 	ticks := &fakeTicks{clock: accountsNow}
 	m := shellModel(t, b, ticks)
 	run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
-	const said = "the accounts could not be read: the store is[2J locked\n"
+	const said = "the accounts could not be read: the store is locked\n"
 	if got := accountsPlain(accountsOf(m).View(80, 20)); got != said {
 		t.Errorf("a failed first read says %q", got)
 	}
