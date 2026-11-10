@@ -1,8 +1,6 @@
 package attach
 
 import (
-	"bytes"
-	"errors"
 	"math"
 	"slices"
 	"strconv"
@@ -21,9 +19,10 @@ func (r *runner) onEvents(evs []chordEvent, now time.Time) {
 		switch e.act {
 		case actType:
 			// A watcher's keys are dropped here, not refused there, and
-			// nothing is typed but into the session shown.
-			if r.phase == runLive && !r.o.Watch && r.ln != nil {
-				_ = r.ln.Type(e.bytes)
+			// nothing is typed but into the session shown and settled.
+			if r.phase == runLive && !r.o.Watch && r.ln != nil && !r.eating {
+				l, b := r.ln, e.bytes
+				r.work.do(func() { _ = l.Type(b) })
 			}
 		case actLeave:
 			r.leave(now)
@@ -43,6 +42,10 @@ func (r *runner) onEvents(evs []chordEvent, now time.Time) {
 			}
 		}
 	}
+	if r.eating && r.ch.state == chordGround {
+		// The key that took the card down has been read whole.
+		r.eating = false
+	}
 	if r.ov.on && r.ov.kind == runHint && r.ov.until.IsZero() && !r.ch.armed() {
 		// The chord the hint was for has ended.
 		r.unlay()
@@ -61,7 +64,7 @@ func (r *runner) act(a action, now time.Time) {
 	case actFit:
 		r.fit(now)
 	case actHelp:
-		r.lay(runOverlay{kind: runCard, lines: helpCard(r.key, false), key: true})
+		r.lay(runOverlay{kind: runCard, lines: helpCard(r.key, false), key: true, eat: true})
 	}
 }
 
@@ -74,17 +77,35 @@ func (r *runner) leave(now time.Time) {
 	r.unlay()
 }
 
-// move shows the next live, attachable session, by when each started, or
-// the one before it, round from the last to the first. Whatever is typed
-// until its hello is dropped.
+// move asks for the sessions, for n (dir 1) or p (-1). The session shown
+// stays until the next one's hello, and whatever is typed meanwhile is
+// dropped.
 func (r *runner) move(dir int) {
-	all, err := r.src.list()
-	if err != nil {
-		r.say("rota: " + err.Error())
+	r.ch.reset()
+	r.phase = runListing
+	gen, src := r.gen, r.src
+	r.work.do(func() {
+		all, err := src.list()
+		select {
+		case r.listed <- runListed{gen: gen, dir: dir, all: all, err: err}:
+		case <-r.done:
+		}
+	})
+}
+
+// onListed opens the next live, attachable session, by when each started,
+// or the one before it, round from the last to the first.
+func (r *runner) onListed(l runListed, now time.Time) {
+	if l.gen != r.gen || r.phase != runListing {
+		return
+	}
+	r.phase = runLive
+	if l.err != nil {
+		r.note("rota: "+l.err.Error(), now)
 		return
 	}
 	var live []client.Session
-	for _, s := range all {
+	for _, s := range l.all {
 		if s.State == "live" && s.Attachable {
 			live = append(live, s)
 		}
@@ -99,29 +120,37 @@ func (r *runner) move(dir int) {
 	var next client.Session
 	switch {
 	case at >= 0 && len(live) > 1:
-		next = live[(at+dir+len(live))%len(live)]
+		next = live[(at+l.dir+len(live))%len(live)]
 	case at < 0 && len(live) > 0:
 		// This session is no longer in the list: the first or the last.
 		next = live[0]
-		if dir < 0 {
+		if l.dir < 0 {
 			next = live[len(live)-1]
 		}
 	default:
-		r.note("rota: no other live session", time.Now())
+		r.note("rota: no other live session", now)
 		return
 	}
-	r.ch.reset()
-	r.drop()
-	r.view.close()
-	r.view = nil
-	r.ov, r.wantRedraw, r.wantWindow = runOverlay{}, false, false
-	// The window is given back before the next session is shown, since a
-	// crop's alternate screen and the last session's modes are not the
-	// next one's.
-	r.write(runPutBack())
 	r.phase = runSwitching
-	r.id = next.ID
+	r.target = next
 	r.start(next.ID)
+}
+
+// switchFailed keeps the session shown when the next one cannot be opened.
+// The daemon's no is said in a note. A transport that failed is a lost
+// link, since the daemon may be going: the session shown is redialled, or
+// the attach is lost.
+func (r *runner) switchFailed(op runOpened, now time.Time) {
+	if runRefusal(op.err) == nil {
+		r.lose(op.err, now)
+		return
+	}
+	r.phase = runLive
+	name := r.target.Name
+	if name == "" {
+		name = r.target.ID
+	}
+	r.note("rota: "+OneLine(name)+": "+op.err.Error(), now)
 }
 
 // holds says whether this connection holds the keyboard.
@@ -132,16 +161,17 @@ func (r *runner) holds() bool {
 // claim asks for the keyboard, and at a k forceAfter or more after asking,
 // takes it.
 func (r *runner) claim(now time.Time) {
+	l := r.ln
 	switch {
 	case r.o.Watch:
 		r.note("rota: watching; this window cannot take the keyboard", now)
 	case r.holds():
 		r.note("rota: this window holds the keyboard", now)
 	case r.askedAt.IsZero():
-		_ = r.ln.Claim(false)
+		r.work.do(func() { _ = l.Claim(false) })
 		r.askedAt = now
 	case now.Sub(r.askedAt) >= forceAfter:
-		_ = r.ln.Claim(true)
+		r.work.do(func() { _ = l.Claim(true) })
 		r.askedAt = time.Time{}
 	default:
 		holder := OneLine(r.holder)
@@ -166,7 +196,8 @@ func (r *runner) fit(now time.Time) {
 	case cols == r.view.sessCols && rows == r.view.sessRows:
 		r.note("rota: the session is already this size", now)
 	default:
-		_ = r.ln.Fit(actionsCells(cols), actionsCells(rows))
+		l := r.ln
+		r.work.do(func() { _ = l.Fit(actionsCells(cols), actionsCells(rows)) })
 	}
 }
 
@@ -250,43 +281,106 @@ func (r *runner) unlay() {
 	r.ov = runOverlay{}
 }
 
-// overlay is the overlay drawn, then the cursor put back where the session
-// has it. The cursor is moved there rather than restored with ESC 8, since
-// ESC 7 and ESC 8 share one slot with the CLI's own saves.
+// overlay is the overlay drawn. drawRow and drawCard save the cursor with
+// ESC 7 and put it back with ESC 8, which brings back the CLI's own pen
+// with it, so what the CLI writes next is in its colours. ESC 7 shares its
+// slot with the CLI's own saves: a CLI that saved the cursor and draws
+// across an overlay goes back to where the overlay was drawn, until the
+// redraw that takes the overlay down.
 func (r *runner) overlay() []byte {
 	v := r.view
 	cols, rows := v.winCols, v.winRows
-	var b []byte
 	switch r.ov.kind {
 	case runCard:
-		b = drawCard(r.ov.lines, cols, rows)
+		return drawCard(r.ov.lines, cols, rows)
 	case runHint:
-		b = drawRow(rows, hintRow(r.key, cols), cols)
-	default:
-		b = drawRow(rows, r.ov.text, cols)
+		return drawRow(rows, hintRow(r.key, cols), cols)
 	}
-	if b == nil {
-		return nil
-	}
-	b = bytes.TrimPrefix(b, []byte("\x1b7"))
-	b = bytes.TrimSuffix(b, []byte("\x1b8"))
-	return append(b, r.cursor()...)
+	return drawRow(rows, r.ov.text, cols)
 }
 
-// cursor moves the window's cursor to where the session's is: the same
-// cell passing through, and its place in the crop while cropped, which
-// flush has hidden when it is out of the window.
-func (r *runner) cursor() []byte {
-	v := r.view
-	row, col := v.screen.Cursor()
-	if v.crop {
-		x, y := viewport(v.sessCols, v.sessRows, v.winCols, v.winRows, row-1, col-1, v.x)
-		row, col = row-y, col-x
-		if row < 1 || row >= v.winRows || col < 1 || col > v.winCols {
-			return nil
+// onOpened takes what an open came to.
+func (r *runner) onOpened(op runOpened, now time.Time) {
+	if r.phase == runRedialing && op.gen == r.gen {
+		r.dialling = false
+	}
+	if op.gen != r.gen || r.phase == runLeaving {
+		// Stale, or the person left while it was opening: not shown.
+		if op.ln != nil {
+			op.ln.Close()
+		}
+		return
+	}
+	if op.err == nil {
+		r.src = op.src
+		r.show(op.ln, op.sess, now)
+		return
+	}
+	switch r.phase {
+	case runOpening:
+		r.sess = op.sess
+		r.end(Refused, 0, op.err)
+	case runSwitching:
+		r.switchFailed(op, now)
+	case runRedialing:
+		if op.final != nil {
+			r.sess = op.sess
+			r.end(op.final.Why, op.final.Code, op.final.Err)
+			return
+		}
+		r.lastErr = op.err
+		if !now.Before(r.redialStart.Add(redialFor)) {
+			r.end(Lost, 0, r.lastErr)
+			return
+		}
+		r.redialNext = op.at.Add(redialEvery)
+	}
+}
+
+// show makes l the session shown: a fresh view at the session's size in
+// this window, the link read, and, before the first session, the card for
+// a person who has not seen the chord.
+func (r *runner) show(l link, sess client.Session, now time.Time) {
+	first := r.phase == runOpening
+	if !first {
+		// A switch or a redial: nothing typed for the old link, or on the
+		// way here, is typed into this one, not even the tail of a key
+		// begun before its hello.
+		r.ch.reset()
+		r.drop()
+		if r.view != nil {
+			r.view.close()
+			r.view = nil
+			r.write(runPutBack())
 		}
 	}
-	return []byte("\x1b[" + strconv.Itoa(row) + ";" + strconv.Itoa(col) + "H")
+	r.ln, r.hello, r.sess, r.id = l, l.Hello(), sess, sess.ID
+	r.held = append(r.held, &linkHeld{l: l})
+	r.holder, r.holderConn = r.hello.Holder, r.hello.HolderConn
+	r.askedAt = time.Time{}
+	r.ov, r.wantRedraw, r.wantWindow, r.eating = runOverlay{}, false, false, false
+	r.phase = runLive
+	name := sess.Name
+	if name == "" {
+		name = sess.ID
+	}
+	key := r.key
+	cols, rows := r.t.Size()
+	r.view = newView(r.out, int(r.hello.Cols), int(r.hello.Rows), cols, rows, func(sc, sr, wc, wr int) string {
+		return cropNote(name, key, sc, sr, wc, wr)
+	})
+	r.lastFlush = now
+	go r.next(r.gen, l)
+	if !first {
+		return
+	}
+	if r.o.Teach != nil {
+		r.lay(runOverlay{kind: runCard, lines: helpCard(key, true), key: true, teach: true})
+	}
+	if early := r.early; len(early) > 0 {
+		r.early = nil
+		r.onInput(early, nil, now)
+	}
 }
 
 // lose takes a link that failed: a redial when there is one to make, and
@@ -302,14 +396,20 @@ func (r *runner) lose(err error, now time.Time) {
 	}
 	r.drop()
 	r.phase = runRedialing
-	r.redialStart, r.redialNext, r.lastErr = now, now, err
+	r.redialStart, r.redialNext, r.lastErr, r.dialling = now, now, err, false
 	r.lay(runOverlay{kind: runNote, text: "rota: the rota daemon went away; waiting for it (" + KeyName(r.key) + " d leaves)"})
 }
 
-// drop closes the link, and has whatever it still sends ignored.
+// drop closes the link, after whatever was asked of it before, and has
+// whatever it still sends ignored.
 func (r *runner) drop() {
 	if r.ln != nil {
-		r.ln.Close()
+		for _, h := range r.held {
+			if h.l == r.ln {
+				r.work.do(h.close)
+			}
+		}
+		r.held = slices.DeleteFunc(r.held, func(h *linkHeld) bool { return h.closed.Load() })
 		r.ln = nil
 	}
 	r.gen++
@@ -334,8 +434,7 @@ func (r *runner) dial() {
 		}
 		op.ln, op.err = op.src.open(id, watch)
 		op.sess = runFind(op.src, id)
-		var refused *client.Refusal
-		if op.err != nil && errors.As(op.err, &refused) {
+		if op.err != nil && runRefusal(op.err) != nil {
 			if e := op.sess.Ended; e != nil {
 				code := -1
 				if op.sess.Exit != nil {

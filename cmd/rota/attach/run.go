@@ -1,10 +1,11 @@
 package attach
 
 import (
-	"bytes"
 	"context"
+	"errors"
 	"io"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/professor93/rota/cmd/rota/client"
@@ -35,8 +36,9 @@ var (
 // the person leaves, the session ends, or the attach is lost or refused. It
 // never resizes the session but at the chord's z, and on every end it puts
 // t back as it found it: every mode the session set off, the main screen,
-// the cursor shown and on the window's last row, where the caller prints
-// Result.Line.
+// the attributes and scroll region reset, the cursor shown and on the
+// window's last row, where the caller prints Result.Line. It reads t's
+// Input only while it runs.
 //
 // id is the session's whole id: a caller resolves what a person typed with
 // client.Match first. Match reads an id, or four or more characters that
@@ -54,7 +56,8 @@ func Run(ctx context.Context, t Terminal, c *client.Client, id string, o Options
 const (
 	runOpening   = iota // the first open, before any hello
 	runLive             // showing a session
-	runSwitching        // n or p: the old link closed, the next not yet open
+	runListing          // n or p: the sessions asked for, the current one still shown
+	runSwitching        // n or p: the next one being opened, the current one still shown
 	runRedialing        // the link lost, the daemon dialled again
 	runLeaving          // d: draining the output, typing nothing
 )
@@ -67,24 +70,20 @@ const (
 )
 
 // runOverlay is what the attach draws over the session: one at a time,
-// drawn from the view's copy of the screen's state and repaired by a
-// redraw from it once it goes.
+// drawn only where the view's copy of the screen can repair it, and
+// repaired by a redraw from that copy once it goes.
 type runOverlay struct {
 	on    bool
 	kind  int
 	text  string    // a note's
 	lines []string  // a card's
 	until time.Time // when it goes; zero is when something else takes it down
-	key   bool      // it goes at the next key, too
+	key   bool      // a key read once it is drawn takes it down
+	eat   bool      // and is dropped rather than typed, unless it is the chord
+	teach bool      // the first-attach card: Teach is asked as it is drawn
 	shown bool      // it is on the screen
 	stale bool      // what was drawn since may have covered it
 	at    time.Time // when it was last drawn
-}
-
-// runInput is one read of the person's terminal.
-type runInput struct {
-	p   []byte
-	err error
 }
 
 // runFrame is one Next of the link of generation gen.
@@ -94,7 +93,7 @@ type runFrame struct {
 	err error
 }
 
-// runOpened is what an open, for a switch or a redial, came to.
+// runOpened is what an open, first, for a switch or for a redial, came to.
 type runOpened struct {
 	gen  int
 	src  source
@@ -105,6 +104,14 @@ type runOpened struct {
 	// is stopped, or the daemon refuses it for good.
 	final *Result
 	at    time.Time // when the attempt began
+}
+
+// runListed is what the list for n or p came to.
+type runListed struct {
+	gen int
+	dir int
+	all []client.Session
+	err error
 }
 
 // runWriter is the person's screen, remembering its first failure: a write
@@ -125,33 +132,39 @@ func (w *runWriter) Write(p []byte) (int, error) {
 	return n, err
 }
 
-// runner is one attach. Everything in it belongs to the goroutine in run:
-// the person's input and the link's frames are read by goroutines of their
-// own and handed over on channels, so that one goroutine alone writes to
-// the terminal, drives the view and the chord, and types, and no read is
-// ever waited on while it does.
+// runner is one attach. Everything in it belongs to the goroutine in run,
+// the loop: it receives the person's input, the links' frames and what
+// opens and lists came to on channels, drives the chord and the view, and
+// alone writes to the terminal. What waits on the daemon goes to work, in
+// order, or to a goroutine of its own, so the loop never waits but on its
+// channels.
 type runner struct {
-	ctx context.Context
-	t   Terminal
-	out *runWriter
-	src source
-	o   Options
-	key byte
+	ctx  context.Context
+	t    Terminal
+	out  *runWriter
+	src  source
+	o    Options
+	key  byte
+	work *linkWork
 
-	done   chan struct{}
-	input  chan runInput
-	frames chan runFrame
-	opened chan runOpened
+	done    chan struct{}
+	frames  chan runFrame
+	opened  chan runOpened
+	listed  chan runListed
+	inEnded bool // Input was closed
 
-	ch    *chord
-	early []byte // typing that settle let through, for the first session
-	phase int
-	id    string
-	sess  client.Session
-	ln    link
-	gen   int
-	hello client.Hello
-	view  *view
+	ch     *chord
+	eating bool   // the key that took a card down is still being read
+	early  []byte // typing that settle let through, for the first session
+	phase  int
+	id     string
+	sess   client.Session
+	target client.Session // the session n or p is opening
+	ln     link
+	held   []*linkHeld
+	gen    int
+	hello  client.Hello
+	view   *view
 
 	holder, holderConn string
 	askedAt            time.Time
@@ -180,17 +193,17 @@ func run(ctx context.Context, t Terminal, src source, id string, o Options) Resu
 	o.Key = key
 	r := &runner{
 		ctx: ctx, t: t, out: &runWriter{w: t}, src: src, o: o, key: key,
+		work:   linkNewWork(),
 		done:   make(chan struct{}),
-		input:  make(chan runInput),
 		frames: make(chan runFrame),
 		opened: make(chan runOpened),
+		listed: make(chan runListed),
 		ch:     newChord(key),
 		id:     id,
 		sess:   client.Session{ID: id},
 		said:   map[string]time.Time{},
 	}
 	defer close(r.done)
-	go r.read()
 	if !o.Settle || r.settle() {
 		r.write([]byte("\x1b[H\x1b[2J"))
 		r.start(id)
@@ -199,29 +212,6 @@ func run(ctx context.Context, t Terminal, src source, id string, o Options) Resu
 		}
 	}
 	return r.finish()
-}
-
-// read hands what the person types to the loop until a read fails or the
-// attach is over.
-func (r *runner) read() {
-	buf := make([]byte, 4096)
-	for {
-		n, err := r.t.Read(buf)
-		if n > 0 {
-			select {
-			case r.input <- runInput{p: bytes.Clone(buf[:n])}:
-			case <-r.done:
-				return
-			}
-		}
-		if err != nil {
-			select {
-			case r.input <- runInput{err: err}:
-			case <-r.done:
-			}
-			return
-		}
-	}
 }
 
 // next hands the link's frames to the loop until it ends or the attach is
@@ -240,8 +230,8 @@ func (r *runner) next(gen int, l link) {
 	}
 }
 
-// start opens id for the phase the attach is in, away from the loop, which
-// meanwhile goes on reading the person's keys.
+// start opens id, away from the loop, which meanwhile goes on reading the
+// person's keys.
 func (r *runner) start(id string) {
 	gen, src, watch := r.gen, r.src, r.o.Watch
 	go func() {
@@ -286,23 +276,35 @@ func (r *runner) step() {
 	}
 	timer := time.NewTimer(wait)
 	defer timer.Stop()
-	input := r.input
-	if r.phase == runOpening {
+	var input <-chan []byte
+	if r.phase != runOpening && !r.inEnded {
 		// What is typed before the first hello waits for it.
-		input = nil
+		input = r.t.Input()
 	}
 	select {
 	case <-r.ctx.Done():
+		if r.phase == runLeaving {
+			// The person had already left: that is what they are told.
+			r.end(Detached, 0, nil)
+			return
+		}
 		r.end(Lost, 0, r.ctx.Err())
 		return
-	case in := <-input:
-		r.onInput(in, time.Now())
+	case p, ok := <-input:
+		if !ok {
+			r.inEnded = true
+			r.onInput(nil, io.EOF, time.Now())
+			break
+		}
+		r.onInput(p, nil, time.Now())
 	case f := <-r.frames:
 		if f.gen == r.gen {
 			r.onFrame(f, time.Now())
 		}
 	case op := <-r.opened:
 		r.onOpened(op, time.Now())
+	case l := <-r.listed:
+		r.onListed(l, time.Now())
 	case <-r.t.Resized():
 		if r.view != nil {
 			r.wantWindow = true
@@ -428,114 +430,48 @@ func (r *runner) paint(now time.Time) {
 	// An overlay the session drew over is drawn again, at most every
 	// cropEvery, so a CLI that redraws all the time cannot hide it.
 	if r.ov.on && (!r.ov.shown || r.ov.stale && now.Sub(r.ov.at) >= cropEvery) && v.screenOK() && !(v.crop && v.dirty) {
+		if r.ov.teach && !r.ov.shown {
+			// Asked now, as it is drawn, so a person is recorded as
+			// taught only by a card that reached their screen.
+			if !r.o.Teach(r.hello.You.Name) {
+				r.ov = runOverlay{}
+				return
+			}
+			r.ov.until = now.Add(teachFor)
+		}
 		r.write(r.overlay())
 		r.ov.shown, r.ov.stale, r.ov.at = true, false, now
 	}
 }
 
-// onInput takes one read of the person's terminal.
-func (r *runner) onInput(in runInput, now time.Time) {
+// onInput takes one read of the person's terminal, or the end of their
+// input, err.
+func (r *runner) onInput(p []byte, err error, now time.Time) {
 	if r.phase == runLeaving {
 		// Dropped: whatever comes now, a key's release or a late reply, is
-		// for nobody, and a failed read ends nothing the drain is not
+		// for nobody, and input that ends ends nothing the drain is not
 		// already ending.
-		if in.err != nil {
-			r.input = nil
-		}
 		return
 	}
-	if in.err != nil {
-		r.end(Lost, 0, in.err)
+	if err != nil {
+		r.end(Lost, 0, err)
 		return
 	}
-	if r.ov.on && r.ov.key {
-		// A card that goes at the next key goes, and the key is the
-		// person's as usual.
+	if r.ov.on && r.ov.key && r.ov.shown {
+		// A card that goes at the next key goes. The teach card's key is
+		// the person's as usual; the help card's is not, since Esc or q,
+		// the keys a card is closed with, would reach the CLI.
+		r.eating = r.ov.eat
 		r.unlay()
 	}
-	r.onEvents(r.ch.feed(in.p, now), now)
+	r.onEvents(r.ch.feed(p, now), now)
 }
 
-// onOpened takes what an open came to.
-func (r *runner) onOpened(op runOpened, now time.Time) {
-	if op.gen != r.gen || r.phase == runLeaving {
-		// Stale, or the person left while it was opening: not shown.
-		if op.ln != nil {
-			op.ln.Close()
-		}
-		return
-	}
-	if op.err == nil {
-		r.src = op.src
-		r.show(op.ln, op.sess, now)
-		return
-	}
-	switch r.phase {
-	case runOpening, runSwitching:
-		r.sess = op.sess
-		r.end(Refused, 0, op.err)
-	case runRedialing:
-		r.dialling = false
-		if op.final != nil {
-			r.sess = op.sess
-			r.end(op.final.Why, op.final.Code, op.final.Err)
-			return
-		}
-		r.lastErr = op.err
-		if !now.Before(r.redialStart.Add(redialFor)) {
-			r.end(Lost, 0, r.lastErr)
-			return
-		}
-		r.redialNext = op.at.Add(redialEvery)
-	}
-}
-
-// show makes l the session shown: a fresh view at the session's size in
-// this window, the link read, and, before the first session, the card for
-// a person who has not seen the chord.
-func (r *runner) show(l link, sess client.Session, now time.Time) {
-	first := r.phase == runOpening
-	if !first {
-		// A switch or a redial: nothing typed for the old link, or on the
-		// way here, is typed into this one, not even the tail of a key
-		// begun before its hello.
-		r.ch.reset()
-		if r.view != nil {
-			r.view.close()
-			r.view = nil
-			r.write(runPutBack())
-		}
-	}
-	r.ln, r.hello, r.sess, r.id = l, l.Hello(), sess, sess.ID
-	r.holder, r.holderConn = r.hello.Holder, r.hello.HolderConn
-	r.askedAt = time.Time{}
-	r.ov, r.wantRedraw, r.wantWindow = runOverlay{}, false, false
-	r.phase = runLive
-	name := sess.Name
-	if name == "" {
-		name = sess.ID
-	}
-	key := r.key
-	cols, rows := r.t.Size()
-	r.view = newView(r.out, int(r.hello.Cols), int(r.hello.Rows), cols, rows, func(sc, sr, wc, wr int) string {
-		return cropNote(name, key, sc, sr, wc, wr)
-	})
-	r.lastFlush = now
-	go r.next(r.gen, l)
-	if !first {
-		return
-	}
-	if r.o.Teach != nil && r.view.screenOK() && r.o.Teach(r.hello.You.Name) {
-		r.lay(runOverlay{kind: runCard, lines: helpCard(key, true), until: now.Add(teachFor), key: true})
-	}
-	if early := r.early; len(early) > 0 {
-		r.early = nil
-		r.onInput(runInput{p: early}, now)
-	}
-}
-
-// runPutBack is what a window is given between one session and the next:
-// every mode the last one set off, the main screen, and a clear.
+// runPutBack is what a window is given between one session and the next,
+// and, with the cursor put on its last row, at the end: every mode the last
+// one set off and the main screen, then the attributes and scroll region
+// reset. Leaving the alternate screen restores the cursor as ESC 8 does,
+// the pen saved with it among it, so the reset comes after.
 func runPutBack() []byte {
 	return append(vtscan.ResetAll(), "\x1b[0m\x1b[r\x1b[H\x1b[2J"...)
 }
@@ -548,15 +484,13 @@ func (r *runner) end(why Why, code int, err error) {
 	r.result = &Result{Why: why, Code: code, Err: err}
 }
 
-// finish lets go of the link and the view, puts the terminal back, and
-// says how the attach ended.
+// finish puts the terminal back, lets go of the view and every link, and
+// says how the attach ended. What work still had queued is abandoned: the
+// person has gone, and nothing more is sent for them.
 func (r *runner) finish() Result {
 	res := *r.result
 	res.Session = r.sess
-	if r.ln != nil {
-		r.ln.Close()
-		r.ln = nil
-	}
+	r.work.stop()
 	if r.view != nil {
 		r.view.close()
 		r.view = nil
@@ -564,9 +498,28 @@ func (r *runner) finish() Result {
 	// Written past a failed write too: a terminal that failed once may yet
 	// take the reset.
 	_, rows := r.t.Size()
-	b := append([]byte("\x1b[0m\x1b[r"), vtscan.ResetAll()...)
-	b = append(b, "\x1b["+strconv.Itoa(max(rows, 1))+";1H"...)
+	b := append(vtscan.ResetAll(), "\x1b[0m\x1b[r\x1b["+strconv.Itoa(max(rows, 1))+";1H"...)
 	_, _ = r.t.Write(b)
+	// Every link not yet closed says goodbye, for a moment at most.
+	var wg sync.WaitGroup
+	for _, h := range r.held {
+		if !h.closed.Load() {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				h.close()
+			}()
+		}
+	}
+	closed := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(linkCloseWait):
+	}
 	return res
 }
 
@@ -575,4 +528,14 @@ func (r *runner) write(p []byte) {
 	if len(p) > 0 {
 		_, _ = r.out.Write(p)
 	}
+}
+
+// runRefusal is err as the daemon's no, or nil when it is something else:
+// a transport that failed, which a redial may mend.
+func runRefusal(err error) *client.Refusal {
+	var refused *client.Refusal
+	if errors.As(err, &refused) {
+		return refused
+	}
+	return nil
 }

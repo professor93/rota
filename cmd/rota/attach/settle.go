@@ -1,6 +1,7 @@
 package attach
 
 import (
+	"io"
 	"regexp"
 	"time"
 
@@ -39,14 +40,17 @@ func (r *runner) settle() bool {
 		case <-r.ctx.Done():
 			r.end(Lost, 0, r.ctx.Err())
 			return false
-		case in := <-r.input:
-			if in.err != nil {
-				r.end(Lost, 0, in.err)
+		case p, ok := <-r.t.Input():
+			if !ok {
+				r.inEnded = true
+				r.end(Lost, 0, io.EOF)
 				return false
 			}
-			held = append(held, in.p...)
+			held = append(held, p...)
 			if loc := settleDA1.FindIndex(held); loc != nil {
-				r.early = held[loc[1]:]
+				// What follows the answer is filtered too: a terminal that
+				// owed a DA1 answer already answers this one after it.
+				r.early = settleStrip(held[loc[1]:])
 				return true
 			}
 			if len(held) > settleMax {
