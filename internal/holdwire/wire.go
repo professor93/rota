@@ -143,12 +143,17 @@ type ScreenHead struct {
 
 // StateMsg is what the holder knows about the session beyond its bytes: the
 // title the CLI set, how many bells it rang, the terminal modes it has on,
-// and what the CLI's own registry says, when it keeps one.
+// what the CLI's own registry says, when it keeps one, and whether it keeps
+// a screen now. Screen is false while the screen is retired, and in every
+// State of a holder older than the field. A daemon that heard a holder say
+// false and then true, on one link or across a relink, repaints every viewer
+// of the session from the screen that came back.
 type StateMsg struct {
 	Title    string       `json:"title,omitempty"`
 	Bells    uint64       `json:"bells,omitempty"`
 	Modes    vtscan.Modes `json:"modes,omitzero"`
 	Registry *Registry    `json:"registry,omitempty"`
+	Screen   bool         `json:"screen,omitzero"`
 }
 
 // Registry is one CLI session as the CLI itself recorded it (Claude Code's

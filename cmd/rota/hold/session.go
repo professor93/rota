@@ -136,7 +136,8 @@ type Session struct {
 	title   string
 	bells   uint64
 	reg     *holdwire.Registry
-	gen     uint64 // counts changes to title, bells, modes and registry
+	kept    bool   // a screen is kept, as the State says: not while retired
+	gen     uint64 // counts changes to title, bells, modes, registry and kept
 	cols    uint16
 	rows    uint16
 	lastOut time.Time
@@ -211,7 +212,7 @@ func newSession(cfg Config, c Child) *Session {
 	s.em.lock, s.em.cols, s.em.rows = make(waitLock, 1), cols, rows
 	s.wait, s.renewAfter = repaintWait, renewAfter
 	if holdwire.ScreenFits(cols, rows) {
-		s.screen = NewScreen(int(cols), int(rows))
+		s.screen, s.kept = NewScreen(int(cols), int(rows)), true
 	} else {
 		s.screen, s.em.retired = noScreen(), true
 		s.log(tooLarge, "cols", cols, "rows", rows, "cells", holdwire.MaxScreenCells)
@@ -249,6 +250,23 @@ func (s *Session) SetRegistry(r *holdwire.Registry) {
 	l := s.link
 	s.mu.Unlock()
 	if l != nil && !same {
+		l.nudge()
+	}
+}
+
+// setKept is a screen being kept or retired, which the next State says: a
+// daemon repaints its viewers from a screen that came back. The caller
+// holds s.em.lock and not s.mu.
+func (s *Session) setKept(kept bool) {
+	s.mu.Lock()
+	changed := s.kept != kept
+	if changed {
+		s.kept = kept
+		s.gen++
+	}
+	l := s.link
+	s.mu.Unlock()
+	if l != nil && changed {
 		l.nudge()
 	}
 }

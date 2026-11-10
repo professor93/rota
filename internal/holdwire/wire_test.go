@@ -88,3 +88,24 @@ func TestAgreePicksTheHighestCommonMajor(t *testing.T) {
 		t.Fatalf("this rota does not agree with itself: %d %v", m, ok)
 	}
 }
+
+// Whether the holder keeps a screen travels in State. A holder that never
+// says, as an older one does not, reads as keeping none, and one that keeps
+// none says nothing at all.
+func TestStateRoundTripsScreen(t *testing.T) {
+	raw, err := rota.Encode(StateMsg{Title: "work", Screen: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back StateMsg
+	if err := rota.UnmarshalLenient(raw, &back); err != nil || !back.Screen || back.Title != "work" {
+		t.Fatalf("State came back as %+v (%v) from %s", back, err, raw)
+	}
+	back = StateMsg{}
+	if err := rota.UnmarshalLenient([]byte(`{"title":"work"}`), &back); err != nil || back.Screen {
+		t.Fatalf("a State without the field came back as %+v (%v)", back, err)
+	}
+	if raw, err := rota.Encode(StateMsg{Title: "work"}); err != nil || bytes.Contains(raw, []byte("screen")) {
+		t.Fatalf("a State keeping no screen is %s (%v)", raw, err)
+	}
+}
