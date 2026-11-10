@@ -3,6 +3,7 @@ package attach
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -99,6 +100,93 @@ func TestNextWrapsAndSaysWhenAlone(t *testing.T) {
 	term2.typ(t, "\x1cd")
 	if r := runResult(t, done2); r.Why != Detached || len(src2.gotOpens()) != 1 {
 		t.Errorf("alone: %v after %v opens", r.Why, src2.gotOpens())
+	}
+}
+
+// TestAStalledSessionHoldsUpNoOther: a send to one session that stalls
+// holds up neither n nor the next session's typing. What was asked of the
+// stalled one still reaches it, in order, before its close.
+func TestAStalledSessionHoldsUpNoOther(t *testing.T) {
+	runKnobs(t)
+	term := runNewTerm(80, 24)
+	src := runNewSrc(runSession("a", 0), runSession("b", 1))
+	a := runNewLink("a", 80, 24)
+	a.block = make(chan struct{})
+	src.add(a)
+	b := src.add(runNewLink("b", 80, 24))
+	a.out("in a")
+	b.out("in b")
+	done := runAttach(context.Background(), term, src, "a", Options{})
+	runWait(t, "a", func() bool { return strings.Contains(term.output(), "in a") })
+	term.typ(t, "x")
+	term.typ(t, "y")
+	term.typ(t, "\x1ck")
+	term.typ(t, "\x1cn")
+	runWait(t, "b shown while a is stalled", func() bool { return strings.Contains(term.output(), "in b") })
+	term.typ(t, "z")
+	runWait(t, "z in b while a is stalled", func() bool { return b.gotTyped() == "z" })
+	if got := a.gotCalls(); len(got) != 0 {
+		t.Errorf("a was sent %q before its stall ended", got)
+	}
+	close(a.block)
+	runWait(t, "a closed", a.isClosed)
+	want := []string{"Type:x", "Type:y", "Claim:false", "Close"}
+	if got := a.gotCalls(); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("a's calls %q, want %q", got, want)
+	}
+	if a.late() || b.late() {
+		t.Errorf("a closed link was typed into")
+	}
+	term.typ(t, "\x1cd")
+	runResult(t, done)
+}
+
+// TestAListThatComesLateIsIgnored: the link lost while the list for n was
+// under way is redialled, and the list that comes back afterwards switches
+// nothing.
+func TestAListThatComesLateIsIgnored(t *testing.T) {
+	runKnobs(t)
+	term := runNewTerm(80, 24)
+	src := runNewSrc(runSession("a", 0), runSession("b", 1))
+	a1 := src.add(runNewLink("a", 80, 24))
+	a2 := src.add(runNewLink("a", 80, 24))
+	src.add(runNewLink("b", 80, 24))
+	a1.out("one")
+	a2.out("two")
+	done := runAttach(context.Background(), term, src, "a", Options{Redial: func() (*client.Client, error) { return nil, nil }})
+	runWait(t, "one", func() bool { return strings.Contains(term.output(), "one") })
+	// Every list from now waits, the one each open makes to name its
+	// session among them, until the gate opens.
+	gate := make(chan struct{})
+	src.mu.Lock()
+	src.listGate = gate
+	src.mu.Unlock()
+	lists := func() int {
+		src.mu.Lock()
+		defer src.mu.Unlock()
+		return src.lists
+	}
+	before := lists()
+	term.typ(t, "\x1cn")
+	runWait(t, "the list for n", func() bool { return lists() > before })
+	// The loop is not waiting on the list: the loss is taken at once, and
+	// the redial is under way.
+	a1.fail(io.ErrUnexpectedEOF)
+	runWait(t, "the note", func() bool { return strings.Contains(term.output(), "went away") })
+	runWait(t, "the redial's open", func() bool { return len(src.gotOpens()) == 2 })
+	close(gate)
+	runWait(t, "two", func() bool { return strings.Contains(term.output(), "two") })
+	time.Sleep(50 * time.Millisecond)
+	term.typ(t, "q")
+	runWait(t, "q in a", func() bool { return a2.gotTyped() == "q" })
+	for _, id := range src.gotBegun() {
+		if id == "b" {
+			t.Errorf("a list that came after the loss opened b: %v", src.gotBegun())
+		}
+	}
+	term.typ(t, "\x1cd")
+	if r := runResult(t, done); r.Why != Detached || r.Session.ID != "a" {
+		t.Errorf("Result = %v on %q, want Detached on a", r.Why, r.Session.ID)
 	}
 }
 

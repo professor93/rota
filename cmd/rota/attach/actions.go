@@ -22,7 +22,7 @@ func (r *runner) onEvents(evs []chordEvent, now time.Time) {
 			// nothing is typed but into the session shown and settled.
 			if r.phase == runLive && !r.o.Watch && r.ln != nil && !r.eating {
 				l, b := r.ln, e.bytes
-				r.work.do(func() { _ = l.Type(b) })
+				r.cur.work.do(func() { _ = l.Type(b) })
 			}
 		case actLeave:
 			r.leave(now)
@@ -84,13 +84,15 @@ func (r *runner) move(dir int) {
 	r.ch.reset()
 	r.phase = runListing
 	gen, src := r.gen, r.src
-	r.work.do(func() {
+	// On a goroutine of its own, so it waits neither behind this session's
+	// typing nor holds up the loop.
+	go func() {
 		all, err := src.list()
 		select {
 		case r.listed <- runListed{gen: gen, dir: dir, all: all, err: err}:
 		case <-r.done:
 		}
-	})
+	}()
 }
 
 // onListed opens the next live, attachable session, by when each started,
@@ -168,10 +170,10 @@ func (r *runner) claim(now time.Time) {
 	case r.holds():
 		r.note("rota: this window holds the keyboard", now)
 	case r.askedAt.IsZero():
-		r.work.do(func() { _ = l.Claim(false) })
+		r.cur.work.do(func() { _ = l.Claim(false) })
 		r.askedAt = now
 	case now.Sub(r.askedAt) >= forceAfter:
-		r.work.do(func() { _ = l.Claim(true) })
+		r.cur.work.do(func() { _ = l.Claim(true) })
 		r.askedAt = time.Time{}
 	default:
 		holder := OneLine(r.holder)
@@ -197,7 +199,7 @@ func (r *runner) fit(now time.Time) {
 		r.note("rota: the session is already this size", now)
 	default:
 		l := r.ln
-		r.work.do(func() { _ = l.Fit(actionsCells(cols), actionsCells(rows)) })
+		r.cur.work.do(func() { _ = l.Fit(actionsCells(cols), actionsCells(rows)) })
 	}
 }
 
@@ -283,10 +285,11 @@ func (r *runner) unlay() {
 
 // overlay is the overlay drawn. drawRow and drawCard save the cursor with
 // ESC 7 and put it back with ESC 8, which brings back the CLI's own pen
-// with it, so what the CLI writes next is in its colours. ESC 7 shares its
-// slot with the CLI's own saves: a CLI that saved the cursor and draws
-// across an overlay goes back to where the overlay was drawn, until the
-// redraw that takes the overlay down.
+// with it, so what the CLI writes next while the overlay is up is in its
+// colours. ESC 7 shares its slot with the CLI's own saves: a CLI that
+// restores a cursor it saved earlier goes back to where the overlay was
+// drawn, even after the overlay goes. And the redraw that takes an overlay
+// down ends on the default pen, as Screen.Repaint does.
 func (r *runner) overlay() []byte {
 	v := r.view
 	cols, rows := v.winCols, v.winRows
@@ -355,7 +358,8 @@ func (r *runner) show(l link, sess client.Session, now time.Time) {
 		}
 	}
 	r.ln, r.hello, r.sess, r.id = l, l.Hello(), sess, sess.ID
-	r.held = append(r.held, &linkHeld{l: l})
+	r.cur = linkHold(l)
+	r.held = append(r.held, r.cur)
 	r.holder, r.holderConn = r.hello.Holder, r.hello.HolderConn
 	r.askedAt = time.Time{}
 	r.ov, r.wantRedraw, r.wantWindow, r.eating = runOverlay{}, false, false, false
@@ -404,13 +408,9 @@ func (r *runner) lose(err error, now time.Time) {
 // whatever it still sends ignored.
 func (r *runner) drop() {
 	if r.ln != nil {
-		for _, h := range r.held {
-			if h.l == r.ln {
-				r.work.do(h.close)
-			}
-		}
+		r.cur.drop()
 		r.held = slices.DeleteFunc(r.held, func(h *linkHeld) bool { return h.closed.Load() })
-		r.ln = nil
+		r.ln, r.cur = nil, nil
 	}
 	r.gen++
 }

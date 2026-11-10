@@ -122,6 +122,7 @@ type runLink struct {
 	block  chan struct{} // when set, Type waits for it to close
 
 	mu        sync.Mutex
+	calls     []string // every Type, Claim, Fit and Close, in order
 	typed     []byte
 	fits      [][2]uint16
 	claims    []bool
@@ -158,6 +159,7 @@ func (l *runLink) Type(p []byte) error {
 		l.typedLate = true
 		return net.ErrClosed
 	}
+	l.calls = append(l.calls, "Type:"+string(p))
 	l.typed = append(l.typed, p...)
 	return nil
 }
@@ -165,6 +167,7 @@ func (l *runLink) Type(p []byte) error {
 func (l *runLink) Fit(cols, rows uint16) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.calls = append(l.calls, fmt.Sprintf("Fit:%dx%d", cols, rows))
 	l.fits = append(l.fits, [2]uint16{cols, rows})
 	return nil
 }
@@ -172,6 +175,7 @@ func (l *runLink) Fit(cols, rows uint16) error {
 func (l *runLink) Claim(force bool) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.calls = append(l.calls, fmt.Sprint("Claim:", force))
 	l.claims = append(l.claims, force)
 	return nil
 }
@@ -180,6 +184,7 @@ func (l *runLink) Close() error {
 	l.once.Do(func() {
 		l.mu.Lock()
 		l.closed = true
+		l.calls = append(l.calls, "Close")
 		l.mu.Unlock()
 		close(l.done)
 	})
@@ -210,6 +215,12 @@ func (l *runLink) gotClaims() []bool {
 	return append([]bool(nil), l.claims...)
 }
 
+func (l *runLink) gotCalls() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.calls...)
+}
+
 func (l *runLink) isClosed() bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -230,6 +241,8 @@ type runSrc struct {
 	links    map[string][]*runLink
 	refuse   map[string]error
 	gate     map[string]chan struct{} // an open of the id waits for this
+	listGate chan struct{}            // when set, a list waits for it
+	lists    int                      // lists begun
 	begun    []string                 // every open, as it began
 	opens    []string                 // every open, as it was answered
 	watched  []bool
@@ -270,6 +283,13 @@ func (s *runSrc) open(id string, watch bool) (link, error) {
 }
 
 func (s *runSrc) list() ([]client.Session, error) {
+	s.mu.Lock()
+	s.lists++
+	g := s.listGate
+	s.mu.Unlock()
+	if g != nil {
+		<-g
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]client.Session(nil), s.sessions...), nil
@@ -444,8 +464,8 @@ func TestWatchTypesNothing(t *testing.T) {
 }
 
 // TestABlockedSendLeavesTheLoopFree: typing into a CLI that is not reading
-// stalls the send, never the attach: output is still drawn, keys still
-// queue in order, and d still leaves at once.
+// stalls the send, never the attach: output is still drawn and d still
+// leaves at once, and what was queued behind the stall is abandoned.
 func TestABlockedSendLeavesTheLoopFree(t *testing.T) {
 	runKnobs(t)
 	term := runNewTerm(80, 24)
@@ -459,17 +479,44 @@ func TestABlockedSendLeavesTheLoopFree(t *testing.T) {
 	l.out("still drawn")
 	runWait(t, "output while the send waits", func() bool { return strings.Contains(term.output(), "still drawn") })
 	term.typ(t, "\x1cd")
-	r := runResult(t, done)
-	if r.Why != Detached {
+	if r := runResult(t, done); r.Why != Detached {
 		t.Fatalf("Why = %v (%v), want Detached", r.Why, r.Err)
 	}
 	close(l.block)
-	// What was queued behind the stalled send is abandoned with the attach,
-	// and nothing reaches the link out of order.
 	time.Sleep(20 * time.Millisecond)
-	if got := l.gotTyped(); got != "" && got != "abc" && got != "abcdef" {
-		t.Errorf("typed %q, want the keys in order or none", got)
+	if got := l.gotTyped(); got != "" {
+		t.Errorf("typed %q after the attach ended, want nothing", got)
 	}
+}
+
+// TestCallsReachTheSessionInOrder: whatever is asked of a session while a
+// send to it is stalled reaches it in the order it was asked, once the
+// stall ends: the typing, then the claim, then the fit.
+func TestCallsReachTheSessionInOrder(t *testing.T) {
+	runKnobs(t)
+	// Smaller than the session, so z fits it.
+	term := runNewTerm(60, 20)
+	src := runNewSrc(runSession("a", 0))
+	l := runNewLink("a", 80, 24)
+	l.block = make(chan struct{})
+	src.add(l)
+	done := runAttach(context.Background(), term, src, "a", Options{})
+	term.typ(t, "abc")
+	term.typ(t, "def")
+	term.typ(t, "\x1ck")
+	term.typ(t, "\x1cz")
+	time.Sleep(20 * time.Millisecond)
+	close(l.block)
+	runWait(t, "the calls", func() bool { return len(l.gotCalls()) == 4 })
+	want := []string{"Type:abc", "Type:def", "Claim:false", "Fit:60x20"}
+	if got := l.gotCalls(); strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Errorf("calls %q, want %q", got, want)
+	}
+	if got := l.gotTyped(); got != "abcdef" {
+		t.Errorf("typed %q, want abcdef", got)
+	}
+	term.typ(t, "\x1cd")
+	runResult(t, done)
 }
 
 // TestNothingIsReadAfterRun: once Run has returned it receives nothing, so

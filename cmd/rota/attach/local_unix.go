@@ -40,9 +40,11 @@ var localNotATerminal = errors.New("attach: standard input is not a terminal")
 // cancelled without taking a byte: it waits for in to be readable, and
 // restore wakes it.
 //
-// restore must be called on every way out: it stops that reader, so a key
-// typed after the attach is read by whatever reads in next and by nothing
-// else; then it sets the settings Local found, stops following the window,
+// restore must be called on every way out, and at once when the attach
+// returns: a key typed between the attach's last receive and restore is
+// dropped, taken by the reader or flushed, as everything typed before the
+// terminal is handed back is. restore stops that reader, so a key typed
+// after it is read by whatever reads in next and by nothing else; then it sets the settings Local found, stops following the window,
 // and drops whatever was typed and not yet read, such as the key release a
 // kitty terminal reports after the last key, so it never reaches the shell.
 // It is safe to call twice, and the second call does nothing. An in that is
@@ -84,8 +86,11 @@ func Local(in, out *os.File) (t Terminal, restore func(), err error) {
 			// The reader first, before anything is put back: once it has
 			// stopped, no key is taken from in on nobody's behalf.
 			close(l.done)
-			l.reader.Cancel()
-			<-l.pumped
+			if l.reader.Cancel() {
+				// A reader that cannot be woken, cancelreader's fallback,
+				// is not waited for: it ends at the next key, and drops it.
+				<-l.pumped
+			}
 			_ = l.reader.Close()
 			signal.Stop(l.winch)
 			_ = localSetTermios(in, before)
@@ -193,9 +198,10 @@ func localSetTermios(f *os.File, t syscall.Termios) error {
 	return localIoctl(f, localSetTermiosNow, unsafe.Pointer(&t))
 }
 
-// localIoctl runs one ioctl on f without taking its descriptor out of the
-// runtime's poller, as internal/pty does: os.File.Fd would put it in
-// blocking mode, and a blocking read cannot be woken by closing the file.
+// localIoctl runs one ioctl on f through its SyscallConn, as internal/pty
+// does. cancelreader calls Fd on the same file, which leaves it in blocking
+// mode; that costs nothing here, since Local's reads are woken by
+// cancelreader's own pipe, never by closing the file or by a deadline.
 func localIoctl(f *os.File, req uintptr, arg unsafe.Pointer) error {
 	conn, err := f.SyscallConn()
 	if err != nil {

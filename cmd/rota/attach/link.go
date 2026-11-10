@@ -61,13 +61,13 @@ func (s linkClient) redial(c *client.Client) source {
 // go.
 var linkCloseWait = 200 * time.Millisecond
 
-// linkWork runs every call of the attach that waits on the daemon (typing,
-// a fit, a claim, a list, a close) on a goroutine of its own, one at a
+// linkWork runs the calls one link makes that wait on the daemon (typing,
+// a fit, a claim, and last its close) on a goroutine of its own, one at a
 // time and in the order they were asked, so what the person typed reaches
-// the daemon in order while the attach's loop never waits: a paste into a
-// CLI that is not reading stalls this goroutine, not the screen, a signal
-// or the chord. A call for a link is queued with the link it is for, so a
-// key meant for one session can never be sent on another's.
+// the session in order while the attach's loop never waits: a paste into a
+// CLI that is not reading stalls this goroutine, not the screen, a signal,
+// the chord or another session's typing. Each link has its own, so a key
+// meant for one session can never be sent on another's.
 type linkWork struct {
 	mu   sync.Mutex
 	q    []func()
@@ -123,13 +123,26 @@ func (w *linkWork) stop() {
 	w.once.Do(func() { close(w.quit) })
 }
 
-// linkHeld is a link the attach opened, and whether it has been closed.
+// linkHeld is a link the attach opened, the queue of its calls, and
+// whether it has been closed.
 type linkHeld struct {
 	l      link
+	work   *linkWork
 	closed atomic.Bool
 }
+
+func linkHold(l link) *linkHeld { return &linkHeld{l: l, work: linkNewWork()} }
 
 func (h *linkHeld) close() {
 	_ = h.l.Close()
 	h.closed.Store(true)
+}
+
+// drop closes the link after every call already asked of it, and lets its
+// queue go.
+func (h *linkHeld) drop() {
+	h.work.do(func() {
+		h.close()
+		h.work.stop()
+	})
 }

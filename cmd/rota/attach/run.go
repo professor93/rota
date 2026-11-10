@@ -139,13 +139,12 @@ func (w *runWriter) Write(p []byte) (int, error) {
 // order, or to a goroutine of its own, so the loop never waits but on its
 // channels.
 type runner struct {
-	ctx  context.Context
-	t    Terminal
-	out  *runWriter
-	src  source
-	o    Options
-	key  byte
-	work *linkWork
+	ctx context.Context
+	t   Terminal
+	out *runWriter
+	src source
+	o   Options
+	key byte
 
 	done    chan struct{}
 	frames  chan runFrame
@@ -161,6 +160,7 @@ type runner struct {
 	sess   client.Session
 	target client.Session // the session n or p is opening
 	ln     link
+	cur    *linkHeld // the link shown, with its queue
 	held   []*linkHeld
 	gen    int
 	hello  client.Hello
@@ -193,7 +193,6 @@ func run(ctx context.Context, t Terminal, src source, id string, o Options) Resu
 	o.Key = key
 	r := &runner{
 		ctx: ctx, t: t, out: &runWriter{w: t}, src: src, o: o, key: key,
-		work:   linkNewWork(),
 		done:   make(chan struct{}),
 		frames: make(chan runFrame),
 		opened: make(chan runOpened),
@@ -430,16 +429,18 @@ func (r *runner) paint(now time.Time) {
 	// An overlay the session drew over is drawn again, at most every
 	// cropEvery, so a CLI that redraws all the time cannot hide it.
 	if r.ov.on && (!r.ov.shown || r.ov.stale && now.Sub(r.ov.at) >= cropEvery) && v.screenOK() && !(v.crop && v.dirty) {
+		b := r.overlay()
 		if r.ov.teach && !r.ov.shown {
 			// Asked now, as it is drawn, so a person is recorded as
-			// taught only by a card that reached their screen.
-			if !r.o.Teach(r.hello.You.Name) {
+			// taught only by a card that reaches their screen; a window
+			// too small for it is not asked at all.
+			if b == nil || !r.o.Teach(r.hello.You.Name) {
 				r.ov = runOverlay{}
 				return
 			}
 			r.ov.until = now.Add(teachFor)
 		}
-		r.write(r.overlay())
+		r.write(b)
 		r.ov.shown, r.ov.stale, r.ov.at = true, false, now
 	}
 }
@@ -485,12 +486,16 @@ func (r *runner) end(why Why, code int, err error) {
 }
 
 // finish puts the terminal back, lets go of the view and every link, and
-// says how the attach ended. What work still had queued is abandoned: the
-// person has gone, and nothing more is sent for them.
+// says how the attach ended. What the links still had queued is abandoned:
+// the person has gone, and nothing more is sent for them. A close, or a call
+// under way, may go on for up to the client's own close wait, a second,
+// after Run returns; it touches nothing but its socket.
 func (r *runner) finish() Result {
 	res := *r.result
 	res.Session = r.sess
-	r.work.stop()
+	for _, h := range r.held {
+		h.work.stop()
+	}
 	if r.view != nil {
 		r.view.close()
 		r.view = nil
