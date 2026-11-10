@@ -46,6 +46,12 @@ var (
 	redialMax = 30 * time.Second
 	// dropSayEvery is how often, at most, the log hears of one sink's drops.
 	dropSayEvery = time.Minute
+	// cancelGrace is how long Wait, having cancelled the attempts under way
+	// at its deadline, gives them to come back and count themselves before
+	// it counts them itself.
+	cancelGrace = 50 * time.Millisecond
+	// unreachedSay is how many failed dials in a row the log hears of, once.
+	unreachedSay = 3
 )
 
 // knobs is the knobs as one notifier read them.
@@ -53,7 +59,8 @@ type knobs struct {
 	backoff                                  []time.Duration
 	depth                                    int
 	attempt, maxAge, maxAfter, every, redial time.Duration
-	dropSay                                  time.Duration
+	dropSay, grace                           time.Duration
+	unreached                                int
 }
 
 func current() knobs {
@@ -61,6 +68,7 @@ func current() knobs {
 		backoff: slices.Clone(backoff), depth: max(queueDepth, 1),
 		attempt: attemptTimeout, maxAge: maxAge, maxAfter: maxAfter,
 		every: max(statusEvery, time.Millisecond), redial: redialMax, dropSay: dropSayEvery,
+		grace: cancelGrace, unreached: max(unreachedSay, 1),
 	}
 }
 
@@ -80,7 +88,8 @@ type Options struct {
 
 // Source is an event stream as *client.EventStream is one. Last is the
 // highest id it has read, to open it again from; a gap never moves it.
-// Close makes a Next that waits return.
+// Close makes a Next that waits return. Close may be called more than once,
+// and from another goroutine while Next waits.
 type Source interface {
 	Next() (events.Event, error)
 	Last() int64
@@ -89,11 +98,18 @@ type Source interface {
 
 var _ Source = (*client.EventStream)(nil)
 
-// sender is one sink's way of sending one event. send is bounded by ctx,
-// which ends at attemptTimeout or when Wait gives up; a failure it can
-// classify is again or dropped, and any other is tried again. secrets is
-// what must never show in anything said of it, asked once, when the sink
-// is made; every error send returns goes through cleanErr with them.
+// sender is one sink's way of sending one event.
+//
+// send is bounded by ctx, which ends at attemptTimeout or when Wait gives
+// up, and must return soon after ctx ends: a send that does not is
+// abandoned by Wait, its goroutine leaks, and nothing it does afterwards
+// counts. A failure it can classify is again or dropped; any other is tried
+// again. Its error never quotes a response body beyond its status line,
+// unless every form the body could echo a secret in is among secrets.
+//
+// secrets is what must never show in anything said of the sink, asked once,
+// when the sink is made; every error send returns goes through cleanErr
+// with them.
 type sender interface {
 	send(ctx context.Context, e events.Event) error
 	secrets() []string
@@ -107,7 +123,13 @@ type env struct {
 	log           *slog.Logger
 }
 
-// newSender makes the sink s is.
+// newSender makes the sink s is, through its type's constructor. Each
+// constructor keeps this contract: its error may name a file but never
+// quotes anything read from one. A constructor that fails after reading a
+// secret may return its sender with the error, so that its secrets() clean
+// the error; such a sender is never sent anything. Every build error is
+// cleaned with the secrets of every sink that was made, and with the URL of
+// its own sink (configSecrets).
 func newSender(s api.EventSink, e env) (sender, error) {
 	switch s.Type {
 	case "webhook":
@@ -184,6 +206,7 @@ type Notifier struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	stop   chan struct{} // closed when Wait is called: nothing is tried again
 	read   chan struct{} // closed when the reader is done
 	done   chan struct{} // closed when the reader and every queue are
 
@@ -219,28 +242,39 @@ func Start(o Options) (*Notifier, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	n := &Notifier{
 		k: current(), log: log, dial: dial, path: StatusPath(o.Terminals),
-		ctx: ctx, cancel: cancel, read: make(chan struct{}), done: make(chan struct{}),
+		ctx: ctx, cancel: cancel, stop: make(chan struct{}), read: make(chan struct{}), done: make(chan struct{}),
 		writerStop: make(chan struct{}), writerDone: make(chan struct{}),
 	}
 	e := env{version: o.Version, link: o.Events.Link, hide: slices.Clone(o.HideEnv), log: log}
 	names := sinkNames(o.Events.Sinks)
-	now := time.Now().UTC()
+	// Every sink is made before any error is said, so that each is cleaned
+	// with the secrets of all that were made.
+	errs := make([]error, len(o.Events.Sinks))
+	var made []string
 	for i, cfg := range o.Events.Sinks {
-		s := &sink{n: n, wake: make(chan struct{}, 1), on: slices.Clone(cfg.On), st: Status{
+		s := &sink{n: n, wake: make(chan struct{}, 1), poke: make(chan struct{}, 1), on: slices.Clone(cfg.On), st: Status{
 			Name: names[i], Type: cfg.Type, Target: targetOf(cfg), On: patterns(cfg.On), State: stateWaiting,
 		}}
-		keys := configSecrets(cfg)
+		s.keys = configSecrets(cfg)
 		snd, err := makeSender(cfg, e)
+		if snd != nil {
+			s.keys = append(slices.Clone(snd.secrets()), s.keys...)
+		}
 		if err == nil && snd == nil {
 			err = errors.New("the sink could not be made")
 		}
-		if err != nil {
-			s.st.State, s.st.LastError, s.st.LastErrorAt = stateFailing, cleanErr(err, keys), now
-			log.Warn(fmt.Sprintf("events: %s failing: %s", s.st.Name, s.st.LastError))
-		} else {
-			s.snd, s.keys = snd, append(slices.Clone(snd.secrets()), keys...)
+		if errs[i] = err; err == nil {
+			s.snd = snd
+			made = append(made, s.keys...)
 		}
 		n.sinks = append(n.sinks, s)
+	}
+	now := time.Now().UTC()
+	for i, s := range n.sinks {
+		if errs[i] != nil {
+			s.st.State, s.st.LastError, s.st.LastErrorAt = stateFailing, cleanErr(errs[i], slices.Concat(s.keys, made)), now
+			log.Warn(fmt.Sprintf("events: %s failing: %s", s.st.Name, s.st.LastError))
+		}
 	}
 	n.writeStatus()
 	var workers sync.WaitGroup
@@ -274,16 +308,27 @@ func socket(terminals string) func(ctx context.Context, since int64) (Source, er
 	}
 }
 
-// Wait waits for the reader to finish and every queue to empty, and says
-// whether they did by until. At until it gives up: attempts under way are
-// cancelled, what is left in the queues counts as dropped, and sinks.json
-// is written once more. A nil notifier has nothing to wait for. Wait is for
-// one caller, once; a later call says what the first did.
+// Wait is the daemon stopping: it waits for the reader to finish and every
+// queue to empty, and says whether they did by until.
+//
+// From the moment it is called nothing is tried again, so a sink that is
+// failing does not hold the stop: an event waiting to be retried is dropped
+// at once, and an event not yet tried gets its one attempt. The stream is
+// read to its end, and not opened again once it ends.
+//
+// At until it gives up. Attempts under way are cancelled and given
+// cancelGrace to come back; then what is left, queued or in flight, counts
+// as dropped, and sinks.json is written once more. An event the reader
+// still routes after that is counted in memory but not written down.
+//
+// A nil notifier has nothing to wait for. Wait is for one caller, once; a
+// later call says what the first did.
 func (n *Notifier) Wait(until time.Time) bool {
 	if n == nil {
 		return true
 	}
 	n.waitOnce.Do(func() {
+		close(n.stop)
 		t := time.NewTimer(time.Until(until))
 		defer t.Stop()
 		select {
@@ -295,9 +340,15 @@ func (n *Notifier) Wait(until time.Time) bool {
 				n.waitOK = true
 			case <-t.C:
 				n.cancel()
+				g := time.NewTimer(n.k.grace)
+				select {
+				case <-n.done:
+				case <-g.C:
+				}
+				g.Stop()
 				now := time.Now().UTC()
 				for _, s := range n.sinks {
-					n.say(s.finish(now))
+					s.finish(now)
 				}
 			}
 		}
@@ -313,10 +364,17 @@ func (n *Notifier) Wait(until time.Time) bool {
 // reader reads the daemon's stream for as long as there is one: from its
 // start first, then from the last event read, after a wait that grows to
 // redialMax. Once daemon.stopped has been routed the stream is read to its
-// end, since an event can land after it, and not opened again.
+// end, since an event can land after it, and not opened again; nor is it
+// once Wait has been called.
+//
+// A refusal (401 or 403) is said once each time the daemon starts to
+// refuse. Any other failure to open the stream is said once it has failed
+// unreachedSay times in a row, and the stream opening again after that is
+// said too.
 func (n *Notifier) reader() {
 	defer close(n.read)
 	since, fails, refused := int64(0), 0, false
+	unreached, lost := 0, false
 	for n.ctx.Err() == nil {
 		src, err := n.dial(n.ctx, since)
 		if err != nil {
@@ -326,13 +384,25 @@ func (n *Notifier) reader() {
 				n.log.Warn("events: the daemon refused the stream: " + cleanErr(err, nil))
 			}
 			refused = no
+			unreached++
+			if no {
+				unreached = 0 // reached, and refused
+			}
+			if unreached == n.k.unreached && !lost {
+				lost = true
+				n.log.Warn("events: cannot reach the daemon's event stream: " + cleanErr(err, nil))
+			}
 			if !n.pause(fails) {
 				return
 			}
 			fails++
 			continue
 		}
-		refused = false
+		refused, unreached = false, 0
+		if lost {
+			lost = false
+			n.log.Info("events: the daemon's event stream is back")
+		}
 		read, stopped := n.drain(src)
 		since = max(since, src.Last())
 		src.Close()
@@ -372,21 +442,19 @@ func (n *Notifier) drain(src Source) (read int, stopped bool) {
 }
 
 // pause waits before the stream is opened again for the time after fails
-// failures, and says false when the notifier is stopping instead.
+// failures, and says false when the daemon is stopping instead.
 func (n *Notifier) pause(fails int) bool {
 	d := n.k.redial
 	if len(n.k.backoff) > 0 {
 		d = min(n.k.backoff[min(fails, len(n.k.backoff)-1)], n.k.redial)
 	}
-	return n.sleep(d)
-}
-
-func (n *Notifier) sleep(d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-t.C:
 		return true
+	case <-n.stop:
+		return false
 	case <-n.ctx.Done():
 		return false
 	}

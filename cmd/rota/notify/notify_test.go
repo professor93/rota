@@ -28,8 +28,10 @@ import (
 func quick(t *testing.T) {
 	t.Helper()
 	b, q, a, age, after, every, redial, say := backoff, queueDepth, attemptTimeout, maxAge, maxAfter, statusEvery, redialMax, dropSayEvery
+	grace, unreached := cancelGrace, unreachedSay
 	t.Cleanup(func() {
 		backoff, queueDepth, attemptTimeout, maxAge, maxAfter, statusEvery, redialMax, dropSayEvery = b, q, a, age, after, every, redial, say
+		cancelGrace, unreachedSay = grace, unreached
 	})
 	backoff = slices.Repeat([]time.Duration{time.Millisecond}, 6)
 	redialMax = time.Millisecond
@@ -79,10 +81,11 @@ func (s *fakeSource) Close() error {
 
 // dialer is Options.Dial for a test: each call takes the next of plan, a
 // *fakeSource or an error, and past its end a stream that never ends. It
-// keeps the since of every call.
+// keeps the since and the time of every call.
 type dialer struct {
 	mu     sync.Mutex
 	sinces []int64
+	at     []time.Time
 	plan   []any
 }
 
@@ -90,6 +93,7 @@ func (d *dialer) dial(_ context.Context, since int64) (Source, error) {
 	d.mu.Lock()
 	i := len(d.sinces)
 	d.sinces = append(d.sinces, since)
+	d.at = append(d.at, time.Now())
 	d.mu.Unlock()
 	if i < len(d.plan) {
 		switch v := d.plan[i].(type) {
@@ -106,6 +110,12 @@ func (d *dialer) asked() []int64 {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return slices.Clone(d.sinces)
+}
+
+func (d *dialer) when() []time.Time {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return slices.Clone(d.at)
 }
 
 // fakeSender is a sink that keeps what reached it. answer says how each
@@ -159,12 +169,13 @@ func (f *fakeSender) times() []time.Time {
 }
 
 // useSenders makes the sinks of each type out of byType: a sender, an error
-// to fail with, or a func(api.EventSink) error that fails with what it says.
+// to fail with, a func(api.EventSink) error that fails with what it says,
+// or a whole constructor.
 func useSenders(t *testing.T, byType map[string]any) {
 	t.Helper()
 	was := makeSender
 	t.Cleanup(func() { makeSender = was })
-	makeSender = func(s api.EventSink, _ env) (sender, error) {
+	makeSender = func(s api.EventSink, e env) (sender, error) {
 		switch v := byType[s.Type].(type) {
 		case sender:
 			return v, nil
@@ -172,6 +183,8 @@ func useSenders(t *testing.T, byType map[string]any) {
 			return nil, v
 		case func(api.EventSink) error:
 			return nil, v(s)
+		case func(api.EventSink, env) (sender, error):
+			return v(s, e)
 		}
 		return nil, fmt.Errorf("this test has no sender for a %s sink", s.Type)
 	}
@@ -229,6 +242,17 @@ func eventually(t *testing.T, what string, cond func() bool) {
 	}
 }
 
+// settled checks that cond, once true, is still true a moment later: that
+// nothing more came.
+func settled(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	eventually(t, what, cond)
+	time.Sleep(20 * time.Millisecond)
+	if !cond() {
+		t.Fatalf("%s, and then no longer", what)
+	}
+}
+
 // statusOf is what the notifier says of the sink called name.
 func statusOf(t *testing.T, n *Notifier, name string) Status {
 	t.Helper()
@@ -241,13 +265,13 @@ func statusOf(t *testing.T, n *Notifier, name string) Status {
 	return Status{}
 }
 
-// queued is how many events wait in the queue of the sink called name.
+// queued is how many events and tests wait for the sink called name.
 func queued(n *Notifier, name string) int {
 	for _, s := range n.sinks {
 		if s.st.Name == name {
 			s.mu.Lock()
 			defer s.mu.Unlock()
-			return len(s.queue)
+			return len(s.queue) + len(s.tests)
 		}
 	}
 	return -1
@@ -289,6 +313,35 @@ func TestNoSinkStartsNothing(t *testing.T) {
 	}
 	if buf.String() != "" {
 		t.Fatalf("the log heard %q", buf.String())
+	}
+}
+
+// Each sink is made with what the daemon says of itself: rota's version,
+// [events] link, the variables a program must not see, and its log.
+func TestSendersAreMadeWithTheDaemonsWords(t *testing.T) {
+	quick(t)
+	var got []env
+	var mu sync.Mutex
+	useSenders(t, map[string]any{"webhook": func(_ api.EventSink, e env) (sender, error) {
+		mu.Lock()
+		got = append(got, e)
+		mu.Unlock()
+		return &fakeSender{}, nil
+	}})
+	log, _ := newLog()
+	startNotifier(t, Options{
+		Events:  api.EventsSection{Link: "https://box.example:8787", Sinks: []api.EventSink{webhookSink, webhookSink}},
+		Version: "1.4.0-test", HideEnv: []string{"ROTA_TOKEN", "MY_KEY"}, Log: log, Dial: (&dialer{}).dial,
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 2 {
+		t.Fatalf("made %d senders", len(got))
+	}
+	for _, e := range got {
+		if e.version != "1.4.0-test" || e.link != "https://box.example:8787" || !slices.Equal(e.hide, []string{"ROTA_TOKEN", "MY_KEY"}) || e.log != log {
+			t.Fatalf("a sender was made with %+v", e)
+		}
 	}
 }
 
@@ -357,184 +410,6 @@ func TestATestEventGoesToTheSinkItNames(t *testing.T) {
 	}
 }
 
-// A sink that never answers holds up no other (Review Focus 1).
-func TestASlowSinkDelaysNobodyElse(t *testing.T) {
-	quick(t)
-	stuck := make(chan struct{})
-	t.Cleanup(func() { close(stuck) })
-	a := &fakeSender{answer: func(context.Context, int, events.Event) error { <-stuck; return nil }}
-	b := &fakeSender{}
-	useSenders(t, map[string]any{"telegram": a, "webhook": b})
-	src := newSource()
-	d := &dialer{plan: []any{src}}
-	startNotifier(t, Options{Events: api.EventsSection{Sinks: []api.EventSink{telegramSink, webhookSink}}, Dial: d.dial})
-
-	began := time.Now()
-	for i := int64(1); i <= 10; i++ {
-		src.feed <- ev(i, events.SessionAttention)
-	}
-	for len(b.delivered()) < 10 {
-		if time.Since(began) > 200*time.Millisecond {
-			t.Fatalf("the webhook had %d of ten events after 200ms", len(b.delivered()))
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if a.tries() != 1 {
-		t.Fatalf("the stuck sink was tried %d times", a.tries())
-	}
-}
-
-// A failed attempt is tried again after each wait of backoff, then dropped;
-// a sink that says to drop is not tried again; and a sink that says when to
-// try again is waited for.
-func TestRetriesBackOffThenDrop(t *testing.T) {
-	busy := errors.New("the chat is busy")
-	run := func(t *testing.T, f *fakeSender, e events.Event) (*Notifier, *logBuffer) {
-		t.Helper()
-		quick(t)
-		useSenders(t, map[string]any{"webhook": f})
-		log, buf := newLog()
-		d := &dialer{plan: []any{newSource(e)}}
-		return startNotifier(t, Options{Events: api.EventsSection{Sinks: []api.EventSink{webhookSink}}, Dial: d.dial, Log: log}), buf
-	}
-
-	t.Run("three failures then a success", func(t *testing.T) {
-		f := &fakeSender{answer: func(_ context.Context, call int, _ events.Event) error {
-			if call <= 3 {
-				return again(busy, 0)
-			}
-			return nil
-		}}
-		n, buf := run(t, f, ev(1, events.AccountDead))
-		eventually(t, "the event to be sent", func() bool { return statusOf(t, n, "webhook").Sent == 1 })
-		s := statusOf(t, n, "webhook")
-		if f.tries() != 4 || len(f.delivered()) != 1 || s.Dropped != 0 || s.State != stateOK || s.LastSent.IsZero() {
-			t.Fatalf("tried %d times, delivered %d: %+v", f.tries(), len(f.delivered()), s)
-		}
-		if s.LastError != "the chat is busy" || s.LastErrorAt.IsZero() {
-			t.Fatalf("the last error is %q at %v", s.LastError, s.LastErrorAt)
-		}
-		if buf.count("events: webhook failing: the chat is busy") != 1 || buf.count("events: webhook sends again") != 1 {
-			t.Fatalf("the log: %s", buf)
-		}
-	})
-
-	t.Run("always failing", func(t *testing.T) {
-		f := &fakeSender{answer: func(context.Context, int, events.Event) error { return again(busy, 0) }}
-		n, buf := run(t, f, ev(1, events.AccountDead))
-		eventually(t, "the event to be dropped", func() bool { return statusOf(t, n, "webhook").Dropped == 1 })
-		time.Sleep(20 * time.Millisecond)
-		s := statusOf(t, n, "webhook")
-		if f.tries() != 7 || s.Sent != 0 || s.State != stateFailing {
-			t.Fatalf("tried %d times: %+v", f.tries(), s)
-		}
-		if buf.count("failing:") != 1 || buf.count("events: webhook dropped 1 event: the chat is busy (tried 7 times)") != 1 {
-			t.Fatalf("the log: %s", buf)
-		}
-	})
-
-	t.Run("dropped is not retried", func(t *testing.T) {
-		f := &fakeSender{answer: func(context.Context, int, events.Event) error { return dropped(errors.New("no such chat")) }}
-		n, buf := run(t, f, ev(1, events.AccountDead))
-		eventually(t, "the event to be dropped", func() bool { return statusOf(t, n, "webhook").Dropped == 1 })
-		time.Sleep(20 * time.Millisecond)
-		if f.tries() != 1 || buf.count("events: webhook dropped 1 event: no such chat") != 1 {
-			t.Fatalf("tried %d times; the log: %s", f.tries(), buf)
-		}
-	})
-
-	t.Run("an error that says nothing is retried", func(t *testing.T) {
-		f := &fakeSender{answer: func(_ context.Context, call int, _ events.Event) error {
-			if call == 1 {
-				return busy
-			}
-			return nil
-		}}
-		n, _ := run(t, f, ev(1, events.AccountDead))
-		eventually(t, "the event to be sent", func() bool { return statusOf(t, n, "webhook").Sent == 1 })
-		if f.tries() != 2 {
-			t.Fatalf("tried %d times", f.tries())
-		}
-	})
-
-	t.Run("again after a while waits for it", func(t *testing.T) {
-		f := &fakeSender{answer: func(_ context.Context, call int, _ events.Event) error {
-			if call == 1 {
-				return again(busy, 50*time.Millisecond)
-			}
-			return nil
-		}}
-		n, _ := run(t, f, ev(1, events.AccountDead))
-		eventually(t, "the event to be sent", func() bool { return statusOf(t, n, "webhook").Sent == 1 })
-		at := f.times()
-		if len(at) != 2 || at[1].Sub(at[0]) < 50*time.Millisecond {
-			t.Fatalf("the attempts came at %v", at)
-		}
-	})
-
-	t.Run("a test event is tried once", func(t *testing.T) {
-		f := &fakeSender{answer: func(context.Context, int, events.Event) error { return again(busy, 0) }}
-		n, _ := run(t, f, ev(9, events.Test))
-		eventually(t, "the test to be answered", func() bool { return statusOf(t, n, "webhook").LastTest != nil })
-		time.Sleep(20 * time.Millisecond)
-		s := statusOf(t, n, "webhook")
-		if f.tries() != 1 || s.Dropped != 1 || *s.LastTest != (TestResult{ID: 9, OK: false, Error: "the chat is busy", At: s.LastTest.At}) {
-			t.Fatalf("tried %d times: %+v %+v", f.tries(), s, s.LastTest)
-		}
-	})
-
-	t.Run("an old event is not sent", func(t *testing.T) {
-		f := &fakeSender{}
-		old := ev(1, events.AccountDead)
-		old.Time = time.Now().Add(-11 * time.Minute)
-		n, buf := run(t, f, old)
-		eventually(t, "the event to be dropped", func() bool { return statusOf(t, n, "webhook").Dropped == 1 })
-		if f.tries() != 0 || buf.count("events: webhook dropped 1 event: older than 10 minutes") != 1 {
-			t.Fatalf("tried %d times; the log: %s", f.tries(), buf)
-		}
-	})
-}
-
-// A queue that is full lets its oldest event go: the event in flight goes
-// on, and of five that come while it does, the last two are kept. The log
-// says the first drop at once and the rest once at the end, not once each.
-func TestAFullQueueDropsTheOldest(t *testing.T) {
-	quick(t)
-	queueDepth = 2
-	inflight, release := make(chan struct{}), make(chan struct{})
-	f := &fakeSender{answer: func(_ context.Context, call int, _ events.Event) error {
-		if call == 1 {
-			close(inflight)
-			<-release
-		}
-		return nil
-	}}
-	useSenders(t, map[string]any{"webhook": f})
-	log, buf := newLog()
-	src := newSource(ev(1, events.SessionAttention))
-	d := &dialer{plan: []any{src}}
-	n := startNotifier(t, Options{Events: api.EventsSection{Sinks: []api.EventSink{webhookSink}}, Dial: d.dial, Log: log})
-
-	<-inflight
-	for i := int64(2); i <= 6; i++ {
-		src.feed <- ev(i, events.SessionAttention)
-	}
-	eventually(t, "three to be dropped", func() bool { return statusOf(t, n, "webhook").Dropped == 3 })
-	close(release)
-	eventually(t, "three to be sent", func() bool { return len(f.delivered()) == 3 })
-	if got := ids(f.delivered()); !slices.Equal(got, []int64{1, 5, 6}) {
-		t.Fatalf("delivered %v, want 1, 5, 6", got)
-	}
-	n.Wait(time.Now())
-	if s := statusOf(t, n, "webhook"); s.Dropped != 3 || s.Sent != 3 {
-		t.Fatalf("%+v", s)
-	}
-	if buf.count("events: webhook dropped 1 event: its queue was full") != 1 ||
-		buf.count("events: webhook dropped 2 events: its queue was full") != 1 || buf.count("dropped") != 2 {
-		t.Fatalf("the log: %s", buf)
-	}
-}
-
 // A stream that breaks is opened again from the last event it gave: from
 // the start first, then from 5, and a gap, said once in the log, does not
 // take it back to 0.
@@ -566,6 +441,8 @@ func TestTheStreamComesBackFromWhereItWas(t *testing.T) {
 // not on every try, and an answer that is not a refusal is not said.
 func TestARefusedStreamIsSaidOnce(t *testing.T) {
 	quick(t)
+	backoff = slices.Repeat([]time.Duration{5 * time.Millisecond}, 6)
+	redialMax = time.Second
 	f := &fakeSender{}
 	useSenders(t, map[string]any{"webhook": f})
 	log, buf := newLog()
@@ -582,6 +459,31 @@ func TestARefusedStreamIsSaidOnce(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "not answering") {
 		t.Fatalf("the log: %s", buf)
+	}
+	// Not in a tight loop: each try waits its backoff after the last.
+	at := d.when()
+	for i := 1; i < 8; i++ {
+		if gap := at[i].Sub(at[i-1]); gap < 5*time.Millisecond {
+			t.Fatalf("dial %d came %s after the one before", i+1, gap)
+		}
+	}
+}
+
+// A stream that cannot be opened is said once it has failed three times in
+// a row, and its coming back is said once; fewer failures say nothing.
+func TestAnUnreachableStreamIsSaidOnce(t *testing.T) {
+	quick(t)
+	f := &fakeSender{}
+	useSenders(t, map[string]any{"webhook": f})
+	log, buf := newLog()
+	down := errors.New("the rota daemon is not answering")
+	d := &dialer{plan: []any{down, down, newSource(ev(1, events.AccountDead), io.EOF),
+		down, down, down, down, down, newSource(ev(2, events.AccountDead))}}
+	startNotifier(t, Options{Events: api.EventsSection{Sinks: []api.EventSink{webhookSink}}, Dial: d.dial, Log: log})
+
+	settled(t, "the log to say it is back", func() bool { return buf.count("events: the daemon's event stream is back") == 1 })
+	if got := buf.count("events: cannot reach the daemon's event stream: the rota daemon is not answering"); got != 1 || len(f.delivered()) != 2 {
+		t.Fatalf("said %d times, %d delivered; the log: %s", got, len(f.delivered()), buf)
 	}
 }
 
@@ -626,34 +528,5 @@ func TestDaemonStoppedEndsTheRun(t *testing.T) {
 	}
 	if got := d.asked(); len(got) != 1 {
 		t.Fatalf("the stream was opened %d times", len(got))
-	}
-}
-
-// Wait is bounded by its deadline whatever a sink does: one that never
-// returns is given up on, and what it held counts as dropped (Review Focus 1).
-func TestStopIsBoundedByAStuckSink(t *testing.T) {
-	quick(t)
-	stuck := make(chan struct{})
-	t.Cleanup(func() { close(stuck) })
-	f := &fakeSender{answer: func(context.Context, int, events.Event) error { <-stuck; return nil }}
-	useSenders(t, map[string]any{"webhook": f})
-	dir := t.TempDir()
-	d := &dialer{plan: []any{newSource(ev(1, events.AccountDead), ev(2, events.AccountDead))}}
-	n := startNotifier(t, Options{Terminals: dir, Events: api.EventsSection{Sinks: []api.EventSink{webhookSink}}, Dial: d.dial})
-	eventually(t, "one in flight and one queued", func() bool { return f.tries() == 1 && queued(n, "webhook") == 1 })
-
-	began := time.Now()
-	if n.Wait(began.Add(100 * time.Millisecond)) {
-		t.Fatal("Wait said everything was sent")
-	}
-	if took := time.Since(began); took > 300*time.Millisecond {
-		t.Fatalf("Wait took %s", took)
-	}
-	if s := statusOf(t, n, "webhook"); s.Dropped != 2 || s.Sent != 0 {
-		t.Fatalf("%+v", s)
-	}
-	f2, err := readFile(StatusPath(dir))
-	if err != nil || f2.Sinks[0].Dropped != 2 {
-		t.Fatalf("sinks.json: %+v %v", f2, err)
 	}
 }

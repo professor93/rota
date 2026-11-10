@@ -63,10 +63,10 @@ type StatusFile struct {
 // Outcome is one sink's answer to Test: whether it answered in time, and if
 // so whether the test was delivered, or why not.
 type Outcome struct {
-	Sink     string
-	Answered bool
-	OK       bool
-	Error    string
+	Sink     string `json:"sink"`
+	Answered bool   `json:"answered"`
+	OK       bool   `json:"ok"`
+	Error    string `json:"error,omitempty"`
 }
 
 // testPoll is how often Test reads sinks.json while it waits.

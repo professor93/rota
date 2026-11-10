@@ -22,7 +22,8 @@ import (
 )
 
 // held reports whether this system runs a daemon, and so can claim a store
-// and answer on a control socket.
+// and answer on a control socket. It and fakeDaemon are this file's own,
+// not shared helpers.
 func held() bool { return runtime.GOOS == "linux" || runtime.GOOS == "darwin" }
 
 // sinks.json says how each sink stands and how its last test went, is its
@@ -35,8 +36,12 @@ func TestStatusFileSaysWhatHappened(t *testing.T) {
 	dir := t.TempDir()
 	d := &dialer{plan: []any{newSource(ev(1, events.AccountDead), ev(2, events.Test))}}
 	n := startNotifier(t, Options{Terminals: dir, Events: api.EventsSection{Sinks: []api.EventSink{telegramSink, webhookSink}}, Dial: d.dial})
-	eventually(t, "both events to be done with", func() bool {
-		return statusOf(t, n, "telegram").Sent == 2 && statusOf(t, n, "webhook").Dropped == 2
+	// Written while it runs, as serve status and --test read it, not only
+	// when it stops.
+	eventually(t, "sinks.json to catch up", func() bool {
+		f, err := readFile(StatusPath(dir))
+		return err == nil && len(f.Sinks) == 2 && f.Sinks[0].Sent == 2 && f.Sinks[0].LastTest != nil &&
+			f.Sinks[0].LastTest.ID == 2 && f.Sinks[1].Dropped == 2
 	})
 	n.Wait(time.Now())
 
