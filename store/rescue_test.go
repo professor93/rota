@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -421,42 +423,85 @@ func TestTheRefreshLockIsKeptFreshForAsLongAsItIsHeld(t *testing.T) {
 }
 
 // Somebody who judged the lock stale and took it now owns it, whatever rota was
-// doing. rota stops touching it and leaves it where it is.
+// doing. rota stops touching it and leaves it where it is: taken between two
+// beats, and taken in the middle of one, after the beat looked at the lock and
+// before it touched it. The provider answers only once a beat has looked at
+// the lock that replaced rota's, so the test waits on the beat, not the clock;
+// a beat that went by the lock's name touched theirs there, kept it as rota's,
+// and removed it at release, which a loaded machine made happen between beats.
 func TestALockSomebodyElseTookIsNotRotas(t *testing.T) {
-	storedRouteHere(t)
-	claudeWorld(t)
-	old := refreshLockBeat
-	refreshLockBeat = 10 * time.Millisecond
-	t.Cleanup(func() { refreshLockBeat = old })
-	f := fakeAnthropic(t)
-	s := openTemp(t)
-	a := livingClaude(s, "u1")
-	home := stranded(t, s, a)
-	lock := filepath.Join(home, claudeRefreshLock)
-	theirs := time.Now().Add(-10 * time.Second).Truncate(time.Second)
-	f.set(func(f *anthropic) {
-		inner := refreshesTo("A-new", "R-new")
-		f.refresh = func() (int, any) {
-			if err := os.Remove(lock); err != nil {
-				t.Error(err)
+	for _, c := range []struct {
+		what    string
+		midBeat bool
+	}{
+		{"between beats", false},
+		{"in the middle of a beat", true},
+	} {
+		t.Run(c.what, func(t *testing.T) {
+			if c.midBeat && runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+				t.Skip("here a beat reaches the lock by its name, and touches a lock made there in the middle of it once")
 			}
-			if err := os.Mkdir(lock, 0o700); err != nil {
-				t.Error(err)
+			storedRouteHere(t)
+			claudeWorld(t)
+			old := refreshLockBeat
+			refreshLockBeat = 10 * time.Millisecond
+			t.Cleanup(func() { refreshLockBeat = old })
+			f := fakeAnthropic(t)
+			s := openTemp(t)
+			a := livingClaude(s, "u1")
+			home := stranded(t, s, a)
+			lock := filepath.Join(home, claudeRefreshLock)
+			theirs := time.Now().Add(-10 * time.Second).Truncate(time.Second)
+			take := func() {
+				if err := os.Remove(lock); err != nil {
+					t.Error(err)
+				}
+				if err := os.Mkdir(lock, 0o700); err != nil {
+					t.Error(err)
+				}
+				if err := os.Chtimes(lock, theirs, theirs); err != nil {
+					t.Error(err)
+				}
 			}
-			if err := os.Chtimes(lock, theirs, theirs); err != nil {
-				t.Error(err)
+			var taken atomic.Bool
+			stoodDown := make(chan struct{})
+			var once sync.Once
+			refreshLockBeating = func(ours bool) {
+				switch {
+				case ours && c.midBeat && taken.CompareAndSwap(false, true):
+					take()
+				case !ours:
+					once.Do(func() { close(stoodDown) })
+				}
 			}
-			time.Sleep(60 * time.Millisecond) // long enough for several beats
-			return inner()
-		}
-	})
-	s.Maintain(context.Background())
-	fi, err := os.Stat(lock)
-	if err != nil {
-		t.Fatalf("the lock that replaced rota's stays: %v", err)
-	}
-	if !fi.ModTime().Equal(theirs) {
-		t.Fatalf("and rota did not touch it: %v, want %v", fi.ModTime(), theirs)
+			t.Cleanup(func() { refreshLockBeating = nil })
+			f.set(func(f *anthropic) {
+				inner := refreshesTo("A-new", "R-new")
+				f.refresh = func() (int, any) {
+					if !c.midBeat {
+						take()
+						taken.Store(true)
+					}
+					select {
+					case <-stoodDown:
+					case <-time.After(30 * time.Second):
+						t.Error("no beat looked at the lock again")
+					}
+					return inner()
+				}
+			})
+			s.Maintain(context.Background())
+			if !taken.Load() {
+				t.Fatal("the lock was never taken")
+			}
+			fi, err := os.Stat(lock)
+			if err != nil {
+				t.Fatalf("the lock that replaced rota's stays: %v", err)
+			}
+			if !fi.ModTime().Equal(theirs) {
+				t.Fatalf("and rota did not touch it: %v, want %v", fi.ModTime(), theirs)
+			}
+		})
 	}
 }
 

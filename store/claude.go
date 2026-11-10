@@ -882,16 +882,49 @@ func (l *refreshLock) beat() {
 		case <-l.stop:
 			return
 		case <-tick.C:
-			if !l.ours() {
+			if !l.touch() {
 				return
-			}
-			now := time.Now()
-			_ = os.Chtimes(l.path, now, now) // a miss is made up for at the next beat
-			if fi, err := os.Lstat(l.path); err == nil {
-				l.held = fi
 			}
 		}
 	}
+}
+
+// refreshLockBeating, when set, hears each beat's look at the lock: whether
+// it was still rota's, before any touch. A test waits on it, and makes the
+// lock somebody else's there, rather than on the clock.
+var refreshLockBeating func(ours bool)
+
+// touch gives the lock a new mtime while it is still rota's, and reports
+// whether it is. The look, the touch and the reading back are made through
+// the one directory found at the lock's name (lockDir), so a lock somebody
+// made there in between is neither touched nor taken for rota's after: a
+// beat that went by the name each time could touch such a lock, keep what it
+// read back as its own, and remove it at release.
+func (l *refreshLock) touch() bool {
+	d, err := openLockDir(l.path)
+	if err != nil {
+		// Nothing to touch through: a miss, made up for at the next beat,
+		// while the lock is rota's.
+		ours := l.ours()
+		if refreshLockBeating != nil {
+			refreshLockBeating(ours)
+		}
+		return ours
+	}
+	defer d.close()
+	fi, err := d.stat()
+	ours := err == nil && os.SameFile(fi, l.held) && fi.ModTime().Equal(l.held.ModTime())
+	if refreshLockBeating != nil {
+		refreshLockBeating(ours)
+	}
+	if !ours {
+		return false
+	}
+	_ = d.touch(time.Now()) // a miss is made up for at the next beat
+	if fi, err := d.stat(); err == nil && os.SameFile(fi, l.held) {
+		l.held = fi
+	}
+	return true
 }
 
 // ours reports whether the lock on disk is still the one rota left there.
