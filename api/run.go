@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/professor93/rota/internal/askmodel"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
 	"github.com/professor93/rota/rotation"
@@ -195,7 +196,9 @@ func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, 
 	// joined in: a start that arrives once Stop was called refreshes nothing.
 	ctx, cancel := joinContexts(r.Context(), s.ctx)
 	defer cancel()
-	a, err := rotation.Choose(ctx, st, id)
+	// A run that names its model is not handed an account that has spent
+	// that model's own window.
+	a, err := rotation.Choose(askmodel.With(ctx, req.Model), st, id)
 	if err != nil {
 		return nil, err
 	}

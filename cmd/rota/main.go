@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/professor93/rota/api"
+	"github.com/professor93/rota/internal/askmodel"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
 	"github.com/professor93/rota/rotation"
@@ -1087,13 +1088,15 @@ func (c *cli) run(args []string) error {
 
 // account resolves what the command line named — an id, or nothing at all,
 // which means the rotation's choice — and adds the one hint that only a
-// terminal can act on.
-func account(s *store.Store, id int) (*rota.Account, error) {
+// terminal can act on. model is the one the request named with --model, or
+// "": the rotation passes by an account that has spent that model's own
+// window.
+func account(s *store.Store, id int, model string) (*rota.Account, error) {
 	var (
 		a   *rota.Account
 		err error
 	)
-	if interruptedDuring(func(ctx context.Context) { a, err = rotation.Choose(ctx, s, id) }) {
+	if interruptedDuring(func(ctx context.Context) { a, err = rotation.Choose(askmodel.With(ctx, model), s, id) }) {
 		return nil, errInterrupted
 	}
 	if errors.Is(err, rota.ErrNoAccount) {
@@ -1164,7 +1167,7 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) (e
 		return err
 	}
 	defer s.Close()
-	a, err := account(s, id)
+	a, err := account(s, id, "")
 	if err != nil {
 		return err
 	}
@@ -1394,7 +1397,7 @@ func (c *cli) answer(id int, args []string) error {
 		return err
 	}
 	defer s.Close()
-	a, err := account(s, id)
+	a, err := account(s, id, spec.Model)
 	if err != nil {
 		return err
 	}

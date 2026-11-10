@@ -193,7 +193,7 @@ func (c *cli) remoteControlFor(id int, remote remoteAsk) ([]string, error) {
 		return nil, err
 	}
 	defer s.Close()
-	a, err := account(s, id)
+	a, err := account(s, id, "")
 	if err != nil {
 		return nil, err
 	}

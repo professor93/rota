@@ -25,7 +25,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
+	"unicode"
 
+	"github.com/professor93/rota/internal/askmodel"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/store"
 )
@@ -56,6 +59,41 @@ func Cutoff(a *rota.Account) int {
 // Spent reports whether usage has reached this account's cutoff, which is
 // what makes the rotation move on.
 func Spent(a *rota.Account) bool { return a.Percent() >= float64(Cutoff(a)) }
+
+// spentOn names the window of model that this account has used up to its
+// cutoff, or "" when there is none — or no model was named, which is every
+// request but one that said which model it wants.
+//
+// Such a window covers one model, which is why Spent leaves it out: nobody
+// knows which model a request that named none will use. One that names its
+// model is a different matter. A Fable request on an account whose weekly
+// Fable window is spent would be refused, however much room the account has
+// otherwise, and a Team seat may have no weekly window but one per model.
+//
+// A window is the model's when its name, the provider's label for it
+// ("Fable"), is a word of the model the request named, whatever the case:
+// "fable", "claude-fable-5" and "claude-fable-5[1m]" all name Fable's.
+func spentOn(a *rota.Account, model string) string {
+	if model == "" || a.Quota == nil {
+		return ""
+	}
+	words := modelWords(model)
+	for _, w := range a.Quota.Windows {
+		if !w.Scoped || w.Percent < float64(Cutoff(a)) {
+			continue
+		}
+		if name := modelWords(w.Name); len(name) > 0 && slices.Contains(words, name[0]) {
+			return w.Name
+		}
+	}
+	return ""
+}
+
+// modelWords is a model's name in lower case, in the words its letters and
+// digits make: "claude-fable-5[1m]" is claude, fable, 5 and 1m.
+func modelWords(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+}
 
 // InQueue reports whether this account is picked automatically.
 func InQueue(a *rota.Account) bool { return a.Order >= 1 }
@@ -144,6 +182,11 @@ func Next(accounts []*rota.Account) int {
 // what the cache is for. A provider that cannot be reached is not fatal: its
 // account keeps whatever reading it had, and an account nobody can get a
 // number for is treated as unspent rather than quietly dropped.
+//
+// A request rota's own program or server makes may carry the model it named
+// in ctx; an account that has used that model's own window up to its
+// threshold is then passed by too (see spentOn). Nothing else carries one,
+// and a choice without one is the one described above.
 func Choose(ctx context.Context, st *store.Store, id int) (*rota.Account, error) {
 	if id != 0 {
 		a := st.Find(id)
@@ -155,7 +198,7 @@ func Choose(ctx context.Context, st *store.Store, id int) (*rota.Account, error)
 	if queue := Queue(st.Accounts); len(queue) > 0 {
 		st.Refresh(store.WithCaller(ctx, "choose"), false, queue...)
 	}
-	return pickIdle(st)
+	return pickIdle(st, askmodel.From(ctx))
 }
 
 // pickIdle is Pick, stepping past an account that is already running.
@@ -170,14 +213,24 @@ func Choose(ctx context.Context, st *store.Store, id int) (*rota.Account, error)
 // between the choice and the run. Run is what actually decides, and a caller
 // that loses the race still gets a clean refusal rather than a damaged
 // account.
-func pickIdle(st *store.Store) (*rota.Account, error) {
+//
+// model is the one the request named, or "": an account that has spent that
+// model's window is passed by like a spent one.
+func pickIdle(st *store.Store, model string) (*rota.Account, error) {
 	queue := Queue(st.Accounts)
 	if len(queue) == 0 {
 		return nil, fmt.Errorf("%w: no account is in the rotation; give one an order", ErrNone)
 	}
 	busy := 0
+	var windows []string
 	for _, a := range queue {
 		if !Available(a) {
+			continue
+		}
+		if w := spentOn(a, model); w != "" {
+			if !slices.Contains(windows, w) {
+				windows = append(windows, w)
+			}
 			continue
 		}
 		if st.Busy(a) {
@@ -189,6 +242,11 @@ func pickIdle(st *store.Store) (*rota.Account, error) {
 	if busy > 0 {
 		return nil, fmt.Errorf("%w: every account that could answer is already running; "+
 			"these providers keep their own credential file and cannot run twice at once, so wait or add an account", ErrNone)
+	}
+	if len(windows) > 0 {
+		return nil, fmt.Errorf("%w: every account in the rotation is spent or needs re-auth, or is an API key out of credit, "+
+			"or has used its %s window up to its threshold; ask for another model, run one by id, raise its threshold, or add an account",
+			ErrNone, strings.Join(windows, " or "))
 	}
 	return nil, errExhausted
 }

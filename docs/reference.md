@@ -397,6 +397,20 @@ is treated as unspent rather than dropped — otherwise an unmetered account
 could never be picked.
 `rota list` marks the account a bare `rota run` would use.
 
+A request that names its model — `rota run --model fable "..."`, or
+`"model"` in `POST /v1/run` — is judged by that model's own window too,
+when the account has one: an Ultra account's separate weekly Fable limit,
+say, or the per-model weekly limit that is the only weekly one a Team seat
+has. An account that has used that window up to its threshold is passed by
+for that request, and for no other; the window's name, the provider's label
+for it, must be a word of the model asked for, in any case, so `fable`,
+`claude-fable-5` and `claude-fable-5[1m]` all count Fable's. A request that
+names no model, an interactive session and a terminal are chosen for as
+before, since nobody knows which model they will use, and an account with no
+such window is chosen for as before whatever the request names. When those
+windows leave nothing, the refusal names the window:
+`… or has used its Fable window up to its threshold; ask for another model, …`.
+
 Accounts added before rotation existed are numbered by id the first time they
 are loaded, once; after that, an account left at 0 is a decision and nothing
 renumbers it.
@@ -3965,9 +3979,11 @@ characters among them, so a name in them lines up too.
 A spent unscoped window shows as `limited`; a dead credential as `re-auth
 needed`; an API key a run found out of credit as `out of credit` with how long
 the rotation still passes it by, `limited` in JSON (see *An account on an API
-key*). Model-scoped windows (a separate weekly Fable budget, say) are shown
-but never count as spent, because nobody knows which model a session will
-use.
+key*). Model-scoped windows (a separate weekly Fable budget, say) are shown,
+a line each under USAGE and `"scoped": true` in `--json`, but never make an
+account `limited` or spent, because nobody knows which model a session will
+use — except for a request that names its model, which a spent window of
+that model passes by (*The rotation*).
 
 A window is read only with its figure. One the usage endpoint leaves out,
 or sends as `null`, is a limit the account does not have: an Ultra account

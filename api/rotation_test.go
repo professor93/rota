@@ -261,3 +261,44 @@ func TestRunWithNoAccountSaysWhenTheRotationIsEmpty(t *testing.T) {
 		t.Fatalf("%d %s", code, body)
 	}
 }
+
+// A run that names a model passes by an account that has spent that model's
+// weekly window, and only that run: the same request for another model, or
+// for none, is answered by the first account in the rotation. When the
+// model's window leaves nothing, the refusal says which window.
+func TestARunForAModelPassesByAnAccountThatSpentItsWindow(t *testing.T) {
+	h := newHarness(t, Options{})
+	now := time.Now().UnixMilli()
+	blob := `{"ordered":true,"nextId":3,"accounts":[
+	 {"id":1,"provider":"claude","email":"a@x","order":1,"quotaAt":%[1]d,"token":{"accessToken":"tok-1"},
+	  "quota":{"windows":[{"name":"5h","percent":10,"primary":true},{"name":"Fable","percent":100,"scoped":true}]}},
+	 {"id":2,"provider":"claude","email":"b@x","order":2,"quotaAt":%[1]d,"token":{"accessToken":"tok-2"},
+	  "quota":{"windows":[{"name":"5h","percent":60,"primary":true},{"name":"Fable","percent":%[2]d,"scoped":true}]}}]}`
+	write := func(second int) {
+		if err := os.WriteFile(filepath.Join(h.dir, "accounts.json"), []byte(fmt.Sprintf(blob, now, second)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(5)
+	for _, c := range []struct {
+		body map[string]any
+		want int
+	}{
+		{map[string]any{"prompt": "hi", "model": "fable"}, 2},
+		{map[string]any{"prompt": "hi", "model": "opus"}, 1},
+		{map[string]any{"prompt": "hi"}, 1},
+	} {
+		resp, raw := h.do("POST", "/v1/run", c.body)
+		var res struct {
+			Account int `json:"account"`
+		}
+		if resp.StatusCode != 200 || json.Unmarshal(raw, &res) != nil || res.Account != c.want {
+			t.Fatalf("%v: %d %s, want account %d", c.body, resp.StatusCode, raw, c.want)
+		}
+	}
+	write(100)
+	resp, raw := h.do("POST", "/v1/run", map[string]any{"prompt": "hi", "model": "fable"})
+	if resp.StatusCode != 409 || !strings.Contains(string(raw), "Fable") {
+		t.Fatalf("%d %s", resp.StatusCode, raw)
+	}
+}
