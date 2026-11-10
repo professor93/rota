@@ -1219,6 +1219,9 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 	if took {
 		tc.say(ts.keyboardDoc())
 	}
+	// A held session's state, before any output, so what a page says about
+	// the session is right from the start.
+	ts.sayState(tc)
 	if gap {
 		tc.say(map[string]any{"type": "gap", "from": from, "to": at})
 	}

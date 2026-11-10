@@ -75,8 +75,10 @@ import (
 //
 // Typed lines are its commands: "exit N" ends it with code N, "count N"
 // prints N numbered lines, "flood N" prints N lines of a kilobyte as fast as
-// it can and then "flood done", and anything else is answered "got:<line>". A send is
-// typed as its text and Enter. Ctrl-C throws away the line so far and
+// it can and then "flood done", "state <waiting|-> <title…>" reports a State
+// whose registry waits for that, or for nothing with -, under that title,
+// and anything else is answered "got:<line>". A send is typed as its text
+// and Enter. Ctrl-C throws away the line so far and
 // prints "^C".
 func fakeHolder() {
 	// However a test fails, no fake outlives it by much.
@@ -535,6 +537,8 @@ func (f *fake) command(line string) {
 		go f.exit(n)
 	case "count":
 		go f.count(n)
+	case "state":
+		f.say(arg)
 	case "flood":
 		go func() {
 			for i := 1; i <= n; i++ {
@@ -544,6 +548,20 @@ func (f *fake) command(line string) {
 		}()
 	default:
 		f.print([]byte("got:" + line + "\r\n"))
+	}
+}
+
+// say reports the State a typed "state <waiting|-> <title…>" asks for.
+func (f *fake) say(arg string) {
+	waiting, title, _ := strings.Cut(arg, " ")
+	reg := &holdwire.Registry{Status: "waiting", WaitingFor: waiting}
+	if waiting == "-" {
+		reg.Status, reg.WaitingFor = "idle", ""
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.link != nil {
+		_ = f.link.SendJSON(holdwire.State, holdwire.StateMsg{Title: title, Registry: reg})
 	}
 }
 

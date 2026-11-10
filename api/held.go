@@ -172,6 +172,10 @@ type heldTerm struct {
 	convCwd string
 	// convName is the name the CLI gave the conversation, kept the same way.
 	convName string
+	// said is the state frame everyone attached was last told
+	// (termSession.tellState). It is guarded by the session's mu, not this
+	// one.
+	said string
 
 	lastOut time.Time
 	seq     uint64
@@ -279,6 +283,10 @@ func (h *heldTerm) describe(doc map[string]any) {
 	doc["resumable"] = h.state == heldInterrupted && h.conv != ""
 	doc["name"] = h.name()
 	doc["status"] = h.status()
+	doc["waiting_for"] = ""
+	if h.state == heldLive {
+		doc["waiting_for"] = h.reg.WaitingFor // a session that stopped waits for nothing
+	}
 	if h.state != heldLive {
 		// Said as soon as the state is, rather than once the terminal has
 		// finished: a reader that sees a session ended or interrupted sees
@@ -376,6 +384,9 @@ func (h *heldTerm) ping(stop chan struct{}) {
 			if conn := h.link(); conn != nil {
 				_ = conn.Send(holdwire.Ping, nil)
 			}
+			// A session that has printed nothing for heldQuiet reads quiet,
+			// which no frame from the holder says: it is told within a beat.
+			h.ts.tellState()
 		}
 	}
 }
@@ -394,9 +405,14 @@ func (h *heldTerm) read(conn *share.Conn) (code int, ended bool) {
 		case holdwire.Output:
 			if off, p, err := holdwire.OutputOf(payload); err == nil && len(p) > 0 {
 				h.mu.Lock()
-				h.lastOut = h.s.now()
+				now := h.s.now()
+				wasQuiet := now.Sub(h.lastOut) >= heldQuiet
+				h.lastOut = now
 				h.mu.Unlock()
 				h.ts.outputAt(off, p)
+				if wasQuiet {
+					h.ts.tellState() // quiet no more
+				}
 			}
 		case holdwire.Resized:
 			var msg holdwire.SizeMsg
@@ -522,9 +538,15 @@ func (h *heldTerm) setState(state string, code int) {
 	}
 }
 
-// noteState keeps what the holder last said about the session. A registry
-// that has gone keeps the conversation it last named.
+// noteState keeps what the holder last said about the session, and tells
+// everyone attached if that changed how it is. A registry that has gone
+// keeps the conversation it last named.
 func (h *heldTerm) noteState(msg *holdwire.StateMsg) {
+	h.keepState(msg)
+	h.ts.tellState() // once h.mu is let go: the lock order is ts.mu, then h.mu
+}
+
+func (h *heldTerm) keepState(msg *holdwire.StateMsg) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.title = msg.Title
