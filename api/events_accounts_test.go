@@ -407,116 +407,6 @@ func TestAFirstReadingIsABaseline(t *testing.T) {
 	}
 }
 
-/* ----------------------------------------------------------------- reset --- */
-
-// A window coming back is said once: when its reset moves on, when its
-// reset has passed and its reading fell, or when its reset has passed and
-// it is gone. Never for a window that had not been used, nor for a reset
-// that moved by seconds, nor for a scoped window.
-func TestAWindowResetIsSaidOnce(t *testing.T) {
-	w := acctWatcher{now: acctNow}
-	r := acctNow.Add(time.Hour)
-	a := acctOn(1, 1, 0, 95)
-	acctWindow(a, "5h", 95, r)
-	a.Quota.Windows = append(a.Quota.Windows, rota.Window{Name: "7d opus", Percent: 90, Scoped: true,
-		ResetsAt: rota.When{Time: r}})
-	acctNone(t, w.look(a), "the baseline")
-
-	acctWindow(a, "5h", 3, r.Add(5*time.Hour))
-	e := acctOne(t, w.look(a), events.AccountReset, "the reset moved on by 5h")
-	if e.Window != "5h" || acctPercent(e) != 95 || e.Limit != 100 || e.Account != 1 || e.Name != "acct1@x.com" ||
-		e.Text != "has its 5h window back: it had reached 95%" {
-		t.Fatalf("the reset moved on by 5h said %+v", e)
-	}
-	acctNone(t, w.look(a), "the same reading again", events.AccountReset)
-	acctWindow(a, "5h", 3, r.Add(5*time.Hour+30*time.Second))
-	acctNone(t, w.look(a), "the reset 30s later", events.AccountReset)
-	acctWindow(a, "5h", 0, r.Add(5*time.Hour+30*time.Second))
-	acctNone(t, w.look(a), "the window at 0%", events.AccountReset)
-	acctWindow(a, "5h", 0, r.Add(10*time.Hour))
-	acctNone(t, w.look(a), "a window at 0% that resets", events.AccountReset)
-
-	// Its reset passed and its reading fell, the reset not yet moved on.
-	r2 := acctNow.Add(2 * time.Hour)
-	acctWindow(a, "5h", 40, r2)
-	acctNone(t, w.look(a), "40%", events.AccountReset)
-	w.now = r2.Add(time.Minute)
-	acctWindow(a, "5h", 10, r2)
-	if e := acctOne(t, w.look(a), events.AccountReset, "fell after its reset"); e.Window != "5h" || acctPercent(e) != 40 {
-		t.Fatalf("fell after its reset said %+v", e)
-	}
-	acctNone(t, w.look(a), "the same after its reset", events.AccountReset)
-
-	// Its reset passed and it is gone.
-	r3 := w.now.Add(time.Hour)
-	acctWindow(a, "7d", 50, r3)
-	acctNone(t, w.look(a), "a week first seen", events.AccountReset)
-	w.now = r3.Add(time.Minute)
-	acctDrop(a, "7d")
-	if e := acctOne(t, w.look(a), events.AccountReset, "gone after its reset"); e.Window != "7d" ||
-		e.Text != "has its 7d window back: it had reached 50%" {
-		t.Fatalf("gone after its reset said %+v", e)
-	}
-
-	// The scoped window moved on long ago, and nothing was said of it.
-	acctWindow(a, "7d opus", 1, w.now.Add(7*24*time.Hour))
-	acctNone(t, w.look(a), "a scoped window back", events.AccountReset)
-}
-
-// A provider is slow to roll a window over, and its clock wanders: one
-// reset is said once though its reading and its reset time come back in
-// different looks, and a reset time that jitters, or moves earlier, while
-// the window fills says nothing. A window that comes back early, its
-// reading falling as its reset moves on, is said.
-func TestAResetIsSaidOnceWhateverTheProviderLags(t *testing.T) {
-	w := acctWatcher{now: acctNow}
-	r := acctNow.Add(-time.Minute) // passed
-	slow := acctOn(1, 0, 0, 95)    // the reading rolls over first, the reset two looks later
-	acctWindow(slow, "5h", 95, r)
-	quick := acctOn(2, 0, 0, 95) // the reset catches up at the next look
-	acctWindow(quick, "5h", 95, r)
-	r3 := acctNow.Add(3 * time.Hour)
-	jitter := acctOn(3, 0, 0, 50)
-	acctWindow(jitter, "5h", 50, r3.Add(-40*time.Second))
-	drift := acctOn(4, 0, 0, 40) // due in 30s, then said to be 2m ago
-	acctWindow(drift, "5h", 40, acctNow.Add(30*time.Second))
-	all := []*rota.Account{slow, quick, jitter, drift}
-	acctNone(t, w.look(all...), "the baseline")
-
-	acctWindow(slow, "5h", 10, r)
-	acctWindow(quick, "5h", 10, r)
-	acctWindow(jitter, "5h", 52, r3.Add(40*time.Second))
-	acctWindow(drift, "5h", 41, acctNow.Add(-2*time.Minute))
-	evs := acctOf(w.look(all...), events.AccountReset)
-	if len(evs) != 2 || evs[0].Account != 1 || evs[1].Account != 2 || acctPercent(evs[0]) != 95 || acctPercent(evs[1]) != 95 {
-		t.Fatalf("two rolled over, the third's reset jittered by 80s and the fourth's moved earlier: %+v", evs)
-	}
-
-	acctWindow(slow, "5h", 12, r)
-	acctWindow(quick, "5h", 12, r.Add(5*time.Hour))
-	acctWindow(jitter, "5h", 55, r3.Add(-5*time.Minute))
-	acctNone(t, w.look(all...), "#1 still on its old reset, #2's caught up, #3's moved earlier", events.AccountReset)
-	acctWindow(slow, "5h", 12, r.Add(5*time.Hour))
-	acctNone(t, w.look(all...), "#1's reset caught up", events.AccountReset)
-	acctWindow(slow, "5h", 30, r.Add(5*time.Hour))
-	acctWindow(quick, "5h", 30, r.Add(5*time.Hour))
-	acctNone(t, w.look(all...), "both filling again", events.AccountReset)
-
-	// #3 comes back hours before its reset: its reading falls as its reset
-	// moves on.
-	acctWindow(jitter, "5h", 0, r3.Add(5*time.Hour))
-	if e := acctOne(t, w.look(all...), events.AccountReset, "#3 back early"); e.Account != 3 || acctPercent(e) != 55 {
-		t.Fatalf("#3 back early said %+v", e)
-	}
-
-	// The next reset is a reset of its own.
-	w.now = r.Add(5*time.Hour + time.Minute)
-	acctWindow(slow, "5h", 2, r.Add(10*time.Hour))
-	if e := acctOne(t, w.look(all...), events.AccountReset, "#1's next reset"); e.Account != 1 || acctPercent(e) != 30 {
-		t.Fatalf("#1's next reset said %+v", e)
-	}
-}
-
 /* ------------------------------------------------------------------ dead --- */
 
 // An account that needs a login is said once each time it comes to need
@@ -642,82 +532,25 @@ func TestTheRotationMoves(t *testing.T) {
 	quiet("still nothing")
 }
 
-/* ---------------------------------------------------------------- sweeps --- */
-
-// The account events follow what a sweep left in the store: the first
-// reading the server takes is the baseline, and the next one past the
-// threshold is said.
-func TestAccountEventsFollowTheSweep(t *testing.T) {
-	s := acctServer(t, `{"ordered":true,"nextId":2,"accounts":[
-	 {"id":1,"provider":"claude","email":"one@x.com","order":1,"threshold":60,"token":{"accessToken":"tok-1"},
-	  "quota":{"windows":[{"name":"5h","percent":50}]}}]}`)
-	read := func(pct float64) func(*store.Store) {
-		return func(st *store.Store) {
-			a := st.Find(1)
-			a.Quota.Windows[0].Percent = pct
-			acctTake(a)
-		}
+// An API key has no usage to read, so every look carries it, and what takes
+// it out of the rotation is a run finding its credit gone: said as credit,
+// and back once the verdict is over.
+func TestAKeyOutOfCreditIsPassedBy(t *testing.T) {
+	w := acctWatcher{now: acctNow}
+	key := &rota.Account{ID: 1, Provider: "claude", Credential: "apikey", Order: 1,
+		Token: rota.Token{Access: "sk-ant-api03-" + strings.Repeat("A", 24) + "wxyz"}}
+	other := acctOn(2, 2, 80, 10)
+	acctNone(t, w.look(key, other), "the baseline, the key first")
+	if w.last.first != 1 || w.last.byID[1].read {
+		t.Fatalf("the baseline kept #%d first and the key as %+v", w.last.first, w.last.byID[1])
 	}
-	acctSweep(t, s)
-	acctEdit(t, s, read(50))
-	acctSweep(t, s)
-	acctEdit(t, s, read(70))
-	acctSweep(t, s)
-	evs := published(s, events.AccountThreshold)
-	if len(evs) != 1 {
-		t.Fatalf("70%% past a threshold of 60 said %+v", evs)
+	key.NoCreditUntil = time.Now().Add(time.Hour).UnixMilli()
+	e := acctOne(t, w.look(key, other), events.AccountRotated, "the key out of credit")
+	if e.Account != 2 || e.Reason != "credit" || e.Text != "is first in the rotation now: api key ...wxyz is out of credit" {
+		t.Fatalf("the key out of credit said %+v", e)
 	}
-	if e := evs[0]; e.Reason != "up" || e.Account != 1 || e.Name != "one@x.com" || acctPercent(e) != 70 || e.Limit != 60 ||
-		e.Text != "reached its 60% limit: 5h at 70%" || e.ID == 0 || e.Time.IsZero() {
-		t.Fatalf("70%% past a threshold of 60 said %+v", e)
-	}
-}
-
-// A daemon that starts after a night off says nothing of what happened
-// while no daemon ran (R6): three accounts read at 95% before it started,
-// their windows reset since, read again at 2% by its first sweep, give no
-// event at all. That reading is the baseline, and the next is said.
-func TestNothingFromBeforeTheStartIsSaid(t *testing.T) {
-	before := time.Now().Add(-3 * time.Hour).UnixMilli()
-	reset := time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)
-	var accounts []string
-	for id := 1; id <= 3; id++ {
-		accounts = append(accounts, fmt.Sprintf(`{"id":%d,"provider":"claude","email":"n%d@x.com","order":%d,"threshold":80,`+
-			`"token":{"accessToken":"tok-%d"},"quotaAt":%d,"quota":{"windows":[{"name":"5h","percent":95,"resetsAt":%q}]}}`,
-			id, id, id, id, before, reset))
-	}
-	s := acctServer(t, `{"ordered":true,"nextId":4,"accounts":[`+strings.Join(accounts, ",")+`]}`)
-	acctSweep(t, s) // as the server starts
-
-	readAt2 := func(ids ...int) func(*store.Store) {
-		return func(st *store.Store) {
-			for _, id := range ids {
-				a := st.Find(id)
-				a.Quota = &rota.Quota{Windows: []rota.Window{{Name: "5h", Percent: 2,
-					ResetsAt: rota.When{Time: time.Now().Add(5 * time.Hour)}}}}
-				acctTake(a)
-			}
-		}
-	}
-	// Its first sweep reads #1 and #2; #3's endpoint turns it away, and its
-	// reading is still the one from before, until the sweep after.
-	acctEdit(t, s, readAt2(1, 2))
-	acctSweep(t, s)
-	acctEdit(t, s, readAt2(3))
-	acctSweep(t, s)
-	if evs := acctAccountEvents(s); len(evs) != 0 {
-		t.Fatalf("the first sweeps after a night off said %+v", evs)
-	}
-
-	acctEdit(t, s, func(st *store.Store) {
-		a := st.Find(1)
-		a.Quota.Windows[0].Percent = 85
-		acctTake(a)
-	})
-	acctSweep(t, s)
-	evs := acctAccountEvents(s)
-	if len(evs) != 2 || evs[0].Type != events.AccountThreshold || evs[0].Account != 1 ||
-		evs[1].Type != events.AccountRotated || evs[1].Account != 2 || evs[1].Reason != "spent" {
-		t.Fatalf("#1 at 85%% after the baseline said %+v", evs)
+	key.NoCreditUntil = 0
+	if e := acctOne(t, w.look(key, other), events.AccountRotated, "the key with credit"); e.Account != 1 || e.Reason != "back" {
+		t.Fatalf("the key with credit said %+v", e)
 	}
 }

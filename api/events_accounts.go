@@ -47,9 +47,12 @@ const (
 
 // accountWatch is what the account events are computed against: the last
 // look, nil until the first, which is the baseline and says nothing. since
-// is when that first look was taken, which is as the server's sweeps begin:
-// a reading taken before it is not this server's, and counts as none. Only
-// the sweeps use it, one at a time, but under mu all the same.
+// is when that first look was taken, which is as the server's sweeps begin,
+// less two sweeps: a reading taken before it is not this server's, and
+// counts as none. So a night with no daemon says nothing of what happened in
+// it, and a daemon restarted for an upgrade still says a crossing its first
+// sweep finds. Only the sweeps use it, one at a time, but under mu all the
+// same.
 type accountWatch struct {
 	mu    sync.Mutex
 	last  *accountsLook
@@ -193,9 +196,11 @@ func diffAccounts(prev, next accountsLook, now time.Time) ([]events.Event, accou
 	for id, n := range kept.byID {
 		switch p, seen := prev.byID[id]; {
 		case !seen:
+			n.windows = accountResetsPassed(n.windows, now)
 			base.byID[id], rebased = n, true
 		case !p.read && n.read:
-			p.read, p.spent, p.percent, p.window, p.windows = n.read, n.spent, n.percent, n.window, n.windows
+			p.read, p.spent, p.percent, p.window = n.read, n.spent, n.percent, n.window
+			p.windows = accountResetsPassed(n.windows, now)
 			p.available = p.pickable()
 			base.byID[id], rebased = p, true
 		}
@@ -215,6 +220,26 @@ func diffAccounts(prev, next accountsLook, now time.Time) ([]events.Event, accou
 		out = append(out, e)
 	}
 	return out, kept
+}
+
+// accountResetsPassed is windows with every reset that has passed by now
+// taken as none, for a reading compared with itself (diffAccounts): a reset
+// that passed before the first comparison happened while nobody compared,
+// and is not said when the provider catches up with it (accountChanges
+// keeps it none until then).
+func accountResetsPassed(windows map[string]windowLook, now time.Time) map[string]windowLook {
+	out, cloned := windows, false
+	for name, w := range windows {
+		if w.resets.IsZero() || now.Before(w.resets) {
+			continue
+		}
+		if !cloned {
+			out, cloned = maps.Clone(windows), true
+		}
+		w.resets = time.Time{}
+		out[name] = w
+	}
+	return out
 }
 
 // accountChanges is what changed about one account from p to n, and n as
@@ -377,13 +402,17 @@ func (s *Server) lookAtAccounts(st *store.Store) {
 
 // watchAccounts is lookAtAccounts for a look already taken: the first is
 // kept as the baseline, and each after it is said against the last. A
-// reading taken before the first look is none (readSince).
+// reading taken more than two sweeps before the first look is none
+// (accountWatch, readSince).
 func (s *Server) watchAccounts(next accountsLook) {
 	w := &s.accounts
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.last == nil {
 		w.since = s.now()
+		if every := s.opts.RefreshEvery; every > 0 {
+			w.since = w.since.Add(-2 * every)
+		}
 		next = next.readSince(w.since)
 		w.last = &next
 		return
