@@ -5,15 +5,20 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -39,8 +44,16 @@ type webEnd struct {
 	code     int
 }
 
+// noCLIs leaves nothing on PATH: a login reaches no vendor CLI, and a test
+// that did would find none of the real ones.
+func noCLIs(t *testing.T) {
+	t.Helper()
+	t.Setenv("PATH", t.TempDir())
+}
+
 func webCall(t *testing.T, args ...string) *webRun {
 	t.Helper()
+	noCLIs(t)
 	r := &webRun{done: make(chan webEnd, 1)}
 	go func() {
 		code := run(args, &r.out, &r.err)
@@ -257,7 +270,7 @@ func TestLoginWebAsksWhereOnATerminal(t *testing.T) {
 		typing(t, c.typed)
 		var errb bytes.Buffer
 		cl := &cli{in: stdin, out: io.Discard, err: &errb}
-		addr, err := cl.pickAddr(&webAsk{Asked: true})
+		addr, err := cl.pickAddr(&webAsk{})
 		if err != nil || addr != c.want {
 			t.Fatalf("%q: %q %v\n%s", c.typed, addr, err, errb.String())
 		}
@@ -295,6 +308,7 @@ func TestLoginWebOffATerminalTakesLoopback(t *testing.T) {
 
 func TestLoginWebRefusesJSONAndACode(t *testing.T) {
 	home := seedTwoClaude(t)
+	noCLIs(t)
 	const why = "--web serves a page for a person to open, so it takes no --json and no code"
 	for _, args := range [][]string{
 		{"--json", "login", "--web", "127.0.0.1:0"},
@@ -505,6 +519,7 @@ func TestLoginWebLeavesTheLoginOpenOnAnInterrupt(t *testing.T) {
 func TestLoginWebServesAParkedLogin(t *testing.T) {
 	home := seedTwoClaude(t)
 	approvalsByCode(t, known)
+	noCLIs(t)
 	out, errOut, code := call(t, "login")
 	if code != 0 {
 		t.Fatalf("%d %q %q", code, out, errOut)
@@ -567,5 +582,206 @@ func TestLoginWebOnTheLAN(t *testing.T) {
 	post(t, u, "AS12")
 	if got := r.wait(t); got.code != 0 {
 		t.Fatalf("%d\n%s\n%s", got.code, got.out, got.err)
+	}
+}
+
+// interruptSelf sends this process the interrupt ^C sends.
+func interruptSelf(t *testing.T) {
+	p, err := os.FindProcess(os.Getpid())
+	if err == nil {
+		err = p.Signal(os.Interrupt)
+	}
+	if err != nil {
+		t.Error(err)
+	}
+}
+
+// claudeAt points Claude's token endpoint at exchange, which is told which
+// exchange of the test this is, from 1, and answers its profile with 500.
+func claudeAt(t *testing.T, exchange func(n int32, w http.ResponseWriter, r *http.Request)) *atomic.Int32 {
+	t.Helper()
+	var asked atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/profile") {
+			w.WriteHeader(500)
+			return
+		}
+		exchange(asked.Add(1), w, r)
+	}))
+	t.Cleanup(srv.Close)
+	for _, e := range []*string{&rota.ClaudeEndpoints.Token, &rota.ClaudeEndpoints.Profile} {
+		old := *e
+		t.Cleanup(func() { *e = old })
+	}
+	rota.ClaudeEndpoints.Token, rota.ClaudeEndpoints.Profile = srv.URL+"/token", srv.URL+"/profile"
+	return &asked
+}
+
+// approvedAs12 is the token endpoint's answer for account 12's approval.
+func approvedAs12(w http.ResponseWriter) {
+	json.NewEncoder(w).Encode(map[string]any{"access_token": "NEW-u12", "refresh_token": "R-u12", "expires_in": 3600,
+		"account": map[string]string{"uuid": "u12", "email_address": "a@b.c"}})
+}
+
+// A value already being checked when the page ends is given its answer: a
+// code the provider takes finishes the login, and a key the API refuses is
+// never stored, whatever ^C meant to stop.
+func TestLoginWebLetsACheckUnderWayFinish(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("an interrupt cannot be sent to this process on Windows")
+	}
+	t.Run("a code the provider takes", func(t *testing.T) {
+		home := seedTwoClaude(t)
+		asked := claudeAt(t, func(_ int32, w http.ResponseWriter, _ *http.Request) {
+			interruptSelf(t)
+			time.Sleep(500 * time.Millisecond)
+			approvedAs12(w)
+		})
+		r := webCall(t, "login", "12", "--web", "127.0.0.1:0")
+		u := r.url(t)
+		go browser.PostForm(u, url.Values{"value": {"AS12"}}) // its answer may be cut with the page
+		got := r.wait(t)
+		if got.code != 0 || !strings.Contains(got.out, "Refreshed claude account 12") || asked.Load() != 1 {
+			t.Fatalf("%d, asked %d\n%s\n%s", got.code, asked.Load(), got.out, got.err)
+		}
+		if p := parked(t, home); p != "" || readAccounts(t, home).Accounts[0].Dead {
+			t.Fatalf("the code was spent and the login not finished: %s", p)
+		}
+	})
+	t.Run("a key the API refuses", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("ROTA_HOME", home)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			interruptSelf(t)
+			time.Sleep(500 * time.Millisecond)
+			w.WriteHeader(401)
+		}))
+		t.Cleanup(srv.Close)
+		old := rota.ClaudeModelsEndpoint
+		rota.ClaudeModelsEndpoint = srv.URL + "/v1/models"
+		t.Cleanup(func() { rota.ClaudeModelsEndpoint = old })
+		r := webCall(t, "login", "--key", "--web", "127.0.0.1:0")
+		u := r.url(t)
+		go browser.PostForm(u, url.Values{"value": {testKey}})
+		got := r.wait(t)
+		if got.code != 130 || strings.Contains(got.out, "Added") {
+			t.Fatalf("%d\n%s\n%s", got.code, got.out, got.err)
+		}
+		secretless(t, "a key refused under ^C", got.out, got.err)
+		if raw, err := os.ReadFile(filepath.Join(home, "accounts.json")); err == nil && strings.Contains(string(raw), "TESTONLY") {
+			t.Fatal("a key the API refused was stored")
+		}
+	})
+}
+
+// A check that runs past its cap is a try like any refusal, and the same
+// login still takes the code again.
+func TestLoginWebCutsACheckShortAtItsCap(t *testing.T) {
+	home := seedTwoClaude(t)
+	was := finishTimeout
+	finishTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { finishTimeout = was })
+	claudeAt(t, func(n int32, w http.ResponseWriter, r *http.Request) {
+		if n == 1 { // held past the cap
+			select {
+			case <-time.After(5 * time.Second):
+			case <-r.Context().Done():
+			}
+			return
+		}
+		approvedAs12(w)
+	})
+	r := webCall(t, "login", "12", "--web", "127.0.0.1:0")
+	u := r.url(t)
+	if code, body := post(t, u, "AS12"); code != http.StatusBadRequest {
+		t.Fatalf("a check cut short: %d %s", code, body)
+	}
+	if !strings.Contains(parked(t, home), loginIDFrom(t, r.out.String())) {
+		t.Fatal("a check cut short gave the login up")
+	}
+	if code, body := post(t, u, "AS12"); code != http.StatusOK {
+		t.Fatalf("the code again: %d %s", code, body)
+	}
+	if got := r.wait(t); got.code != 0 || !strings.Contains(got.out, "Refreshed claude account 12") {
+		t.Fatalf("%d\n%s\n%s", got.code, got.out, got.err)
+	}
+}
+
+// An address the page cannot listen on ends the command before any login is
+// begun: an empty port, one not this machine's, or a port in use.
+func TestLoginWebRefusesAnAddressBeforeBeginning(t *testing.T) {
+	busy, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer busy.Close()
+	for _, c := range []struct {
+		args []string
+		code int
+		says string
+	}{
+		{[]string{"login", "12", "--web", "127.0.0.1:"}, 2, "the port is not a port"},
+		{[]string{"login", "12", "--web", ":"}, 2, "the port is not a port"},
+		{[]string{"login", "--web", "192.0.2.1:0"}, 1, "the one-time page cannot listen on 192.0.2.1:0"},
+		{[]string{"login", "12", "--web", busy.Addr().String()}, 1, "the one-time page cannot listen on"},
+		{[]string{"login", "--key", "--web", busy.Addr().String()}, 1, "the one-time page cannot listen on"},
+		{[]string{"login", "12", "--token", "--web", busy.Addr().String()}, 1, "the one-time page cannot listen on"},
+	} {
+		home := seedTwoClaude(t)
+		got := webCall(t, c.args...).wait(t)
+		if got.code != c.code || !strings.Contains(got.err, c.says) || strings.Contains(got.out, "Open this") {
+			t.Errorf("%v: %d\n%s\n%s", c.args, got.code, got.out, got.err)
+		}
+		if p := parked(t, home); p != "" {
+			t.Errorf("%v: a login was begun: %s", c.args, p)
+		}
+	}
+}
+
+// What no paste could ever satisfy is refused before a page is served, in
+// the words the command without --web gives once a paste arrives.
+func TestLoginWebRefusesWhatNoPasteCanSatisfy(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	writeStore(t, home, `{"ordered":true,"nextId":3,"accounts":[
+		{"id":1,"provider":"claude","credential":"apikey","order":0,"token":{"accessToken":"KEY"}},
+		{"id":2,"provider":"codex","email":"c@d.e","uuid":"c2","order":1,"token":{"accessToken":"C2"}}]}`)
+	for _, c := range []struct {
+		web, plain []string
+		paste      string
+	}{
+		{[]string{"login", "codex", "--key", "--web", "127.0.0.1:0"}, []string{"login", "codex", "--key"}, testKey},
+		{[]string{"login", "1", "--token", "--web", "127.0.0.1:0"}, []string{"login", "1", "--token"}, testSetup},
+		{[]string{"login", "2", "--token", "--web", "127.0.0.1:0"}, []string{"login", "2", "--token"}, testSetup},
+	} {
+		got := webCall(t, c.web...).wait(t)
+		_, plainErr, plainCode := runCLIStdin(t, c.paste+"\n", c.plain...)
+		if got.code != plainCode || got.code == 0 || got.err != plainErr || pageLine.MatchString(got.out) {
+			t.Errorf("%v: %d %q, and without --web %d %q", c.web, got.code, got.err, plainCode, plainErr)
+		}
+	}
+}
+
+// A login that takes nothing pasted is refused, naming the line that finishes
+// it; an account whose own CLI signs it in begins nothing.
+func TestLoginWebRefusesLoginsThatTakeNothingPasted(t *testing.T) {
+	for _, provider := range []string{"t-wait-device", "t-wait-own"} {
+		t.Setenv("ROTA_HOME", t.TempDir())
+		got := webCall(t, "login", provider, "--web", "127.0.0.1:0").wait(t)
+		m := regexp.MustCompile(`rota login ([0-9a-f]{6})`).FindStringSubmatch(got.out)
+		if got.code != 1 || m == nil || !strings.Contains(got.err, "takes nothing pasted") ||
+			!strings.Contains(got.err, "rota login "+m[1]) || pageLine.MatchString(got.out) {
+			t.Errorf("%s: %d\n%s\n%s", provider, got.code, got.out, got.err)
+		}
+	}
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	writeStore(t, home, `{"ordered":true,"nextId":2,"accounts":[{"id":1,"provider":"grok","delegated":true,"uuid":"g1","order":1}]}`)
+	got := webCall(t, "login", "1", "--web", "127.0.0.1:0").wait(t)
+	if got.code != 2 || !strings.Contains(got.err, "signs in through its own CLI") || got.out != "" {
+		t.Fatalf("%d\n%s\n%s", got.code, got.out, got.err)
+	}
+	if p := parked(t, home); p != "" {
+		t.Fatalf("a login was begun: %s", p)
 	}
 }

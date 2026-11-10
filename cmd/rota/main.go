@@ -402,6 +402,11 @@ func (c *cli) login(args []string) error {
 		} else if len(rest) > 0 {
 			return usageError(loginUsage)
 		}
+		if c.web != nil {
+			if err := c.readyWeb(); err != nil {
+				return err
+			}
+		}
 		s, err := c.openStore()
 		if err != nil {
 			return err
@@ -428,11 +433,26 @@ func (c *cli) login(args []string) error {
 	if err != nil {
 		return err
 	}
-	if numeric && s.Find(id) != nil {
+	if a := s.Find(id); numeric && a != nil {
+		// --web needs a login rota begins: an account whose own CLI signs
+		// it in has none, and is refused before anything is asked. Its
+		// address is settled before the login begins, except where signIn
+		// refuses anyway: words after the id, or an account on a key.
+		_, delegated := rota.LoginPlanFor(a, s.Home(a))
+		if c.web != nil && delegated {
+			s.Close()
+			return usageErr("account %d signs in through its own CLI, which takes nothing from a page; `rota login %d` runs that CLI's login", id, id)
+		}
+		begins := len(rest) == 1 && !a.APIKey()
 		// The delegated flow runs a vendor CLI a person will sit in front
 		// of, and takes the lock again afterwards, so signIn owns its own
 		// store, whichever kind of account this turns out to be.
 		s.Close()
+		if c.web != nil && begins {
+			if err := c.readyWeb(); err != nil {
+				return err
+			}
+		}
 		return c.signIn(id, rest[1:])
 	}
 	defer s.Close()
@@ -454,6 +474,11 @@ func (c *cli) login(args []string) error {
 			if l == nil {
 				return rota.WrapNoLogin(rest[0])
 			}
+			// Account 0: which account a parked login was begun for is the
+			// store's own record, which it does not export, and the SDK
+			// gains nothing here. The store still holds the login to that
+			// account; only the page's "approve as" and the line that
+			// begins it again name no account.
 			return c.webWait(s, l, 0)
 		}
 		return c.finish(s, rest[0], strings.Join(rest[1:], ""))
@@ -2265,9 +2290,6 @@ func (c *cli) signIn(id int, extra []string) error {
 			return usageErr("usage: rota login <account-id> — account %d signs in through rota, so there is no vendor CLI to pass anything after the id to", id)
 		}
 		return c.beginFor(s, a)
-	}
-	if c.web != nil {
-		return usageErr("account %d signs in through its own CLI, which takes nothing from a page; `rota login %d` runs that CLI's login", id, id)
 	}
 	// The same claim a run takes. This hands the home to the vendor's own
 	// login, which writes a new credential file over whatever is there — so of

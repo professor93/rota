@@ -84,28 +84,38 @@ func (c *cli) loginKey(provider string, long bool, rest []string, label string) 
 	}
 	if c.web != nil {
 		// The key comes from the one-time page instead, where it is pasted
-		// into a password field; each one pasted there is tried in turn.
+		// into a password field; each one pasted there is tried in turn. A
+		// provider that takes no key is refused first, as a paste would be.
+		if err := takesPaste(provider); err != nil {
+			return err
+		}
+		if err := c.readyWeb(); err != nil {
+			return err
+		}
 		return c.awaitWeb(nil, loginpage.Options{Want: loginpage.Key, Provider: provider,
 			Submit: func(ctx context.Context, key string) (string, error) {
-				return "", c.storeKey(ctx, provider, key, label)
+				work, cancel := checking(ctx)
+				defer cancel()
+				return "", c.storeKey(ctx, work, provider, key, label)
 			}})
 	}
 	key, err := c.askSecret("API key")
 	if err != nil {
 		return err
 	}
-	return c.storeKey(context.Background(), provider, key, label)
+	return c.storeKey(context.Background(), context.Background(), provider, key, label)
 }
 
 // storeKey makes or updates the account this API key belongs to, and says
-// which, by its last four characters at most.
-func (c *cli) storeKey(ctx context.Context, provider, key, label string) error {
-	s, err := c.openStoreCtx(ctx)
+// which, by its last four characters at most. The store's lock is waited for
+// under wait, and the key is checked under work.
+func (c *cli) storeKey(wait, work context.Context, provider, key, label string) error {
+	s, err := c.openStoreCtx(wait)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-	a, added, unverified, err := s.LoginKey(ctx, provider, key, label)
+	a, added, unverified, err := s.LoginKey(work, provider, key, label)
 	if err != nil {
 		return err
 	}
@@ -158,10 +168,25 @@ func (c *cli) loginToken(provider string, long bool, rest []string) error {
 		}
 		a := s.Find(id)
 		s.Close()
-		if a == nil {
+		// What no token can put right is refused before a page is served,
+		// in the words a pasted one would get.
+		switch {
+		case a == nil:
 			return fmt.Errorf("%w; see `rota list`", rota.WrapNoAccount(id))
+		case a.APIKey():
+			return rota.Invalid("%s runs on an API key; a token from `claude setup-token` belongs on the claude.ai account it was made for", a)
 		}
-		return c.awaitWeb(nil, loginpage.Options{Want: loginpage.Token, Provider: a.Provider,
+		if err := takesPaste(a.Provider); err != nil {
+			return err
+		}
+		if err := c.readyWeb(); err != nil {
+			return err
+		}
+		approve := oneLine(a.Email)
+		if approve == "" {
+			approve = labelOf(a)
+		}
+		return c.awaitWeb(nil, loginpage.Options{Want: loginpage.Token, Provider: a.Provider, Approve: approve,
 			Submit: func(ctx context.Context, tok string) (string, error) {
 				err := c.storeToken(ctx, id, tok)
 				if errors.Is(err, rota.ErrNoAccount) {

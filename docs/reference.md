@@ -531,9 +531,10 @@ so does approving as the wrong account.
 the terminal: the code, an API key with `--key`, or a `claude setup-token`
 token with `<account-id> --token`, pasted on a phone or another computer, or in
 a browser where a paste is easier than at a prompt. It works with every login
-rota waits for, a new one, one on a provider, `--long` and `<account-id>`, and
-`rota login <login-id> --web` serves a page for one already parked. The login
-is begun and printed as always, and then the page's link:
+that takes a code or a key: a new one, one on a provider, `--long` and
+`<account-id>`, and `rota login <login-id> --web` serves a page for one already
+parked. Where the page listens is settled first, as below, and the login is
+then begun and printed as always, followed by the page's link:
 
 ```
 Open the one-time page: http://127.0.0.1:8788/<secret>
@@ -547,7 +548,10 @@ key or a token. What is pasted travels only in the form's body; it is never
 printed, logged or echoed, and the page sets no cache. A refusal is shown on the
 page with the value taken out, and the next value is tried on the same login;
 one that approving again cannot put right ends the page with it, as the terminal
-wait ends. The page closes, and its port with it, after the login it finishes,
+wait ends. A value already being checked is given its answer, for up to 60
+seconds, whatever else ends the page meanwhile: a code the provider has taken
+finishes the login, and a key the API refuses is never stored.
+The page closes, and its port with it, after the login it finishes,
 after five rejected values, at the earlier of 10 minutes and the login's own
 end, or on `^C`. A login another rota finishes meanwhile ends it as it ends the
 terminal wait.
@@ -561,7 +565,9 @@ parses as an IP address, or is `localhost`. So `rota login --web 12` is account
 With no address, at a terminal rota lists this machine's addresses, `127.0.0.1`
 first and `0.0.0.0` last, each saying who can reach it, with any reachable
 beyond this machine's own networks marked `— warning`, and asks; Enter takes the
-first. Off a terminal it takes `127.0.0.1` and says so. Off loopback the page is
+first. Off a terminal it takes `127.0.0.1` and says so. The address is listened
+on once before anything begins, so one that is not this machine's, or a port
+that is busy, ends the command with no login begun. Off loopback the page is
 HTTPS only, with a certificate made for this run, and rota prints its SHA-256
 fingerprint to compare with what the browser shows; plain HTTP is never served
 there.
@@ -573,6 +579,9 @@ token says nothing was stored. A login that runs out says it expired, and `^C`
 exits 130 with the login left open. `--web` takes no `--json` and no code after
 a login id: both are a usage error. An account whose CLI keeps its own
 credentials has no page, and neither has a login that takes nothing pasted.
+What no paste could satisfy is refused before a page is served, in the words a
+paste would get: `--key` on a provider that takes no key, and `--token` on an
+account on an API key or a provider that takes no setup token.
 
 ## The HTTP API
 

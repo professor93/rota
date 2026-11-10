@@ -29,11 +29,10 @@ import (
 // Nothing pasted on the page is printed here, and nothing about it reaches
 // argv: the value travels only in the page's form body.
 
-// webAsk is --web on the command line: Asked that it was given, and Addr the
-// address after it, empty when none was.
+// webAsk is --web on the command line, nil when it was not given. Addr is the
+// address after it, empty when none was, until readyWeb settles one.
 type webAsk struct {
-	Addr  string
-	Asked bool
+	Addr string
 }
 
 // webUsage is why --web is refused beside --json or a code.
@@ -48,10 +47,20 @@ var pageChoices = loginpage.Choices
 // kernel's; tests set it to 0, so that none of them takes the default port.
 var pagePort = loginpage.DefaultPort
 
-// finishTimeout bounds one value's check from the page: the store's lock and
-// the provider's answer. The page waits for a check under way before it ends,
-// so ^C is never held up longer than this.
-const finishTimeout = 60 * time.Second
+// finishTimeout bounds one value's check from the page once it is sent: the
+// provider's answer, or the key's. A check under way is never cancelled by ^C
+// or by the page's end: the provider may have taken a single-use code, or be
+// about to refuse a key, and its answer is the only copy of what it said. The
+// page waits for it, so ^C is held up no longer than this. Waiting for the
+// store's lock, before anything is sent, does give up on ^C. A variable so a
+// test can cut a check short.
+var finishTimeout = 60 * time.Second
+
+// checking is the context a value's check runs under once it is sent: ctx's
+// values, but not its end, and finishTimeout from now.
+func checking(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
+}
 
 // takeWeb lifts --web and its address out of login's arguments. The word
 // after --web is its address only when it reads as one: it holds a colon,
@@ -69,7 +78,7 @@ func takeWeb(args []string) (rest []string, w *webAsk, err error) {
 		if w != nil {
 			return nil, nil, usageErr("--web is given once")
 		}
-		w = &webAsk{Asked: true}
+		w = &webAsk{}
 		switch {
 		case hasValue && value == "":
 			return nil, nil, usageErr("--web= needs an address after it, such as 127.0.0.1 or :8788")
@@ -101,13 +110,8 @@ func looksLikeAddr(s string) bool {
 // is begun: a host that is not an IP address or localhost, or a port that is
 // not one. The page itself decides the rest.
 func checkAddr(addr string) error {
-	host, port := addr, ""
-	if h, p, err := net.SplitHostPort(addr); err == nil {
-		host, port = h, p
-	} else if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
-		host = host[1 : len(host)-1]
-	}
-	if port != "" {
+	host, port, hasPort := splitAddr(addr)
+	if hasPort {
 		if n, err := strconv.Atoi(port); err != nil || n < 0 || n > 65535 {
 			return usageErr("--web %s: the port is not a port", oneLine(addr))
 		}
@@ -117,6 +121,63 @@ func checkAddr(addr string) error {
 	}
 	if _, err := netip.ParseAddr(host); err != nil {
 		return usageErr("--web %s: give the page an IP address, not a name", oneLine(addr))
+	}
+	return nil
+}
+
+// splitAddr is addr's host, without brackets, and its port. hasPort says a
+// colon named one, even an empty one, which checkAddr refuses.
+func splitAddr(addr string) (host, port string, hasPort bool) {
+	if h, p, err := net.SplitHostPort(addr); err == nil {
+		return h, p, true
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]"), "", false
+}
+
+// readyWeb settles where the page listens, before any login is begun or any
+// lock taken: the address given, or the one chosen at the menu, which is
+// asked here so that nothing is parked while a person reads it. It then
+// listens there once and lets go, so an address that is not this machine's,
+// or a port that is busy or not this user's, ends the command with nothing
+// begun.
+func (c *cli) readyWeb() error {
+	addr, err := c.pickAddr(c.web)
+	if err != nil {
+		return err
+	}
+	if err := tryListen(pageAddr(addr)); err != nil {
+		return err
+	}
+	c.web.Addr = addr
+	return nil
+}
+
+// tryListen listens on addr for a moment: on its port, or on the kernel's
+// when it names none, since the page falls back from a busy default port.
+func tryListen(addr string) error {
+	host, port, _ := splitAddr(addr)
+	if port == "" {
+		port = "0"
+	}
+	if host == "" || strings.EqualFold(host, "localhost") {
+		host = "127.0.0.1"
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		return fmt.Errorf("the one-time page cannot listen on %s: %v", oneLine(addr), err)
+	}
+	return ln.Close()
+}
+
+// takesPaste is nil when provider takes a pasted key or setup token, and
+// otherwise the refusal a paste would get. It asks lib with an empty token,
+// which is refused by its shape and sent nowhere.
+func takesPaste(provider string) error {
+	if _, err := rota.Lookup(provider); err != nil {
+		return err
+	}
+	if _, err := rota.PasteLong(provider, ""); err != nil && strings.HasSuffix(err.Error(), "takes no pasted key or token") {
+		return err
 	}
 	return nil
 }
@@ -147,8 +208,12 @@ func (c *cli) pickAddr(w *webAsk) (string, error) {
 		return loopback, nil
 	}
 	choices, err := pageChoices()
-	if err != nil || len(choices) == 0 {
+	switch {
+	case err != nil:
 		warn(c.err, "this machine's addresses cannot be listed (%v), so the one-time page listens on %s", err, loopback)
+		return loopback, nil
+	case len(choices) == 0:
+		warn(c.err, "this machine lists no address to offer, so the one-time page listens on %s", loopback)
 		return loopback, nil
 	}
 	ctx, stop := interrupted()
@@ -207,6 +272,11 @@ func (c *cli) webWait(s *store.Store, l *rota.Login, account int) error {
 		ends: time.UnixMilli(l.CreatedAt).Add(loginTTL), looked: make(chan lookedResult, 1)}
 	w.dir, _ = store.DefaultDir()
 	_ = s.Release()
+	// A login just begun had its address settled before it began; one named
+	// by its id is settled now, with the lock let go.
+	if err := c.readyWeb(); err != nil {
+		return c.stillOpen(w, err)
+	}
 	o.Ends = w.ends
 	o.Submit = func(ctx context.Context, code string) (string, error) {
 		s, err := c.openStoreCtx(ctx)
@@ -214,7 +284,9 @@ func (c *cli) webWait(s *store.Store, l *rota.Login, account int) error {
 			return "", err
 		}
 		defer s.Close()
-		waiting, err := c.finishOnce(ctx, s, l.ID, code)
+		work, cancel := checking(ctx)
+		defer cancel()
+		waiting, err := c.finishOnce(work, s, l.ID, code)
 		var refused *rota.OAuthError
 		switch {
 		case err == nil && waiting:
@@ -241,10 +313,6 @@ func (c *cli) webWait(s *store.Store, l *rota.Login, account int) error {
 // ends the page in the same words. A value being checked on the page is let
 // finish first: what it did is what is said.
 func (c *cli) awaitWeb(w *waitFor, o loginpage.Options) error {
-	addr, err := c.pickAddr(c.web)
-	if err != nil {
-		return c.stillOpen(w, err)
-	}
 	ctx, stop := interrupted()
 	defer stop()
 
@@ -263,8 +331,6 @@ func (c *cli) awaitWeb(w *waitFor, o loginpage.Options) error {
 		if closing {
 			return "", loginpage.Final(errors.New("this login is no longer open here"))
 		}
-		ctx, cancel := context.WithTimeout(ctx, finishTimeout)
-		defer cancel()
 		done, err := submit(ctx, v)
 		if err == nil {
 			accepted = true
@@ -273,7 +339,7 @@ func (c *cli) awaitWeb(w *waitFor, o loginpage.Options) error {
 		}
 		return done, err
 	}
-	o.Addr = pageAddr(addr)
+	o.Addr = pageAddr(c.web.Addr)
 	p, err := loginpage.Serve(ctx, o)
 	if err != nil {
 		return c.stillOpen(w, err)
