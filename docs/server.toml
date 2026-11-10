@@ -79,7 +79,8 @@ dir = ""  # where rota keeps everything; empty is $ROTA_HOME or ~/.rota
 # What happens to the accounts and sessions the daemon holds: an account
 # crossing its limit or needing a login, a session that wants you or ended,
 # somebody attaching. Nothing is sent anywhere unless a [[events.sink]] says
-# where; GET /v1/events streams the same events to whoever asks for them.
+# where; GET /v1/events streams the same events to a watcher or controller
+# who asks for them.
 [events]
 link = ""  # the address a phone opens this server at, so a message links to its
            # session: https://box.tail1234.ts.net:8787; empty sends no link

@@ -70,7 +70,7 @@ func TestSinksAreReadFromTheFile(t *testing.T) {
 	}
 	want := EventsSection{
 		Link: "https://box.tail1234.ts.net:8787",
-		Sink: []EventSink{
+		Sinks: []EventSink{
 			{Type: "telegram", On: []string{"account.*", "session.attention", "session.ended"},
 				BotTokenFile: token, ChatID: "123"},
 			{Type: "webhook", URL: "https://example.com/hook", SecretFile: secret},
@@ -130,6 +130,20 @@ func TestSinkRefusals(t *testing.T) {
 			"[[events.sink]] #1: url is empty; a webhook sink posts to one address", ""},
 		{"webhook over plain http", hook("http://example.com/services/XYZSECRET"),
 			"[[events.sink]] #1: a webhook goes over https, or over http only to this machine (127.0.0.1, ::1, localhost)", "XYZSECRET"},
+		{"http to a name that starts like loopback", hook("http://127.0.0.1.evil.example/x"),
+			"[[events.sink]] #1: a webhook goes over https, or over http only", "evil.example"},
+		{"http to a name that starts like localhost", hook("http://localhost.evil.example/x"),
+			"[[events.sink]] #1: a webhook goes over https, or over http only", "evil.example"},
+		{"http to every interface", hook("http://0.0.0.0/x"),
+			"[[events.sink]] #1: a webhook goes over https, or over http only", "0.0.0.0"},
+		{"http to loopback written as a number", hook("http://2130706433/x"),
+			"[[events.sink]] #1: a webhook goes over https, or over http only", "2130706433"},
+		{"http with loopback only in the fragment", hook("http://evil.example#@127.0.0.1/x"),
+			"[[events.sink]] #1: a webhook goes over https, or over http only", "evil.example"},
+		{"http to a localhost spelled with a long s", hook("http://localhoſt/x"),
+			"[[events.sink]] #1: a webhook goes over https, or over http only", "\u017f"},
+		{"blank chat", "[[events.sink]]\ntype = \"telegram\"\nbot_token_file = " + abs + "\nchat_id = \" \"\n",
+			"[[events.sink]] #1: chat_id is empty; a telegram sink sends to one chat", ""},
 		{"webhook over ftp", hook("ftp://example.com/XYZSECRET"),
 			"[[events.sink]] #1: a webhook goes over https, or over http only to this machine (127.0.0.1, ::1, localhost)", "XYZSECRET"},
 		{"webhook without host", hook("https:///XYZSECRET"),
@@ -167,12 +181,28 @@ func TestSinkRefusals(t *testing.T) {
 	}
 }
 
+// TestLoopbackIsASCII: localhost is matched as the ASCII word, so no
+// Unicode case folding turns another name into it.
+func TestLoopbackIsASCII(t *testing.T) {
+	for addr, want := range map[string]bool{
+		"localhost:1": true, "LocalHost:1": true, "127.0.0.1:1": true, "[::1]:1": true,
+		"localho\u017ft:1": false, "\uff4cocalhost:1": false, "localhost.:1": false, "0.0.0.0:1": false,
+	} {
+		if got := loopback(addr); got != want {
+			t.Errorf("loopback(%q) = %v, want %v", addr, got, want)
+		}
+	}
+}
+
 // TestSinksThatLoad: the addresses and programs a sink may have.
 func TestSinksThatLoad(t *testing.T) {
 	for _, file := range []string{
 		"[[events.sink]]\ntype = \"webhook\"\nurl = \"http://127.0.0.1:9/hook\"\n",
 		"[[events.sink]]\ntype = \"webhook\"\nurl = \"http://localhost/hook\"\n",
 		"[[events.sink]]\ntype = \"webhook\"\nurl = \"http://[::1]:9/hook\"\n",
+		"[[events.sink]]\ntype = \"webhook\"\nurl = \"http://[::ffff:127.0.0.1]/x\"\n",
+		"[[events.sink]]\ntype = \"webhook\"\nurl = \"http://127.255.0.1/x\"\n",
+		"[[events.sink]]\ntype = \"webhook\"\nurl = \"http://LOCALHOST/x\"\n",
 		"[[events.sink]]\ntype = \"webhook\"\nurl = \"https://x/y?z\"\n",
 		"[[events.sink]]\ntype = \"command\"\ncommand = [\"notify-send\", \"rota\"]\non = []\n",
 		"[[events.sink]]\ntype = \"command\"\ncommand = [" + quote(filepath.Join(t.TempDir(), "x")) + "]\non = [\"*\"]\n",
@@ -191,7 +221,7 @@ func TestSinksThatLoad(t *testing.T) {
 func TestPrintMasksTheWebhookURL(t *testing.T) {
 	token := filepath.Join(t.TempDir(), "telegram.token")
 	c := DefaultConfig()
-	c.Events.Sink = []EventSink{
+	c.Events.Sinks = []EventSink{
 		{Type: "telegram", BotTokenFile: token, ChatID: "123", On: []string{"account.*"}},
 		{Type: "webhook", URL: "https://hooks.example/services/T0/B0/XYZSECRET"},
 	}
@@ -226,7 +256,7 @@ func TestPrintedSinksReadBack(t *testing.T) {
 	c := DefaultConfig()
 	c.Events = EventsSection{
 		Link: "https://box.example",
-		Sink: []EventSink{
+		Sinks: []EventSink{
 			{Type: "telegram", BotTokenFile: filepath.Join(t.TempDir(), "t"), ChatID: "123", On: []string{"session.*"}},
 			{Type: "command", Command: []string{"logger"}, On: []string{}},
 			{Type: "command", Command: []string{"notify-send", "rota"}, On: []string{}},

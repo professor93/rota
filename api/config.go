@@ -366,17 +366,30 @@ func (c *Config) checkTerminal() error {
 // loopback reports whether an address is reachable only from this machine.
 // A host that is not an address at all — a name somebody put in the file —
 // counts as reachable from elsewhere unless it is localhost: what a name
-// resolves to is not this file's to decide.
+// resolves to is not this file's to decide. localhost is compared as ASCII,
+// because Unicode case folding would let another spelling, such as one with
+// a long s, pass for it.
 func loopback(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return false
 	}
-	if strings.EqualFold(host, "localhost") {
+	if asciiLower(host) == "localhost" {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// asciiLower lowers A-Z and leaves every other byte as it is.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // checkPrincipals says what is wrong with the people and the tokens this
@@ -644,6 +657,11 @@ func (c *Config) Print(w io.Writer, token string) error {
 	num := func(name string, v int) { key(name, strconv.Itoa(v)) }
 	span := func(name string, v time.Duration) { key(name, quote(duration(v))) }
 	list := func(name string, v []string) {
+		if len(v) > 0 && isSecret(name) {
+			key(name, quote("(set)"))
+			masked = true
+			return
+		}
 		quoted := make([]string, 0, len(v))
 		for _, s := range v {
 			quoted = append(quoted, quote(s))

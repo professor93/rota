@@ -19,8 +19,8 @@ type EventsSection struct {
 	// links to that session's page under it. Empty sends no link: the
 	// daemon cannot know which of its addresses somebody else reaches.
 	Link string `toml:"link"`
-	// Sink is each [[events.sink]], in the order the file has them.
-	Sink []EventSink `toml:"sink"`
+	// Sinks is each [[events.sink]], in the order the file has them.
+	Sinks []EventSink `toml:"sink"`
 }
 
 // EventSink is one [[events.sink]]: one place events go. Type says which
@@ -95,7 +95,7 @@ func (c *Config) checkEvents() error {
 	if l := c.Events.Link; l != "" && !pageAddress(l) {
 		return errors.New("events.link must be an http or https address, as a phone opens it")
 	}
-	for i, s := range c.Events.Sink {
+	for i, s := range c.Events.Sinks {
 		if err := s.check(); err != nil {
 			return fmt.Errorf("%s: %w", entryName("events.sink", i, ""), err)
 		}
@@ -142,7 +142,7 @@ func (s EventSink) check() error {
 		if !filepath.IsAbs(s.BotTokenFile) {
 			return errors.New("bot_token_file must be an absolute path")
 		}
-		if s.ChatID == "" {
+		if strings.TrimSpace(s.ChatID) == "" {
 			return errors.New("chat_id is empty; a telegram sink sends to one chat")
 		}
 	case sinkWebhook:
@@ -203,7 +203,7 @@ func webhookURL(raw string) error {
 func (c *Config) printEvents(body *strings.Builder, str func(name, v string), list func(name string, v []string)) {
 	body.WriteString("\n[events]\n")
 	str("events.link", c.Events.Link)
-	for i, s := range c.Events.Sink {
+	for i, s := range c.Events.Sinks {
 		at := func(k string) string { return fmt.Sprintf("events.sink.%d.%s", i, k) }
 		body.WriteString("\n[[events.sink]]\n")
 		str(at("type"), s.Type)
