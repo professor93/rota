@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/professor93/rota/internal/logins"
 	rota "github.com/professor93/rota/lib"
 )
 
@@ -98,6 +99,19 @@ func parked(t *testing.T, home string) string {
 	return string(raw)
 }
 
+// boundTo is the account the store says the parked login with this id was
+// begun for, zero for none.
+func boundTo(t *testing.T, home, id string) int {
+	t.Helper()
+	m := map[string]int{}
+	if raw, err := os.ReadFile(filepath.Join(home, "homes", "pending-for.json")); err == nil {
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("the bindings: %v %s", err, raw)
+		}
+	}
+	return m[id]
+}
+
 func TestLoginByAccountIDStartsALoginBoundToIt(t *testing.T) {
 	home := seedTwoClaude(t)
 	out, errOut, code := call(t, "login", "12")
@@ -111,15 +125,18 @@ func TestLoginByAccountIDStartsALoginBoundToIt(t *testing.T) {
 		t.Fatalf("no URL: %q", out)
 	}
 	id := loginIDFrom(t, out)
-	if p := parked(t, home); !strings.Contains(p, `"account": 12`) || !strings.Contains(p, id) {
+	if p := parked(t, home); !strings.Contains(p, id) || boundTo(t, home, id) != 12 {
 		t.Fatalf("not bound: %s", p)
 	}
 
 	// --json is the login, as a login that starts anywhere else prints it.
 	out, _, code = call(t, "--json", "login", "13")
-	var l rota.Login
+	var l logins.Reply
 	if err := json.Unmarshal([]byte(out), &l); code != 0 || err != nil || l.Account != 13 || l.URL == "" || l.Kind != "code" {
 		t.Fatalf("%d %v %q", code, err, out)
+	}
+	if boundTo(t, home, l.ID) != 13 {
+		t.Fatal("not bound")
 	}
 }
 

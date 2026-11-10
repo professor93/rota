@@ -1,17 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/professor93/rota/internal/logins"
 	rota "github.com/professor93/rota/lib"
 )
 
@@ -333,6 +336,92 @@ func TestLoginOnATerminalSaysWhenAnotherRotaFinishedIt(t *testing.T) {
 	}
 }
 
+// An unbound login finished in another shell made or changed an account of its
+// provider, which is what makes it finished there.
+func TestAnUnboundLoginFinishedByAnotherRotaIsSaidToBe(t *testing.T) {
+	home := seedTwoClaude(t)
+	approvalsByCode(t, known)
+	typing(t, "")
+	was := pendingCheck
+	pendingCheck = 20 * time.Millisecond
+	t.Cleanup(func() { pendingCheck = was })
+	duringWait(t, func(context.Context) {
+		if out, errOut, code := call(t, "login", parkedID(t, home), "STRANGER"); code != 0 {
+			t.Errorf("the other shell: %d %q %q", code, out, errOut)
+		}
+	})
+	out, errOut, code := call(t, "login")
+	if code != 0 || !strings.Contains(errOut, "another rota finished it") {
+		t.Fatalf("%d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// A login gone from the store with no account signed in by it was not
+// finished, whatever took it: it says so, exits 1, and the account it was for
+// is as it was. A store somebody removed is not made again by looking.
+func TestALoginThatVanishedUnfinishedIsNotSaidToBeFinished(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		typed  string
+		check  time.Duration
+		vanish func(t *testing.T, home string)
+	}{
+		{"its file torn, noticed by itself", "", 20 * time.Millisecond, func(t *testing.T, home string) {
+			if err := os.WriteFile(filepath.Join(home, "homes", "pending.json"), []byte("{not json"), 0o600); err != nil {
+				t.Error(err)
+			}
+		}},
+		{"its file torn, noticed at the next line", "AS12\n", time.Hour, func(t *testing.T, home string) {
+			if err := os.WriteFile(filepath.Join(home, "homes", "pending.json"), []byte("{not json"), 0o600); err != nil {
+				t.Error(err)
+			}
+		}},
+		{"the store removed", "", 20 * time.Millisecond, func(t *testing.T, home string) {
+			if err := os.RemoveAll(home); err != nil {
+				t.Error(err)
+			}
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			home := seedTwoClaude(t)
+			approvalsByCode(t, known)
+			typing(t, c.typed)
+			was := pendingCheck
+			pendingCheck = c.check
+			t.Cleanup(func() { pendingCheck = was })
+			duringWait(t, func(context.Context) { c.vanish(t, home) })
+			out, errOut, code := call(t, "login", "12")
+			if code != 1 || !strings.Contains(errOut, "no account was signed in by it") || strings.Contains(out+errOut, "finished it") {
+				t.Fatalf("%d\n%s\n%s", code, out, errOut)
+			}
+			if !strings.Contains(errOut, "`rota login 12`") {
+				t.Fatalf("how to begin again: %q", errOut)
+			}
+			if _, err := os.Stat(home); err == nil && c.name == "the store removed" {
+				t.Fatal("the look made the removed store again")
+			}
+			if c.name != "the store removed" && !readAccounts(t, home).Accounts[0].Dead {
+				t.Fatal("account 12 changed")
+			}
+		})
+	}
+}
+
+// The prompt and every error of the wait go to standard error, so a wait with
+// it elsewhere would show nothing to answer.
+func TestLoginWithItsErrorsElsewhereDoesNotWait(t *testing.T) {
+	home := seedTwoClaude(t)
+	typing(t, "")
+	var out, errb bytes.Buffer
+	was := loginTerminal
+	loginTerminal = func(end any) bool { return end != any(&errb) }
+	t.Cleanup(func() { loginTerminal = was })
+	code := run([]string{"login", "12"}, &out, &errb)
+	if code != 0 || strings.Contains(errb.String(), "left") || !strings.Contains(parked(t, home), loginIDFrom(t, out.String())) {
+		t.Fatalf("%d\n%s\n%s", code, out.String(), errb.String())
+	}
+}
+
 // The URL goes to standard output, so a wait whose output is not a terminal
 // would leave a person with a prompt and nothing to open.
 func TestLoginWithItsOutputElsewhereDoesNotWait(t *testing.T) {
@@ -379,7 +468,7 @@ func TestLoginWithoutATerminalOrWithJSONIsTwoSteps(t *testing.T) {
 		home := seedTwoClaude(t)
 		typing(t, "")
 		out, errOut, code := call(t, "--json", "login", "12")
-		var l rota.Login
+		var l logins.Reply
 		if err := json.Unmarshal([]byte(out), &l); code != 0 || err != nil || l.Account != 12 || errOut != "" {
 			t.Fatalf("%d %v\n%s\n%s", code, err, out, errOut)
 		}

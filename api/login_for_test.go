@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -53,6 +54,20 @@ func TestBeginningALoginOverHTTPKeepsItsStateToItself(t *testing.T) {
 	}
 }
 
+// boundIn is which parked logins the store says were begun for an account.
+func boundIn(t *testing.T, dir string) map[string]int {
+	t.Helper()
+	m := map[string]int{}
+	raw, err := os.ReadFile(filepath.Join(dir, "homes", "pending-for.json"))
+	if err == nil {
+		err = json.Unmarshal(raw, &m)
+	}
+	if err != nil {
+		t.Fatalf("the bindings: %v %s", err, raw)
+	}
+	return m
+}
+
 // addAccounts puts these accounts in the harness's store beside the ones it
 // was made with.
 func addAccounts(t *testing.T, dir string, accounts ...map[string]any) {
@@ -100,14 +115,14 @@ func TestBeginningALoginForAnAccountOverHTTP(t *testing.T) {
 	if _, ok := doc["state"]; ok {
 		t.Fatalf("the state went out: %s", raw)
 	}
-	s, err := store.Open(h.dir)
-	if err != nil {
-		t.Fatal(err)
+	id, _ := doc["id"].(string)
+	var kept map[string]rota.Login
+	raw, err := os.ReadFile(filepath.Join(h.dir, "homes", "pending.json"))
+	if err := errors.Join(err, json.Unmarshal(raw, &kept)); err != nil || kept[id].State["verifier"] == "" {
+		t.Fatalf("not parked: %v %s", err, raw)
 	}
-	l, err := s.PendingLogin(doc["id"].(string))
-	s.Close()
-	if err != nil || l == nil || l.Account != 1 || l.State["verifier"] == "" {
-		t.Fatalf("not parked for account 1: %+v %v", l, err)
+	if b := boundIn(t, h.dir); b[id] != 1 {
+		t.Fatalf("not bound to account 1: %v", b)
 	}
 
 	for _, c := range []struct {
@@ -186,7 +201,10 @@ func TestFinishingALoginBegunForAnAccountOverHTTPIsHeldToIt(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if p, err := s.PendingLogin(l.ID); err != nil || p == nil || p.Account != 1 {
+	if p, err := s.PendingLogin(l.ID); err != nil || p == nil {
 		t.Fatalf("the parked login must stay: %+v %v", p, err)
+	}
+	if b := boundIn(t, h.dir); b[l.ID] != 1 {
+		t.Fatalf("and stay bound: %v", b)
 	}
 }

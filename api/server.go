@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/logins"
 	"github.com/professor93/rota/internal/pty"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/rotation"
@@ -1476,7 +1477,7 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 		s.report(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, wire.DescribeLogin(l))
+	writeJSON(w, http.StatusOK, logins.ReplyOf(l, body.Account))
 }
 
 // loginKey makes or updates the account an API key belongs to. A key the API

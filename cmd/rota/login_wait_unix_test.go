@@ -15,6 +15,7 @@ import (
 
 	"github.com/professor93/rota/internal/pty"
 	rota "github.com/professor93/rota/lib"
+	"github.com/professor93/rota/store"
 )
 
 // ^C while the command waits ends the wait with the status an interrupt
@@ -34,6 +35,36 @@ func TestLoginOnATerminalLeavesTheLoginOpenOnAnInterrupt(t *testing.T) {
 	id := loginIDFrom(t, out)
 	if !strings.Contains(errOut, "rota login "+id+" <code>") || !strings.Contains(parked(t, home), id) {
 		t.Fatalf("not left open: %q %s", errOut, parked(t, home))
+	}
+}
+
+// The look at whether the login is still parked takes the store's lock, which
+// another rota may hold for half a minute. ^C is not held up behind it.
+func TestAnInterruptIsNotHeldBehindTheStoreLock(t *testing.T) {
+	home := seedTwoClaude(t)
+	typing(t, "")
+	was := pendingCheck
+	pendingCheck = 20 * time.Millisecond
+	t.Cleanup(func() { pendingCheck = was })
+	var sent atomic.Int64
+	duringWait(t, func(context.Context) {
+		other, err := store.Open(home) // another rota, holding the lock
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		go func() {
+			time.Sleep(200 * time.Millisecond)
+			sent.Store(time.Now().UnixNano())
+			syscall.Kill(os.Getpid(), syscall.SIGINT)
+			time.Sleep(3 * time.Second)
+			other.Close()
+		}()
+	})
+	r := result(t, callAsync(t, "login", "12"))
+	took := time.Duration(time.Now().UnixNano() - sent.Load())
+	if r.code != 130 || took > time.Second {
+		t.Fatalf("%d, %v after ^C\n%s\n%s", r.code, took, r.out, r.err)
 	}
 }
 
@@ -128,7 +159,13 @@ func TestAKeyTypedAtARealTerminalIsNotShown(t *testing.T) {
 				master.Close()
 			})
 			screen.wait(t, "it is not shown")
-			if tio, ok := termios(master.Fd()); ok && tio.Lflag&syscall.ECHO != 0 {
+			// The prompt is printed with the echo already off, so the moment it
+			// shows is a moment the terminal echoes nothing.
+			tio, ok := termios(master.Fd())
+			if !ok {
+				t.Fatal("the pseudo-terminal's settings cannot be read")
+			}
+			if tio.Lflag&syscall.ECHO != 0 {
 				t.Fatal("the terminal echoes what is typed at the key prompt")
 			}
 			if _, err := master.Write([]byte(c.typed)); err != nil {

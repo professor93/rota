@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +10,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/professor93/rota/internal/logins"
 	rota "github.com/professor93/rota/lib"
 )
 
@@ -18,29 +18,10 @@ import (
 // rota.Begin and Login.Complete — need no storage at all; a caller that keeps
 // its own accounts uses those directly and never touches a Store.
 
-// PendingTTL bounds how long a half-finished login is kept, counted from its
-// CreatedAt; the authorization code dies server-side within minutes anyway.
-// Past it, FinishLogin no longer finds the login (rota.ErrNoLogin), so a
-// caller waiting on somebody to approve one can say how long is left.
-const PendingTTL = 15 * time.Minute
-
-// Unfinishable reports whether err is FinishLogin turning down a login no
-// approval can finish: one begun for an account that has since been removed,
-// or approved by that account's e-mail under another of the provider's ids,
-// which approving again would only repeat. The login stays parked, as after
-// every refusal, and runs out by itself; a caller waiting for somebody to
-// approve it again stops waiting. Every other error, rota.ErrNoLogin and a
-// rejected code included, is not this.
-func Unfinishable(err error) bool {
-	var u unfinishable
-	return errors.As(err, &u)
-}
-
-// unfinishable marks a refusal as one Unfinishable reports, and is otherwise
-// the refusal it carries, rota.ErrInvalidRequest and all.
-type unfinishable struct{ error }
-
-func (u unfinishable) Unwrap() error { return u.error }
+// pendingTTL bounds how long a half-finished login is kept; the
+// authorization code dies server-side within minutes anyway. The command
+// that waits for one reads the same bound, so it lives where both can.
+const pendingTTL = logins.TTL
 
 // BeginLogin starts a login with a provider ("" for DefaultProvider) and
 // parks its state so a later FinishLogin — in another process — can pick it
@@ -58,8 +39,11 @@ func (s *Store) BeginLongLogin(ctx context.Context, provider string) (*rota.Logi
 }
 
 // BeginLoginFor starts an ordinary login for the account with this id and
-// parks it the same way, with the account's id on it (rota.Login.Account).
-// FinishLogin then signs in that account or nothing: see boundAccount.
+// parks it the same way, remembering the account with it. FinishLogin then
+// signs in that account or nothing: an approval by any other account, by one
+// the store does not hold or by a reply that names nobody is refused with
+// rota.ErrInvalidRequest, nothing is written, and the login stays parked, so
+// approving again as the right account finishes it.
 //
 // It is for an account whose login rota holds, a dead one above all. What has
 // no sign-in to start is refused here, before anybody is sent to a browser: an
@@ -94,8 +78,7 @@ func (s *Store) BeginLoginFor(ctx context.Context, id int) (*rota.Login, error) 
 	case "delegated":
 		return nil, signsItselfIn(a)
 	}
-	l.Account = a.ID
-	return s.park(l, nil)
+	return l, s.keep(l, a.ID)
 }
 
 func signsItselfIn(a *rota.Account) error {
@@ -106,12 +89,29 @@ func (s *Store) park(l *rota.Login, err error) (*rota.Login, error) {
 	if err != nil {
 		return nil, err
 	}
+	return l, s.keep(l, 0)
+}
+
+// keep parks l, begun for account (zero for none). The binding is written
+// before the login, so that a login is never parked unbound when it was
+// begun for an account.
+func (s *Store) keep(l *rota.Login, account int) error {
 	m, err := s.loadPendings()
 	if err != nil {
-		return nil, err
+		return err
+	}
+	if account != 0 {
+		b, err := s.loadBound()
+		if err != nil {
+			return err
+		}
+		b[l.ID] = account
+		if err := s.saveBound(b, m, l.ID); err != nil {
+			return err
+		}
 	}
 	m[l.ID] = l
-	return l, s.savePendings(m)
+	return s.savePendings(m)
 }
 
 // PendingLogin is the parked login with this id, or nil when there is none.
@@ -135,7 +135,8 @@ func (s *Store) PendingLogin(id string) (*rota.Login, error) {
 // rather than a whole login; ErrAuthPending is passed through unchanged.
 //
 // A login begun for one account (BeginLoginFor) updates that account or
-// nothing, however the approval went: see boundAccount.
+// nothing, however the approval went; an account with an e-mail and no uuid
+// takes the approval of that e-mail, and its uuid with it.
 func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Account, added bool, err error) {
 	m, err := s.loadPendings()
 	if err != nil {
@@ -145,6 +146,13 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 	if l == nil {
 		return nil, false, rota.WrapNoLogin(id)
 	}
+	// Which account it was begun for is read before anything is sent: a
+	// binding that cannot be read must not let the login finish unbound.
+	bound, err := s.loadBound()
+	if err != nil {
+		return nil, false, err
+	}
+	account := bound[id]
 	tok, err := l.Complete(ctx, code)
 	if err != nil {
 		return nil, false, err
@@ -158,7 +166,7 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 		return a, false, s.savePendings(m)
 	}
 	a = rota.MatchIdentity(s.Accounts, l.Provider, tok.Identity)
-	if a, err = s.boundAccount(l, tok, a); err != nil {
+	if a, err = s.boundAccount(l, account, tok, a); err != nil {
 		return nil, false, err
 	}
 	if a == nil {
@@ -179,13 +187,17 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 		return nil, false, err
 	}
 	delete(m, id)
-	return a, added, s.savePendings(m)
+	if err := s.savePendings(m); err != nil || account == 0 {
+		return a, added, err
+	}
+	return a, added, s.saveBound(bound, m, "")
 }
 
-// boundAccount is the account a finished login signs in, given the account
-// its approval resolved to by itself (approved, nil for none). A login that
-// names no account takes that answer as it stands. One begun for an account
-// signs in that account or is refused.
+// boundAccount is the account a finished login signs in, given the account it
+// was begun for (account, zero for none) and the account its approval
+// resolved to by itself (approved, nil for none). A login that names no
+// account takes that answer as it stands. One begun for an account signs in
+// that account or is refused.
 //
 // Several accounts in one browser make approving as the wrong one the likely
 // mistake, and taking it would leave the account that was asked for dead while
@@ -200,14 +212,14 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 // its e-mail is enough here, and the approval gives it its uuid. MatchIdentity
 // does not do that, and must not for a login that names nobody: there the
 // e-mail would decide whose account a stranger's login lands on.
-func (s *Store) boundAccount(l *rota.Login, tok *rota.Token, approved *rota.Account) (*rota.Account, error) {
-	if l.Account == 0 {
+func (s *Store) boundAccount(l *rota.Login, account int, tok *rota.Token, approved *rota.Account) (*rota.Account, error) {
+	if account == 0 {
 		return approved, nil
 	}
-	named := s.Find(l.Account)
+	named := s.Find(account)
 	if named == nil {
-		return nil, unfinishable{rota.Invalid("%s account %d, which this login was begun for, is no longer here; nothing was stored, and `rota login %s` starts a login of its own",
-			l.Provider, l.Account, l.Provider)}
+		return nil, logins.MarkUnfinishable(rota.Invalid("%s account %d, which this login was begun for, is no longer here; nothing was stored, and `rota login %s` starts a login of its own",
+			l.Provider, account, l.Provider))
 	}
 	if approved == named {
 		return named, nil
@@ -231,8 +243,8 @@ func (s *Store) boundAccount(l *rota.Login, tok *rota.Token, approved *rota.Acco
 		if approved != nil {
 			out = fmt.Sprintf("that approval is account %d's", approved.ID)
 		}
-		return nil, unfinishable{rota.Invalid("this login is for account %d, and the e-mail %s matches, but the provider's account id differs: %s here, %s approved; nothing was stored; %s, and `rota remove %d` drops the old one",
-			named.ID, name, idOrNone(named.UUID), idOrNone(id.UUID), out, named.ID)}
+		return nil, logins.MarkUnfinishable(rota.Invalid("this login is for account %d, and the e-mail %s matches, but the provider's account id differs: %s here, %s approved; nothing was stored; %s, and `rota remove %d` drops the old one",
+			named.ID, name, idOrNone(named.UUID), idOrNone(id.UUID), out, named.ID))
 	}
 	if approved != nil {
 		return nil, rota.Invalid("this login is for account %d (%s), but it was approved as %s, which is account %d; nothing was stored; %s",
@@ -393,6 +405,63 @@ func (s *Store) pendingPath() string {
 	return filepath.Join(s.homeRoot, "pending.json")
 }
 
+// boundPath is where the store keeps which parked logins were begun for an
+// account (BeginLoginFor), as login id to account id. The binding is the
+// store's business rather than the login's, so it is not on rota.Login; and it
+// is a file of its own beside pending.json rather than a key in it, so that a
+// rota from before bound logins, which reads pending.json and writes it back,
+// cannot drop a binding it knows nothing about.
+//
+// Such a rota can still finish a bound login: it never reads this file, so it
+// finishes the login unbound, whoever approved it. That is the residual, open
+// for as long as a login stays parked (pendingTTL) across an upgrade, with an
+// older rota serving or on PATH; every rota from this one on refuses.
+func (s *Store) boundPath() string {
+	return filepath.Join(s.homeRoot, "pending-for.json")
+}
+
+// loadBound reads the bindings. Unlike pending.json, a file here that cannot
+// be read is an error rather than nothing: taken as empty, it would let a
+// login begun for one account be finished by any other.
+func (s *Store) loadBound() (map[string]int, error) {
+	m := map[string]int{}
+	raw, err := os.ReadFile(s.boundPath())
+	if os.IsNotExist(err) {
+		return m, nil
+	}
+	if err == nil {
+		err = rota.UnmarshalLenient(raw, &m)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("%s cannot be read, so whether a login was begun for an account cannot be told (%v); "+
+			"remove it and pending.json beside it, then begin the login again", s.boundPath(), err)
+	}
+	return m, nil
+}
+
+// saveBound writes the bindings, keeping only those of logins still parked in
+// pending (and keep, which is about to be). A binding outlives its login only
+// until the next one is written.
+func (s *Store) saveBound(b map[string]int, pending map[string]*rota.Login, keep string) error {
+	for id := range b {
+		if pending[id] == nil && id != keep {
+			delete(b, id)
+		}
+	}
+	if len(b) == 0 {
+		err := os.Remove(s.boundPath())
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	raw, err := rota.EncodeIndent(b)
+	if err != nil {
+		return err
+	}
+	return writeAtomic(s.boundPath(), append(raw, '\n'))
+}
+
 // loadPendings reads the parked logins, dropping any past their TTL. A
 // corrupt file is treated as empty: nothing in it is worth more than a
 // fresh login.
@@ -409,7 +478,7 @@ func (s *Store) loadPendings() (map[string]*rota.Login, error) {
 		return map[string]*rota.Login{}, nil
 	}
 	for id, l := range m {
-		if l == nil || time.Since(time.UnixMilli(l.CreatedAt)) > PendingTTL {
+		if l == nil || time.Since(time.UnixMilli(l.CreatedAt)) > pendingTTL {
 			delete(m, id)
 		}
 	}

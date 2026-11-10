@@ -187,8 +187,12 @@ func (c *cli) askSecret(what string) (string, error) {
 	)
 	switch {
 	case tty != nil && isTerminal(tty):
-		fmt.Fprintf(c.err, "Paste the %s (it is not shown): ", what)
-		s, err = noEcho(tty, line)
+		// The prompt is printed once the echo is off, so nothing typed ahead
+		// of it is shown either.
+		s, err = noEcho(tty, func() (string, error) {
+			fmt.Fprintf(c.err, "Paste the %s (it is not shown): ", what)
+			return line()
+		})
 		fmt.Fprintln(c.err)
 	case tty != nil && !canHideInput && isCharDevice(tty):
 		return "", fmt.Errorf("this terminal cannot hide what is typed, so rota does not read the %s from it; "+

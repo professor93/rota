@@ -3,14 +3,17 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
 
+	"github.com/professor93/rota/internal/logins"
 	rota "github.com/professor93/rota/lib"
 )
 
@@ -102,27 +105,85 @@ func (w *boundWorld) refused(t *testing.T, as *rota.Identity, words ...string) e
 	return err
 }
 
-// What a login names is remembered with it, and only a login begun for an
-// account names one.
-func TestBeginLoginForParksTheAccountWithTheLogin(t *testing.T) {
+// What a login was begun for is kept beside it, in a file of the store's own;
+// the parked login is the login and nothing else, and only a login begun for
+// an account is bound to one.
+func TestBeginLoginForKeepsTheAccountBesideTheLogin(t *testing.T) {
 	w := newBoundWorld(t, "t-bound-park")
-	if w.login.Account != w.named.ID || w.login.Provider != "t-bound-park" || w.login.Kind != "code" {
+	if w.login.Provider != "t-bound-park" || w.login.Kind != "code" {
 		t.Fatalf("%+v", w.login)
 	}
+	b, err := w.s.loadBound()
+	if err != nil || b[w.login.ID] != w.named.ID {
+		t.Fatalf("not bound to account %d: %v %v", w.named.ID, b, err)
+	}
+	raw, _ := os.ReadFile(w.s.pendingPath())
+	if bytes.Contains(raw, []byte(`"account"`)) {
+		t.Fatalf("the binding is in the parked login: %s", raw)
+	}
 	again, err := w.s.PendingLogin(w.login.ID)
-	if err != nil || again == nil || again.Account != w.named.ID {
-		t.Fatalf("not parked: %+v %v", again, err)
+	if err != nil || again == nil || !reflect.DeepEqual(again, w.login) {
+		t.Fatalf("the login read back is not the login begun: %+v %v", again, err)
 	}
 	if _, err := w.s.BeginLoginFor(context.Background(), 99); !errors.Is(err, rota.ErrNoAccount) {
 		t.Fatalf("no such account: %v", err)
 	}
 	l, err := w.s.BeginLogin(context.Background(), "t-bound-park")
-	if err != nil || l.Account != 0 {
-		t.Fatalf("an ordinary login names nobody: %+v %v", l, err)
+	if err != nil {
+		t.Fatal(err)
 	}
-	raw, err := rota.EncodeIndent(l)
-	if err != nil || bytes.Contains(raw, []byte(`"account"`)) {
-		t.Fatalf("the field is written for nobody: %s %v", raw, err)
+	if b, _ := w.s.loadBound(); len(b) != 1 || b[l.ID] != 0 {
+		t.Fatalf("an ordinary login is bound to nobody: %v", b)
+	}
+
+	// Finished, the binding goes with the login.
+	w.p.identity = &rota.Identity{UUID: "u-named", Email: "named@x"}
+	if _, _, err := w.s.FinishLogin(context.Background(), w.login.ID, "NEW"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(w.s.boundPath()); !os.IsNotExist(err) {
+		t.Fatalf("the binding of a finished login is kept: %v", err)
+	}
+}
+
+// A rota from before bound logins reads the parked logins and writes them
+// back as the logins it knows. That cannot drop a binding, which is not in
+// that file.
+func TestABindingOutlivesAnOlderRotaRewritingTheParkedLogins(t *testing.T) {
+	w := newBoundWorld(t, "t-bound-older")
+	raw, err := os.ReadFile(w.s.pendingPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var older map[string]*rota.Login // what an older rota decodes it into
+	if err := json.Unmarshal(raw, &older); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := rota.EncodeIndent(older)
+	if err := os.WriteFile(w.s.pendingPath(), append(again, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w.refused(t, &rota.Identity{UUID: "u-new", Email: "stranger@x"}, "stranger@x", "account 1")
+}
+
+// A binding that cannot be read lets no login finish, rather than letting a
+// login begun for one account be finished by any.
+func TestABindingThatCannotBeReadLetsNothingFinish(t *testing.T) {
+	w := newBoundWorld(t, "t-bound-torn")
+	if err := os.WriteFile(w.s.boundPath(), []byte("{torn"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := w.saved(t)
+	w.p.identity = &rota.Identity{UUID: "u-new", Email: "stranger@x"}
+	_, added, err := w.s.FinishLogin(context.Background(), w.login.ID, "CODE")
+	if err == nil || added || !strings.Contains(err.Error(), "pending-for.json") {
+		t.Fatalf("added=%v err=%v", added, err)
+	}
+	if !bytes.Equal(before, w.saved(t)) || len(w.s.Accounts) != 2 {
+		t.Fatalf("written: %s", w.saved(t))
+	}
+	if _, err := w.s.BeginLoginFor(context.Background(), w.named.ID); err == nil {
+		t.Fatal("a binding written over one that cannot be read")
 	}
 }
 
@@ -186,7 +247,7 @@ func TestFinishLoginRefusesWhenTheNamedAccountIsGone(t *testing.T) {
 	if !bytes.Equal(before, w.saved(t)) || len(w.s.Accounts) != 1 {
 		t.Fatalf("written: %s", w.saved(t))
 	}
-	if !Unfinishable(err) {
+	if !logins.Unfinishable(err) {
 		t.Fatalf("no approval can finish a login for an account that is gone: %v", err)
 	}
 	if l, _ := w.s.PendingLogin(w.login.ID); l == nil {
@@ -247,7 +308,7 @@ func TestFinishLoginSaysSoWhenOnlyTheEmailMatches(t *testing.T) {
 	if strings.Contains(err.Error(), "approve again") {
 		t.Fatalf("telling them to do again what cannot work: %v", err)
 	}
-	if !Unfinishable(err) || !errors.Is(err, rota.ErrInvalidRequest) {
+	if !logins.Unfinishable(err) || !errors.Is(err, rota.ErrInvalidRequest) {
 		t.Fatalf("a refusal approving again cannot put right: %v", err)
 	}
 }
@@ -257,14 +318,14 @@ func TestFinishLoginSaysSoWhenOnlyTheEmailMatches(t *testing.T) {
 func TestOnlyWhatNoApprovalCanFinishIsUnfinishable(t *testing.T) {
 	w := newBoundWorld(t, "t-bound-finishable")
 	for _, as := range []*rota.Identity{{UUID: "u-other", Email: "other@x"}, {UUID: "u-new", Email: "s@x"}, nil} {
-		if err := w.refused(t, as); Unfinishable(err) {
+		if err := w.refused(t, as); logins.Unfinishable(err) {
 			t.Fatalf("approving again can finish this: %v", err)
 		}
 	}
-	if _, _, err := w.s.FinishLogin(context.Background(), w.login.ID, "bad"); err == nil || Unfinishable(err) {
+	if _, _, err := w.s.FinishLogin(context.Background(), w.login.ID, "bad"); err == nil || logins.Unfinishable(err) {
 		t.Fatalf("a rejected code: %v", err)
 	}
-	if _, _, err := w.s.FinishLogin(context.Background(), "zzzzzz", ""); Unfinishable(err) || Unfinishable(nil) {
+	if _, _, err := w.s.FinishLogin(context.Background(), "zzzzzz", ""); logins.Unfinishable(err) || logins.Unfinishable(nil) {
 		t.Fatalf("no such login: %v", err)
 	}
 }
@@ -281,7 +342,7 @@ func TestFinishLoginNamesTheAccountThatHasTheSameEmail(t *testing.T) {
 	if strings.Contains(err.Error(), "of its own") || strings.Contains(err.Error(), "approve again") {
 		t.Fatalf("offers what would not happen: %v", err)
 	}
-	if !Unfinishable(err) {
+	if !logins.Unfinishable(err) {
 		t.Fatalf("a refusal approving again cannot put right: %v", err)
 	}
 }
@@ -354,7 +415,10 @@ func TestTheOlderCopyRemedyBeginsALogin(t *testing.T) {
 	}
 	id, _ := strconv.Atoi(m[1])
 	l, err := w.s.BeginLoginFor(context.Background(), id)
-	if err != nil || l.Account != w.named.ID {
-		t.Fatalf("%+v %v", l, err)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := w.s.loadBound(); b[l.ID] != w.named.ID {
+		t.Fatalf("not begun for account %d: %v", w.named.ID, b)
 	}
 }

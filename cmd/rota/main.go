@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/professor93/rota/api"
+	"github.com/professor93/rota/internal/logins"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
 	"github.com/professor93/rota/rotation"
@@ -445,7 +446,7 @@ const loginUsage = `usage: rota login [provider]             start a new account
        rota login <account-id>           sign it in again; only that account's approval finishes it
        rota login <account-id> [options] one whose CLI keeps its own credentials, through that CLI
 
-At a terminal, a login started here waits for what finishes it: the code, or a key, unseen.
+At a terminal, a login started here waits for the code from the page.
 
 `
 
@@ -471,7 +472,7 @@ func (c *cli) begin(s *store.Store, provider string, long bool) error {
 		return err
 	}
 	if c.json {
-		return c.emit(wire.DescribeLogin(l))
+		return c.emit(logins.ReplyOf(l, 0))
 	}
 	if long {
 		// Which account is approved is the whole of this flow: the token is
@@ -480,7 +481,7 @@ func (c *cli) begin(s *store.Store, provider string, long bool) error {
 		fmt.Fprintf(c.out, "Open this and approve as the %s account the token is for — it must already be in `rota list`:\n\n  %s\n\n", l.Provider, l.URL)
 		fmt.Fprintf(c.out, "Then: rota login %s <code>\n"+
 			"  — stores a token that lasts a year, so a window or a daemon outlives the 8-hour one.\n", l.ID)
-		return c.afterBegin(s, l)
+		return c.afterBegin(s, l, 0)
 	}
 	fmt.Fprintf(c.out, "Open this and approve access as your %s account:\n\n  %s\n\n", l.Provider, l.URL)
 	c.thenFinish(l)
@@ -489,7 +490,7 @@ func (c *cli) begin(s *store.Store, provider string, long bool) error {
 			"  — registers the account and prints one command that signs %s in itself,\n"+
 			"    keeping its own credentials in a directory rota reserves for it.\n", l.ID, l.Provider)
 	}
-	return c.afterBegin(s, l)
+	return c.afterBegin(s, l, 0)
 }
 
 // beginFor starts a login that only this account's approval can finish. Which
@@ -501,7 +502,7 @@ func (c *cli) beginFor(s *store.Store, a *rota.Account) error {
 		return err
 	}
 	if c.json {
-		return c.emit(wire.DescribeLogin(l))
+		return c.emit(logins.ReplyOf(l, a.ID))
 	}
 	who := oneLine(a.Email)
 	if who == "" {
@@ -510,7 +511,7 @@ func (c *cli) beginFor(s *store.Store, a *rota.Account) error {
 	fmt.Fprintf(c.out, "Open this and approve access as %s, which is %s account %d; no other account's approval will finish it:\n\n  %s\n\n",
 		who, oneLine(a.Provider), a.ID, l.URL)
 	c.thenFinish(l)
-	return c.afterBegin(s, l)
+	return c.afterBegin(s, l, a.ID)
 }
 
 // thenFinish says how a login of this kind is finished.
