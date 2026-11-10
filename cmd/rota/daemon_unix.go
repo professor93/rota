@@ -63,6 +63,10 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 	return nil
 }
 
+// daemonBinary is the rota serve start runs as the daemon: invokedAs. A
+// variable so a test can name one that cannot be run.
+var daemonBinary = invokedAs
+
 // spawnDaemon starts the daemon in a session of its own, in /, on the store
 // this command names, written down by absolute path, with nothing of this
 // terminal's or of an account a CLI rota launched runs as (daemonEnv), and
@@ -108,7 +112,7 @@ func (c *cli) spawnDaemon(ctlOnly bool, conf string) (*daemonStart, error) {
 		from = fi.Size()
 	}
 
-	exe, err := invokedAs()
+	exe, err := daemonBinary()
 	if err != nil {
 		return nil, err
 	}
@@ -131,7 +135,7 @@ func (c *cli) spawnDaemon(ctlOnly bool, conf string) (*daemonStart, error) {
 	cmd.Env = env
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("starting the rota daemon: %w", err)
+		return nil, fmt.Errorf("starting the rota daemon: %w", oneLineError{err})
 	}
 	exited := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(exited) }()
@@ -290,7 +294,7 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 	// pid file and socket would be another store's.
 	if !srv.HoldsDaemon(terminals) {
 		srv.Stop()
-		return failed(fmt.Errorf("the server did not claim %s", holdwire.DaemonLock(terminals)))
+		return failed(fmt.Errorf("the server did not claim %s", oneLine(holdwire.DaemonLock(terminals))))
 	}
 	requests := &inFlight{}
 	port, err := daemonPort(cfg, ctlOnly, listener, srv, requests, log)
@@ -393,7 +397,7 @@ func daemonPort(cfg *api.Config, ctlOnly bool, listener api.Listener, srv *api.S
 	if listener.Cert != "" {
 		pair, err := tls.LoadX509KeyPair(listener.Cert, listener.Key)
 		if err != nil {
-			return nil, fmt.Errorf("tls: %w", err)
+			return nil, fmt.Errorf("tls: %w", oneLineError{err})
 		}
 		server.TLSConfig.Certificates = []tls.Certificate{pair}
 	}

@@ -283,3 +283,11 @@ func printable(s string) string {
 // a reply from outside set in a line of rota's own, which it must not end
 // early. Only the value is cleaned, so the line's own ending is untouched.
 func oneLine(s string) string { return strings.ReplaceAll(printable(s), "\n", " ") }
+
+// oneLineError is an error said by oneLine: one whose message names a path
+// or quotes something from outside, set in a line of rota's own. errors.Is
+// and errors.As still find the error it was.
+type oneLineError struct{ err error }
+
+func (e oneLineError) Error() string { return oneLine(e.err.Error()) }
+func (e oneLineError) Unwrap() error { return e.err }
