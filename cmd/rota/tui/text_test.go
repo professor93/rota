@@ -52,14 +52,23 @@ func textNFD(s string) string {
 
 func TestCleanDropsControlsAndKeys(t *testing.T) {
 	for in, want := range map[string]string{
-		"a\x1b[2Jb\nc\x07":                "a[2Jb c",
-		"tab\there":                       "tab here",
-		"crlf\r\nnext":                    "crlf next",
-		"del\x7fc1\u009bx":                "delc1x",
-		"nel\u0085line\u2028par\u2029end": "nel line par end",
+		// A whole escape sequence goes, as a space: a CSI, an SGR, an OSC
+		// to its BEL or ST, an ESC pair, and the C1 forms.
+		"a\x1b[2Jb\nc\x07":                          "a b c",
+		"\x1b[1;31mred\x1b[0m":                      " red ",
+		"\x1b]0;title\x07x":                         " x",
+		"\x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\": " link ",
+		"\x1b7saved\x1b(B":                          " saved ",
+		"c1\u009b2Kx":                               "c1 x",
+		"c1\u009d2;t\u009cx":                        "c1 x",
+		"tab\there":                                 "tab here",
+		"crlf\r\nnext":                              "crlf next",
+		"del\x7fc1\u0080x":                          "delc1x",
+		"nel\u0085line\u2028par\u2029end":           "nel line par end",
 		// A byte that is not UTF-8: 0x9b alone is CSI to a terminal that
 		// reads 8 bits.
-		"bad\x9b[2J": "bad?[2J",
+		"bad\x9b2Jx": "bad x",
+		"bad\xff":    "bad?",
 		// Bidi overrides, a zero width space, a soft hyphen and a BOM are
 		// not drawn, and a terminal may reorder or hide by them.
 		"\u202eevil\u202c\u200b\u00ad\ufeff": "evil",
@@ -70,13 +79,38 @@ func TestCleanDropsControlsAndKeys(t *testing.T) {
 		}
 	}
 	key := "sk-ant-api03-" + strings.Repeat("A", 40)
-	for _, in := range []string{"x " + key, "x\n" + key, "x\x1b" + key + "\x07", "refused: " + key + "."} {
+	for _, in := range []string{"x " + key, "x\n" + key, "x\x07" + key + "\x07", "refused: " + key + "."} {
 		got := clean(in)
 		if strings.Contains(got, "AAAAAAAAAAAAAAAA") {
 			t.Errorf("clean(%q) = %q still shows the key", in, got)
 		}
 		if !strings.Contains(got, "sk-ant-[not repeated]") {
 			t.Errorf("clean(%q) = %q does not say a key was taken out", in, got)
+		}
+	}
+	// A key after an escape sequence is glued to its parameters until the
+	// sequence goes, so it is taken out after; and one a sequence splits
+	// shows as neither half.
+	// An ESC takes the letter after it as its sequence, as a terminal does:
+	// here the key's own "s", so no marker is left whole, and no key either.
+	if got := clean("x\x1b" + key); strings.Contains(got, "AAAAAAAAAAAAAAAA") {
+		t.Errorf("clean(x ESC key) = %q still shows the key", got)
+	}
+	for _, in := range []string{
+		"refused " + key[:21] + "\x1b[0m" + key[21:],
+		"x\x1b[1m" + key,
+		"x\x1b[1m" + key[:21] + "\x1b[0m" + key[21:],
+		"refused " + key[:21] + "\x1b]8;;u\x07" + key[21:],
+		"\x1b[2J" + key,
+		"\x1b[1m" + key + "\x1b[0m",
+		"\x1b]8;;https://example.com\x1b\\" + key + "\x1b]8;;\x1b\\",
+		"\x1b]8;;https://example.com\x07" + key + "\x1b]8;;\x07",
+		"\u009b2J" + key,
+		"\x9b2J" + key,
+	} {
+		got := clean(in)
+		if strings.Contains(got, "AAAAAAAAAAAAAAAA") || !strings.Contains(got, "sk-ant-[not repeated]") {
+			t.Errorf("clean(%q) = %q, want the key taken out", in, got)
 		}
 	}
 	// A key split by a character clean drops is whole only once it is
@@ -514,7 +548,9 @@ func TestTextRandomLabelsMeasureOneWay(t *testing.T) {
 	joins := func(s string) int {
 		n := 0
 		for _, r := range s {
-			if r == 0x0d4e || r == 0x111c2 || r == 0x11a84 || r == 0x0600 {
+			// A joining letter, and an ESC, which takes what follows it as
+			// the rest of its sequence.
+			if r == 0x0d4e || r == 0x111c2 || r == 0x11a84 || r == 0x0600 || r == 0x1b {
 				n++
 			}
 		}
