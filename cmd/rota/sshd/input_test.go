@@ -220,11 +220,15 @@ func TestAReadAskingAsTheHoldComesTakesNothing(t *testing.T) {
 			close(asking)
 			<-goOn
 		}
-		got := make(chan string, 1)
+		type read struct {
+			s   string
+			err error
+		}
+		got := make(chan read, 1)
 		go func() {
 			p := make([]byte, 4)
-			n, _ := r.in.Read(p)
-			got <- string(p[:n])
+			n, err := r.in.Read(p)
+			got <- read{string(p[:n]), err}
 		}()
 		select {
 		case <-asking:
@@ -246,8 +250,8 @@ func TestAReadAskingAsTheHoldComesTakesNothing(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("Hold never returned")
 		}
-		if s := <-got; s != "" {
-			t.Fatalf("try %d: a Read asking as the hold came took %q", i, s)
+		if g := <-got; g.s != "" || g.err != io.EOF {
+			t.Fatalf("try %d: a Read asking as the hold came: %q %v, want nothing and EOF", i, g.s, g.err)
 		}
 		if b := r.recv(); string(b) != "x" {
 			t.Fatalf("try %d: the attach got %q, want x", i, b)

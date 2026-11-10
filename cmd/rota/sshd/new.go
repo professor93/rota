@@ -7,7 +7,6 @@ import (
 	"io"
 	"slices"
 	"strings"
-	"unicode"
 
 	"github.com/professor93/rota/cmd/rota/attach"
 	"github.com/professor93/rota/cmd/rota/client"
@@ -97,19 +96,8 @@ func newRun(ctx context.Context, ch *Channel, args []string) int {
 }
 
 // newPrints says a CLI argument asks the CLI to print one answer and exit:
-// -p or --print, --print=…, or -p among single-letter flags written
-// together, such as -cp.
+// -p, --print or --print=…. A cluster of single letters is the CLI's to
+// read, not new's: -dp is Claude Code's --debug with the filter p.
 func newPrints(a string) bool {
-	switch {
-	case a == "--print", strings.HasPrefix(a, "--print="):
-		return true
-	case len(a) < 2 || a[0] != '-' || a[1] == '-':
-		return false
-	}
-	for _, c := range a[1:] {
-		if !unicode.IsLetter(c) {
-			return false
-		}
-	}
-	return strings.ContainsRune(a[1:], 'p')
+	return a == "-p" || a == "--print" || strings.HasPrefix(a, "--print=")
 }

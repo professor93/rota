@@ -282,7 +282,8 @@ func TestNewStartsASession(t *testing.T) {
 	// A fake that says what it was given, and stays.
 	r := commandsStart(t, fakecli.Spec{KeepStdin: true, Stdout: []string{"ARGS={{args}}", "{{sleep:1m}}"}})
 	c := r.signIn(r.me)
-	out, errOut, code := sshdRun(t, c, "new --label ' job ' -- --model m")
+	// -dp is Claude Code's --debug with the filter p: the CLI's to read.
+	out, errOut, code := sshdRun(t, c, "new --label ' job ' -- --model m -dp")
 	m := regexp.MustCompile(`^held as session job \(([0-9a-f]+)\)\n$`).FindStringSubmatch(out)
 	if code != 0 || m == nil || errOut != "" {
 		t.Fatalf("new: %d %q %q", code, out, errOut)
@@ -348,7 +349,7 @@ func TestNewStartsASession(t *testing.T) {
 	}
 	// What new asked for: the rotation's choice, then the account named.
 	want := []string{
-		"map[args:[--model m] cols:120 label:job rows:40]",
+		"map[args:[--model m -dp] cols:120 label:job rows:40]",
 		"map[account:1 cols:70 cwd:" + dir + " label:sized rows:20]",
 	}
 	if got := r.created(); !slices.Equal(got, want) {
@@ -366,8 +367,6 @@ func TestNewRefusesAPromptAndPrint(t *testing.T) {
 		{"new --label job fix", prompt},
 		{"new -- -p hi", prompt},
 		{"new -- --print=true", prompt},
-		{"new -- -cp", prompt},
-		{"new -- --model m -pc", prompt},
 		{"new -- --model m --print", prompt},
 		{"new -p", prompt},
 		{"new --print -- x", prompt},

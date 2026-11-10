@@ -87,10 +87,21 @@ type Options struct {
 //	Resume()              // let Reads go on
 //
 // Before the TUI hands the terminal to an attach, it calls Hold; the attach
-// receives on Input (attach.Command takes as stdin a file, such a pump, or
-// nil, and refuses anything else); and once the attach has returned the TUI
-// calls Resume and reads again. A Read must never be waiting while an
-// attach runs: it would take the attach's first key.
+// receives on Input (attach.Command takes as stdin a file, a pump such as
+// this one, or nil, and refuses anything else); and once the attach has
+// returned the TUI calls Resume and reads again. A Read must never be
+// waiting while an attach runs: it would take the attach's first key.
+//
+// With Bubble Tea, where each goes is fixed (measured with v2.1.1):
+//   - Hold in Update, right before returning the tea.Exec of the attach,
+//     never inside the exec command: by then Bubble Tea has only marked its
+//     reader cancelled, its Read still waits here, and the key it takes is
+//     dropped.
+//   - Resume at the end of the exec command's own Run, after the attach has
+//     returned: never at Run's start, which hands the attach's keys back to
+//     Bubble Tea's Read, and never in tea.Exec's callback, which comes after
+//     Bubble Tea has started reading again, so its first Read meets the hold,
+//     ends with io.EOF and leaves the TUI deaf.
 type TUISession struct {
 	In         io.Reader
 	Out        io.Writer
