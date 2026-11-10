@@ -36,11 +36,12 @@ func (a *accountsTab) launchHeld(acct wire.Account) tea.Cmd { return a.launchHer
 // which is nil where this process's terminal is not the person's. It is a
 // foreground run at this machine's own terminal, natural by default: rota
 // adds no argument, setting or guard of its own to it. The command is made
-// in the command launch returns, not in Update.
+// in the command launch returns, not in Update. Where there is no Exec the
+// toast says so, whole within 80 columns, the toasts' room there.
 func (a *accountsTab) launchHere(acct wire.Account) tea.Cmd {
 	start := a.e.o.Exec
 	if start == nil {
-		return toast(levelWarn, "this connection has no terminal to hand over; Sessions (in a later beta) attaches over SSH")
+		return toast(levelWarn, "no terminal here to hand over; Sessions (a later beta) attaches over SSH")
 	}
 	id := acct.ID
 	return func() tea.Msg {

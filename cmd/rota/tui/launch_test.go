@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,9 +31,11 @@ type launchExec struct {
 }
 
 func (x *launchExec) exec(args ...string) *exec.Cmd {
-	c := exec.Command(x.path, args...)
+	var c *exec.Cmd
 	if x.make != nil {
 		c = x.make(args...)
+	} else {
+		c = exec.Command(x.path, args...)
 	}
 	x.mu.Lock()
 	defer x.mu.Unlock()
@@ -45,6 +48,13 @@ func (x *launchExec) runs() [][]string {
 	x.mu.Lock()
 	defer x.mu.Unlock()
 	return slices.Clone(x.asked)
+}
+
+// commands are the commands Exec made, in order.
+func (x *launchExec) commands() []*exec.Cmd {
+	x.mu.Lock()
+	defer x.mu.Unlock()
+	return slices.Clone(x.made)
 }
 
 // launchFake installs a fake rota that does what spec says, on a PATH that
@@ -131,7 +141,7 @@ func TestEnterRunsTheCLIOnTheTerminal(t *testing.T) {
 		t.Fatalf("Exec was asked for %q, want one run 1", got)
 	}
 	tl, ok := h.Cmd.(*tailed)
-	if !ok || tl.c != x.made[0] {
+	if !ok || tl.c != x.commands()[0] {
 		t.Fatalf("the hand-off is %T, not the command Exec made, tailed", h.Cmd)
 	}
 	if c := tl.c; c.Env != nil || c.Dir != "" || !slices.Equal(c.Args[1:], []string{"run", "1"}) {
@@ -165,6 +175,41 @@ func TestEnterRunsTheCLIOnTheTerminal(t *testing.T) {
 	if got := x.runs(); len(got) != 2 || !slices.Equal(got[1], []string{"run", "2"}) {
 		t.Errorf("after moving down Exec was asked for %q", got)
 	}
+	// With a daemon running and Attach set, a live account takes the held
+	// path. Until Task 19 that path runs the CLI here, and it does run: a
+	// held path that did nothing would leave ⏎ dead wherever a daemon runs.
+	t.Run("held", func(t *testing.T) {
+		x := launchFake(t, fakecli.Spec{})
+		var attached atomic.Bool
+		m, b := accountsModel(t, accountsThree(), func(o *Options) {
+			o.Exec = x.exec
+			o.Daemon = func(context.Context) Daemon { return Daemon{Running: true} }
+			o.Attach = func(context.Context, int, func() (int, int), <-chan struct{}) (Attached, error) {
+				attached.Store(true)
+				return nil, errors.New("not until Task 19")
+			}
+		})
+		run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
+		if !m.e.daemon.Running {
+			t.Fatal("the daemon is not running")
+		}
+		_, seen := run(t, m, press("enter")...)
+		h := launchHandedOff(t, seen)
+		if got := x.runs(); len(got) != 1 || !slices.Equal(got[0], []string{"run", "1"}) {
+			t.Fatalf("Exec was asked for %q, want one run 1", got)
+		}
+		if attached.Load() {
+			t.Error("an attach was asked for before Task 19 makes one")
+		}
+		if _, _, err := launchPlay(h); err != nil {
+			t.Fatalf("the run ended %v", err)
+		}
+		stale := launchStale(b)
+		run(t, m, h.Done(nil))
+		if n := launchStale(b); n != stale+1 {
+			t.Errorf("after the run the stale reads went from %d to %d, want one more", stale, n)
+		}
+	})
 }
 
 func TestAFailedRunSaysWhy(t *testing.T) {
@@ -219,8 +264,9 @@ func TestAFailedRunSaysWhy(t *testing.T) {
 		}
 		ready := filepath.Join(t.TempDir(), "ready")
 		x := launchFake(t, fakecli.Spec{Ready: ready, Sleep: "30s"})
-		m, _ := accountsModel(t, accountsThree(), func(o *Options) { o.Exec = x.exec })
+		m, b := accountsModel(t, accountsThree(), func(o *Options) { o.Exec = x.exec })
 		run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
+		stale := launchStale(b)
 		_, seen := run(t, m, press("enter")...)
 		h := launchHandedOff(t, seen)
 		ended := make(chan error, 1)
@@ -240,6 +286,34 @@ func TestAFailedRunSaysWhy(t *testing.T) {
 		_, seen = run(t, m, h.Done(err))
 		if got := launchToasts(seen); len(got) != 1 || got[0] != (toastMsg{Text: "rota run 1 ended (signal: killed)", Level: levelErr}) {
 			t.Errorf("the toasts are %+v", got)
+		}
+		if n := launchStale(b); n != stale+1 {
+			t.Errorf("after a killed run the stale reads went from %d to %d, want one more", stale, n)
+		}
+	})
+	// A run that went well, whose terminal then did not come back, is said
+	// by that error alone: the CLI's last words belong to a run that went
+	// well, and are not added to it.
+	t.Run("the terminal did not come back", func(t *testing.T) {
+		x := launchFake(t, fakecli.Spec{Stderr: []string{"fine"}})
+		m, b := accountsModel(t, accountsThree(), func(o *Options) { o.Exec = x.exec })
+		run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
+		stale := launchStale(b)
+		_, seen := run(t, m, press("enter")...)
+		h := launchHandedOff(t, seen)
+		if _, _, err := launchPlay(h); err != nil {
+			t.Fatalf("the run ended %v", err)
+		}
+		if last := h.Cmd.(*tailed).Last(); last != "fine" {
+			t.Fatalf("the tail holds %q, want fine", last)
+		}
+		_, seen = run(t, m, h.Done(errors.New("the terminal did not come back")))
+		want := toastMsg{Text: "rota run 1: the terminal did not come back", Level: levelErr}
+		if got := launchToasts(seen); len(got) != 1 || got[0] != want {
+			t.Errorf("the toasts are %+v, want %+v", got, want)
+		}
+		if n := launchStale(b); n != stale+1 {
+			t.Errorf("the stale reads went from %d to %d, want one more", stale, n)
 		}
 	})
 	t.Run("never started", func(t *testing.T) {
@@ -319,12 +393,16 @@ func TestADeadAccountIsNotRun(t *testing.T) {
 }
 
 func TestWithoutATerminalItSaysSo(t *testing.T) {
-	const want = "this connection has no terminal to hand over; Sessions (in a later beta) attaches over SSH"
+	const want = "no terminal here to hand over; Sessions (a later beta) attaches over SSH"
+	// A toast has the width less two columns: at 80 it is said whole.
+	if w := textWidth(want); w > 78 {
+		t.Fatalf("the toast is %d columns, more than 80 gives it", w)
+	}
 	for _, remote := range []bool{true, false} {
 		t.Run(map[bool]string{true: "over SSH", false: "no Exec"}[remote], func(t *testing.T) {
 			t.Setenv("PATH", t.TempDir())
 			m, b := accountsModel(t, accountsThree(), func(o *Options) { o.Remote = remote })
-			run(t, m, tea.BatchMsg{m.Init()}, size(120, 40))
+			run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
 			stale := launchStale(b)
 			_, seen := run(t, m, press("enter")...)
 			for _, msg := range seen {
