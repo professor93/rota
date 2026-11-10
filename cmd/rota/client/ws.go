@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -22,6 +24,11 @@ import (
 // api/ws.go: a handshake, masked frames out, unmasked frames in, ping, pong
 // and close. Extensions, compression and subprotocols are absent rather
 // than stubbed.
+//
+// Two of the RFC's SHOULDs are left out on purpose, and are harmless over
+// a unix socket or a pipe: a server that breaks the protocol is dropped
+// without a close frame naming why, and our own close lets the connection
+// go once it is written rather than waiting for the server's.
 
 // maxFrame bounds one message from the server, its fragments reassembled
 // included: the server caps what it is sent at the same.
@@ -42,6 +49,9 @@ const (
 	wsNormal   = 1000 // the client is done
 	wsNoStatus = 1005 // a close frame that named no code
 
+	// wsMaxHeader bounds the handshake's answer, status line and headers:
+	// past it the answer is not the daemon's.
+	wsMaxHeader = 64 << 10
 	// wsWriteWait bounds one write: a server that has stopped reading must
 	// not hold a typist forever.
 	wsWriteWait = 10 * time.Second
@@ -54,10 +64,13 @@ const (
 )
 
 // wsConn is one WebSocket, from the client's side. Reading is one
-// goroutine's; writing is anybody's, a frame at a time.
+// goroutine's; writing is anybody's, a message at a time.
 type wsConn struct {
 	conn net.Conn
 	r    *bufio.Reader
+	// quiet is how long one frame is waited for once attached: wsQuiet,
+	// unless a test made it shorter before reading.
+	quiet time.Duration
 
 	// turn is the writer's turn, a channel rather than a mutex so that a
 	// goodbye can give up waiting on a write that is stuck.
@@ -79,6 +92,13 @@ func (e wsProtocolError) Error() string {
 	return "the rota daemon broke the WebSocket protocol: " + e.why
 }
 
+// wsQuietError is a server that said nothing, not even a ping, for as long
+// as one is waited for.
+type wsQuietError struct{ err error }
+
+func (e wsQuietError) Error() string { return "the rota daemon has said nothing for a minute" }
+func (e wsQuietError) Unwrap() error { return e.err }
+
 // wsHandshake asks for the upgrade on conn and reads the answer. A 101 that
 // proves itself is the socket, read from what the answer left buffered;
 // any other answer is the response, with its body read, for a refusal.
@@ -98,11 +118,18 @@ func wsHandshake(conn net.Conn, path string, deadline time.Time) (*wsConn, *http
 	if err := req.Write(conn); err != nil {
 		return nil, nil, nil, err
 	}
-	br := bufio.NewReader(conn)
+	// The answer's head is read through a limit, lifted once it is read:
+	// the body has maxBody, and frames have maxFrame.
+	lr := &io.LimitedReader{R: conn, N: wsMaxHeader}
+	br := bufio.NewReader(lr)
 	resp, err := http.ReadResponse(br, req)
 	if err != nil {
+		if lr.N == 0 {
+			return nil, nil, nil, wsProtocolError{fmt.Sprintf("its answer's head ran past %d KiB", wsMaxHeader>>10)}
+		}
 		return nil, nil, nil, err
 	}
+	lr.N = math.MaxInt64
 	if resp.StatusCode != http.StatusSwitchingProtocols {
 		raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 		resp.Body.Close()
@@ -112,10 +139,26 @@ func wsHandshake(conn net.Conn, path string, deadline time.Time) (*wsConn, *http
 	switch {
 	case !strings.EqualFold(resp.Header.Get("Upgrade"), "websocket"):
 		return nil, nil, nil, wsProtocolError{"its 101 did not upgrade to websocket"}
+	case !wsHeaderHas(resp.Header, "Connection", "upgrade"):
+		return nil, nil, nil, wsProtocolError{"its 101 did not say Connection: Upgrade"}
 	case resp.Header.Get("Sec-WebSocket-Accept") != base64.StdEncoding.EncodeToString(sum[:]):
 		return nil, nil, nil, wsProtocolError{"its 101 answered another key"}
+	case len(resp.Header.Values("Sec-WebSocket-Extensions")) > 0:
+		return nil, nil, nil, wsProtocolError{"its 101 named an extension nobody asked for"}
 	}
-	return &wsConn{conn: conn, r: br, turn: make(chan struct{}, 1)}, nil, nil, nil
+	return &wsConn{conn: conn, r: br, quiet: wsQuiet, turn: make(chan struct{}, 1)}, nil, nil, nil
+}
+
+// wsHeaderHas reports whether a comma-separated header names this token.
+func wsHeaderHas(h http.Header, name, want string) bool {
+	for _, v := range h.Values(name) {
+		for part := range strings.SplitSeq(v, ",") {
+			if strings.EqualFold(strings.TrimSpace(part), want) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // send writes one frame, masked with a key of its own, as every frame a
@@ -127,6 +170,29 @@ func (w *wsConn) send(op byte, payload []byte) error {
 		return net.ErrClosed
 	}
 	return w.write(op, payload, wsWriteWait)
+}
+
+// sendAll writes payload as frames of op of at most chunk bytes each, all
+// in one turn, so that nothing anybody else sends lands between them. The
+// last frame is never a single byte: the server reads a lone Esc or
+// Ctrl-C in a frame of its own as a key pressed on its own.
+func (w *wsConn) sendAll(op byte, payload []byte, chunk int) error {
+	w.turn <- struct{}{}
+	defer func() { <-w.turn }()
+	for len(payload) > 0 {
+		n := min(len(payload), chunk)
+		if len(payload)-n == 1 {
+			n--
+		}
+		if w.shut.Load() {
+			return net.ErrClosed
+		}
+		if err := w.write(op, payload[:n], wsWriteWait); err != nil {
+			return err
+		}
+		payload = payload[n:]
+	}
+	return nil
 }
 
 // say writes one document as a text frame.
@@ -189,19 +255,34 @@ func (w *wsConn) drop() {
 // wsCloseBody is a close frame's body for code.
 func wsCloseBody(code uint16) []byte { return binary.BigEndian.AppendUint16(nil, code) }
 
-// frame reads one frame. The server's frames are never masked.
-func (w *wsConn) frame() (op byte, payload []byte, fin bool, err error) {
-	_ = w.conn.SetReadDeadline(time.Now().Add(wsQuiet))
+// wsSendable reports whether a close code may be sent: RFC 6455 7.4 keeps
+// 1004, 1005, 1006 and 1015 for saying what happened, never for a frame,
+// and leaves everything under 1000 unused.
+func wsSendable(code int) bool {
+	switch {
+	case code >= 1000 && code <= 1003, code >= 1007 && code <= 1014, code >= 3000 && code <= 4999:
+		return true
+	}
+	return false
+}
+
+// frame reads one frame, waiting at most wait for it. The server's frames
+// are never masked, and a frame is judged by its head before its payload
+// is allocated.
+func (w *wsConn) frame(wait time.Duration) (op byte, payload []byte, fin bool, err error) {
+	_ = w.conn.SetReadDeadline(time.Now().Add(wait))
 	var head [2]byte
 	if _, err := io.ReadFull(w.r, head[:]); err != nil {
 		return 0, nil, false, err
 	}
 	fin, op = head[0]&0x80 != 0, head[0]&0x0f
-	if head[0]&0x70 != 0 {
+	switch {
+	case head[0]&0x70 != 0:
 		return 0, nil, false, wsProtocolError{"a reserved bit was set, with no extension agreed"}
-	}
-	if head[1]&0x80 != 0 {
+	case head[1]&0x80 != 0:
 		return 0, nil, false, wsProtocolError{"a frame from the server was masked"}
+	case op > wsOpBinary && op < wsOpClose, op > wsOpPong:
+		return 0, nil, false, wsProtocolError{fmt.Sprintf("an opcode %#x that means nothing", op)}
 	}
 	size := uint64(head[1] & 0x7f)
 	switch size {
@@ -224,6 +305,10 @@ func (w *wsConn) frame() (op byte, payload []byte, fin bool, err error) {
 	if size > maxFrame {
 		return 0, nil, false, wsProtocolError{fmt.Sprintf("a frame of %d bytes, past the %d a message may be", size, maxFrame)}
 	}
+	// A continuation counts with what it continues, before it is read.
+	if op == wsOpContinue && uint64(len(w.held))+size > maxFrame {
+		return 0, nil, false, wsProtocolError{fmt.Sprintf("a message past the %d bytes one may be", maxFrame)}
+	}
 	payload = make([]byte, size)
 	if _, err := io.ReadFull(w.r, payload); err != nil {
 		return 0, nil, false, err
@@ -231,12 +316,14 @@ func (w *wsConn) frame() (op byte, payload []byte, fin bool, err error) {
 	return op, payload, fin, nil
 }
 
-// message reads one whole message, text or binary, its fragments joined.
-// A ping is answered on the way and a pong passed over. The server's close
-// is answered with its own code and is a *Closed; an end with no close is
-// io.ErrUnexpectedEOF. Any error lets the connection go.
-func (w *wsConn) message() (op byte, payload []byte, err error) {
-	op, payload, err = w.next()
+// message reads one whole message, text or binary, its fragments joined,
+// waiting at most wait for each frame. A ping is answered on the way and a
+// pong passed over. The server's close is answered and is a *Closed; an
+// end with no close is io.ErrUnexpectedEOF, after our own close it is
+// net.ErrClosed, and a server silent for wait is a wsQuietError. Any error
+// lets the connection go.
+func (w *wsConn) message(wait time.Duration) (op byte, payload []byte, err error) {
+	op, payload, err = w.next(wait)
 	if err != nil {
 		var closed *Closed
 		switch {
@@ -245,15 +332,17 @@ func (w *wsConn) message() (op byte, payload []byte, err error) {
 			err = net.ErrClosed
 		case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 			err = io.ErrUnexpectedEOF
+		case errors.Is(err, os.ErrDeadlineExceeded):
+			err = wsQuietError{err}
 		}
 		w.drop()
 	}
 	return op, payload, err
 }
 
-func (w *wsConn) next() (byte, []byte, error) {
+func (w *wsConn) next(wait time.Duration) (byte, []byte, error) {
 	for {
-		op, payload, fin, err := w.frame()
+		op, payload, fin, err := w.frame(wait)
 		if err != nil {
 			return 0, nil, err
 		}
@@ -264,14 +353,7 @@ func (w *wsConn) next() (byte, []byte, error) {
 			}
 		case wsOpPong:
 		case wsOpClose:
-			c := &Closed{Code: wsNoStatus}
-			if len(payload) >= 2 {
-				c.Code, c.Reason = int(binary.BigEndian.Uint16(payload)), string(payload[2:])
-				w.goodbye(payload[:2])
-			} else {
-				w.goodbye(nil)
-			}
-			return 0, nil, c
+			return 0, nil, w.closed(payload)
 		case wsOpText, wsOpBinary:
 			if w.holding {
 				return 0, nil, wsProtocolError{"a message began inside another"}
@@ -284,17 +366,32 @@ func (w *wsConn) next() (byte, []byte, error) {
 			if !w.holding {
 				return 0, nil, wsProtocolError{"a continuation with no message to continue"}
 			}
-			if len(w.held)+len(payload) > maxFrame {
-				return 0, nil, wsProtocolError{fmt.Sprintf("a message past the %d bytes one may be", maxFrame)}
-			}
 			w.held = append(w.held, payload...)
 			if fin {
 				whole := w.held
 				w.held, w.holding = nil, false
 				return w.heldOp, whole, nil
 			}
-		default:
-			return 0, nil, wsProtocolError{fmt.Sprintf("an opcode %#x that means nothing", op)}
 		}
 	}
+}
+
+// closed answers the server's close and says what it said. A body of one
+// byte is no close at all. The answer repeats the server's code when it is
+// one that may be sent, and is 1000 otherwise.
+func (w *wsConn) closed(body []byte) error {
+	switch len(body) {
+	case 0:
+		w.goodbye(nil)
+		return &Closed{Code: wsNoStatus}
+	case 1:
+		return wsProtocolError{"a close frame of one byte"}
+	}
+	c := &Closed{Code: int(binary.BigEndian.Uint16(body)), Reason: string(body[2:])}
+	if wsSendable(c.Code) {
+		w.goodbye(body[:2])
+	} else {
+		w.goodbye(wsCloseBody(wsNormal))
+	}
+	return c
 }

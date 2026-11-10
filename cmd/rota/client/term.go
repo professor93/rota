@@ -3,7 +3,10 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -15,9 +18,10 @@ import (
 // the CLI's output and the server's documents as Next reads them, and the
 // person's typing, a fit and a claim the other way. Next is one
 // goroutine's; Type, Fit, Claim and Close may be called from any, and
-// their frames go out one at a time.
+// what each sends goes out whole, never between another's frames.
 type Term struct {
 	ws    *wsConn
+	sock  string
 	hello Hello
 
 	closeOnce sync.Once
@@ -58,7 +62,9 @@ type Frame struct {
 
 // Doc is one document the terminal socket sends after hello: keyboard,
 // repaint, claim_request, resized, viewers, gap, exit, error or pong, named
-// by Type, with whichever of the rest that kind carries.
+// by Type, with whichever of the rest that kind carries. A field the
+// server sent as another type than this one is left empty, and the rest
+// of the document is kept: a newer daemon may say more than this knows.
 type Doc struct {
 	Type       string `json:"type"`
 	Holder     string `json:"holder"`
@@ -75,7 +81,9 @@ type Doc struct {
 	Code       int    `json:"code"`
 }
 
-// Closed is the server's goodbye: the close code it sent, and its reason.
+// Closed is the server's goodbye: the close code it sent, and its reason,
+// raw, as the server wrote it. Whoever shows it to a person cleans it
+// first.
 type Closed struct {
 	Code   int
 	Reason string
@@ -88,9 +96,10 @@ func (c *Closed) Error() string {
 	return fmt.Sprintf("the rota daemon closed the terminal's socket (%d): %s", c.Code, c.Reason)
 }
 
-// termTypeChunk bounds one frame of typing, well under what the server
-// takes in one message: a paste longer than it goes as several frames, in
-// order, rather than as one the server would close the socket over.
+// termTypeChunk bounds one frame of typing. It is needed, not a nicety: a
+// held session's holder link carries at most 1 MiB a frame, its own nine
+// bytes of kind and sequence included, so a message near 1 MiB fails there,
+// and one over it has the server close the socket with 1009.
 const termTypeChunk = 64 << 10
 
 // Attach opens the terminal id's socket, watching only when watch is set,
@@ -117,20 +126,29 @@ func (c *Client) Attach(id string, watch bool) (*Term, error) {
 		conn.Close()
 		return nil, termRefusal(resp, raw, path)
 	}
-	t := &Term{ws: ws}
-	op, payload, err := ws.message()
+	t := &Term{ws: ws, sock: c.sock}
+	op, payload, err := ws.message(time.Until(deadline))
 	if err != nil {
 		return nil, fmt.Errorf("the rota daemon on %s: %w", c.sock, err)
 	}
 	var kind struct {
 		Type string `json:"type"`
 	}
-	if op != wsOpText || json.Unmarshal(payload, &kind) != nil || kind.Type != "hello" || json.Unmarshal(payload, &t.hello) != nil {
+	if op != wsOpText || !termDecode(payload, &kind) || kind.Type != "hello" || !termDecode(payload, &t.hello) {
 		ws.drop()
 		return nil, fmt.Errorf("the rota daemon on %s: %w", c.sock, wsProtocolError{"its first frame was not hello"})
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return t, nil
+}
+
+// termDecode reads a document into v leniently: a field of another type
+// than v's is passed over and the rest kept. It is false only for what is
+// not a JSON object at all.
+func termDecode(raw []byte, v any) bool {
+	err := json.Unmarshal(raw, v)
+	var mistyped *json.UnmarshalTypeError
+	return err == nil || errors.As(err, &mistyped) && mistyped.Field != ""
 }
 
 // termRefusal is an answer that was not the upgrade, said as do says one.
@@ -151,40 +169,38 @@ func (t *Term) Hello() Hello { return t.hello }
 
 // Next is the next output or document. Pings are answered and never
 // returned. The server's close is a *Closed, an end without one is
-// io.ErrUnexpectedEOF, and after Close it is net.ErrClosed; once Next has
-// returned an error it returns it again.
+// io.ErrUnexpectedEOF, and after Close it is net.ErrClosed, each as itself;
+// anything else names the daemon. Once Next has returned an error it
+// returns it again.
 func (t *Term) Next() (Frame, error) {
 	if t.ended != nil {
 		return Frame{}, t.ended
 	}
-	op, payload, err := t.ws.message()
+	op, payload, err := t.ws.message(t.ws.quiet)
 	if err == nil && op == wsOpText {
 		var d Doc
-		if jerr := json.Unmarshal(payload, &d); jerr != nil {
-			t.ws.drop()
-			err = wsProtocolError{"a document that is not JSON: " + jerr.Error()}
-		} else {
+		if termDecode(payload, &d) {
 			return Frame{Doc: &d}, nil
 		}
+		t.ws.drop()
+		err = wsProtocolError{"a document that is not a JSON object"}
 	}
 	if err != nil {
+		var closed *Closed
+		if !errors.As(err, &closed) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, net.ErrClosed) {
+			err = fmt.Errorf("the rota daemon on %s: %w", t.sock, err)
+		}
 		t.ended = err
 		return Frame{}, err
 	}
 	return Frame{Output: payload}, nil
 }
 
-// Type sends p as typing, as binary frames.
-func (t *Term) Type(p []byte) error {
-	for len(p) > 0 {
-		n := min(len(p), termTypeChunk)
-		if err := t.ws.send(wsOpBinary, p[:n]); err != nil {
-			return err
-		}
-		p = p[n:]
-	}
-	return nil
-}
+// Type sends p as typing, in binary frames of at most termTypeChunk, all of
+// them before anything else is sent. The server judges each frame on its
+// own: should the keyboard move, or a send begin to wait, partway through
+// a long paste, the rest of it is refused.
+func (t *Term) Type(p []byte) error { return t.ws.sendAll(wsOpBinary, p, termTypeChunk) }
 
 // Fit asks for the session to be this size: the one resize a held session
 // takes.

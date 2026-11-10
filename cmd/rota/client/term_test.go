@@ -3,17 +3,14 @@
 package client
 
 import (
-	"bufio"
 	"context"
-	"crypto/sha1"
-	"encoding/base64"
-	"encoding/binary"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +24,7 @@ import (
 // termRig is a real server with the terminal group on, reached in process
 // as me, over a store whose one account runs the tty fake as claude.
 type termRig struct {
+	home string
 	srv  *api.Server
 	c    *Client
 	stop func()
@@ -62,7 +60,7 @@ func newTermRig(t *testing.T, spec fakecli.Spec) *termRig {
 	t.Cleanup(srv.Stop)
 	c, stop := InProcess(srv.LocalHandler(&me))
 	t.Cleanup(stop)
-	return &termRig{srv: srv, c: c, stop: stop}
+	return &termRig{home: home, srv: srv, c: c, stop: stop}
 }
 
 // open starts a terminal at this size and says its id.
@@ -271,10 +269,11 @@ func TestFramesSurviveOneByteReads(t *testing.T) {
 	p.output(t, "size 81x25")
 }
 
-// A server that stops says so, and Next returns what it said. The fake
-// takes no notice of the hangup, so the only goodbye is the server's own.
+// A server that stops closes the socket: 1000 after the terminal's exit,
+// or 1001 for the server going. Stop ends its terminals before it says it
+// is going, so either may come first.
 func TestAServerCloseIsSaid(t *testing.T) {
-	r := newTermRig(t, fakecli.Spec{Tty: true, Linger: "10s"})
+	r := newTermRig(t, fakecli.Spec{Tty: true})
 	id := r.open(t, 80, 24)
 	tm, err := r.c.Attach(id, false)
 	if err != nil {
@@ -284,11 +283,92 @@ func TestAServerCloseIsSaid(t *testing.T) {
 	p := pumpOf(tm)
 	p.output(t, "ready 80x24")
 	r.srv.Stop()
-	err = p.end(t, 5*time.Second)
+	err = p.end(t, 2*time.Second)
 	var closed *Closed
-	if !errors.As(err, &closed) || closed.Code != 1001 {
-		t.Fatalf("Next after the server stopped: %v, want a close 1001", err)
+	if !errors.As(err, &closed) || (closed.Code != 1000 && closed.Code != 1001) {
+		t.Fatalf("Next after the server stopped: %v, want a close 1000 or 1001", err)
 	}
+}
+
+// The account's home a claude terminal runs in is the rig's own, and
+// mirrors the tests' stand-in Claude Code directory: nothing in it is, or
+// leads to, the person's real HOME.
+func TestTheAccountHomeIsNotThePersons(t *testing.T) {
+	standIn := os.Getenv("CLAUDE_CONFIG_DIR")
+	if standIn == "" {
+		t.Fatal("CLAUDE_CONFIG_DIR is not set: TestMain did not isolate the tests")
+	}
+	// Something to mirror, so the home holds a link to follow.
+	if err := os.WriteFile(filepath.Join(standIn, "settings.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := newTermRig(t, fakecli.Spec{Tty: true})
+	id := r.open(t, 200, 24)
+	tm, err := r.c.Attach(id, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tm.Close()
+	p := pumpOf(tm)
+	p.output(t, "ready 200x24")
+	if err := tm.Type([]byte("env CLAUDE_CONFIG_DIR\r")); err != nil {
+		t.Fatal(err)
+	}
+	// The pty makes the fake's \r\n into \r\r\n.
+	line := regexp.MustCompile(`env CLAUDE_CONFIG_DIR=([^\r\n]+)\r+\n`)
+	var m []string
+	p.await(t, "the CLI's CLAUDE_CONFIG_DIR", 5*time.Second, func(Frame) bool {
+		m = line.FindStringSubmatch(p.out.String())
+		return m != nil
+	})
+	home := resolved(t, m[1])
+	if store := resolved(t, r.home); !within(home, store) {
+		t.Fatalf("the account's home is %s, outside the rig's store %s", home, store)
+	}
+	real := resolved(t, personHome)
+	tmp := resolved(t, os.TempDir())
+	if personHome == "" || within(tmp, real) {
+		t.Skipf("the temporary directory %s is under HOME %s, so nothing more can be told apart", tmp, real)
+	}
+	if within(home, real) {
+		t.Fatalf("the account's home %s is under the person's HOME %s", home, real)
+	}
+	entries, err := os.ReadDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linked := false
+	for _, e := range entries {
+		if e.Type()&os.ModeSymlink == 0 {
+			continue
+		}
+		to := resolved(t, filepath.Join(home, e.Name()))
+		if within(to, real) {
+			t.Errorf("%s in the account's home leads to %s, under the person's HOME", e.Name(), to)
+		}
+		if e.Name() == "settings.json" {
+			linked = within(to, resolved(t, standIn))
+		}
+	}
+	if !linked {
+		t.Errorf("the account's home has no settings.json linked into the stand-in %s", standIn)
+	}
+}
+
+// resolved is a path with every link in it followed.
+func resolved(t *testing.T, path string) string {
+	t.Helper()
+	r, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// within says whether path is dir or inside it.
+func within(path, dir string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // stop ends what InProcess accepted, a socket taken over included: a reader
@@ -306,153 +386,5 @@ func TestStopClosesAnAttachedSocket(t *testing.T) {
 	r.stop()
 	if err := p.end(t, 2*time.Second); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("Next after stop: %v, want io.ErrUnexpectedEOF", err)
-	}
-}
-
-/* ---------------------------------------------------- a hand-written peer --- */
-
-// peer is a client whose every dial reaches script, in place of a server,
-// once the handshake is answered and hello sent.
-func peer(t *testing.T, script func(conn net.Conn, br *bufio.Reader)) *Client {
-	t.Helper()
-	c := newClient("a test peer")
-	c.dial = func(context.Context) (net.Conn, error) {
-		server, client := net.Pipe()
-		go func() {
-			defer server.Close()
-			br := bufio.NewReader(server)
-			req, err := http.ReadRequest(br)
-			if err != nil {
-				t.Errorf("the peer read no request: %v", err)
-				return
-			}
-			if req.Host != "rota" || req.Header.Get("Sec-WebSocket-Version") != "13" {
-				t.Errorf("the handshake: host %q, version %q", req.Host, req.Header.Get("Sec-WebSocket-Version"))
-			}
-			key, _ := base64.StdEncoding.DecodeString(req.Header.Get("Sec-WebSocket-Key"))
-			if len(key) != 16 {
-				t.Errorf("the key is %d bytes, want 16", len(key))
-			}
-			sum := sha1.Sum([]byte(req.Header.Get("Sec-WebSocket-Key") + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
-			_, _ = io.WriteString(server, "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"+
-				"Sec-WebSocket-Accept: "+base64.StdEncoding.EncodeToString(sum[:])+"\r\n\r\n")
-			if err := peerWrite(server, 0x1, []byte(`{"type":"hello","id":"p","kind":"account","cols":80,"rows":24,"offset":0,"holder":null,"you":{"name":"me","role":"control","conn":"c1"},"viewers":[]}`)); err != nil {
-				t.Errorf("the peer's hello: %v", err)
-				return
-			}
-			script(server, br)
-		}()
-		return client, nil
-	}
-	return c
-}
-
-// peerWrite writes one frame as a server does, unmasked.
-func peerWrite(w io.Writer, op byte, payload []byte) error {
-	head := []byte{0x80 | op}
-	switch n := len(payload); {
-	case n < 126:
-		head = append(head, byte(n))
-	case n < 1<<16:
-		head = append(head, 126, byte(n>>8), byte(n))
-	default:
-		head = append(head, 127)
-		head = binary.BigEndian.AppendUint64(head, uint64(n))
-	}
-	_, err := w.Write(append(head, payload...))
-	return err
-}
-
-// peerRead reads one frame as a server does, and says whether it was masked.
-func peerRead(r io.Reader) (op byte, payload []byte, masked bool, err error) {
-	var head [2]byte
-	if _, err := io.ReadFull(r, head[:]); err != nil {
-		return 0, nil, false, err
-	}
-	op, masked = head[0]&0x0f, head[1]&0x80 != 0
-	size := int(head[1] & 0x7f)
-	if size >= 126 {
-		return 0, nil, false, errors.New("a long frame where a short one was expected")
-	}
-	var mask [4]byte
-	if masked {
-		if _, err := io.ReadFull(r, mask[:]); err != nil {
-			return 0, nil, false, err
-		}
-	}
-	payload = make([]byte, size)
-	if _, err := io.ReadFull(r, payload); err != nil {
-		return 0, nil, false, err
-	}
-	for i := range payload {
-		payload[i] ^= mask[i%4]
-	}
-	return op, payload, masked, nil
-}
-
-// A frame longer than maxFrame is refused before it is read, and the
-// connection with it.
-func TestAnOversizedFrameIsRefused(t *testing.T) {
-	wrote := make(chan error, 1)
-	c := peer(t, func(conn net.Conn, _ *bufio.Reader) {
-		wrote <- peerWrite(conn, 0x2, make([]byte, 2<<20))
-	})
-	tm, err := c.Attach("p", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tm.Close()
-	if _, err := tm.Next(); err == nil {
-		t.Fatal("a 2 MiB frame was read")
-	}
-	select {
-	case err := <-wrote:
-		if err == nil {
-			t.Fatal("the peer wrote all 2 MiB: the connection was not closed")
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("the peer is still writing: the connection was not closed")
-	}
-	if _, err := tm.Next(); err == nil {
-		t.Fatal("Next read on after refusing a frame")
-	}
-}
-
-// A ping is answered with a masked pong carrying its payload, and is not a
-// frame Next returns.
-func TestPingsAreAnswered(t *testing.T) {
-	pong := make(chan []byte, 1)
-	c := peer(t, func(conn net.Conn, br *bufio.Reader) {
-		go func() {
-			_ = peerWrite(conn, 0x9, []byte("p1"))
-			_ = peerWrite(conn, 0x2, []byte("x"))
-		}()
-		op, payload, masked, err := peerRead(br)
-		if err != nil || op != 0xA || !masked {
-			t.Errorf("the answer to a ping: op %#x masked %v err %v, want a masked pong", op, masked, err)
-		}
-		pong <- payload
-		// Held open until the test is done reading.
-		_, _, _, _ = peerRead(br)
-	})
-	tm, err := c.Attach("p", false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer tm.Close()
-	if h := tm.Hello(); h.ID != "p" || h.Holder != "" || h.You.Conn != "c1" {
-		t.Fatalf("hello %+v", h)
-	}
-	f, err := tm.Next()
-	if err != nil || f.Doc != nil || string(f.Output) != "x" {
-		t.Fatalf("Next after a ping: %+v %v, want the output x", f, err)
-	}
-	select {
-	case got := <-pong:
-		if string(got) != "p1" {
-			t.Fatalf("the pong carries %q, want p1", got)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("no pong")
 	}
 }

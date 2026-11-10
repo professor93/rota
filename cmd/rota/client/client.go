@@ -135,7 +135,13 @@ func dial(terminals string, wait time.Duration) (*Client, error) {
 }
 
 func newClient(sock string) *Client {
-	c := &Client{sock: sock, dial: func(ctx context.Context) (net.Conn, error) { return dialOwn(ctx, sock) }}
+	return dialledBy(sock, func(ctx context.Context) (net.Conn, error) { return dialOwn(ctx, sock) })
+}
+
+// dialledBy is a client whose every connection is dial's, named sock where
+// a sentence says what it is talking to.
+func dialledBy(sock string, dial func(ctx context.Context) (net.Conn, error)) *Client {
+	c := &Client{sock: sock, dial: dial}
 	c.http = &http.Client{
 		Transport: &http.Transport{
 			DisableKeepAlives: true,

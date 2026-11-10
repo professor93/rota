@@ -2,6 +2,8 @@ package client
 
 import (
 	"context"
+	"io"
+	"log"
 	"net"
 	"net/http"
 	"sync"
@@ -9,7 +11,7 @@ import (
 
 // inprocName is what a client of a handler in this process says it is
 // talking to, where a daemon's would name its socket.
-const inprocName = "this process"
+const inprocName = "in process"
 
 // InProcess is a client of h itself, with no socket between: every request
 // and every attach is a connection of an in-memory pipe that an
@@ -19,10 +21,12 @@ const inprocName = "this process"
 // a second stop does nothing.
 func InProcess(h http.Handler) (c *Client, stop func()) {
 	ln := &inprocListener{accept: make(chan net.Conn), done: make(chan struct{}), open: map[*inprocConn]struct{}{}}
-	srv := &http.Server{Handler: h, ReadHeaderTimeout: requestWait}
+	// net/http's own lines — a handler's panic, a write on a hijacked
+	// connection — would go to this process's stderr, which may be a TUI's
+	// screen.
+	srv := &http.Server{Handler: h, ReadHeaderTimeout: requestWait, ErrorLog: log.New(io.Discard, "", 0)}
 	go func() { _ = srv.Serve(ln) }()
-	c = newClient(inprocName)
-	c.dial = ln.dial
+	c = dialledBy(inprocName, ln.dial)
 	var once sync.Once
 	return c, func() {
 		once.Do(func() {
