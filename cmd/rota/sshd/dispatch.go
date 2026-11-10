@@ -14,12 +14,16 @@ type command func(ctx context.Context, ch *Channel, args []string) int
 
 // commands is the fixed list a command line is looked up in, and nothing
 // else is: no shell runs a line, and a word not here runs nothing. The
-// commands that fill it are list, attach, watch and new, registered before
-// any server starts; Listen takes its own copy.
-var commands = map[string]command{}
+// commands that fill it are list, attach, watch and new, registered here,
+// before any server starts; Listen takes its own copy.
+var commands = map[string]command{
+	"list": listRun,
+	"new":  newRun,
+}
 
-// usage is what a bare command, or a wrong one, prints. The chord's key is
-// Ctrl-\ in 1.4.0, with nothing to change it.
+// usage is what a bare command prints after the list, and a wrong one after
+// what was wrong. The chord's key is Ctrl-\ in 1.4.0, with nothing to
+// change it.
 const usage = `rota over ssh takes one of:
   list [--json]                      every session the daemon holds or lists
   attach <session>                   look and type; Ctrl-\ then d leaves
@@ -31,10 +35,11 @@ const usage = `rota over ssh takes one of:
 const dispatchUnknown = "rota over ssh runs list, attach, watch and new, and nothing else\n"
 
 // dispatchRun runs one command line on a channel and gives its exit status.
-// bare is a shell request; an exec of an empty line is the same thing. The
-// first word is looked up in cmds; one not there, or a line words cannot
-// split, runs nothing and is exit 2. The log names the person and the word,
-// never the arguments, and never a word that is not a command.
+// bare is a shell request; an exec of an empty line is the same thing, and
+// both run the bare command (tuiBare). Otherwise the first word is looked
+// up in cmds; one not there, or a line words cannot split, runs nothing and
+// is exit 2. The log names the person and the word, never the arguments,
+// and never a word that is not a command.
 func dispatchRun(ctx context.Context, ch *Channel, line string, bare bool, cmds map[string]command, log *slog.Logger) int {
 	if len(line) > maxLine {
 		log.Info("ssh command", "name", ch.User.Name, "word", "", "refused", "too long")
@@ -52,8 +57,7 @@ func dispatchRun(ctx context.Context, ch *Channel, line string, bare bool, cmds 
 	}
 	if len(w) == 0 {
 		log.Info("ssh command", "name", ch.User.Name, "word", "")
-		dispatchText(ch.Out, ch.PTY, usage)
-		return 0
+		return tuiBare(ctx, ch)
 	}
 	run, ok := cmds[w[0]]
 	if !ok {

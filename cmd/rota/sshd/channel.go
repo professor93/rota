@@ -41,6 +41,8 @@ type Channel struct {
 	// connection. Its error is the sentence to print, and done gives the
 	// place back. A bare command hands it on as TUISession.Slot.
 	slot func() (done func(), err error)
+	// tui is Options.TUI, which a bare command on a pty runs.
+	tui func(ctx context.Context, s TUISession) error
 }
 
 // channelResizes is how many window-changes wait for a command to read them.
@@ -58,7 +60,7 @@ func channelServe(ctx context.Context, sc *sshdConn, ch ssh.Channel, reqs <-chan
 		In: ch, Out: ch, Err: ch.Stderr(), Resize: resize,
 		User: sc.user, Login: sc.login, Handler: sc.handler,
 		Key: sc.s.o.Key, Taught: sc.s.o.Taught,
-		slot: sc.limitsSlot,
+		slot: sc.limitsSlot, tui: sc.s.o.TUI,
 	}
 	var done chan struct{}
 	// However this loop ends, the client closing the channel, the connection
