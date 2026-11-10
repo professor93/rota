@@ -31,8 +31,11 @@ function termName(t) {
 }
 
 // The words and tones of a session's status. Stopped is said apart, since a
-// held session stops and a terminal that is not held ends.
+// held session stops and a terminal that is not held ends. This table and
+// the next have no prototype, so a status the server never sends, such as
+// "constructor", finds nothing rather than something of Object's.
 const TERM_STATUS = {
+  __proto__: null,
   running: { word: "running", tone: "ok" },
   needs_you: { word: "needs you", tone: "warn" },
   quiet: { word: "quiet", tone: "muted" },
@@ -60,7 +63,7 @@ function termEnding(t) {
   return `ended, code ${t.exit}`;
 }
 
-const TERM_CREDENTIAL = { login: "login", long: "long token", apikey: "API key" };
+const TERM_CREDENTIAL = { __proto__: null, login: "login", long: "long token", apikey: "API key" };
 
 // termCredential is what the account behind a session launches on: the
 // session's own word when its description carries one, else what the

@@ -28,6 +28,11 @@ const { assert } = kit;
   same(tp.termStatusOf({ status: 'needs_you' }), { key: 'needs_you', word: 'needs you', tone: 'warn' },
     'needs_you is a warning');
   same(tp.termStatusOf({ status: 'quiet' }), { key: 'quiet', word: 'quiet', tone: 'muted' }, 'quiet is muted');
+  same(tp.termStatusOf({ status: 'thinking' }), { key: 'thinking', word: 'thinking', tone: 'muted' },
+    'a status this page does not know is said as it is, muted');
+  for (const k of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    same(tp.termStatusOf({ status: k }), { key: k, word: k, tone: 'muted' }, 'a status named like ' + k + ' is only a word');
+  }
 
   // termEnding: how a session ended.
   assert(tp.termEnding({ lost: true, ending: 'its sharer stopped' }) === 'its sharer stopped',
@@ -54,6 +59,10 @@ const { assert } = kit;
     "the session's own credential wins over its account's");
   assert(tp.termCredential({ account: { id: 2, credential: 'login' } }, accounts) === 'login', 'login is login');
   assert(tp.termCredential({ account: { id: 4, credential: 'apikey' } }, accounts) === 'API key', 'apikey is API key');
+  for (const k of ['constructor', 'toString', '__proto__']) {
+    assert(tp.termCredential({ account: { id: 4, credential: k } }, accounts) === 'login',
+      'a credential named like ' + k + ' falls back to the account');
+  }
 
   // termWaitingWord: what a session is waiting on, in words.
   assert(tp.termWaitingWord('permission') === 'a permission', 'a permission');
