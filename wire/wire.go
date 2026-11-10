@@ -427,6 +427,28 @@ func Ended(res *rota.Result, err error, w message.With, src message.Sources) End
 
 /* ------------------------------------------- a login someone must run --- */
 
+// Login is a login just begun, as a reply shows it: everything rota.Login
+// says about it but its State. The state is what Complete needs, the PKCE
+// verifier among it, and it stays with the parked login: whoever opens the
+// URL and brings back the code needs only the id to finish it, and a verifier
+// that left the machine is half of what a stolen code needs.
+type Login struct {
+	ID        string `json:"id"`
+	Provider  string `json:"provider"`
+	URL       string `json:"url"`
+	Kind      string `json:"kind"`
+	Delegated bool   `json:"delegated,omitzero"`
+	Long      bool   `json:"long,omitzero"`
+	Account   int    `json:"account,omitzero"`
+	CreatedAt int64  `json:"createdAt"`
+}
+
+// DescribeLogin is l as a reply shows it.
+func DescribeLogin(l *rota.Login) Login {
+	return Login{ID: l.ID, Provider: l.Provider, URL: l.URL, Kind: l.Kind, Delegated: l.Delegated,
+		Long: l.Long, Account: l.Account, CreatedAt: l.CreatedAt}
+}
+
 // LoginCommand renders the command that signs an account in, as a line
 // someone could run by hand. Empty when the account's provider has no such
 // command — most sign in through rota itself.

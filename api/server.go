@@ -1438,6 +1438,12 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 	case body.Key == "" && body.Label != "":
 		fail(w, http.StatusBadRequest, "label names an account a key makes; it takes a key")
 		return
+	case body.Account < 0:
+		fail(w, http.StatusBadRequest, "account is an account's id, as GET /v1/accounts lists it")
+		return
+	case body.Token == "" && body.Account != 0 && (body.Long || body.Provider != ""):
+		fail(w, http.StatusBadRequest, "account begins a login for that account, on its own provider; it takes no long or provider")
+		return
 	}
 	st, ok := s.open(w)
 	if !ok {
@@ -1452,16 +1458,25 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 		s.pasteLong(w, r, st, body.Account, body.Token)
 		return
 	}
-	beginning := st.BeginLogin
-	if body.Long {
-		beginning = st.BeginLongLogin
+	var (
+		l   *rota.Login
+		err error
+	)
+	switch {
+	case body.Account != 0:
+		// The same login `rota login <id>` begins: only that account's
+		// approval finishes it.
+		l, err = st.BeginLoginFor(r.Context(), body.Account)
+	case body.Long:
+		l, err = st.BeginLongLogin(r.Context(), body.Provider)
+	default:
+		l, err = st.BeginLogin(r.Context(), body.Provider)
 	}
-	l, err := beginning(r.Context(), body.Provider)
 	if err != nil {
 		s.report(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, l)
+	writeJSON(w, http.StatusOK, wire.DescribeLogin(l))
 }
 
 // loginKey makes or updates the account an API key belongs to. A key the API

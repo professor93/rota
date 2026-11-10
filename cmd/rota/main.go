@@ -472,7 +472,7 @@ func (c *cli) begin(s *store.Store, provider string, long bool) error {
 		return err
 	}
 	if c.json {
-		return c.emit(l)
+		return c.emit(wire.DescribeLogin(l))
 	}
 	if long {
 		// Which account is approved is the whole of this flow: the token is
@@ -502,7 +502,7 @@ func (c *cli) beginFor(s *store.Store, a *rota.Account) error {
 		return err
 	}
 	if c.json {
-		return c.emit(l)
+		return c.emit(wire.DescribeLogin(l))
 	}
 	who := oneLine(a.Email)
 	if who == "" {

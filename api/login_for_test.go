@@ -15,6 +15,70 @@ import (
 	"github.com/professor93/rota/store"
 )
 
+// beginReply is POST /v1/login's answer, as a client reads it.
+func beginReply(t *testing.T, raw []byte) map[string]any {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("%v: %s", err, raw)
+	}
+	return doc
+}
+
+// What a login keeps for its second half, the PKCE verifier above all, stays
+// with the parked login: the reply says what to open and how to finish it.
+func TestBeginningALoginOverHTTPKeepsItsStateToItself(t *testing.T) {
+	h := newHarness(t, Options{})
+	for _, body := range []map[string]any{{"provider": "claude"}, {"provider": "claude", "long": true}, {}} {
+		resp, raw := h.do("POST", "/v1/login", body)
+		doc := beginReply(t, raw)
+		if resp.StatusCode != 200 || doc["id"] == "" || doc["url"] == "" || doc["kind"] != "code" || doc["provider"] != "claude" {
+			t.Fatalf("%v: %d %s", body, resp.StatusCode, raw)
+		}
+		if _, ok := doc["state"]; ok || strings.Contains(string(raw), "verifier") {
+			t.Fatalf("%v: the state went out: %s", body, raw)
+		}
+	}
+}
+
+// {"account":N} begins the login for that account, as `rota login N` does:
+// one body, one operation.
+func TestBeginningALoginForAnAccountOverHTTP(t *testing.T) {
+	h := newHarness(t, Options{})
+	seedUUID(t, h.dir, 1, "u1")
+	resp, raw := h.do("POST", "/v1/login", map[string]any{"account": 1})
+	doc := beginReply(t, raw)
+	if resp.StatusCode != 200 || doc["account"] != float64(1) || doc["kind"] != "code" || doc["url"] == "" {
+		t.Fatalf("%d %s", resp.StatusCode, raw)
+	}
+	if _, ok := doc["state"]; ok {
+		t.Fatalf("the state went out: %s", raw)
+	}
+	s, err := store.Open(h.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l, err := s.PendingLogin(doc["id"].(string))
+	s.Close()
+	if err != nil || l == nil || l.Account != 1 || l.State["verifier"] == "" {
+		t.Fatalf("not parked for account 1: %+v %v", l, err)
+	}
+
+	for _, c := range []struct {
+		body map[string]any
+		code int
+	}{
+		{map[string]any{"account": 99}, 404},
+		{map[string]any{"account": 1, "long": true}, 400},
+		{map[string]any{"account": 1, "provider": "codex"}, 400},
+		{map[string]any{"account": -1}, 400},
+	} {
+		if resp, raw := h.do("POST", "/v1/login", c.body); resp.StatusCode != c.code {
+			t.Errorf("%v: %d %s", c.body, resp.StatusCode, raw)
+		}
+	}
+}
+
 // A login begun for one account is held to it wherever it is finished, and
 // the finish that is refused over HTTP leaves everything as it found it.
 func TestFinishingALoginBegunForAnAccountOverHTTPIsHeldToIt(t *testing.T) {

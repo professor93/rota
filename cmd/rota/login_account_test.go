@@ -123,6 +123,25 @@ func TestLoginByAccountIDStartsALoginBoundToIt(t *testing.T) {
 	}
 }
 
+// What a login keeps for its second half, the PKCE verifier above all, stays
+// with the parked login; --json prints what to open and how to finish it.
+func TestLoginJSONKeepsTheLoginsStateToItself(t *testing.T) {
+	home := seedTwoClaude(t)
+	for _, args := range [][]string{{"--json", "login"}, {"--json", "login", "12"}, {"--json", "login", "--long"}} {
+		out, errOut, code := call(t, args...)
+		var doc map[string]any
+		if err := json.Unmarshal([]byte(out), &doc); code != 0 || err != nil || doc["url"] == "" || doc["kind"] != "code" {
+			t.Fatalf("%v: %d %v %q %q", args, code, err, out, errOut)
+		}
+		if _, ok := doc["state"]; ok || strings.Contains(out, "verifier") {
+			t.Fatalf("%v: the state went out: %s", args, out)
+		}
+		if p := parked(t, home); !strings.Contains(p, `"verifier"`) {
+			t.Fatalf("%v: the state must still be parked: %s", args, p)
+		}
+	}
+}
+
 func TestLoginByAccountIDFinishedAsThatAccountRevivesIt(t *testing.T) {
 	home := seedTwoClaude(t)
 	who := claudeApproves(t)
