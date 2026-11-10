@@ -28,6 +28,9 @@ import (
 // says ok. That had been happening, silently, to everything below
 // main_test.go. A test that means to exercise the handover calls handover(t).
 func TestMain(m *testing.M) {
+	// A fake plays its part and ends here. Anything else carries on with
+	// every directory holding a real vendor CLI left out of PATH: a test
+	// that forgets its fake finds none, never the real one.
 	fakecli.Maybe()
 	// No keychain and no Claude Code daemon of anybody's is reached from
 	// here, in this process or in the rota it runs as below.
@@ -81,6 +84,10 @@ func TestMain(m *testing.M) {
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
+
+// No test here can start a real vendor CLI: TestMain left every directory
+// holding one out of PATH.
+func TestNoVendorCLIIsOnPath(t *testing.T) { fakecli.NoneOnPath(t) }
 
 // offline points every endpoint of every provider at an address nothing
 // answers on, so a made-up token never leaves the machine; a test that wants
