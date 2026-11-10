@@ -645,6 +645,46 @@ func TestAnEndWhileSubmittingKeepsAnAcceptance(t *testing.T) {
 	}
 }
 
+// A value accepted while the page is being stopped still gets its answer:
+// the browser that sent it sees "Signed in", never a dropped connection.
+func TestAnAcceptanceWhileStoppingStillReachesTheBrowser(t *testing.T) {
+	entered := make(chan struct{})
+	p := serve(t, Options{Submit: func(ctx context.Context, _ string) (string, error) {
+		close(entered)
+		<-ctx.Done()
+		time.Sleep(100 * time.Millisecond) // the answer comes after the stop began
+		return "", nil
+	}})
+	type answer struct {
+		code int
+		body string
+		err  error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		resp, err := client(p).PostForm(p.URL, url.Values{"value": {"good"}})
+		if err != nil {
+			got <- answer{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(resp.Body)
+		got <- answer{resp.StatusCode, string(b), err}
+	}()
+	<-entered
+	p.Close()
+	a := <-got
+	if a.err != nil || a.code != http.StatusOK || !strings.Contains(a.body, "Signed in.") {
+		t.Fatalf("the browser got %d %v:\n%s", a.code, a.err, a.body)
+	}
+	if e := ended(t, p); e.Why != Accepted {
+		t.Fatalf("ended %+v", e)
+	}
+	if _, err := client(p).Get(p.URL); err == nil {
+		t.Fatal("the page still answers after it stopped")
+	}
+}
+
 // submit2 posts without failing the test, for a request the page may cut.
 func submit2(p *Page, value string) {
 	resp, err := client(p).PostForm(p.URL, url.Values{"value": {value}})

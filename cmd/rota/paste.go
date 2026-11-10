@@ -85,7 +85,11 @@ func (c *cli) loginKey(provider string, long bool, rest []string, label string) 
 	if c.web != nil {
 		// The key comes from the one-time page instead, where it is pasted
 		// into a password field; each one pasted there is tried in turn. A
-		// provider that takes no key is refused first, as a paste would be.
+		// label or a provider no key can satisfy is refused first, in the
+		// order and the words a paste would get.
+		if err := checkLabel(label); err != nil {
+			return err
+		}
 		if err := takesPaste(provider); err != nil {
 			return err
 		}
@@ -94,9 +98,11 @@ func (c *cli) loginKey(provider string, long bool, rest []string, label string) 
 		}
 		return c.awaitWeb(nil, loginpage.Options{Want: loginpage.Key, Provider: provider,
 			Submit: func(ctx context.Context, key string) (string, error) {
+				wait, stopWait := lockWait(ctx)
+				defer stopWait()
 				work, cancel := checking(ctx)
 				defer cancel()
-				return "", c.storeKey(ctx, work, provider, key, label)
+				return "", c.storeKey(wait, work, provider, key, label)
 			}})
 	}
 	key, err := c.askSecret("API key")
@@ -188,7 +194,9 @@ func (c *cli) loginToken(provider string, long bool, rest []string) error {
 		}
 		return c.awaitWeb(nil, loginpage.Options{Want: loginpage.Token, Provider: a.Provider, Approve: approve,
 			Submit: func(ctx context.Context, tok string) (string, error) {
-				err := c.storeToken(ctx, id, tok)
+				wait, stopWait := lockWait(ctx)
+				defer stopWait()
+				err := c.storeToken(wait, id, tok)
 				if errors.Is(err, rota.ErrNoAccount) {
 					return "", loginpage.Final(err)
 				}

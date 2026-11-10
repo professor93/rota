@@ -24,6 +24,7 @@ import (
 
 	"github.com/professor93/rota/cmd/rota/loginpage"
 	rota "github.com/professor93/rota/lib"
+	"github.com/professor93/rota/store"
 )
 
 // No test binds the page's default port: many test binaries share this
@@ -424,6 +425,9 @@ func TestLoginWebTakesAKeyUnseen(t *testing.T) {
 		seedTwoClaude(t)
 		r := webCall(t, "login", "12", "--token", "--web", "127.0.0.1:0")
 		u := r.url(t)
+		if page := get(t, u); !strings.Contains(page, "a@b.c") {
+			t.Fatalf("the token page says whose token it takes: %s", page)
+		}
 		code, body := post(t, u, testSetup)
 		if code != http.StatusOK {
 			t.Fatalf("%d %s", code, body)
@@ -681,20 +685,26 @@ func TestLoginWebCutsACheckShortAtItsCap(t *testing.T) {
 	was := finishTimeout
 	finishTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { finishTimeout = was })
+	release := make(chan struct{})
 	claudeAt(t, func(n int32, w http.ResponseWriter, r *http.Request) {
-		if n == 1 { // held past the cap
+		if n == 1 { // held for as long as the test runs: only the cap ends it
 			select {
-			case <-time.After(5 * time.Second):
 			case <-r.Context().Done():
+			case <-release:
 			}
 			return
 		}
 		approvedAs12(w)
 	})
+	t.Cleanup(func() { close(release) }) // before the fake server closes
 	r := webCall(t, "login", "12", "--web", "127.0.0.1:0")
 	u := r.url(t)
+	start := time.Now()
 	if code, body := post(t, u, "AS12"); code != http.StatusBadRequest {
 		t.Fatalf("a check cut short: %d %s", code, body)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("the check was not cut at its cap: answered after %v", took)
 	}
 	if !strings.Contains(parked(t, home), loginIDFrom(t, r.out.String())) {
 		t.Fatal("a check cut short gave the login up")
@@ -753,6 +763,10 @@ func TestLoginWebRefusesWhatNoPasteCanSatisfy(t *testing.T) {
 		{[]string{"login", "codex", "--key", "--web", "127.0.0.1:0"}, []string{"login", "codex", "--key"}, testKey},
 		{[]string{"login", "1", "--token", "--web", "127.0.0.1:0"}, []string{"login", "1", "--token"}, testSetup},
 		{[]string{"login", "2", "--token", "--web", "127.0.0.1:0"}, []string{"login", "2", "--token"}, testSetup},
+		{[]string{"login", "--key", "--label", strings.Repeat("x", 65), "--web", "127.0.0.1:0"},
+			[]string{"login", "--key", "--label", strings.Repeat("x", 65)}, testKey},
+		{[]string{"login", "--key", "--label", "two\nlines", "--web", "127.0.0.1:0"},
+			[]string{"login", "--key", "--label", "two\nlines"}, testKey},
 	} {
 		got := webCall(t, c.web...).wait(t)
 		_, plainErr, plainCode := runCLIStdin(t, c.paste+"\n", c.plain...)
@@ -783,5 +797,114 @@ func TestLoginWebRefusesLoginsThatTakeNothingPasted(t *testing.T) {
 	}
 	if p := parked(t, home); p != "" {
 		t.Fatalf("a login was begun: %s", p)
+	}
+}
+
+// Which providers take a pasted key or setup token is told from lib's own
+// refusal, by its words: a rewording fails here at once.
+func TestTakesPasteTellsWhoTakesOne(t *testing.T) {
+	if err := takesPaste(rota.DefaultProvider); err != nil {
+		t.Fatalf("%s: %v", rota.DefaultProvider, err)
+	}
+	for _, p := range []string{"codex", "t-wait-device", "no-such-provider"} {
+		if err := takesPaste(p); err == nil {
+			t.Errorf("%s takes no pasted key or token, and was said to", p)
+		}
+	}
+}
+
+// A machine that lists no address is said to, not shown an empty menu or a
+// "<nil>".
+func TestTheMenuWithNoAddressSaysSo(t *testing.T) {
+	was := pageChoices
+	pageChoices = func() ([]loginpage.Choice, error) { return nil, nil }
+	t.Cleanup(func() { pageChoices = was })
+	typing(t, "")
+	var errb bytes.Buffer
+	addr, err := (&cli{in: stdin, out: io.Discard, err: &errb}).pickAddr(&webAsk{})
+	if err != nil || addr != "127.0.0.1" || !strings.Contains(errb.String(), "lists no address") ||
+		strings.Contains(errb.String(), "<nil>") || strings.Contains(errb.String(), "Choice") {
+		t.Fatalf("%q %v\n%s", addr, err, errb.String())
+	}
+}
+
+// heldStore is a throwaway store that hold(true) opens as another rota
+// would, its lock held, until hold(false). Its directory is removed without
+// failing the test, since a command given up on may still open it once the
+// lock is let go.
+func heldStore(t *testing.T) (home string, hold func(bool)) {
+	t.Helper()
+	home, err := os.MkdirTemp("", "rota-held")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ROTA_HOME", home)
+	writeStore(t, home, `{"ordered":true,"nextId":14,"accounts":[
+		{"id":12,"provider":"claude","email":"a@b.c","uuid":"u12","order":1,"dead":true,"deadReason":"gone",
+		 "token":{"accessToken":"OLD-12","refreshToken":"R12"}},
+		{"id":13,"provider":"claude","email":"d@e.f","uuid":"u13","order":2,
+		 "token":{"accessToken":"OLD-13","refreshToken":"R13"}}]}`)
+	var held *store.Store
+	hold = func(on bool) {
+		switch {
+		case on && held == nil:
+			var err error
+			if held, err = store.Open(home); err != nil {
+				t.Fatal(err)
+			}
+		case !on && held != nil:
+			held.Close()
+			held = nil
+		}
+	}
+	t.Cleanup(func() {
+		hold(false)
+		time.Sleep(200 * time.Millisecond) // a check given up on opens and closes it
+		os.RemoveAll(home)
+	})
+	return home, hold
+}
+
+// ^C while a value waits for the store's lock, which another rota holds, ends
+// the command at once: the wait for the lock gives up, and nothing was sent.
+func TestLoginWebGivesUpTheLockWaitOnAnInterrupt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("an interrupt cannot be sent to this process on Windows")
+	}
+	for _, c := range []struct {
+		name  string
+		args  []string
+		value string
+	}{
+		{"a code", []string{"login", "12", "--web", "127.0.0.1:0"}, "AS12"},
+		{"a key", []string{"login", "--key", "--web", "127.0.0.1:0"}, testKey},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			home, hold := heldStore(t)
+			approvalsByCode(t, known)
+			keyAPI(t, 200)
+			submitted := make(chan struct{}, 1)
+			webSubmitted = func() { submitted <- struct{}{} }
+			t.Cleanup(func() { webSubmitted = nil })
+			r := webCall(t, c.args...)
+			u := r.url(t)
+			hold(true) // another rota takes the store now, after the login began
+			go browser.PostForm(u, url.Values{"value": {c.value}})
+			<-submitted
+			time.Sleep(100 * time.Millisecond) // into the wait for the lock
+			sent := time.Now()
+			interruptSelf(t)
+			got := r.wait(t)
+			if took := time.Since(sent); got.code != 130 || took > 3*time.Second {
+				t.Fatalf("%d after %v\n%s\n%s", got.code, took, got.out, got.err)
+			}
+			if strings.Contains(got.out, "Refreshed") || strings.Contains(got.out, "Added") {
+				t.Fatalf("finished while the store was held:\n%s", got.out)
+			}
+			hold(false)
+			if c.name == "a code" && !strings.Contains(parked(t, home), loginIDFrom(t, got.out)) {
+				t.Fatal("the login was not left parked")
+			}
+		})
 	}
 }

@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/professor93/rota/cmd/rota/loginpage"
 	"github.com/professor93/rota/internal/logins"
@@ -30,9 +32,11 @@ import (
 // argv: the value travels only in the page's form body.
 
 // webAsk is --web on the command line, nil when it was not given. Addr is the
-// address after it, empty when none was, until readyWeb settles one.
+// address after it, empty when none was, until readyWeb settles one; ready
+// says it has.
 type webAsk struct {
-	Addr string
+	Addr  string
+	ready bool
 }
 
 // webUsage is why --web is refused beside --json or a code.
@@ -52,8 +56,8 @@ var pagePort = loginpage.DefaultPort
 // or by the page's end: the provider may have taken a single-use code, or be
 // about to refuse a key, and its answer is the only copy of what it said. The
 // page waits for it, so ^C is held up no longer than this. Waiting for the
-// store's lock, before anything is sent, does give up on ^C. A variable so a
-// test can cut a check short.
+// store's lock, before anything is sent, has the same bound and does give up
+// on ^C (lockWait). A variable so a test can cut a check short.
 var finishTimeout = 60 * time.Second
 
 // checking is the context a value's check runs under once it is sent: ctx's
@@ -61,6 +65,17 @@ var finishTimeout = 60 * time.Second
 func checking(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), finishTimeout)
 }
+
+// lockWait is the context a value waits for the store's lock under: ctx, so
+// ^C and the page's end stop it, and finishTimeout from now, so a rota that
+// keeps the store does not keep the page's one check slot with it.
+func lockWait(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, finishTimeout)
+}
+
+// webSubmitted, when set, is called as each value from the page begins to be
+// checked: how a test acts while a check waits.
+var webSubmitted func()
 
 // takeWeb lifts --web and its address out of login's arguments. The word
 // after --web is its address only when it reads as one: it holds a colon,
@@ -141,6 +156,9 @@ func splitAddr(addr string) (host, port string, hasPort bool) {
 // or a port that is busy or not this user's, ends the command with nothing
 // begun.
 func (c *cli) readyWeb() error {
+	if c.web.ready {
+		return nil
+	}
 	addr, err := c.pickAddr(c.web)
 	if err != nil {
 		return err
@@ -148,7 +166,7 @@ func (c *cli) readyWeb() error {
 	if err := tryListen(pageAddr(addr)); err != nil {
 		return err
 	}
-	c.web.Addr = addr
+	c.web.Addr, c.web.ready = addr, true
 	return nil
 }
 
@@ -171,13 +189,29 @@ func tryListen(addr string) error {
 
 // takesPaste is nil when provider takes a pasted key or setup token, and
 // otherwise the refusal a paste would get. It asks lib with an empty token,
-// which is refused by its shape and sent nowhere.
+// which is refused by its shape and sent nowhere. lib exports no other way to
+// ask, so the refusal is told by its words; were they to change, this would
+// say yes and the first paste would be refused instead, in the same words
+// (TestTakesPasteTellsWhoTakesOne fails at once if they do).
 func takesPaste(provider string) error {
 	if _, err := rota.Lookup(provider); err != nil {
 		return err
 	}
-	if _, err := rota.PasteLong(provider, ""); err != nil && strings.HasSuffix(err.Error(), "takes no pasted key or token") {
+	_, err := rota.PasteLong(provider, "")
+	if err != nil && errors.Is(err, rota.ErrInvalidRequest) && strings.HasSuffix(err.Error(), "takes no pasted key or token") {
 		return err
+	}
+	return nil
+}
+
+// checkLabel is the store's rule for a key account's label, in its words, so
+// a page is not served for a label every paste would be refused over. The
+// store keeps the rule unexported; this is a copy of it, and
+// TestLoginWebRefusesWhatNoPasteCanSatisfy holds the words to the store's.
+func checkLabel(label string) error {
+	label = strings.TrimSpace(label)
+	if utf8.RuneCountInString(label) > 64 || strings.ContainsFunc(label, unicode.IsControl) {
+		return rota.Invalid("a label is one line of at most 64 characters")
 	}
 	return nil
 }
@@ -272,14 +306,16 @@ func (c *cli) webWait(s *store.Store, l *rota.Login, account int) error {
 		ends: time.UnixMilli(l.CreatedAt).Add(loginTTL), looked: make(chan lookedResult, 1)}
 	w.dir, _ = store.DefaultDir()
 	_ = s.Release()
-	// A login just begun had its address settled before it began; one named
-	// by its id is settled now, with the lock let go.
+	// A login just begun had its address settled before it began, and this
+	// does nothing; one named by its id is settled now, with the lock let go.
 	if err := c.readyWeb(); err != nil {
 		return c.stillOpen(w, err)
 	}
 	o.Ends = w.ends
 	o.Submit = func(ctx context.Context, code string) (string, error) {
-		s, err := c.openStoreCtx(ctx)
+		wait, stopWait := lockWait(ctx)
+		s, err := c.openStoreCtx(wait)
+		stopWait()
 		if err != nil {
 			return "", err
 		}
@@ -330,6 +366,9 @@ func (c *cli) awaitWeb(w *waitFor, o loginpage.Options) error {
 		defer mu.Unlock()
 		if closing {
 			return "", loginpage.Final(errors.New("this login is no longer open here"))
+		}
+		if webSubmitted != nil {
+			webSubmitted()
 		}
 		done, err := submit(ctx, v)
 		if err == nil {
@@ -491,6 +530,9 @@ func (c *cli) openStoreCtx(ctx context.Context) (*store.Store, error) {
 				o.s.Close()
 			}
 		}()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return nil, errors.New("another rota is holding the account store; give it again in a moment")
+		}
 		return nil, ctx.Err()
 	}
 }

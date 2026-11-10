@@ -580,8 +580,9 @@ exits 130 with the login left open. `--web` takes no `--json` and no code after
 a login id: both are a usage error. An account whose CLI keeps its own
 credentials has no page, and neither has a login that takes nothing pasted.
 What no paste could satisfy is refused before a page is served, in the words a
-paste would get: `--key` on a provider that takes no key, and `--token` on an
-account on an API key or a provider that takes no setup token.
+paste would get: `--key` on a provider that takes no key or with a `--label`
+longer than 64 characters or more than one line, and `--token` on an account on
+an API key or a provider that takes no setup token.
 
 ## The HTTP API
 
