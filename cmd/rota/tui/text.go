@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,11 +21,17 @@ import (
 //     C1 CSI as a character or as the lone byte 0x9b) to its final byte, an
 //     OSC and the other string sequences to their BEL or ST, and any other
 //     ESC with what it takes (textEscapes). A key the sequence's parameters
-//     were glued to then stands as a word, and a key a sequence split is
-//     read whole (textRedact); either is taken out.
-//   - Every C0 control, DEL and every C1 control left is dropped. A newline, a tab and the other
-//     line breaks become a space. A byte that is not UTF-8 becomes "?": 0x9b
-//     alone is CSI to a terminal that reads 8 bits.
+//     were glued to then stands as a word, a key a sequence split is read
+//     whole, and a key whose characters a sequence took is read with them
+//     put back (textRedact); each is taken out. What is not: a key with two
+//     sequences inside its "sk-ant-", one taking a character of it and the
+//     other putting characters of its own in, as x ESC s ESC [0m k-ant-….
+//     Whoever can place those can as well print the key without its
+//     prefix, which no redaction by shape stops; redaction is for a key
+//     echoed by accident, and no accident puts sequences inside a prefix.
+//   - Every C0 control, DEL and every C1 control left is dropped. A
+//     newline, a tab and the other line breaks become a space. A byte that
+//     is not UTF-8 becomes "?".
 //   - Format characters that are never drawn are dropped: the bidi controls a
 //     terminal may reorder a row by, the zero width space, the soft hyphen,
 //     the byte order mark. Only the joiners, ZWJ and ZWNJ, stay; they are
@@ -58,7 +65,7 @@ func textClean(s string) (out string, passes, scanned int) {
 	// A control stands between words as a space does, so a key just after
 	// one is taken out before the control goes, and a key that dropping
 	// controls joins up is taken out after.
-	s, seams := textEscapes(wire.Unsecret(s))
+	s, seams, ate := textEscapes(wire.Unsecret(s))
 	var b strings.Builder
 	b.Grow(len(s))
 	kept := seams[:0] // where the spaces that stand for sequences are now
@@ -82,8 +89,9 @@ func textClean(s string) (out string, passes, scanned int) {
 			b.WriteRune(r)
 		}
 	}
-	out, passes, scanned = textSamePasses(textHangul(textRedact(b.String(), kept)))
-	return wire.Unsecret(out), passes, scanned
+	red, looked := textRedact(b.String(), kept, ate)
+	out, passes, scanned = textSamePasses(textHangul(red))
+	return wire.Unsecret(out), passes, scanned + looked
 }
 
 // textKey is the start of an Anthropic credential: wire.Unsecret's shape,
@@ -97,61 +105,93 @@ func textKeyByte(c byte) bool {
 }
 
 // textRedact is s, in which each space at seams stands for an escape
-// sequence, with every key taken out that reads whole once those spaces are
-// gone: a key a sequence split in two shows as neither half. A key starts
-// where s starts, after a character that is not a letter or digit, or
-// after a seam, as wire.Unsecret has it, so a key a sequence was glued to
-// is taken out too. Its replacement is wire.Unsecret's.
-func textRedact(s string, seams []int) string {
+// sequence and ate[n] holds the key characters the n-th one took, with
+// every key taken out that either of two readings finds: the sequences
+// gone, so a key a sequence split shows as neither half, and each
+// sequence's key characters put back, so a key whose "s" or "-a" a
+// sequence took is found too. A key starts where s starts, after a
+// character that is not a letter or digit, after a seam or inside one, as
+// wire.Unsecret has it, so a key a sequence was glued to is taken out too.
+// Its replacement is wire.Unsecret's. The second result is how many bytes
+// of key bodies it read: each once, as a body is read only where a key
+// starts.
+func textRedact(s string, seams []int, ate []string) (string, int) {
 	if len(seams) == 0 {
-		return s
+		return s, 0
 	}
-	// j is s without the seams, and at[k] where j's k-th byte is in s.
-	var j strings.Builder
-	at := make([]int, 0, len(s))
-	seam := make(map[int]bool, len(seams))
-	for _, i := range seams {
-		seam[i] = true
+	looked := 0
+	seam := make(map[int]string, len(seams))
+	for n, i := range seams {
+		seam[i] = ate[n]
 	}
-	for i := 0; i < len(s); i++ {
-		if !seam[i] {
-			j.WriteByte(s[i])
-			at = append(at, i)
-		}
-	}
-	js := j.String()
 	type span struct{ from, to int } // in s
 	var spans []span
-	for k := 0; k < len(js); {
-		off := strings.Index(js[k:], textKey)
-		if off < 0 {
-			break
+	// Two readings: the sequences gone, and each sequence's key bytes kept.
+	for _, keep := range []bool{false, true} {
+		var j strings.Builder
+		at := make([]int, 0, len(s))
+		var eaten []bool
+		for i := 0; i < len(s); i++ {
+			if k, ok := seam[i]; ok {
+				if keep {
+					for x := 0; x < len(k); x++ {
+						j.WriteByte(k[x])
+						at = append(at, i)
+						eaten = append(eaten, true)
+					}
+				}
+				continue
+			}
+			j.WriteByte(s[i])
+			at = append(at, i)
+			eaten = append(eaten, false)
 		}
-		start := k + off
-		end := start + len(textKey)
-		for end < len(js) && textKeyByte(js[end]) {
-			end++
+		js := j.String()
+		for k := 0; k < len(js); {
+			off := strings.Index(js[k:], textKey)
+			if off < 0 {
+				break
+			}
+			start := k + off
+			_, after := seam[at[start]-1]
+			word := start == 0 || eaten[start] || after || !(textKeyByte(js[start-1]) && js[start-1] != '_' && js[start-1] != '-')
+			if !word {
+				k = start + 1
+				continue
+			}
+			end := start + len(textKey)
+			for end < len(js) && textKeyByte(js[end]) {
+				end++
+			}
+			looked += end - start
+			if end-start-len(textKey) >= 16 {
+				spans = append(spans, span{at[start], at[end-1] + 1})
+				k = end
+				continue
+			}
+			k = start + 1
 		}
-		word := start == 0 || seam[at[start]-1] || !(textKeyByte(js[start-1]) && js[start-1] != '_' && js[start-1] != '-')
-		if word && end-start-len(textKey) >= 16 {
-			spans = append(spans, span{at[start], at[end-1] + 1})
-			k = end
-			continue
-		}
-		k = start + 1
 	}
 	if len(spans) == 0 {
-		return s
+		return s, looked
 	}
+	sort.Slice(spans, func(x, y int) bool { return spans[x].from < spans[y].from })
 	var b strings.Builder
 	done := 0
 	for _, sp := range spans {
-		b.WriteString(s[done:sp.from])
+		if sp.to <= done {
+			continue
+		}
+		if sp.from < done {
+			sp.from = done
+		} else {
+			b.WriteString(s[done:sp.from])
+		}
 		b.WriteString(textKey + "[not repeated]")
 		done = sp.to
 	}
 	b.WriteString(s[done:])
-	return b.String()
+	return b.String(), looked
 }
 
 // textEscapes is s with each escape sequence in it replaced by a space, and
@@ -166,14 +206,22 @@ func textRedact(s string, seams []int) string {
 //
 // A sequence cut short goes as far as it got. Anything else, a lone ESC
 // among them, is left for clean's control pass to drop. The scan is linear.
-func textEscapes(s string) (string, []int) {
+func textEscapes(s string) (string, []int, []string) {
 	const esc = 0x1b
 	var b strings.Builder
 	var seams []int
+	var ate []string
 	done := 0 // how much of s is in b; 0 while nothing was replaced
 	put := func(from, to int) {
 		b.WriteString(s[done:from])
 		seams = append(seams, b.Len())
+		var k []byte
+		for x := from; x < to; x++ {
+			if textKeyByte(s[x]) {
+				k = append(k, s[x])
+			}
+		}
+		ate = append(ate, string(k))
 		b.WriteByte(' ')
 		done = to
 	}
@@ -245,10 +293,10 @@ func textEscapes(s string) (string, []int) {
 		}
 	}
 	if done == 0 {
-		return s, nil
+		return s, nil, nil
 	}
 	b.WriteString(s[done:])
-	return b.String(), seams
+	return b.String(), seams, ate
 }
 
 // textSame is s with every character the measures disagree on replaced by
