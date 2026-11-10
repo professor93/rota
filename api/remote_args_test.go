@@ -42,6 +42,16 @@ var remoteSpellings = [][]string{
 	{"remote-control"},
 	{"--model", "opus", "rc"},
 	{"--", "remote-control"},
+	// The re-review's probes of a46fbc9, each a "--" taken as a flag's
+	// value, after which the flag is still a flag.
+	{"--model", "--", "--rc"},
+	{"-n", "--", "--remote-control"},
+	{"--name", "--", "--settings", `{"remoteControlAtStartup":true}`},
+	{"--append-system-prompt", "--", "--rc=desk"},
+	{"-cn", "--", "--rc"},
+	{"--add-dir", "--", "--rc"},
+	// A --settings that cannot be read does not hide a later one.
+	{"--settings", "missing.json", "--settings", `{"remoteControlAtStartup":true}`},
 }
 
 // plainArgs carry no Remote Control, however close they come: a flag's

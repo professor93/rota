@@ -3253,31 +3253,46 @@ Claude Code 2.1.322 takes:
   flag's value, after `--` too;
 - `remote`, `sync` and `bridge` as the first argument, which Claude Code also
   answers with Remote Control;
-- `--settings` whose document, inline or in the file it names (relative to
-  where the CLI starts), sets `remoteControlAtStartup` to `true`. A run's
-  `settings` counts as the `--settings` it becomes.
+- any `--settings` whose document sets `remoteControlAtStartup` to `true`,
+  wherever it stands among them. A value that begins with `{` and ends with
+  `}` is the document inline, as Claude Code tells them apart; anything else
+  names a file, read relative to where the CLI starts. A run's `settings`
+  counts as the `--settings` it becomes.
+
+The flags and `--settings` are read as whole arguments wherever they stand:
+after `--` too, and where they might be another flag's value. Claude Code
+takes the next argument as a required flag's value even when that is `--`,
+so in `--model -- --rc` the `--rc` is still the flag. A prompt that is
+exactly `--rc` is therefore read as asking, which over TCP refuses it.
 
 Over the control socket each is readied as `rota run --remote-control` is:
 the setting turned on and saved, and a session whose Remote Control could not
 work refused, in the same words. From a bearer token or a page's user each is
 refused, and so is a `--settings` rota cannot read; an invite only watches and
-is refused before that. A `PATCH remote_control` that changes the setting is
+is refused before that. Over the socket a `--settings` rota cannot read is
+Claude Code's to refuse, and does not hide another one that asks. A `PATCH remote_control` that changes the setting is
 refused the same way, because the setting decides whose claude.ai identity a
 session can be reached through. `rota run 2 --detach -- --rc` goes to the
 daemon over its socket, which readies the account, and the command says the
 setting is on from now on.
 
 This is a guard, not a wall. Claude Code's own releases add spellings this
-list does not know yet. Several ways in carry nothing a server can read:
+list does not know yet. An agent in a session held by a daemon that serves
+another store than the default is not seen as inside it. Several ways in
+carry nothing a server can read:
 typed into a session, `/remote-control`, `/rc`, and `/config`, whose "Enable
 Remote Control for all sessions" writes `remoteControlAtStartup` into the
 settings every account shares. Auto-connect can also come from your own
 settings, the organisation's managed settings, the key in `.claude.json`, or
 the organisation's default. Whoever holds a session's keyboard can do the
-first three. For a claude account whose setting is off, a launch says once,
-in a warning, when the settings files Claude Code will read, or
-`.claude.json`, turn `remoteControlAtStartup` on, naming the file. It changes
-nothing, and the organisation's default is Claude Code's alone to know.
+first three. For a claude account whose setting is off, a launch that opens
+Claude Code's own session says once, in a warning, when the files rota reads
+turn `remoteControlAtStartup` on, naming the file. Those files are your
+settings, a project's, the managed settings files and `.claude.json`. A run
+is `claude -p`, which never auto-connects, and is not warned. The warning
+changes nothing. Managed policy from MDM, the macOS profile or the Windows
+registry, or from the server is not read for it, and the organisation's
+default is Claude Code's alone to know.
 
 In your own terminal the CLI's own arguments stay yours:
 `rota run 2 -- --rc`, or `-- remote-control`, hands Claude Code exactly that,
@@ -3289,7 +3304,12 @@ in one, which may have been started from another device. There Remote Control
 in the CLI's own arguments is refused, the way `rota serve stop` is: *Remote
 Control in the CLI's own arguments is refused inside held session <id>; run it
 from outside the session, or ask for it with rota's own --remote-control,
-before --*.
+before --*. A `--settings` rota cannot read counts as asking there. A current
+directory that cannot be read is taken as inside a held session, since it is
+how an agent could step out of the check: *Remote Control in the CLI's own
+arguments is refused when the current directory cannot be read, as it is
+inside a held session; run it from a directory that exists, or ask for it
+with rota's own --remote-control, before --*.
 
 An account with `--config` has no Remote Control in 1.3.0: it runs on a
 token, which Remote Control refuses. `rota run --remote-control`, `rota set

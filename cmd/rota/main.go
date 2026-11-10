@@ -1172,10 +1172,8 @@ func (c *cli) handOver(id int, args []string, ask shareAsk, remote remoteAsk) (e
 	// it, when that is what does.
 	defer func() { err = heldBusy(s, a, err) }()
 	if rota.Flavor(a.Provider) == "claude" {
-		if cwd, werr := os.Getwd(); werr == nil && asksRemoteControl(args, cwd) {
-			if err := remoteInsideHeld(s); err != nil {
-				return err
-			}
+		if err := remoteOwnArgs(s, args); err != nil {
+			return err
 		}
 	}
 	more, err := c.remoteControl(s, a, remote)

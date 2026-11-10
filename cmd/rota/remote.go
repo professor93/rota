@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/professor93/rota/internal/holdwire"
@@ -56,11 +58,39 @@ func asksRemoteControl(args []string, cwd string) bool {
 	return asks
 }
 
-// remoteInsideHeld is the one exception to the CLI's own arguments being the
-// person's: Remote Control asked for in them from inside a held session,
-// where it is most likely the agent in one, which may have been started from
-// another device. That is refused, the way rota serve stop is, and rota's
-// own --remote-control, which readies the account, still works there.
+// getwd is os.Getwd, and a variable only so a test can stand in for a
+// directory that cannot be read, which macOS still names once removed.
+var getwd = os.Getwd
+
+// remoteInsideCwd is remoteOwnArgs's refusal where the current directory
+// cannot be read.
+const remoteInsideCwd = "Remote Control in the CLI's own arguments is refused when the current directory cannot be read, " +
+	"as it is inside a held session; run it from a directory that exists, or ask for it with rota's own --remote-control, before --"
+
+// remoteOwnArgs is the one exception to a claude account's CLI arguments,
+// handed over on this machine, being the person's own. Remote Control asked
+// for in them from inside a held session is refused (remoteInsideHeld).
+// That covers a --settings that cannot be read, which might ask for it. A
+// current directory that cannot be read is taken as inside: it is how an
+// agent could step out of the check, and a relative --settings cannot be
+// read without it. Anywhere else they are handed over untouched.
+func remoteOwnArgs(s *store.Store, args []string) error {
+	cwd, werr := getwd()
+	asks, err := holdwire.AsksRemoteControl(args, cwd)
+	switch {
+	case !asks && err == nil:
+		return nil
+	case werr != nil:
+		return errors.New(remoteInsideCwd)
+	}
+	return remoteInsideHeld(s)
+}
+
+// remoteInsideHeld refuses Remote Control asked for in the CLI's own
+// arguments from inside a held session. The caller there is most likely the
+// agent in one, which may have been started from another device. It is
+// refused the way rota serve stop is, and rota's own --remote-control, which
+// readies the account, still works there.
 func remoteInsideHeld(s *store.Store) error {
 	terminals, err := s.TerminalDir()
 	if err == nil {

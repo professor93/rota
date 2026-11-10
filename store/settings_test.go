@@ -447,7 +447,7 @@ func TestNoHomeDirectoryMeansNoUserSettings(t *testing.T) {
 	var said []string
 	s.Warn = func(msg string) { said = append(said, msg) }
 
-	s.sayRiskySettings(a, nil, "", []string{"user"}, false)
+	s.sayRiskySettings(a, nil, "", []string{"user"}, false, false)
 	if len(said) != 0 {
 		t.Fatalf("no home, no user settings: %q", said)
 	}

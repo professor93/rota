@@ -86,7 +86,7 @@ func (s *Store) sayRunSettings(a *rota.Account, cmd *rota.Command, spec rota.Spe
 		cwd = ""
 	}
 	env := rota.Environ(cmd.BaseEnv, cmd)
-	s.sayRiskySettings(a, env, cwd, spec.SettingSources, spec.Hermetic)
+	s.sayRiskySettings(a, env, cwd, spec.SettingSources, spec.Hermetic, false)
 	s.sayFederationProfile(a, env, cwd)
 }
 
@@ -94,8 +94,11 @@ func (s *Store) sayRunSettings(a *rota.Account, cmd *rota.Command, spec rota.Spe
 // Claude Code will read that sets apiKeyHelper or one of settingsEnvKeys in
 // its env block. env is the child's environment, which says the
 // configuration directory it runs in; cwd the directory it starts in;
-// sources the run's setting_sources, nil for all of them; and hermetic that
-// the run gets a fresh configuration directory with no settings in it.
+// sources the run's setting_sources, nil for all of them; hermetic that
+// the run gets a fresh configuration directory with no settings in it; and
+// interactive that the launch opens Claude Code's own session, the only kind
+// remoteControlAtStartup connects, so only such a launch is told about it
+// (atStartupFrom). A run is claude -p, and is not.
 //
 // The warning says two things apart. A credential or a host is a risk to
 // the account and is said as one. A proxy or a certificate in the person's
@@ -106,7 +109,7 @@ func (s *Store) sayRunSettings(a *rota.Account, cmd *rota.Command, spec rota.Spe
 // which come with whatever repository is checked out, a proxy and a
 // certificate are how that repository could intercept the token, and they
 // are said as the risk with the rest.
-func (s *Store) sayRiskySettings(a *rota.Account, env []string, cwd string, sources []string, hermetic bool) {
+func (s *Store) sayRiskySettings(a *rota.Account, env []string, cwd string, sources []string, hermetic, interactive bool) {
 	if s.Warn == nil || rota.Flavor(a.Provider) != "claude" {
 		return
 	}
@@ -171,7 +174,7 @@ func (s *Store) sayRiskySettings(a *rota.Account, env []string, cwd string, sour
 		said = append(said, "Claude Code will use the proxy or the certificates its settings name, which rota otherwise "+
 			"keeps out of an account's environment; nothing is wrong if they are your network's: "+strings.Join(routes, "; "))
 	}
-	if !a.RemoteControl {
+	if interactive && !a.RemoteControl {
 		var user, config string
 		if dir := configDirOf(env); dir != "" {
 			config = filepath.Join(dir, ".claude.json")
@@ -204,14 +207,17 @@ const maxConfigFile = 64 << 20
 
 // atStartupFrom is the file whose remoteControlAtStartup true connects a
 // launch's interactive sessions to Remote Control as they start, links
-// resolved, or "" when none does. It decides as Claude Code 2.1.322 does.
-// A false in a project's or a local settings file (repo) turns it off. A
-// true there is ignored. Otherwise the managed settings decide, the last
-// file that names the key winning, then the person's own (user). Only when
-// none of them names it does the key in .claude.json (config) decide.
-// --settings and the organisation's default are not seen here: rota reads a
-// launch's arguments for Remote Control on their own
-// (holdwire.AsksRemoteControl), and the default is Claude Code's to know.
+// resolved, or "" when none does. It follows Claude Code 2.1.322's order
+// over the files rota reads, and those alone. A false in a project's or a
+// local settings file (repo) turns it off, and a true there is ignored.
+// Otherwise the managed settings files decide (managed-settings.json and its
+// drop-ins), the last that names the key winning, then the person's own
+// (user). Only when none of them names it does the key in .claude.json
+// (config) decide. What rota does not read is not seen: the managed policy
+// from MDM (the macOS profile, the Windows registry) or from the server
+// (remote-settings.json), which rank above those files, --settings, which
+// rota reads with the launch's arguments (holdwire.AsksRemoteControl), and
+// the organisation's default, which is Claude Code's to know.
 func atStartupFrom(managed []string, user string, repo []string, config string) string {
 	read := func(path string, limit int64) (on, set bool, at string) {
 		if path == "" {

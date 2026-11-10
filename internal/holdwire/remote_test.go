@@ -33,6 +33,7 @@ func TestAsksRemoteControlReadsWhatClaudeCodeTakes(t *testing.T) {
 	off := write("off.json", `{"remoteControlAtStartup":false,"model":"x"}`)
 	write("rel.json", string([]byte{0xEF, 0xBB, 0xBF})+`{"remoteControlAtStartup": true}`) // after a byte-order mark
 	broken := write("broken.json", `{"remoteControlAtStartup":`)
+	write("{rc.json", `{"remoteControlAtStartup":true}`)
 
 	asks := [][]string{
 		// The review's probe table.
@@ -61,10 +62,38 @@ func TestAsksRemoteControlReadsWhatClaudeCodeTakes(t *testing.T) {
 		{"--settings", on},
 		{"--settings=" + on},
 		{"--settings", "rel.json"},
+		// The re-review's probes of a46fbc9: Commander takes the next
+		// argument as a required flag's value even when it is "--", so the
+		// flag after it is still a flag. The flags and --settings are read
+		// wherever they stand, after "--" too, and as a value of another flag.
+		{"--model", "--", "--rc"},
+		{"-n", "--", "--remote-control"},
+		{"-n", "--", "--remote-control=x"},
+		{"--name", "--", "--settings", `{"remoteControlAtStartup":true}`},
+		{"--append-system-prompt", "--", "--rc=desk"},
+		{"-cn", "--", "--rc"},
+		{"--add-dir", "--", "--rc"},
+		{"--", "--rc"},
+		{"--", "--settings=" + on},
+		{"--name", "--rc"},
+		{"--settings", "--rc"},
+		// A value is a document only when it is one, "{" to "}", as Claude
+		// Code tells them apart; otherwise it is a file.
+		{"--settings", "{rc.json"},
 	}
 	for _, args := range asks {
-		if got, err := AsksRemoteControl(args, dir); !got || err != nil {
-			t.Errorf("%q: %v %v, want it to ask for Remote Control", args, got, err)
+		if got, _ := AsksRemoteControl(args, dir); !got {
+			t.Errorf("%q: %v, want it to ask for Remote Control", args, got)
+		}
+	}
+	// Every --settings is read: one that cannot be read does not hide one
+	// that turns it on, and is still said, for a caller that refuses it.
+	for _, args := range [][]string{
+		{"--settings", "missing.json", "--settings", `{"remoteControlAtStartup":true}`},
+		{"--settings", `{"remoteControlAtStartup":true}`, "--settings", "missing.json"},
+	} {
+		if got, err := AsksRemoteControl(args, dir); !got || err == nil {
+			t.Errorf("%q: %v %v, want it to ask, and the unreadable one said", args, got, err)
 		}
 	}
 	plain := [][]string{
@@ -83,7 +112,8 @@ func TestAsksRemoteControlReadsWhatClaudeCodeTakes(t *testing.T) {
 		{"--resume", "rc"},
 		{"--verbose", "remote"},
 		{"--", "remote"},
-		{"--", "--rc"},
+		{"--", "--rcx"},
+		{"--", "say --rc please"},
 		{"--settings", `{"model":"x"}`},
 		{"--settings", `{"remoteControlAtStartup":false}`},
 		{"--settings", off},

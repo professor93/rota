@@ -70,11 +70,46 @@ const settingsFlag = "--settings"
 // do are held to the rule a request's remote_control is held to, so the
 // account Remote Control acts as is readied first.
 //
-// cwd is the directory the CLI starts in, which a relative --settings path is
-// read from. A --settings value that cannot be read as one JSON object is an
-// error. A caller that would refuse what asks for Remote Control refuses that
-// too, because rota cannot tell what Claude Code would make of it.
-func AsksRemoteControl(args []string, cwd string) (bool, error) {
+// The flag spellings and --settings are read as whole arguments wherever
+// they stand: after "--" too, and where they might be another flag's value.
+// Commander takes the next argument as a required flag's value even when
+// that is "--", so after `--model --` a --rc is still the flag. Reading them
+// everywhere covers that, bundled short flags and variadic values without
+// modelling Commander. It can only add false positives: a prompt that is
+// exactly --rc, which a caller over TCP refuses, failing closed. The command
+// words need the operands told from flag values, which is what valueFlags
+// is for.
+//
+// Every --settings is read, and one that turns remoteControlAtStartup on asks
+// for Remote Control, wherever it stands among them. cwd is the directory the
+// CLI starts in, which a relative path is read from. A --settings that cannot
+// be read as one JSON object is the error, said beside whatever the
+// arguments ask. A caller that refuses what asks for Remote Control refuses
+// that too, because rota cannot tell what Claude Code would make of it.
+func AsksRemoteControl(args []string, cwd string) (asks bool, err error) {
+	for i, a := range args {
+		name, value, inline := strings.Cut(a, "=")
+		switch {
+		case slices.Contains(remoteFlags, name):
+			asks = true
+		case name == settingsFlag && (inline || i+1 < len(args)):
+			if !inline {
+				value = args[i+1]
+			}
+			on, serr := settingsAsk(value, cwd)
+			asks = asks || on
+			if err == nil {
+				err = serr
+			}
+		}
+	}
+	return asks || asksCommand(args), err
+}
+
+// asksCommand reports whether Claude Code's command, or a word its entry
+// point takes first, is among the arguments as an operand rather than as a
+// flag's value.
+func asksCommand(args []string) bool {
 	options := true
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -83,41 +118,27 @@ func AsksRemoteControl(args []string, cwd string) (bool, error) {
 			continue
 		}
 		if options && strings.HasPrefix(a, "-") && a != "-" {
-			name, value, inline := strings.Cut(a, "=")
-			switch {
-			case slices.Contains(remoteFlags, name):
-				return true, nil
-			case name == settingsFlag:
-				if !inline {
-					if i+1 == len(args) {
-						continue
-					}
-					i++
-					value = args[i]
-				}
-				if on, err := settingsAsk(value, cwd); on || err != nil {
-					return on, err
-				}
-			case !inline && valueFlags[name] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-"):
+			name, _, inline := strings.Cut(a, "=")
+			if !inline && (valueFlags[name] || name == settingsFlag) && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				i++
 			}
 			continue
 		}
 		if slices.Contains(remoteCommands, a) || (i == 0 && slices.Contains(remoteFirst, a)) {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }
 
 // settingsAsk reports whether one --settings value turns
-// remoteControlAtStartup on: the document inline, when it starts with "{",
-// as Claude Code tells the two apart, and otherwise the file it names, read
-// as Claude Code reads a settings file. The errors never repeat the value,
-// which may carry anything.
+// remoteControlAtStartup on. The value is the document inline when, trimmed,
+// it begins with "{" and ends with "}", as Claude Code tells the two apart.
+// Otherwise it is the file it names, read as Claude Code reads a settings
+// file. The errors never repeat the value, which may carry anything.
 func settingsAsk(value, cwd string) (bool, error) {
 	text := []byte(value)
-	if !strings.HasPrefix(strings.TrimSpace(value), "{") {
+	if trimmed := strings.TrimSpace(value); !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
 		if value == "" {
 			return false, errors.New("--settings names no file")
 		}

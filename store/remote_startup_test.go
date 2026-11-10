@@ -4,6 +4,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	rota "github.com/professor93/rota/lib"
 )
 
 // remoteControlAtStartup connects every interactive session to Remote
@@ -28,7 +30,7 @@ func TestRemoteControlAtStartupIsSaidWhenTheAccountsSettingIsOff(t *testing.T) {
 		t.Helper()
 		var out []string
 		s.Warn = func(msg string) { out = append(out, msg) }
-		s.sayRiskySettings(a, env, cwd, nil, false)
+		s.sayRiskySettings(a, env, cwd, nil, false, true)
 		return out
 	}
 	const advice = "`rota set 1 --remote-control on` gives it a .claude.json of its own"
@@ -65,4 +67,27 @@ func TestRemoteControlAtStartupIsSaidWhenTheAccountsSettingIsOff(t *testing.T) {
 
 	a.RemoteControl = true
 	check("the account's own setting on", "")
+}
+
+// Only an interactive launch connects at startup: a run is claude -p, which
+// never does, so a run of the same account is not warned. The handover's
+// launch is, through the home's mirror of the person's .claude.json.
+func TestRemoteControlAtStartupIsNotSaidForARun(t *testing.T) {
+	noManaged(t)
+	src := claudeWorld(t)
+	writeFile(t, filepath.Join(src, ".claude.json"), `{"remoteControlAtStartup":true}`)
+	t.Chdir(t.TempDir())
+	s, a := claudeStore(t)
+	for _, msg := range ran(t, s, a, rota.Spec{}) {
+		if strings.Contains(msg, "remoteControlAtStartup") {
+			t.Fatalf("a run is warned about Remote Control at startup: %s", msg)
+		}
+	}
+	onPath(t, "claude")
+	// A run lets go of its store, so the launch opens one of its own.
+	s, a = claudeStore(t)
+	said := prepared(t, s, a)
+	if len(said) != 1 || !strings.Contains(said[0], "remoteControlAtStartup") {
+		t.Fatalf("the handover's launch: %q, want the warning", said)
+	}
 }
