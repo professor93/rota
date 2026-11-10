@@ -205,9 +205,11 @@ func ReservedNames(users []User, tokens []TokenPrincipal) error {
 // personOf is who a principal is as a person, for the keyboard of a held
 // session: the same person on several devices types on whichever of them
 // without asking. A user signed in on the page is its name. The local
-// principal — the control socket, this machine's own terminal — is the one
-// user who may control when there is exactly one, the one auth.local_user
-// names when there are more, and local itself when nobody says. A bearer
+// principal — the control socket, this machine's own terminal — is the
+// person Options.LocalUser names when it names one, else the one user who
+// may control when there is exactly one, and local itself when nobody says.
+// LocalUser comes first because it may name a person Users does not hold,
+// such as one who signs in by SSH key alone. A bearer
 // token or an invite is "", which is never a person: a token is carried by
 // a program, and an invite by whoever was handed the link.
 func (s *Server) personOf(p *Principal) string {
@@ -225,10 +227,10 @@ func (s *Server) personOf(p *Principal) string {
 			}
 		}
 		switch {
-		case n == 1:
-			return only
 		case s.opts.LocalUser != "":
 			return s.opts.LocalUser
+		case n == 1:
+			return only
 		}
 		return localName
 	}
