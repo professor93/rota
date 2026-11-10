@@ -990,14 +990,20 @@ agent is not loaded — exit status 3, *No such process*, as after a bootout
 by hand — is what uninstall asks for, and not an error.
 
 From `sudo -u`, `su` or a cron job, `systemctl --user` has no
-`XDG_RUNTIME_DIR` of yours — none, or the invoker's — and so no user bus.
-When `/run/user/<uid>` is your own directory and `systemd/private` in it
-your own socket, `install` and `uninstall` give systemctl
-`XDG_RUNTIME_DIR=/run/user/<uid>`, through which it reaches your user
-manager, `user@<uid>.service`, with no bus; an `XDG_RUNTIME_DIR` that
-already names a directory of yours is left as it is. A command that fails
-is then named with it: *XDG_RUNTIME_DIR=/run/user/<uid> systemctl --user
-disable --now <unit>: …*.
+`XDG_RUNTIME_DIR` that reaches a manager — none, the invoker's, or one
+with no manager in it — and so no user bus. An `XDG_RUNTIME_DIR` with a
+manager's socket at `systemd/private` in it is left as it is, whoever's it
+is: root given yours, as `sudo -E` gives it, reaches your manager.
+Otherwise, when `/run/user/<uid>` is your own directory and
+`systemd/private` in it your own socket, `install` and `uninstall` give
+systemctl `XDG_RUNTIME_DIR=/run/user/<uid>`, through which it reaches your
+user manager, `user@<uid>.service`, with no bus. A command that fails is
+then named with it: *XDG_RUNTIME_DIR=/run/user/<uid> systemctl --user
+disable --now <unit>: …*. `install` from there writes that environment's
+`PATH` into the unit, as it always writes the one it runs in — `sudo`'s
+`secure_path` where it sets one, or cron's, often `/usr/bin:/bin` — so a
+CLI in `~/.local/bin` may not be found; give it yours: `PATH=$HOME/.local/bin:$PATH rota
+serve install`, or install from a login of your own.
 
 A supervisor that still cannot be asked — no manager listening there, say
 — may leave the daemon running under the unit, and systemd, once it
@@ -1036,7 +1042,10 @@ its bus; stopping a daemon started by hand cancels nothing. A daemon it
 starts then, under a unit whose file is gone, ends the unit's sessions
 when it stops after the next reload. Which daemon is the unit's is read
 from `/proc/<pid>/cgroup`, and one whose cgroup cannot be read is taken
-for one started by hand. Nothing could start one again when no user
+for one started by hand. One started by hand from inside the unit's
+cgroup — from a session the unit's daemon held, which stays there after
+that daemon has gone — is taken for the unit's own: nothing outside
+systemd tells the two apart. Nothing could start one again when no user
 manager of yours runs: `/proc` can be read and shows itself, no process
 of yours in it is `systemd --user`, and `/sys/fs/cgroup` has no
 `user@<uid>.service`. Then the error is as above, and no reload is asked
