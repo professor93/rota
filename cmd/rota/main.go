@@ -774,7 +774,7 @@ func (c *cli) sayLongNotes(shown []*rota.Account, width int) {
 		if note := wire.LongNote(a); note != "" {
 			say(c.out, width, fmt.Sprintf("\n%s: %s\n", nameOf(a), note))
 		}
-		if note := wire.LoginNote(a); note != "" {
+		if note := loginNote(a); note != "" {
 			say(c.out, width, fmt.Sprintf("\n%s: %s\n", nameOf(a), note))
 		}
 		// Here too, because --short has no STATUS to say it in.
@@ -782,6 +782,38 @@ func (c *cli) sayLongNotes(shown []*rota.Account, width int) {
 			say(c.out, width, fmt.Sprintf("\n%s: %s\n", nameOf(a), note))
 		}
 	}
+}
+
+// loginNoteLead is how close to its end a login has to be before rota list's
+// note says so: a week, not the three days of wire.LoginSoon. With several
+// accounts there is a login to make again every few days, and three days'
+// notice is too little to plan them. The STATUS cell keeps its three days,
+// when Claude Code's own warning starts.
+const loginNoteLead = 7 * 24 * time.Hour
+
+// loginNote is what rota list says under its table about when an account's
+// login ends, or "" when that is more than loginNoteLead away or unknown: in
+// whole days and hours, "5d 12h", and in hours alone in its last day, never
+// fewer than one. The date is UTC's, as wire.LoginNote gives it, and a login
+// that is over is said as wire says it.
+func loginNote(a *rota.Account) string {
+	t := a.LoginUntil()
+	if t.IsZero() || a.Dead {
+		return ""
+	}
+	// The clock the end is kept by, as wire's note and STATUS cell read it.
+	left := t.Sub(rota.Now())
+	if left <= 0 {
+		return wire.LoginNote(a)
+	}
+	if left >= loginNoteLead {
+		return ""
+	}
+	in := fmt.Sprintf("%dh", max(int(left.Hours()), 1))
+	if h := int(left.Hours()); h >= 24 {
+		in = fmt.Sprintf("%dd %dh", h/24, h%24)
+	}
+	return fmt.Sprintf("login ends in %s (%s); rota login %d before then", in, t.UTC().Format(time.DateOnly), a.ID)
 }
 
 // showSessions prints what the CLIs are doing: what is running now, and what

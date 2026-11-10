@@ -90,7 +90,7 @@ func TestTheStatusCellSaysWhenALoginEnds(t *testing.T) {
 }
 
 // When the login itself ends is shown beside the long token's date, and said
-// in a listing only in its last week.
+// in a listing only in its last few days.
 func TestWhenTheLoginEndsIsShownAndSaidOnlyNearTheEnd(t *testing.T) {
 	a := &rota.Account{ID: 1, Provider: "claude"}
 	if Describe(a).LoginUntil != "" || LoginNote(a) != "" {
@@ -107,7 +107,7 @@ func TestWhenTheLoginEndsIsShownAndSaidOnlyNearTheEnd(t *testing.T) {
 	// microseconds against an end kept in milliseconds, no time passing is
 	// common.
 	a.Extra = at(2*24*time.Hour + 12*time.Hour + 30*time.Minute)
-	if note := LoginNote(a); !strings.Contains(note, "login ends in 2d 12h") {
+	if note := LoginNote(a); !strings.Contains(note, "login ends in 60h") {
 		t.Fatal(note)
 	}
 	a.Extra = at(-time.Hour)
