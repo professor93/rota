@@ -3,6 +3,8 @@ package api
 import (
 	"fmt"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/professor93/rota/internal/events"
@@ -32,8 +34,9 @@ const (
 	whyMoved       = "moved"
 )
 
-// byIdle is who stops a terminal that nobody has been attached to for the
-// idle timeout (sweepTerminals).
+// byIdle is who the audit says stopped a terminal that nobody has been
+// attached to for the idle timeout (sweepTerminals). The words go by
+// termSession.stoppedIdle, not by this name, which a person may also have.
 const byIdle = "idle"
 
 // viewerSettle is how long a person who left a session has to come back
@@ -79,7 +82,7 @@ func (ts *termSession) startedWords(by, why string) string {
 		return "was resumed on " + on + in
 	case why == whyMoved:
 		if on == "" {
-			return "was moved" + in
+			return "was moved"
 		}
 		return "moved to " + on
 	case ts.kind == termKindShared:
@@ -116,10 +119,10 @@ func (ts *termSession) endingAs(why, text string) {
 //
 // The reason is the one endingAs gave; else interrupted, for a holder that
 // went without its CLI's exit; else stopped, for one somebody stopped; else
-// exited.
+// exited. A session never said to have started (unsaid) ends unsaid too.
 func (ts *termSession) sessionEnded(code int) {
 	ts.mu.Lock()
-	why, text, by := ts.endWhy, ts.endText, ts.stoppedBy
+	why, text, by, idle, unsaid := ts.endWhy, ts.endText, ts.stoppedBy, ts.stoppedIdle, ts.unsaid
 	for _, p := range ts.present {
 		if p.timer != nil {
 			p.timer.Stop()
@@ -127,11 +130,14 @@ func (ts *termSession) sessionEnded(code int) {
 	}
 	ts.present = nil
 	ts.mu.Unlock()
+	if unsaid {
+		return
+	}
 	if why == "" {
 		switch {
 		case ts.interrupted():
 			why = whyInterrupted
-		case by != "":
+		case by != "" || idle:
 			why = whyStopped
 		default:
 			why = whyExited
@@ -141,7 +147,7 @@ func (ts *termSession) sessionEnded(code int) {
 		code = -1
 	}
 	if text == "" {
-		text = ts.endedWords(why, by, code, ts.s.now().Sub(ts.started))
+		text = ts.endedWords(why, by, idle, code, ts.s.now().Sub(ts.started))
 	}
 	ts.s.emit(events.Event{Type: events.SessionEnded, Account: ts.account, Session: ts.id,
 		Name: ts.eventName(), Reason: why, Exit: &code, Text: text})
@@ -161,8 +167,9 @@ func (ts *termSession) interrupted() bool {
 
 // endedWords is what session.ended says when it is given no words: "ended
 // with exit 0 after 1h 3m". A stop names who stopped it, unless that is
-// this machine's own user; one for being left alone says for how long.
-func (ts *termSession) endedWords(why, by string, code int, age time.Duration) string {
+// this machine's own user; one for being left alone (idle) says for how
+// long.
+func (ts *termSession) endedWords(why, by string, idle bool, code int, age time.Duration) string {
 	after := sessionFor(age)
 	switch why {
 	case whyInterrupted:
@@ -171,7 +178,7 @@ func (ts *termSession) endedWords(why, by string, code int, age time.Duration) s
 		return "was moved after " + after
 	case whyStopped:
 		switch {
-		case by == byIdle:
+		case idle:
 			alone := ts.s.opts.Terminal.IdleTimeout
 			if alone <= 0 {
 				alone = age
@@ -193,6 +200,9 @@ func (ts *termSession) endedWords(why, by string, code int, age time.Duration) s
 // user, on the control socket, is never said, and nobody joins a session
 // that has ended: it stays listed for a while, and replays. Called with
 // ts.mu held.
+//
+// A daemon that restarts says it again of a person whose page reconnects to
+// it: R6's cost for now; its baseline belongs where a session is adopted.
 func (ts *termSession) viewerCame(tc *termConn) {
 	if tc.via == "local" || ts.ended {
 		return
@@ -266,10 +276,15 @@ func (ts *termSession) viewerWent(tc *termConn) {
 // account and saying which session can no longer reach it. A claude session
 // on its account's stored login says its login ended instead. The terminals'
 // sweep calls it, whether or not it ends idle terminals.
+//
+// It is said only of an end the session cannot get past by itself (hardEnd):
+// a CLI handed its refresh token, as codex is, renews its access token and
+// goes on working past the time it was started with.
 func (s *Server) tokensEnded(now time.Time) {
 	for _, ts := range s.everyTerminal() {
 		ts.mu.Lock()
-		due := !ts.tokenSaid && !ts.ended && !ts.left && !ts.tokenUntil.IsZero() && !now.Before(ts.tokenUntil)
+		due := !ts.tokenSaid && !ts.ended && !ts.left && ts.hardEnd() &&
+			!ts.tokenUntil.IsZero() && !now.Before(ts.tokenUntil)
 		if due {
 			ts.tokenSaid = true
 		}
@@ -288,17 +303,43 @@ func (s *Server) tokensEnded(now time.Time) {
 	}
 }
 
-// onTokenFor reports whether a claude session on account a runs on a token
-// rather than on a's stored login, from until, the time its credential
-// lasts: a session on the stored login lasts as long as the login does
-// (holdwire.LoginUntil), and one on a token as long as the token. It is the
-// one rule for both kinds of session, since a holder says only until. A
-// session of any other flavor is on its token whatever this says.
+// hardEnd reports whether the end of ts's credential is one its CLI cannot
+// get past by itself: any claude session's, on a token (which Claude Code
+// never replaces in a running process) or on the stored login (whose end is
+// the login's), and a session on a long-lived token. An adopted session's
+// flavor is from its record, so a claude one is said too.
+func (ts *termSession) hardEnd() bool {
+	return rota.Flavor(ts.provider) == "claude" || ts.longToken
+}
+
+// runsOn sets what ts's credential is, from a, the account as chosen, and
+// until, the time its holder says that credential lasts: onToken by
+// onTokenFor, and longToken from a. A terminal this server runs reads both
+// from its plan instead, which knows its environment.
+func (ts *termSession) runsOn(a *rota.Account, until time.Time) {
+	ts.tokenUntil, ts.onToken = until, onTokenFor(a, until)
+	ts.longToken = a != nil && a.LongValid()
+}
+
+// onTokenFor reports whether a held claude session on account a runs on a
+// token rather than on a's stored login, from until, the time its holder
+// says its credential lasts: a session on the stored login lasts as long as
+// the login does (holdwire.LoginUntil), and one on a token as long as the
+// token. The holder says only until, so this is inferred, and only the words
+// of a token's end depend on it: a prepare in the holder that moved the
+// login's end reads as a token. A session of any other flavor is on its
+// token whatever this says.
 func onTokenFor(a *rota.Account, until time.Time) bool {
 	if a == nil || until.IsZero() || rota.Flavor(a.Provider) != "claude" {
 		return false
 	}
 	return !until.Equal(a.LoginUntil())
+}
+
+// tokenInEnv reports whether a claude CLI with this environment runs on a
+// token, as holdwire.LoginUntil reads it, rather than on the stored login.
+func tokenInEnv(env []string) bool {
+	return slices.ContainsFunc(env, func(e string) bool { return strings.HasPrefix(e, "CLAUDE_CODE_OAUTH_TOKEN=") })
 }
 
 /* ------------------------------------------------------------- words --- */

@@ -753,18 +753,24 @@ type termSession struct {
 	left bool
 
 	// What its events need (events_sessions.go). stoppedBy is who asked it
-	// to end (kill), and endWhy and endText how it is to say it ended
-	// (endingAs). present is who is attached, by person (viewerCame).
-	// tokenSaid is its token's end having been said, or having been over
-	// when it was taken up. onToken is a claude session on a token rather
-	// than on its account's stored login; it is set once when the session
-	// is made, and only says which words its token's end is said in.
-	stoppedBy string
-	endWhy    string
-	endText   string
-	present   map[string]*presence
-	tokenSaid bool
-	onToken   bool
+	// to end, and stoppedIdle that it was the idle timeout (stop); endWhy
+	// and endText are how it is to say it ended (endingAs). unsaid is a
+	// session never said to have started, which says nothing of its end
+	// either. present is who is attached, by person (viewerCame). tokenSaid
+	// is its token's end having been said, or having been over when it was
+	// taken up. onToken is a claude session on a token rather than on its
+	// account's stored login, and longToken one on a long-lived token: both
+	// are set once when the session is made, and say whether and in which
+	// words its token's end is said (hardEnd).
+	stoppedBy   string
+	stoppedIdle bool
+	endWhy      string
+	endText     string
+	unsaid      bool
+	present     map[string]*presence
+	tokenSaid   bool
+	onToken     bool
+	longToken   bool
 }
 
 /* ------------------------------------------------------------ the keyboard --- */
@@ -1581,13 +1587,17 @@ func (ts *termSession) finish(code int) {
 // server has no process to signal — and the sharer hangs up the child it is
 // holding. The insisting ending is this server letting go of the link, which
 // is all it can do to a machine it does not own.
-func (ts *termSession) kill(by string) {
+func (ts *termSession) kill(by string) { ts.stop(by, false) }
+
+// stop is kill, saying whether it is the idle timeout's: a fact of its own,
+// set with killing, since by is a name and anybody may be called idle.
+func (ts *termSession) stop(by string, idle bool) {
 	ts.mu.Lock()
 	if ts.ended || ts.killing || ts.left {
 		ts.mu.Unlock()
 		return
 	}
-	ts.killing, ts.stoppedBy = true, by
+	ts.killing, ts.stoppedBy, ts.stoppedIdle = true, by, idle
 	back := ts.back
 	ts.mu.Unlock()
 	if by != "" {
@@ -1880,7 +1890,7 @@ func (s *Server) sweepTerminals() {
 		ts.mu.Unlock()
 		if idle {
 			ts.audit("terminal idle", "for", short(limit))
-			ts.kill(byIdle)
+			ts.stop(byIdle, true)
 		}
 	}
 }

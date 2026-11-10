@@ -5,8 +5,10 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -14,6 +16,7 @@ import (
 	"time"
 
 	"github.com/professor93/rota/internal/events"
+	"github.com/professor93/rota/internal/share"
 )
 
 // What a session says about itself when a CLI on a pseudo-terminal, or a
@@ -66,17 +69,37 @@ func sessAs() *http.Request {
 		&Principal{Name: "alice", Role: RoleControl, Via: "user"})
 }
 
+// sessFakesOnly runs setup, and then leaves on PATH only what setup put in
+// front of it, the directories of its fakes: no CLI of this machine's can be
+// found while the test runs.
+func sessFakesOnly[T any](t *testing.T, setup func() T) T {
+	t.Helper()
+	before := os.Getenv("PATH")
+	v := setup()
+	added, ok := strings.CutSuffix(os.Getenv("PATH"), string(os.PathListSeparator)+before)
+	if !ok || added == "" {
+		t.Fatalf("setup put nothing in front of PATH: %q", os.Getenv("PATH"))
+	}
+	t.Setenv("PATH", added)
+	return v
+}
+
 // A terminal this server runs says it started, by whom, on which account
 // and in which folder; that it ended on its own when its CLI exits; and
 // that it was stopped, by whom, when it is deleted.
 func TestStartedAndEndedOnALocalTerminal(t *testing.T) {
-	p := withTerminals(t)
+	p := sessFakesOnly(t, func() *terms { return withTerminals(t) })
 	doc := p.sessStart(p.alice, nil)
 	id := doc["id"].(string)
 	e := sessWait(t, p.api, events.SessionStarted, id, 5*time.Second)
 	if want := "started by alice on " + sessWords(doc); e.Text != want || e.Reason != "" ||
 		e.Account != 1 || e.Name != filepath.Base(doc["cwd"].(string)) {
 		t.Fatalf("the start said %+v, want %q", e, want)
+	}
+	// Account 1 holds no refresh token, so its claude is handed the token in
+	// its environment, and its token's end is said as a token's.
+	if !p.api.findTerminal(id).onToken {
+		t.Error("a claude terminal on CLAUDE_CODE_OAUTH_TOKEN is not known to run on a token")
 	}
 
 	tm := p.attach(id, p.alice, "")
@@ -109,7 +132,7 @@ func TestStartedAndEndedOnALocalTerminal(t *testing.T) {
 // A held session says it started, and that it ended with its CLI's exit
 // code; one whose holder is killed from outside says it was interrupted.
 func TestHeldSessionsStartEndAndAreInterrupted(t *testing.T) {
-	p := withHeld(t, nil)
+	p := sessFakesOnly(t, func() *terms { return withHeld(t, nil) })
 	doc := p.sessStart(p.alice, nil)
 	id := doc["id"].(string)
 	if e := sessWait(t, p.api, events.SessionStarted, id, 5*time.Second); e.Text != "started by alice on "+sessWords(doc) {
@@ -140,7 +163,7 @@ func TestHeldSessionsStartEndAndAreInterrupted(t *testing.T) {
 // stopped let them go, which ends nothing, and the next one says nothing of
 // a session it adopted until that session ends.
 func TestARestartAnnouncesNoSession(t *testing.T) {
-	p := withHeld(t, nil)
+	p := sessFakesOnly(t, func() *terms { return withHeld(t, nil) })
 	id := p.start(nil)["id"].(string)
 	sessWait(t, p.api, events.SessionStarted, id, 5*time.Second)
 	q := p.restart()
@@ -171,7 +194,7 @@ func TestARestartAnnouncesNoSession(t *testing.T) {
 // Why a session started reaches its session.started, on a terminal this
 // server runs and on a held one: a path that resumes or moves one says so.
 func TestWhyReachesTheStart(t *testing.T) {
-	p := withTerminals(t)
+	p := sessFakesOnly(t, func() *terms { return withTerminals(t) })
 	ts, err := p.api.startTerminal(sessAs(), &termRequest{Account: 1, Cols: 80, Rows: 24, why: whyResumed})
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +204,7 @@ func TestWhyReachesTheStart(t *testing.T) {
 		t.Fatalf("a resume said %+v, want %q", e, want)
 	}
 
-	q := withHeld(t, nil)
+	q := sessFakesOnly(t, func() *terms { return withHeld(t, nil) })
 	ts, err = q.api.startTerminal(sessAs(), &termRequest{Account: 1, Cols: 80, Rows: 24, why: whyMoved})
 	if err != nil {
 		t.Fatal(err)
@@ -190,5 +213,51 @@ func TestWhyReachesTheStart(t *testing.T) {
 	a, _ := ts.view()["account"].(map[string]any)
 	if want := fmt.Sprintf("moved to %v (%v)", a["label"], a["provider"]); e.Reason != whyMoved || e.Text != want {
 		t.Fatalf("a held move said %+v, want %q", e, want)
+	}
+}
+
+// A terminal shared from this machine says it is shared, naming nobody, and
+// says it ended with the code its sharer sends.
+func TestASharedTerminalSaysItStartedAndEnded(t *testing.T) {
+	p := sessFakesOnly(t, func() *terms { return withTerminals(t) })
+	f, _ := p.offer(share.HelloMsg{Account: 1, AccountLabel: "work@x.com", Provider: "claude", Cwd: "/x/app"})
+	e := sessWait(t, p.api, events.SessionStarted, f.id, 5*time.Second)
+	if e.Text != "is shared from a terminal on this machine" || e.Reason != "" || e.Name != "app" || e.Account != 1 {
+		t.Fatalf("a share said %+v", e)
+	}
+	if err := f.c.SendJSON(share.Exit, share.ExitMsg{Code: 7}); err != nil {
+		t.Fatal(err)
+	}
+	e = sessWait(t, p.api, events.SessionEnded, f.id, 10*time.Second)
+	if e.Reason != whyExited || e.Exit == nil || *e.Exit != 7 || !strings.HasPrefix(e.Text, "ended with exit 7 after ") {
+		t.Fatalf("a shared terminal's exit said %+v", e)
+	}
+	if n := len(sessOf(p.api, events.SessionStarted, f.id)); n != 1 {
+		t.Fatalf("a share was said to start %d times", n)
+	}
+}
+
+// A terminal startTerminal started but could not list, as Stop begins, is
+// ended without a word: it was never said to have started.
+func TestATerminalNeverListedSaysNothing(t *testing.T) {
+	var out logBuf
+	p := sessFakesOnly(t, func() *terms {
+		return withTerminals(t, func(o *Options) {
+			o.Log = slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelInfo}))
+		})
+	})
+	p.api.termsMu.Lock()
+	p.api.stopping = true
+	p.api.termsMu.Unlock()
+	if _, err := p.api.startTerminal(sessAs(), &termRequest{Account: 1, Cols: 80, Rows: 24}); err == nil {
+		t.Fatal("a terminal was listed on a server that is stopping")
+	}
+	for end := time.Now().Add(10 * time.Second); !strings.Contains(out.String(), `msg="terminal ended"`); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("the terminal that was not listed never ended:\n%s", out.String())
+		}
+	}
+	if got := published(p.api, events.SessionStarted, events.SessionEnded); len(got) != 0 {
+		t.Fatalf("a terminal never listed said %+v", got)
 	}
 }

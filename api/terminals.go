@@ -368,7 +368,11 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 		case running:
 		case ts != nil:
 			// Listed, and perhaps recorded: its own ending ends all of it,
-			// the claim included, once the CLI it started has gone.
+			// the claim included, once the CLI it started has gone. It was
+			// never said to have started, so its end is not said either.
+			ts.mu.Lock()
+			ts.unsaid = true
+			ts.mu.Unlock()
 			ts.back.end()
 			go ts.run()
 		default:
@@ -397,6 +401,7 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 		name: strings.TrimSpace(req.Label), cwd: cwd, started: s.now(),
 		tokenUntil: plan.tokenUntil,
 		onToken:    plan.onToken,
+		longToken:  plan.longToken,
 		back:       &localTerm{master: master, cmd: cmd, proc: cmd.Process},
 		release:    plan.release,
 		cols:       cols, rows: rows, ring: ring.New(s.opts.Terminal.Scrollback),
@@ -484,6 +489,7 @@ type termPlan struct {
 	provider   string
 	tokenUntil time.Time
 	onToken    bool
+	longToken  bool
 }
 
 // planTerminal builds that, which for an account means the whole of the CLI
@@ -523,10 +529,10 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest, cw
 	// Everything the store had to say is on disk; let go of its lock before
 	// a process that may run for hours starts, exactly as the handover does.
 	_ = st.Close()
-	until := holdwire.LoginUntil(a, env)
 	plan := &termPlan{
 		path: path, args: args, env: termenv.Env(env), release: release,
-		account: a.ID, label: a.Label(), provider: a.Provider, tokenUntil: until, onToken: onTokenFor(a, until),
+		account: a.ID, label: a.Label(), provider: a.Provider, tokenUntil: holdwire.LoginUntil(a, env),
+		onToken: rota.Flavor(a.Provider) == "claude" && tokenInEnv(env), longToken: a.LongValid(),
 	}
 	handed = true
 	return plan, nil

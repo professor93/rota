@@ -3,11 +3,11 @@ package api
 import (
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/professor93/rota/internal/events"
+	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/ring"
 	rota "github.com/professor93/rota/lib"
 )
@@ -55,12 +55,14 @@ func sessConn(name, via string, role Role, watch bool) *termConn {
 	return tc
 }
 
-// sessClock stops s's clock at at, and gives what moves it on.
-func sessClock(s *Server, at time.Time) (forward func(time.Duration)) {
-	var mu sync.Mutex
-	s.clock.set(func() time.Time { mu.Lock(); defer mu.Unlock(); return at })
-	return func(d time.Duration) { mu.Lock(); at = at.Add(d); mu.Unlock() }
+// sessHold is a far end that runs until it is let go, for a session whose
+// run a test starts.
+type sessHold struct {
+	sessBack
+	going chan struct{}
 }
+
+func (h sessHold) run(termSink) int { <-h.going; return 0 }
 
 // sessOf is every event s keeps of type typ about session id.
 func sessOf(s *Server, typ, id string) []events.Event {
@@ -181,8 +183,17 @@ func TestEndedSaysWhyAndHowLong(t *testing.T) {
 			"was stopped by alice after 12m (exit 129)", 129},
 		{"a stop from this machine", func(ts *termSession) { ts.kill("local") }, 12 * time.Minute, 129, whyStopped,
 			"was stopped after 12m (exit 129)", 129},
-		{"a stop for being left alone", func(ts *termSession) { ts.kill("idle") }, 30 * time.Hour, 129, whyStopped,
-			"was stopped after 12h with nobody attached", 129},
+		// The sweep's own stop, a day after the last viewer left.
+		{"a stop for being left alone", func(ts *termSession) {
+			ts.idleAt = at
+			h.api.addTerminal(ts)
+			defer h.api.dropTerminal(ts.id)
+			h.api.clock.set(func() time.Time { return at.Add(24 * time.Hour) })
+			h.api.sweepTerminals()
+		}, 30 * time.Hour, 129, whyStopped, "was stopped after 12h with nobody attached", 129},
+		// And a person who happens to be called idle is a person.
+		{"a stop by somebody called idle", func(ts *termSession) { ts.kill("idle") }, 12 * time.Minute, 129, whyStopped,
+			"was stopped by idle after 12m (exit 129)", 129},
 		{"a move", func(ts *termSession) { ts.endingAs(whyMoved, "is moving to home@x.com") }, 5 * time.Minute, 0, whyMoved,
 			"is moving to home@x.com", 0},
 		{"a move that is also a stop", func(ts *termSession) {
@@ -248,9 +259,7 @@ func TestViewersArePeopleNotConnections(t *testing.T) {
 	ts.detach(first)
 	sessQuiet(t, h.api, ts.id, 3*viewerSettle, events.ViewerLeft)
 	ts.detach(second)
-	if got := sessOf(h.api, events.ViewerLeft, ts.id); len(got) != 0 {
-		t.Fatalf("alice was said to leave before the settle: %+v", got)
-	}
+	sessQuiet(t, h.api, ts.id, viewerSettle/2, events.ViewerLeft) // not before the settle
 	for end := time.Now().Add(5 * time.Second); len(sessOf(h.api, events.ViewerLeft, ts.id)) == 0; time.Sleep(5 * time.Millisecond) {
 		if time.Now().After(end) {
 			t.Fatal("alice's leaving was never said")
@@ -271,6 +280,7 @@ func TestViewersArePeopleNotConnections(t *testing.T) {
 	}
 	viewerSettle = time.Minute
 	ts.detach(again)
+	time.Sleep(100 * time.Millisecond) // a leave said sooner than the settle shows below
 	ts.attach(sessConn("alice", "user", RoleControl, false), 0, true)
 	viewerSettle = 50 * time.Millisecond
 	if got := sessOf(h.api, events.ViewerJoined, ts.id); len(got) != 2 {
@@ -357,17 +367,18 @@ func TestATokenThatEndsIsSaidOnce(t *testing.T) {
 		what     string
 		provider string
 		onToken  bool
+		long     bool
 		idle     time.Duration
 		words    string
 	}{
-		{"a codex token", "codex", false, 0, "the token it was started with ended at "},
-		{"a claude token", "claude", true, 0, "the token it was started with ended at "},
-		{"a claude login", "claude", false, 0, "its login ended at "},
-		{"no idle timeout", "codex", false, -1, "the token it was started with ended at "},
+		{"a claude token", "claude", true, false, 0, "the token it was started with ended at "},
+		{"a claude login", "claude", false, false, 0, "its login ended at "},
+		{"a long-lived token", "codex", false, true, 0, "the token it was started with ended at "},
+		{"no idle timeout", "claude", true, false, -1, "the token it was started with ended at "},
 	} {
 		h := eventsServer(t, func(o *Options) { o.Terminal.IdleTimeout = c.idle })
 		ts := sessIn(h.api, time.Now().Add(-time.Hour), func(ts *termSession) {
-			ts.provider, ts.onToken, ts.tokenUntil, ts.name = c.provider, c.onToken, until, "refactor"
+			ts.provider, ts.onToken, ts.longToken, ts.tokenUntil, ts.name = c.provider, c.onToken, c.long, until, "refactor"
 		})
 		h.api.addTerminal(ts)
 		t.Cleanup(func() { h.api.dropTerminal(ts.id) })
@@ -383,18 +394,106 @@ func TestATokenThatEndsIsSaidOnce(t *testing.T) {
 		}
 	}
 
-	// One not yet over, or one that has ended, says nothing.
+	// One not yet over, one that has ended, one let go of, and a long codex
+	// session, whose CLI renews its own token from the refresh token it was
+	// handed and goes on working, say nothing.
 	h := eventsServer(t)
 	later := sessIn(h.api, time.Now(), func(ts *termSession) { ts.tokenUntil = time.Now().Add(time.Hour) })
 	over := sessIn(h.api, time.Now(), func(ts *termSession) { ts.tokenUntil = until })
 	over.finish(0)
-	for _, ts := range []*termSession{later, over} {
+	left := sessIn(h.api, time.Now(), func(ts *termSession) { ts.tokenUntil, ts.left = until, true })
+	codex := sessIn(h.api, time.Now().Add(-24*time.Hour), func(ts *termSession) {
+		ts.provider, ts.tokenUntil = "codex", until
+	})
+	for _, ts := range []*termSession{later, over, left, codex} {
 		h.api.addTerminal(ts)
 		t.Cleanup(func() { h.api.dropTerminal(ts.id) })
 	}
 	h.api.sweepTerminals()
 	if got := published(h.api, events.AccountDead); len(got) != 0 {
-		t.Fatalf("a token still good and a session that ended said %+v", got)
+		t.Fatalf("a token still good, a session that ended, one let go of and a codex one said %+v", got)
+	}
+}
+
+// A token already over as a session is taken up, as an adopted session's
+// may be, is no news: the daemon that was there said it (R6).
+func TestATokenOverWhenTakenUpIsNotNews(t *testing.T) {
+	h := eventsServer(t)
+	going := make(chan struct{})
+	ts := sessIn(h.api, time.Now().Add(-2*time.Hour), func(ts *termSession) {
+		ts.tokenUntil, ts.onToken, ts.back = time.Now().Add(-time.Hour), true, sessHold{going: going}
+	})
+	h.api.addTerminal(ts)
+	t.Cleanup(func() { h.api.dropTerminal(ts.id) })
+	go ts.run()
+	defer close(going)
+	for end := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		ts.mu.Lock()
+		said := ts.tokenSaid
+		ts.mu.Unlock()
+		if said {
+			break
+		}
+		if time.Now().After(end) {
+			t.Fatal("a session taken up with its token over did not take that as said")
+		}
+	}
+	h.api.sweepTerminals()
+	if got := published(h.api, events.AccountDead); len(got) != 0 {
+		t.Fatalf("a token over before the session was taken up was said: %+v", got)
+	}
+}
+
+// A held session's token end is said in the words of what it runs on, as
+// startHeld makes it from the holder's answer: a claude session on its
+// login, on a token, on a long-lived one, and a codex one, which says
+// nothing.
+func TestAHeldSessionSaysWhatItsTokenWas(t *testing.T) {
+	end := time.Now().Add(-time.Minute).Truncate(time.Millisecond)
+	login := map[string]string{"refresh_token_expires_at": strconv.FormatInt(end.UnixMilli(), 10)}
+	long := &rota.LongToken{Access: "long-token-xxxx", ExpiresAt: time.Now().Add(30 * 24 * time.Hour).UnixMilli()}
+	for _, c := range []struct {
+		what  string
+		a     *rota.Account
+		until time.Time
+		words string
+	}{
+		{"on its login", &rota.Account{ID: 1, Provider: "claude", Email: "work@x.com", Extra: login}, end, "its login ended at "},
+		{"on a token", &rota.Account{ID: 1, Provider: "claude", Email: "work@x.com", Extra: login}, end.Add(-time.Hour),
+			"the token it was started with ended at "},
+		{"on a long-lived token", &rota.Account{ID: 1, Provider: "codex", Email: "work@x.com", Long: long}, end,
+			"the token it was started with ended at "},
+		{"codex", &rota.Account{ID: 1, Provider: "codex", Email: "work@x.com"}, end, ""},
+	} {
+		h := eventsServer(t)
+		hreq := &holdwire.Request{ID: runID(), Kind: termKindAccount, Account: c.a.ID, Name: "refactor"}
+		ts := h.api.heldSession(hreq, "/x/app", c.a, &holdwire.Ready{OK: true, TokenUntil: c.until},
+			&holdwire.WelcomeMsg{Cols: 80, Rows: 24}, &heldTerm{state: heldLive})
+		h.api.addTerminal(ts)
+		t.Cleanup(func() { h.api.dropTerminal(ts.id) })
+		h.api.tokensEnded(time.Now())
+		got := sessOf(h.api, events.AccountDead, ts.id)
+		if c.words == "" {
+			if len(got) != 0 {
+				t.Errorf("%s: said %+v", c.what, got)
+			}
+			continue
+		}
+		want := "can no longer be reached from refactor: " + c.words + sessUTC(c.until)
+		if len(got) != 1 || got[0].Text != want || got[0].Name != "work@x.com" {
+			t.Errorf("%s: said %+v, want %q", c.what, got, want)
+		}
+	}
+}
+
+// A session never said to have started, as one startTerminal listed and
+// then could not run, is not said to have ended either.
+func TestASessionNeverSaidToStartIsNotSaidToEnd(t *testing.T) {
+	h := eventsServer(t)
+	ts := sessIn(h.api, time.Now(), func(ts *termSession) { ts.unsaid = true })
+	ts.finish(0)
+	if got := published(h.api, events.SessionEnded); len(got) != 0 {
+		t.Fatalf("a session never said to start was said to end: %+v", got)
 	}
 }
 
@@ -419,5 +518,10 @@ func TestASessionKnowsWhatItRunsOn(t *testing.T) {
 		if got := onTokenFor(c.a, c.until); got != c.want {
 			t.Errorf("%s: on a token is %v, want %v", c.what, got, c.want)
 		}
+	}
+	// A terminal this server runs knows it from the environment it gives
+	// its CLI.
+	if !tokenInEnv([]string{"A=1", "CLAUDE_CODE_OAUTH_TOKEN=x"}) || tokenInEnv([]string{"CLAUDE_CONFIG_DIR=/h"}) {
+		t.Error("the environment is read wrong")
 	}
 }

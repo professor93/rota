@@ -76,7 +76,6 @@ func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd s
 	if err != nil {
 		return nil, err
 	}
-	var label, provider string
 	if a != nil {
 		hreq.Args, err = s.argsFor(r, st, a, req)
 		// The store is let go of before a holder opens it.
@@ -84,7 +83,7 @@ func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd s
 		if err != nil {
 			return nil, err
 		}
-		hreq.Account, label, provider = a.ID, a.Label(), a.Provider
+		hreq.Account = a.ID
 	}
 	// On its way from here: a sweep finding its record before this has
 	// linked to it must not link to it as well.
@@ -113,19 +112,7 @@ func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd s
 		return nil, fmt.Errorf("linking to the holder of %s: %w", hreq.ID, err)
 	}
 	h.conn, h.features = conn, w.Features
-	cols, rows := boundSize(w.Cols, w.Rows)
-	ts := &termSession{
-		s: s, id: hreq.ID, log: s.log.Info,
-		kind: kind, account: hreq.Account, label: label, provider: provider,
-		name: hreq.Name, cwd: cwd, started: s.now(),
-		// What it runs on is read from the account as it was chosen, before
-		// its holder prepared it: a refresh there moves a token's end, not
-		// the login's.
-		tokenUntil: ready.TokenUntil, onToken: onTokenFor(a, ready.TokenUntil),
-		back: h, cols: cols, rows: rows, ring: ring.NewAt(s.opts.Terminal.Scrollback, w.Oldest),
-	}
-	ts.idleAt = ts.started
-	h.ts = ts
+	ts := s.heldSession(&hreq, cwd, a, ready, w, h)
 	s.recordTerminal(ts)
 	if !list(ts) {
 		// Stop has begun and let go of every held session it found. This
@@ -142,6 +129,28 @@ func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd s
 	s.sessionStarted(ts, who(r).Name, req.why, "")
 	go ts.run()
 	return ts, nil
+}
+
+// heldSession is the session for the holder h of hreq, once it has answered
+// ready and welcomed its link w: on account a, as chosen, or none for a
+// shell. What its credential is comes from a as it was chosen, before its
+// holder prepared it, and from how long ready says it lasts (runsOn).
+func (s *Server) heldSession(hreq *holdwire.Request, cwd string, a *rota.Account, ready *holdwire.Ready, w *holdwire.WelcomeMsg, h *heldTerm) *termSession {
+	var label, provider string
+	if a != nil {
+		label, provider = a.Label(), a.Provider
+	}
+	cols, rows := boundSize(w.Cols, w.Rows)
+	ts := &termSession{
+		s: s, id: hreq.ID, log: s.log.Info,
+		kind: hreq.Kind, account: hreq.Account, label: label, provider: provider,
+		name: hreq.Name, cwd: cwd, started: s.now(),
+		back: h, cols: cols, rows: rows, ring: ring.NewAt(s.opts.Terminal.Scrollback, w.Oldest),
+	}
+	ts.runsOn(a, ready.TokenUntil)
+	ts.idleAt = ts.started
+	h.ts = ts
+	return ts
 }
 
 // spawnHolder starts one holder, in a session of its own and pointed at this
