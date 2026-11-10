@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,8 +27,9 @@ func pageScript(t *testing.T, page []byte, what string) []byte {
 // the one part of a Go project that no test touches, and the part most
 // likely to break silently when a field or a response shape changes.
 //
-// Both pages are run: they share a script, so a change to it that suits one
-// of them and breaks the other is a failure here rather than in a browser.
+// This is the playground's. The terminal page's tests are
+// testdata/term/*.test.js, which TestTheTerminalPageInNode runs on the same
+// shared script and the same fixtures.
 func TestThePagesRunTheirOwnScripts(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
@@ -42,20 +42,36 @@ func TestThePagesRunTheirOwnScripts(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	pageFixtures(t, write)
+	write("pg.js", pageScript(t, playgroundHTML, "the playground"))
+	raw, err := os.ReadFile(filepath.Join("testdata", "harness.js"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("harness.js", raw)
+
+	cmd := exec.Command(node, filepath.Join(dir, "harness.js"))
+	cmd.Env = append(os.Environ(), "T="+dir)
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "PLAYGROUND_OK") {
+		t.Fatalf("harness.js failed against this server's own schema:\n%s\n%v", out, err)
+	}
+}
+
+// pageFixtures writes what both pages' Node tests run on: the shared script,
+// the minimal DOM, and the schema and accounts a real server answers.
+func pageFixtures(t *testing.T, write func(name string, data []byte)) {
+	t.Helper()
 	shared, err := assetFS.ReadFile("assets/page.js")
 	if err != nil {
 		t.Fatal(err)
 	}
 	write("page.js", shared)
-	write("pg.js", pageScript(t, playgroundHTML, "the playground"))
-	write("term.js", pageScript(t, terminalHTML, "the terminal page"))
-	for _, f := range []string{"dom.js", "harness.js", "terminal-harness.js"} {
-		raw, err := os.ReadFile(filepath.Join("testdata", f))
-		if err != nil {
-			t.Fatal(err)
-		}
-		write(f, raw)
+	raw, err := os.ReadFile(filepath.Join("testdata", "dom.js"))
+	if err != nil {
+		t.Fatal(err)
 	}
+	write("dom.js", raw)
 
 	// Two servers, because the schema is what each page is built from and
 	// the terminal group is off unless it was asked for.
@@ -73,21 +89,7 @@ func TestThePagesRunTheirOwnScripts(t *testing.T) {
 		if resp.StatusCode != 200 {
 			t.Fatalf("%s: %d", e.path, resp.StatusCode)
 		}
-		var pretty any
-		json.Unmarshal(raw, &pretty)
 		write(e.file, raw)
-	}
-
-	for _, run := range []struct{ harness, ok string }{
-		{"harness.js", "PLAYGROUND_OK"},
-		{"terminal-harness.js", "TERMINAL_OK"},
-	} {
-		cmd := exec.Command(node, filepath.Join(dir, run.harness))
-		cmd.Env = append(os.Environ(), "T="+dir)
-		out, err := cmd.CombinedOutput()
-		if err != nil || !strings.Contains(string(out), run.ok) {
-			t.Fatalf("%s failed against this server's own schema:\n%s\n%v", run.harness, out, err)
-		}
 	}
 }
 
@@ -102,7 +104,7 @@ func TestThePagesAreSelfContained(t *testing.T) {
 		uses []string
 	}{
 		{"the playground", playgroundHTML, []string{"/v1/schema", "/v1/accounts", "rota.history"}},
-		{"the terminal page", terminalHTML, []string{"/v1/terminals", "/assets/xterm/xterm.js", "new WebSocket"}},
+		{"the terminal page", []byte(termPageSource(t)), []string{"/v1/terminals", "/assets/xterm/xterm.js", "new WebSocket"}},
 	} {
 		page := string(p.body)
 		for _, bad := range []string{"http://", "https://", "//cdn", "@import"} {
@@ -121,13 +123,20 @@ func TestThePagesAreSelfContained(t *testing.T) {
 			}
 		}
 	}
-	// And the emulator is named in one place, so a test can put another
-	// terminal there.
-	term := string(terminalHTML)
+	// And the emulator is named in one place, view.js, so a test can put
+	// another terminal there.
+	term := termPageSource(t)
 	if n := strings.Count(term, "new Terminal("); n != 1 {
 		t.Errorf("xterm is constructed in %d places, want one", n)
 	}
 	if n := strings.Count(term, "new FitAddon"); n != 1 {
 		t.Errorf("the fit addon is made in %d places, want one", n)
+	}
+	view, err := assetFS.ReadFile("assets/term/view.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(view), "new Terminal(") || !strings.Contains(string(view), "new FitAddon") {
+		t.Error("xterm is not constructed in view.js")
 	}
 }

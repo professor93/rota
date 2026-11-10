@@ -1,8 +1,12 @@
 package api
 
 import (
+	"bytes"
 	_ "embed"
 	"net/http"
+	"net/url"
+
+	"github.com/professor93/rota/wire"
 )
 
 // The two pages this server serves, each in its own route group: the
@@ -18,21 +22,38 @@ var playgroundHTML []byte
 //go:embed terminal.html
 var terminalHTML []byte
 
+// The pages as they are served: every asset either one asks for carries this
+// server's version, so the year-long cache on /assets is never a stale
+// script after an upgrade. Stamped once, since the version is a constant.
+var (
+	playgroundPage = stamp(playgroundHTML)
+	terminalPage   = stamp(terminalHTML)
+)
+
+// stamp puts this server's version where a page says {{v}}.
+func stamp(page []byte) []byte {
+	return bytes.ReplaceAll(page, []byte("{{v}}"), []byte(url.QueryEscape(wire.Version)))
+}
+
 // playground serves a single page for trying this server by hand. It ships
 // no token of its own: the page asks for one, checks it against
 // /v1/accounts, and keeps it only in the browser.
 func (s *Server) playground(w http.ResponseWriter, _ *http.Request) {
-	writePage(w, playgroundHTML)
+	writePage(w, playgroundPage, true)
 }
 
 // terminalPage serves the page a terminal is watched and typed at from. It
 // is in the terminal group, so a server that holds no terminals does not
 // have it, and a server that holds them without a playground does.
 func (s *Server) terminalPage(w http.ResponseWriter, _ *http.Request) {
-	writePage(w, terminalHTML)
+	writePage(w, terminalPage, false)
 }
 
-func writePage(w http.ResponseWriter, body []byte) {
+// writePage serves a page. inlineScript is whether the page runs a script
+// in its own markup: the playground does, and the terminal page, whose
+// script is all files under /assets/term/, does not, so its policy admits
+// none.
+func writePage(w http.ResponseWriter, body []byte, inlineScript bool) {
 	h := w.Header()
 	h.Set("Content-Type", "text/html; charset=utf-8")
 	h.Set("X-Content-Type-Options", "nosniff")
@@ -42,8 +63,12 @@ func writePage(w http.ResponseWriter, body []byte) {
 	// shared script and stylesheet, and the terminal emulator — which are in
 	// this binary and served by this server. No remote host, and no
 	// 'unsafe-eval': nothing here needs either.
+	script := "script-src 'self';"
+	if inlineScript {
+		script = "script-src 'self' 'unsafe-inline';"
+	}
 	h.Set("Content-Security-Policy",
-		"default-src 'none'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "+
+		"default-src 'none'; style-src 'self' 'unsafe-inline'; "+script+" "+
 			"connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	h.Set("X-Frame-Options", "DENY") // no framing: the page holds the token
 	h.Set("Referrer-Policy", "no-referrer")

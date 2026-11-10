@@ -12,6 +12,9 @@ import (
 // in common — the palette, the header strip, the credential, the sign-in —
 // written once and served to both rather than kept in step in two files.
 //
+// assets/term is the terminal page's own script and styles, one file per
+// region of the page, so that the page runs no script inline.
+//
 // assets/xterm is the terminal emulator. It is vendored rather than fetched:
 // this server is usually on a loopback address with no route out, so a page
 // that asked a CDN for its emulator would be a page that does not work here
@@ -37,11 +40,28 @@ var assetTypes = map[string]string{
 	"xterm/LICENSE-addon-fit.txt": "text/plain; charset=utf-8",
 	// Where all of that came from, readable from the server that serves it.
 	"xterm/README": "text/plain; charset=utf-8",
+	// The terminal page's own script and styles, in the order it loads them.
+	"term/view.js":    "text/javascript; charset=utf-8",
+	"term/words.js":   "text/javascript; charset=utf-8",
+	"term/core.js":    "text/javascript; charset=utf-8",
+	"term/list.js":    "text/javascript; charset=utf-8",
+	"term/new.js":     "text/javascript; charset=utf-8",
+	"term/info.js":    "text/javascript; charset=utf-8",
+	"term/size.js":    "text/javascript; charset=utf-8",
+	"term/dock.js":    "text/javascript; charset=utf-8",
+	"term/actions.js": "text/javascript; charset=utf-8",
+	"term/events.js":  "text/javascript; charset=utf-8",
+	"term/boot.js":    "text/javascript; charset=utf-8",
+	"term/term.css":   "text/css; charset=utf-8",
+	"term/list.css":   "text/css; charset=utf-8",
+	"term/info.css":   "text/css; charset=utf-8",
+	"term/size.css":   "text/css; charset=utf-8",
+	"term/dock.css":   "text/css; charset=utf-8",
 }
 
-// asset serves one of them, and is registered under two patterns: the two
-// shared files, which exist wherever either page does, and the emulator,
-// which belongs to the terminal group alone.
+// asset serves one of them, and is registered under three patterns: the two
+// shared files, which exist wherever either page does, and the emulator and
+// the terminal page's own files, which belong to the terminal group alone.
 //
 // It is behind no credential, like the pages themselves. The page asks for
 // each file with ?v=<this server's version>, so the answer may be kept for

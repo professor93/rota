@@ -2,16 +2,16 @@
 // terminal group on serves, in Node, on a minimal DOM. xterm is never
 // loaded: the page keeps it behind one factory, and what is put there
 // instead is a terminal that only remembers what it was shown.
-const fs = require('fs');
-const T = process.env.T;
-const { nodes, sockets } = require(T + '/dom.js');
-const schema = JSON.parse(fs.readFileSync(T + '/schema-terminal.json', 'utf8'));
-const accountsDoc = JSON.parse(fs.readFileSync(T + '/accounts.json', 'utf8'));
+//
+// This was terminal-harness.js. It pins how a terminal that is not held
+// behaves, and no later change edits it: what changed when the page was
+// split into files is only how the page is loaded, which is the kit's now.
+const kit = require(process.env.T + '/term/kit.js');
 
 // The terminals this fake server holds. The ended one is listed first on
 // purpose: putting what is running at the top is the page's own doing.
 const CLOCK = 1758000000000;
-let terminalsDoc = { terminals: [
+const terminalsDoc = { terminals: [
   { id: 't-done', kind: 'shell', label: '', cwd: '/', started: new Date(CLOCK - 3600000).toISOString(),
     cols: 80, rows: 24, holder: null, viewers: [], offset: 10, ended: true, exit: 2, recording: false },
   { id: 't-live', kind: 'account', label: 'fintech', cwd: '/src/api',
@@ -23,113 +23,34 @@ let terminalsDoc = { terminals: [
     token_until: new Date(CLOCK + 1800000).toISOString() },
 ] };
 let lastTerminal = null;
-const deletes = [];
-let sessionDoc = null;
 let signInRole = 'control';
 
-const jsonAPI = async (path, init = {}) => {
-  const reply = doc => ({
-    ok: true, status: 200, headers: { get: () => 'application/json' },
-    text: async () => JSON.stringify(doc), json: async () => doc,
-  });
-  const refuse = (status, doc) => ({
-    ok: false, status, headers: { get: () => 'application/json' },
-    text: async () => JSON.stringify(doc), json: async () => doc,
-  });
-  if (path === '/v1/session') {
-    if (init.method === 'POST') {
-      const body = JSON.parse(init.body);
-      if (body.password !== 'right') return refuse(401, { error: 'that name and password do not go together' });
-      sessionDoc = { name: body.name, role: signInRole, via: 'user', expires: '2030-01-01T00:00:00Z' };
-      return reply(sessionDoc);
-    }
-    if (init.method === 'DELETE') { sessionDoc = null; return reply({ signed_out: true }); }
-    if (sessionDoc) return reply(sessionDoc);
-    if (init.headers && init.headers.authorization) return reply({ name: 'token', role: 'control', via: 'token' });
-    return refuse(401, { error: 'invalid or missing bearer token' });
-  }
-  if (path.startsWith('/v1/terminals')) {
-    if (init.method === 'POST') {
-      lastTerminal = JSON.parse(init.body || '{}');
-      const made = { id: 't-new', kind: lastTerminal.kind || 'account', label: lastTerminal.label || '',
-        cwd: lastTerminal.cwd || '', started: new Date(CLOCK).toISOString(), cols: 80, rows: 24,
-        holder: null, viewers: [], offset: 0, ended: false, recording: false };
-      terminalsDoc.terminals.push(made);
-      return reply(made);
-    }
-    if (init.method === 'DELETE') { deletes.push(path); return reply({ ok: true }); }
-    const id = path.slice('/v1/terminals'.length).replace(/^\//, '').split('?')[0];
-    if (id) {
-      const one = terminalsDoc.terminals.find(t => t.id === id);
-      return one ? reply(one) : refuse(404, { error: 'no terminal ' + id });
-    }
-    return reply(terminalsDoc);
-  }
-  if (path.includes('/schema')) return reply(schema);
-  if (path.includes('/accounts')) return reply(accountsDoc);
-  return reply({ ok: true });
-};
-globalThis.fetch = jsonAPI;
-
-// The page is two scripts: the one both of rota's pages load first, and the
-// terminal page's own. A browser gives them one scope between them, so they
-// are run here the same way.
-const shared = fs.readFileSync(T + '/page.js', 'utf8');
-const src = fs.readFileSync(T + '/term.js', 'utf8');
-const tp = new Function(shared + '\n' + src + `
-;return {
-  signIn, signOut, watching, renderLink, refreshTerminals, renderTerm, renderTermStrip, renderTermInfo,
-  termSelect, termTick, termFit, splitArgs, enterTerminal,
-  set makeTerminal(v){makeTerminal=v}, set loadXterm(v){loadXterm=v},
-  set termNow(v){termNow=v}, set termLater(v){termLater=v},
-  set termOpenNew(v){termOpenNew=v},
-  get link(){return $("#otherpage")},
-  get me(){return me}, get schema(){return schema},
-  get terms(){return terms}, get termId(){return termId},
-  get termOffset(){return termOffset}, get termHolder(){return termHolder},
-  get termStatus(){return termStatus}, get termEnded(){return termEnded},
-  get termSock(){return termSock},
-};`)();
-
-const findAll = (root, pred) => (root._all ? root._all().filter(pred) : []);
-const byId = (root, id) => findAll(root, e => e.attrs && e.attrs.id === id)[0];
-const assert = (cond, msg) => { if (!cond) { console.error('FAILED:', msg); process.exit(1); } };
-const settle = () => new Promise(r => setTimeout(r, 5));
-
-// A terminal that only remembers: the page must be drivable without an
-// emulator, or none of this could be tested outside a browser.
-const fakes = [];
-let fitSize = { cols: 96, rows: 30 };
-const fakeTerminal = () => {
-  const t = {
-    writes: [], sizes: [], fits: 0, disposed: false, data: null,
-    write(b) { this.writes.push(b); },
-    onData(cb) { this.data = cb; },
-    resize(c, r) { this.sizes.push([c, r]); },
-    fit() { this.fits++; return fitSize; },
-    dispose() { this.disposed = true; },
-    text() { return this.writes.map(b => new TextDecoder().decode(b)).join(''); },
-  };
-  fakes.push(t);
-  return t;
-};
-tp.makeTerminal = async () => fakeTerminal();
-tp.loadXterm = async () => {};
-
-// The clock and the timers, so a ten-second countdown takes no time at all.
-let clock = CLOCK;
-const timers = [];
-tp.termNow = () => clock;
-tp.termLater = (fn, ms) => { timers.push({ fn, ms }); };
-const fire = () => { for (const t of timers.splice(0)) t.fn(); };
-
-const strip = () => nodes['#tstrip'];
-const info = () => nodes['#tinfo'].textContent;
-const btn = (host, text) => findAll(host, e => e.tagName === 'BUTTON' && e.textContent.includes(text))[0];
-const lastSock = () => sockets[sockets.length - 1];
-const screen = () => fakes[fakes.length - 1];
+const { assert, byId, findAll, btn } = kit;
 
 (async () => {
+  const page = await kit.load({ terminals: terminalsDoc.terminals, role: signInRole, signedIn: false });
+  const { nodes, sockets, fakes } = page;
+  // What the old harness kept of its own: the last terminal posted, and the
+  // role a sign-in is given, both read at the moment they happen.
+  page.route('POST', '/v1/terminals', (path, body) => { if (path === '/v1/terminals') lastTerminal = body || {}; });
+  page.route('POST', '/v1/session', () => { page.role = signInRole; });
+  // The way to the other page is a node, not a name in the page's scope.
+  const tp = new Proxy(page.tp, {
+    get: (t, k) => (k === 'link' ? nodes['#otherpage'] : t[k]),
+    set: (t, k, v) => { t[k] = v; return true; },
+  });
+
+  // The clock and the timers, so a ten-second countdown takes no time at all.
+  let clock = CLOCK;
+  tp.termNow = () => clock;
+  const fire = () => page.fire();
+  const settle = () => page.settle();
+
+  const strip = () => nodes['#tstrip'];
+  const info = () => nodes['#tinfo'].textContent;
+  const lastSock = () => sockets[sockets.length - 1];
+  const screen = () => fakes[fakes.length - 1];
+
   // 1. signed out, this page is the sign-in the other page shows.
   assert(nodes['#termshell'].hidden === true, 'nobody is shown a terminal before signing in');
   assert(byId(nodes['#gate'], 'signin_name'), 'the page asks for a name and a password');
@@ -441,5 +362,5 @@ const screen = () => fakes[fakes.length - 1];
   screen().data('x');
   assert(wsock.sent.length === wsent, "and a watcher's keystroke goes nowhere");
 
-  console.log('TERMINAL_OK');
+  kit.ok();
 })().catch(e => { console.error('FAILED:', e.stack); process.exit(1); });

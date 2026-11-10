@@ -165,10 +165,16 @@ func TestEitherPageMayBeServedWithoutTheOther(t *testing.T) {
 // needs, and a policy that admits this server's own assets and nothing else.
 func TestBothPagesCarryTheSamePolicy(t *testing.T) {
 	h := newHarness(t, Options{Routes: terminalRoutes()})
-	for _, path := range []string{"/playground", "/terminal"} {
+	// The playground runs a script of its own in its markup, and the
+	// terminal page runs none, so each admits exactly what it runs.
+	for _, p := range []struct{ path, script string }{
+		{"/playground", "script-src 'self' 'unsafe-inline';"},
+		{"/terminal", "script-src 'self';"},
+	} {
+		path := p.path
 		resp, _ := h.do("GET", path, nil)
 		csp := resp.Header.Get("Content-Security-Policy")
-		for _, want := range []string{"default-src 'none'", "script-src 'self' 'unsafe-inline'",
+		for _, want := range []string{"default-src 'none'", p.script,
 			"style-src 'self' 'unsafe-inline'", "frame-ancestors 'none'"} {
 			if !strings.Contains(csp, want) {
 				t.Errorf("%s: the policy is missing %q: %s", path, want, csp)
