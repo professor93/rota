@@ -3128,7 +3128,7 @@ belongs to one login or one daemon:
 | `statsig`, `mcp-needs-auth-cache.json`, `telemetry` | per-login caches and spools: feature flags, which MCP servers want a sign-in, what is waiting to be reported |
 | `policy-limits.json`, `remote-settings.json`, `remote-settings-helper-consent`, `remote-settings-consent.json`, and any name that is one of them followed by a dot, such as `policy-limits.json.signature.json` or `remote-settings.json.synced-at` | the policy and the settings the login's organisation set, cached, with what the login agreed to of them: shared, one organisation's would apply under another account, and two accounts of one organisation would keep replacing each other's consent |
 | `.session_ingress_token`, and any name that is it followed by a dot | the token a self-hosted runner gives one session |
-| any `*.lock` | locks Claude Code takes for this directory's own processes |
+| any `*.lock`, and any name with `.lock.` in it, such as `.oauth_refresh.lock.owner` | locks Claude Code takes for this directory's own processes, and what it keeps beside them: the refresh lock's owner record says whose pid may take the lock over |
 | `.claude.json` and `backups/` — with Remote Control on | the identity Remote Control acts as, and Claude Code's backups of that file |
 
 Shared, any of these would let one account's processes sign in with
@@ -3279,7 +3279,13 @@ there and launches on what it finds, and does not write the store, refresh
 the login, or rewrite the home's `.claude.json`. Alive means a rota run
 holding the account, a `daemon.lock` naming a live process, or a
 `sessions/<pid>.json` naming one — and a record nobody can read counts as
-alive. When nothing is alive, rota may refresh, and a refresh is followed at
+alive. A record whose pid has since gone to another process does not: each
+record carries its writer's start, `procStart`, and a process at that pid
+that started more than two minutes after it is not the writer, as after a
+crash or a reboot. On Linux, where a start time moves when the clock is set,
+such a process still counts while its command line names claude; a record
+with no `procStart`, and one on Windows, are judged by the pid alone. When
+nothing is alive, rota may refresh, and a refresh is followed at
 once — after the store is saved — by writing the new login into the home.
 Before rota refreshes — for a launch, a listing, usage read over HTTP or a
 server's maintenance — the store is saved, and when that save fails nothing is
