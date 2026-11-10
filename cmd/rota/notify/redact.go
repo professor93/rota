@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/professor93/rota/api"
 	"github.com/professor93/rota/internal/events"
@@ -97,8 +98,9 @@ func urlErrors(err error) []*url.Error {
 
 // configSecrets is what of a sink's own keys is secret, for an error said
 // before the sink exists to say its own, and beside every secret it says
-// itself: a webhook's URL, whole, by its path and query, and by each path
-// segment and each query value alone, any of which may be its key.
+// itself: a webhook's URL, whole, by its path and by its query; and each
+// path segment and query value alone that looks like a key (keyLike), so
+// that "webhook", "json" or "services" stay words in what is said.
 func configSecrets(s api.EventSink) []string {
 	if s.URL == "" {
 		return nil
@@ -106,13 +108,34 @@ func configSecrets(s api.EventSink) []string {
 	out := []string{s.URL}
 	if u, err := parseURL(s.URL); err == nil {
 		out = append(out, u.String(), u.Path, u.RawPath, u.EscapedPath(), u.RawQuery, u.Fragment)
-		out = append(out, strings.Split(u.Path, "/")...)
+		parts := strings.Split(u.Path, "/")
 		q, _ := url.ParseQuery(u.RawQuery) // what it could read, even of a bad query
 		for _, vs := range q {
-			out = append(out, vs...)
+			parts = append(parts, vs...)
+		}
+		for _, p := range parts {
+			if keyLike(p) {
+				out = append(out, p)
+			}
 		}
 	}
 	return out
+}
+
+// keyLike reports whether a path segment or a query value may be a key: it
+// holds a digit or an uppercase letter, or is at least 16 bytes long. A
+// word of a URL's own, such as webhook or services, is none of these.
+func keyLike(p string) bool {
+	return len(p) >= 16 || strings.ContainsFunc(p, func(r rune) bool { return unicode.IsDigit(r) || unicode.IsUpper(r) })
+}
+
+// urlSecrets is what of a sink's keys cleans another sink's build error: its
+// URL whole, without the parts that are only words in a file path.
+func urlSecrets(s api.EventSink) []string {
+	if s.URL == "" {
+		return nil
+	}
+	return []string{s.URL}
 }
 
 // parseURL is url.Parse, whose error is never said: it quotes the address.

@@ -222,6 +222,29 @@ func TestAnAttemptIsBounded(t *testing.T) {
 			t.Fatalf("the log: %s", buf)
 		}
 	})
+
+	// The grace is what lets a cancelled attempt finish its own way, a
+	// command being killed or an answer being read, and count itself.
+	t.Run("an attempt that comes back in the grace counts itself", func(t *testing.T) {
+		quick(t)
+		attemptTimeout = time.Hour
+		cancelGrace = 2 * time.Second
+		inflight := make(chan struct{})
+		f := &fakeSender{answer: func(ctx context.Context, _ int, _ events.Event) error {
+			close(inflight)
+			<-ctx.Done()
+			time.Sleep(100 * time.Millisecond)
+			return nil
+		}}
+		useSenders(t, map[string]any{"webhook": f})
+		d := &dialer{plan: []any{newSource(ev(1, events.AccountDead))}}
+		n := startNotifier(t, Options{Events: api.EventsSection{Sinks: []api.EventSink{webhookSink}}, Dial: d.dial})
+		<-inflight
+		n.Wait(time.Now().Add(20 * time.Millisecond))
+		if s := statusOf(t, n, "webhook"); s.Sent != 1 || s.Dropped != 0 {
+			t.Fatalf("sent %d, dropped %d; want it sent", s.Sent, s.Dropped)
+		}
+	})
 }
 
 // A test goes before the events a sink has queued, and is sent even while
@@ -276,6 +299,35 @@ func TestATestJumpsTheQueue(t *testing.T) {
 		eventually(t, "all four to be sent", func() bool { return len(f.delivered()) == 4 })
 		if got := ids(f.delivered()); !slices.Equal(got, []int64{1, 9, 2, 3}) {
 			t.Fatalf("sent %v, want 1, 9, 2, 3", got)
+		}
+	})
+
+	t.Run("two tests that share one poke", func(t *testing.T) {
+		quick(t)
+		backoff = []time.Duration{time.Hour}
+		inAttempt, release := make(chan struct{}), make(chan struct{})
+		f := &fakeSender{answer: func(_ context.Context, call int, e events.Event) error {
+			if e.Type == events.Test {
+				return nil
+			}
+			if call == 1 {
+				close(inAttempt)
+				<-release
+			}
+			return again(errors.New("down"), 0)
+		}}
+		useSenders(t, map[string]any{"webhook": f})
+		src := newSource(ev(1, events.AccountDead))
+		d := &dialer{plan: []any{src}}
+		n := startNotifier(t, Options{Events: api.EventsSection{Sinks: []api.EventSink{webhookSink}}, Dial: d.dial})
+		<-inAttempt
+		src.feed <- ev(9, events.Test)
+		src.feed <- ev(10, events.Test)
+		eventually(t, "two tests to wait", func() bool { return queued(n, "webhook") == 2 })
+		close(release)
+		eventually(t, "both tests to be sent", func() bool { return len(f.delivered()) == 2 })
+		if got := ids(f.delivered()); !slices.Equal(got, []int64{9, 10}) {
+			t.Fatalf("sent %v, want 9, 10", got)
 		}
 	})
 }
@@ -377,5 +429,38 @@ func TestStopIsBoundedByAStuckSink(t *testing.T) {
 	f2, err := readFile(StatusPath(dir))
 	if err != nil || f2.Sinks[0].Dropped != 2 {
 		t.Fatalf("sinks.json: %+v %v", f2, err)
+	}
+}
+
+// When Wait gives up, everything a sink still holds counts as dropped: the
+// event waiting to be retried, a test stuck in flight beside it, and the
+// tests waiting behind that one.
+func TestAGiveUpCountsEverythingLeft(t *testing.T) {
+	quick(t)
+	backoff = []time.Duration{time.Hour}
+	stuck := make(chan struct{})
+	t.Cleanup(func() { close(stuck) })
+	probing := make(chan struct{}, 1)
+	f := &fakeSender{answer: func(_ context.Context, _ int, e events.Event) error {
+		if e.Type == events.Test {
+			probing <- struct{}{}
+			<-stuck // ignores its context
+			return nil
+		}
+		return again(errors.New("down"), 0)
+	}}
+	useSenders(t, map[string]any{"webhook": f})
+	src := newSource(ev(1, events.AccountDead))
+	d := &dialer{plan: []any{src}}
+	n := startNotifier(t, Options{Events: api.EventsSection{Sinks: []api.EventSink{webhookSink}}, Dial: d.dial})
+	eventually(t, "event 1 to wait to be retried", func() bool { return f.tries() == 1 })
+	src.feed <- ev(9, events.Test)
+	<-probing
+	src.feed <- ev(10, events.Test)
+	src.feed <- ev(11, events.Test)
+	eventually(t, "two tests to wait", func() bool { return queued(n, "webhook") == 2 })
+	n.Wait(time.Now().Add(20 * time.Millisecond))
+	if s := statusOf(t, n, "webhook"); s.Dropped != 4 {
+		t.Fatalf("dropped %d, want 4: the event, the test in flight and two waiting", s.Dropped)
 	}
 }

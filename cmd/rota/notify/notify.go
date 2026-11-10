@@ -128,8 +128,8 @@ type env struct {
 // quotes anything read from one. A constructor that fails after reading a
 // secret may return its sender with the error, so that its secrets() clean
 // the error; such a sender is never sent anything. Every build error is
-// cleaned with the secrets of every sink that was made, and with the URL of
-// its own sink (configSecrets).
+// cleaned with its own sink's configSecrets, and with the senders' secrets
+// and the whole URLs of every sink that was made.
 func newSender(s api.EventSink, e env) (sender, error) {
 	switch s.Type {
 	case "webhook":
@@ -248,24 +248,26 @@ func Start(o Options) (*Notifier, error) {
 	e := env{version: o.Version, link: o.Events.Link, hide: slices.Clone(o.HideEnv), log: log}
 	names := sinkNames(o.Events.Sinks)
 	// Every sink is made before any error is said, so that each is cleaned
-	// with the secrets of all that were made.
+	// with the secrets of all that were made: their senders' own and their
+	// URLs whole, not the parts of a URL that are words in a file path.
 	errs := make([]error, len(o.Events.Sinks))
 	var made []string
 	for i, cfg := range o.Events.Sinks {
 		s := &sink{n: n, wake: make(chan struct{}, 1), poke: make(chan struct{}, 1), on: slices.Clone(cfg.On), st: Status{
 			Name: names[i], Type: cfg.Type, Target: targetOf(cfg), On: patterns(cfg.On), State: stateWaiting,
 		}}
-		s.keys = configSecrets(cfg)
 		snd, err := makeSender(cfg, e)
+		var own []string
 		if snd != nil {
-			s.keys = append(slices.Clone(snd.secrets()), s.keys...)
+			own = slices.Clone(snd.secrets())
 		}
+		s.keys = append(own, configSecrets(cfg)...)
 		if err == nil && snd == nil {
 			err = errors.New("the sink could not be made")
 		}
 		if errs[i] = err; err == nil {
 			s.snd = snd
-			made = append(made, s.keys...)
+			made = append(append(made, own...), urlSecrets(cfg)...)
 		}
 		n.sinks = append(n.sinks, s)
 	}
@@ -309,7 +311,10 @@ func socket(terminals string) func(ctx context.Context, since int64) (Source, er
 }
 
 // Wait is the daemon stopping: it waits for the reader to finish and every
-// queue to empty, and says whether they did by until.
+// queue to empty, and says whether they did by until. True means the run
+// ended, every event it read sent or dropped; it does not mean that
+// daemon.stopped reached every sink, or was read at all: a stream that
+// broke before it is not opened again once Wait is called.
 //
 // From the moment it is called nothing is tried again, so a sink that is
 // failing does not hold the stop: an event waiting to be retried is dropped

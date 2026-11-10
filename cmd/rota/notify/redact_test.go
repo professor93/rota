@@ -96,6 +96,33 @@ func TestRedact(t *testing.T) {
 	}
 }
 
+// Of a webhook's URL, the whole, its path and its query are secret, and a
+// segment or value alone only when it looks like a key: the words of an
+// n8n or Slack URL stay words in what is said, and its keys do not.
+func TestOnlyKeyLikePartsOfAURLAreSecret(t *testing.T) {
+	n8n := configSecrets(api.EventSink{Type: "webhook", URL: "https://n8n.example/webhook/3f2a9c1e-7b4d-4e8a-9f0c-1a2b3c4d5e6f?format=json"})
+	said := "webhook answered 502 Bad Gateway; the body was not json; our services are down"
+	if got := redact(said, n8n); got != said {
+		t.Fatalf("words were taken out: %q", got)
+	}
+	if got := redact("no workflow listens on 3f2a9c1e-7b4d-4e8a-9f0c-1a2b3c4d5e6f", n8n); got != "no workflow listens on [redacted]" {
+		t.Fatalf("a key-like segment: %q", got)
+	}
+	slack := configSecrets(api.EventSink{Type: "webhook", URL: "https://hooks.slack.com/services/T0AB12CD/B0CD34EF/abcdefghijklmnopqrstuvwx"})
+	got := redact("our services are down; no channel B0CD34EF; key abcdefghijklmnopqrstuvwx", slack)
+	if got != "our services are down; no channel [redacted]; key [redacted]" {
+		t.Fatalf("slack: %q", got)
+	}
+	for p, want := range map[string]bool{
+		"webhook": false, "json": false, "services": false, "hooks": false, "catch": false,
+		"T0AB12CD": true, "abc1": true, "Key": true, "abcdefghijklmnop": true, "abcdefghijklmno": false,
+	} {
+		if keyLike(p) != want {
+			t.Errorf("keyLike(%q) = %v", p, !want)
+		}
+	}
+}
+
 // A sink's build error is cleaned with its own sender's secrets when the
 // constructor returns one with the error, and with the secrets of every
 // sink that was made; such a sender is sent nothing.
@@ -103,17 +130,24 @@ func TestABuildErrorIsCleanedWithEverySecret(t *testing.T) {
 	quick(t)
 	made := &fakeSender{keys: []string{"CROSSKEY1"}}
 	half := &fakeSender{keys: []string{"TOKENABC"}}
+	// Another sink's URL cleans it whole; its parts do not, so a file path
+	// that shares a word with it is left as it is.
+	const hookURL = "https://h.example/hooks/Rota2/k3y?sig=Zz9"
 	useSenders(t, map[string]any{
 		"command": made,
+		"webhook": &fakeSender{},
 		"telegram": func(api.EventSink, env) (sender, error) {
-			return half, errors.New("the token TOKENABC is not a bot token, nor is CROSSKEY1")
+			return half, errors.New("the token TOKENABC is not a bot token, nor is CROSSKEY1; " +
+				"/home/me/Rota2/tg.token is open to others; and " + hookURL)
 		},
 	})
 	cmd := api.EventSink{Type: "command", Command: []string{"notify-send"}}
+	hook := api.EventSink{Type: "webhook", URL: hookURL}
 	d := &dialer{plan: []any{newSource(ev(1, events.AccountDead))}}
-	n := startNotifier(t, Options{Events: api.EventsSection{Sinks: []api.EventSink{telegramSink, cmd}}, Dial: d.dial})
+	n := startNotifier(t, Options{Events: api.EventsSection{Sinks: []api.EventSink{telegramSink, cmd, hook}}, Dial: d.dial})
 	eventually(t, "the command sink to send", func() bool { return len(made.delivered()) == 1 })
-	if s := statusOf(t, n, "telegram"); s.LastError != "the token [redacted] is not a bot token, nor is [redacted]" || s.State != stateFailing {
+	want := "the token [redacted] is not a bot token, nor is [redacted]; /home/me/Rota2/tg.token is open to others; and [redacted]"
+	if s := statusOf(t, n, "telegram"); s.LastError != want || s.State != stateFailing {
 		t.Fatalf("%+v", s)
 	}
 	if half.tries() != 0 {

@@ -512,7 +512,8 @@ func TestASinkThatCannotBeBuiltIsFailing(t *testing.T) {
 }
 
 // daemon.stopped is the end: the stream is read on to its end, since an
-// event can land after it, and is not opened again (Review Focus 5).
+// event can land after it, and is not opened again, before Wait is called
+// as after (Review Focus 5).
 func TestDaemonStoppedEndsTheRun(t *testing.T) {
 	quick(t)
 	f := &fakeSender{}
@@ -520,6 +521,11 @@ func TestDaemonStoppedEndsTheRun(t *testing.T) {
 	d := &dialer{plan: []any{newSource(ev(1, events.DaemonStopped), ev(2, events.SessionEnded), io.EOF)}}
 	n := startNotifier(t, Options{Events: api.EventsSection{Sinks: []api.EventSink{webhookSink}}, Dial: d.dial})
 
+	eventually(t, "both to be delivered", func() bool { return len(f.delivered()) == 2 })
+	time.Sleep(30 * time.Millisecond) // thirty redial waits under quick
+	if got := d.asked(); len(got) != 1 {
+		t.Fatalf("the stream was opened %d times before Wait", len(got))
+	}
 	if !n.Wait(time.Now().Add(5 * time.Second)) {
 		t.Fatal("Wait gave up")
 	}
@@ -528,5 +534,25 @@ func TestDaemonStoppedEndsTheRun(t *testing.T) {
 	}
 	if got := d.asked(); len(got) != 1 {
 		t.Fatalf("the stream was opened %d times", len(got))
+	}
+}
+
+// A stream that broke without daemon.stopped is not opened again once Wait
+// is called: the daemon is going, and its socket with it.
+func TestAStreamIsNotOpenedAgainOnceWaitIsCalled(t *testing.T) {
+	quick(t)
+	backoff, redialMax = []time.Duration{time.Hour}, time.Hour
+	f := &fakeSender{}
+	useSenders(t, map[string]any{"webhook": f})
+	d := &dialer{plan: []any{newSource(ev(1, events.AccountDead), errors.New("the stream broke"))}}
+	n := startNotifier(t, Options{Events: api.EventsSection{Sinks: []api.EventSink{webhookSink}}, Dial: d.dial})
+	eventually(t, "the event to be delivered", func() bool { return len(f.delivered()) == 1 })
+
+	began := time.Now()
+	if !n.Wait(began.Add(2 * time.Second)) {
+		t.Fatal("Wait gave up")
+	}
+	if took := time.Since(began); took > time.Second || len(d.asked()) != 1 {
+		t.Fatalf("Wait took %s; the stream was opened %d times", took, len(d.asked()))
 	}
 }
