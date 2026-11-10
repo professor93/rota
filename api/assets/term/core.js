@@ -279,7 +279,7 @@ function termFrame(doc) {
       termOffset = doc.offset || 0;
       termPaint = true;
       termCols = doc.cols || termCols; termRows = doc.rows || termRows;
-      if ((termShared() || !termIHold()) && termView) termView.resize(termCols, termRows);
+      termSized();
       renderTermStrip();
       break;
     case "keyboard":
@@ -300,7 +300,7 @@ function termFrame(doc) {
       // Somebody else's size is shown as it is: this page scrolls inside its
       // container rather than telling a comfortable lie about how wide the
       // terminal on the server is.
-      if ((termShared() || !termIHold()) && termView) termView.resize(termCols, termRows);
+      termSized();
       renderTermStrip(); renderTermInfo();
       break;
     case "viewers":

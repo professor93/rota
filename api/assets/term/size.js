@@ -19,6 +19,14 @@ function termFit() {
   termSendSize(size);
 }
 
+// termSized follows a size the session now is, from a resized or a repaint
+// frame: a terminal this page is not typing into, or one shared from a
+// window somewhere, is drawn at that size; the holder's own stays fitted to
+// the space it is in.
+function termSized() {
+  if ((termShared() || !termIHold()) && termView) termView.resize(termCols, termRows);
+}
+
 function termSendSize(size) {
   termWantSize = size;
   if (termSizeTimer) return;
