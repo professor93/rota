@@ -341,7 +341,7 @@ func TestTheHolderIsToldWhatToRunAndNoSecret(t *testing.T) {
 	r := seen.Request
 	if r.ID != doc["id"] || r.Kind != "account" || r.Account != 1 || r.Name != "x" ||
 		r.Cols != 100 || r.Rows != 30 || r.Scrollback <= 0 ||
-		strings.Join(r.Args, " ") != `--settings {"disableRemoteControl":true} --model opus` {
+		strings.Join(r.Args, " ") != `--model opus --settings {"disableRemoteControl":true}` {
 		t.Errorf("the request is %+v", r)
 	}
 	if seen.RotaHome != p.dir || !filepath.IsAbs(seen.RotaHome) {

@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/professor93/rota/internal/fakecli"
 )
 
 // In a person's own terminal the CLI's own arguments are handed over
@@ -69,6 +71,15 @@ func TestAForegroundRunCarriesNoGuard(t *testing.T) {
 	}
 	if storedAccount(t, rotaHome)["remoteControl"] == true {
 		t.Fatal("the account's setting was turned on")
+	}
+	// Nor does a question asked here, claude -p, which the person's own
+	// terminal starts.
+	bin := t.TempDir()
+	fakecli.Install(t, bin, "claude", fakecli.Result(0))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	out, errOut, code := call(t, "run", "1", "-p", "hi")
+	if code != 0 || !strings.Contains(out, "ARGS=") || strings.Contains(out, "disableRemoteControl") || strings.Contains(out, "--settings") {
+		t.Fatalf("rota run 1 -p hi: exit %d %q %q, want the question asked with no guard", code, out, errOut)
 	}
 }
 

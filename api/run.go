@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/professor93/rota/internal/holdwire"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
 	"github.com/professor93/rota/rotation"
@@ -148,6 +149,40 @@ func runArgs(spec *rota.Spec) []string {
 		args = append(args, "--settings", string(spec.Settings))
 	}
 	return args
+}
+
+// guardRun puts a run behind Claude Code's own guard against Remote Control
+// (holdwire.GuardRemoteControl), checked and resolved already. Claude Code
+// reads only the last --settings. The settings a run asks for come first on
+// its command line, and its raw args last. So where there are raw args the
+// guard goes last among them. It folds in their own --settings in a flag's
+// position, or, failing one, the run's settings, leaving the run's settings
+// as they are. A run with no raw args, which is every run a server that
+// allows none takes, has its settings gain the guard, inline or read from
+// their file. A --managed-settings that would lift the guard refuses the
+// run, and so does a --settings that cannot be read.
+func guardRun(spec *rota.Spec) error {
+	if holdwire.ReadManaged(spec.Extra).Reenables {
+		return refuse(http.StatusBadRequest, managedReenables)
+	}
+	value, have := "", len(spec.Settings) > 0
+	if have && rota.UnmarshalLenient(spec.Settings, &value) != nil {
+		value = string(spec.Settings)
+	}
+	if len(spec.Extra) > 0 {
+		guarded, err := holdwire.GuardRemoteControlOver(spec.Extra, spec.Cwd, value, have)
+		if err != nil {
+			return refuse(http.StatusBadRequest, guardUnread)
+		}
+		spec.Extra = guarded
+		return nil
+	}
+	doc, err := holdwire.GuardedSettings(value, have, spec.Cwd)
+	if err != nil {
+		return refuse(http.StatusBadRequest, guardUnread)
+	}
+	spec.Settings = doc
+	return nil
 }
 
 // errGone is a caller that stopped waiting while its run was queued. Nothing
@@ -287,6 +322,15 @@ func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, 
 	}
 	if remote {
 		if err := s.readyRemoteControl(r, st, a); err != nil {
+			return nil, err
+		}
+	}
+	// Every claude process the server starts for an account whose remote
+	// control setting is off runs behind Claude Code's own guard, a run as
+	// much as a terminal: one that stays open takes messages from whoever
+	// sent it.
+	if rota.Flavor(a.Provider) == "claude" && !a.RemoteControl {
+		if err := guardRun(&req.Spec); err != nil {
 			return nil, err
 		}
 	}

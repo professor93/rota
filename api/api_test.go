@@ -585,7 +585,7 @@ func TestRunClaudeMapsEveryFieldAndFeedsPromptOnStdin(t *testing.T) {
 	for _, want := range []string{"PROMPT=hello there", "TOKEN=tok-1", "CWD=" + realSub,
 		"-p --output-format json", "--model claude-opus-5", "--effort high", "--fallback-model sonnet", `--json-schema {"type":"object"}`,
 		"--max-budget-usd 1.5", "--session-id 11111111-1111-1111-1111-111111111111", "--fork-session", "--no-session-persistence", "--name n1",
-		"--system-prompt sys", "--append-system-prompt app", `--settings {"a":1}`, `--agents {"r":{"description":"d","prompt":"p"}}`, "--agent r",
+		"--system-prompt sys", "--append-system-prompt app", `--settings {"a":1,"disableRemoteControl":true}`, `--agents {"r":{"description":"d","prompt":"p"}}`, "--agent r",
 		"--strict-mcp-config", "--plugin-url https://x/p.zip", "--autocompact 200000", "--exclude-dynamic-system-prompt-sections",
 		"--setting-sources user,project", "--worktree wt1", "--permission-mode plan", "--allowedTools Bash(git *),Edit", "--disallowedTools WebFetch", "--tools Bash,Edit",
 		"--restricted", "--safe-mode", "--disable-slash-commands", "--include-hook-events", "--forward-subagent-text",

@@ -106,8 +106,8 @@ func TestAHeldSessionIsHandedTheGuardOnlyWithRemoteControlOff(t *testing.T) {
 		if resp, raw := h.do("POST", "/v1/terminals", map[string]any{"account": 1, "args": []string{"--model", "opus"}}); resp.StatusCode != http.StatusCreated {
 			t.Fatalf("%s: %d %s", name, resp.StatusCode, raw)
 		}
-		if got := handed(); guardDoc(t, got) == nil || !slices.Equal(got[2:], []string{"--model", "opus"}) {
-			t.Errorf("%s, remote control off: the holder was handed %q, want the guard first", name, got)
+		if got := handed(); guardDoc(t, got) == nil || !slices.Equal(got[:len(got)-2], []string{"--model", "opus"}) {
+			t.Errorf("%s, remote control off: the holder was handed %q, want the guard last", name, got)
 		}
 	}
 	raw, err := os.ReadFile(filepath.Join(p.dir, "accounts.json"))

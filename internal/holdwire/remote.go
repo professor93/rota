@@ -35,13 +35,14 @@ var (
 	// argument, before Commander runs, and answers with server-mode Remote
 	// Control. Anywhere else they are ordinary words.
 	remoteFirst = []string{"remote-control", "rc", "remote", "sync", "bridge"}
-	// valueFlags take the next argument as their value, so a word after one
-	// of them is a value, not an operand. Optional values count too:
-	// Commander takes the next argument when it does not start with "-".
-	// A flag missing from this list is read as one that takes no value, so
-	// the word after it still counts, which errs on the side of the check.
-	// --debug is missing on purpose: it binds a filter only in its "=" form.
-	valueFlags = map[string]bool{
+	// requiredFlags take the next argument as their value whatever it is, a
+	// "--" or another flag included, as Commander reads a required value.
+	// optionalFlags take it only when it does not start with "-". For the
+	// command words both count as values (valueFlags), and a flag missing
+	// from both is read as taking no value, so the word after it still
+	// counts, which errs on the side of the check. --debug is missing on
+	// purpose: it binds a filter only in its "=" form.
+	requiredFlags = map[string]bool{
 		"--add-dir": true, "--advisor": true, "--agent": true, "--agents": true,
 		"--allowedTools": true, "--allowed-tools": true,
 		"--append-subagent-system-prompt": true, "--append-subagent-system-prompt-file": true,
@@ -57,11 +58,17 @@ var (
 		"--remote-control-session-name-prefix": true, "--session-id": true,
 		"--setting-sources": true, "--system-prompt": true, "--system-prompt-file": true,
 		"--system-prompt-snapshot": true, "--teammate-mode": true, "--tools": true,
-		// Optional values.
+		"--settings": true, "--managed-settings": true,
+	}
+	optionalFlags = map[string]bool{
 		"--resume": true, "-r": true, "--worktree": true, "-w": true, "--from-pr": true,
 		"--cloud": true, "--remote": true, "--teleport": true,
+		"--remote-control": true, "--rc": true,
 	}
 )
+
+// valueFlags reports whether flag takes a value, required or optional.
+func valueFlags(flag string) bool { return requiredFlags[flag] || optionalFlags[flag] }
 
 // settingsFlag takes a settings file's path, or the document itself inline,
 // whose remoteControlAtStartup true connects the session to Remote Control
@@ -182,7 +189,7 @@ func asksCommand(args []string) bool {
 		}
 		if options && strings.HasPrefix(a, "-") && a != "-" {
 			name, _, inline := strings.Cut(a, "=")
-			if !inline && (valueFlags[name] || name == settingsFlag || name == managedFlag) && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+			if !inline && valueFlags(name) && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
 				i++
 			}
 			continue
@@ -245,41 +252,135 @@ const remoteGuardKey = "disableRemoteControl"
 
 // GuardRemoteControl is a claude account's CLI arguments with Remote Control
 // turned off for that one session, by Claude Code's own disableRemoteControl
-// given as the first --settings. Claude Code reads only the last --settings,
-// so the one the arguments carry, inline or the file it names relative to
-// cwd, is folded into the guard's document, and every --settings of theirs
-// is left out. A --settings that a value of another flag might be is taken
-// as one, as AsksRemoteControl takes it. Nothing else of the arguments
-// changes. When that last --settings cannot be read as one JSON object, the
-// answer is the error, and the session is never to be launched without its
-// guard.
+// given as their last --settings. Claude Code reads only the last one, so the
+// --settings the arguments carry in a flag's position, as its parser reads
+// them (flagWalk), is folded into the guard's document, inline or the file it
+// names relative to cwd, and is left out. The last of them is the one folded
+// in. A --settings that is another flag's value stays exactly where and as it
+// is, and so does everything else. The guard goes where the options end:
+// before a "--" that ends them, or before a flag left without its value,
+// which would otherwise take the guard for one. When the last --settings
+// cannot be read as one JSON object, the answer is the error, and the session
+// is never to be launched without its guard.
 func GuardRemoteControl(args []string, cwd string) ([]string, error) {
-	rest := make([]string, 0, len(args))
-	last, have := "", false
-	for i := 0; i < len(args); i++ {
-		name, value, inline := strings.Cut(args[i], "=")
-		if name == settingsFlag && (inline || i+1 < len(args)) {
-			if !inline {
-				i++
-				value = args[i]
-			}
-			last, have = value, true
-			continue
-		}
-		rest = append(rest, args[i])
+	return GuardRemoteControlOver(args, cwd, "", false)
+}
+
+// GuardRemoteControlOver is GuardRemoteControl for arguments that come after
+// a --settings of their own, a run's settings say, whose value is folded in
+// when the arguments carry none in a flag's position, since it is then the
+// last that counts.
+func GuardRemoteControlOver(args []string, cwd, before string, haveBefore bool) ([]string, error) {
+	settings, end := flagWalk(args)
+	drop := map[int]bool{}
+	last, have := before, haveBefore
+	if len(settings) > 0 {
+		have = true
 	}
+	for _, k := range settings {
+		_, value, inline := strings.Cut(args[k], "=")
+		drop[k] = true
+		if !inline {
+			value = args[k+1]
+			drop[k+1] = true
+		}
+		last = value
+	}
+	guard, err := GuardedSettings(last, have, cwd)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(args)+2)
+	for i, a := range args {
+		if i == end {
+			out = append(out, settingsFlag, string(guard))
+		}
+		if !drop[i] {
+			out = append(out, a)
+		}
+	}
+	if end == len(args) {
+		out = append(out, settingsFlag, string(guard))
+	}
+	return out, nil
+}
+
+// HasFlagSettings reports whether the arguments carry a --settings in a
+// flag's position, as Claude Code's parser reads them (flagWalk).
+func HasFlagSettings(args []string) bool {
+	settings, _ := flagWalk(args)
+	return len(settings) > 0
+}
+
+// GuardedSettings is the guard's --settings document: value's, when have,
+// read as a --settings value is (settingsDoc), with disableRemoteControl
+// true in it; otherwise that key alone. Its keys are in order, so the same
+// settings give the same document.
+func GuardedSettings(value string, have bool, cwd string) ([]byte, error) {
 	doc := map[string]jsontext.Value{}
 	if have {
 		var err error
-		if doc, err = settingsDoc(last, cwd); err != nil {
+		if doc, err = settingsDoc(value, cwd); err != nil {
 			return nil, err
 		}
 	}
 	doc[remoteGuardKey] = jsontext.Value("true")
-	raw, err := jsonv2.Marshal(doc, jsonv2.Deterministic(true))
-	if err != nil {
-		return nil, err
+	return jsonv2.Marshal(doc, jsonv2.Deterministic(true))
+}
+
+// flagWalk reads Claude Code's arguments as its parser, Commander, reads
+// them, as far as rota knows its flags. A required value is the next
+// argument whatever it is, an optional one only when it does not start with
+// "-", and a short flag in a bundle such as -cn takes the rest of the bundle,
+// or else the next argument, as its value. A flag rota does not know takes
+// none. It answers the indices of the --settings that stand in a flag's
+// position, and where the options end: at the "--" that ends them, before a
+// last flag left without its value, or after the last argument.
+func flagWalk(args []string) (settings []int, end int) {
+	end = len(args)
+	takes := func(i int, flag string) (next int) {
+		switch {
+		case requiredFlags[flag] && i+1 == len(args):
+			end = i // left without its value
+			return i
+		case requiredFlags[flag]:
+			return i + 1
+		case optionalFlags[flag] && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-"):
+			return i + 1
+		}
+		return i
 	}
-	// First, where no "--" before it can make it a prompt's word.
-	return append([]string{settingsFlag, string(raw)}, rest...), nil
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--":
+			return settings, i
+		case !strings.HasPrefix(a, "-") || a == "-":
+		case strings.HasPrefix(a, "--"):
+			name, _, inline := strings.Cut(a, "=")
+			if inline {
+				if name == settingsFlag {
+					settings = append(settings, i)
+				}
+				continue
+			}
+			next := takes(i, name)
+			if name == settingsFlag && next > i {
+				settings = append(settings, i)
+			}
+			i = next
+		default:
+			for j := 1; j < len(a); j++ {
+				flag := "-" + a[j:j+1]
+				if !valueFlags(flag) {
+					continue
+				}
+				if j+1 == len(a) {
+					i = takes(i, flag)
+				}
+				break
+			}
+		}
+	}
+	return settings, end
 }
