@@ -208,7 +208,10 @@ func (s *Server) adopt(r *holdwire.Record, labels map[int]string) {
 		conn: conn, features: w.Features, state: heldLive, lastOut: s.now(),
 		conv: m.Conversation, convName: m.ConversationName, convCwd: m.ConversationCwd,
 		reg:  holdwire.Registry{SessionID: m.Conversation, Name: m.ConversationName, Cwd: m.ConversationCwd},
-		asks: map[uint64]chan *heldScreen{}, left: make(chan struct{})}
+		asks: map[uint64]chan *heldScreen{}, left: make(chan struct{}),
+		// What it is doing already is where its attention starts from, and
+		// what its holder replays is not activity.
+		adopted: true, replayTo: w.End, linkedAt: s.now()}
 	kind, started := m.Kind, m.Started
 	if kind == "" {
 		kind = termKindAccount

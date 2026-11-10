@@ -69,9 +69,16 @@ import (
 //	                              session that is busy for a while
 //	FAKE_HOLDER_RESIZE=none       take no resize and answer none, as a holder
 //	                              whose CLI is ending
+//	FAKE_HOLDER_STATE_AFTER=<path> send the State a link opens with only once
+//	                              path exists, as a holder slow to say it
 //
 // The conversation and its folder are written into meta.json as well, as a
 // real holder keeps them there for a session that has stopped.
+//
+// Three typed lines each report one State, the last one reported with one
+// thing changed, as a CLI's own signals would change it: "title <text>"
+// sets the title, "status <s> [waiting]" the registry's status and what it
+// waits for, and "bell" rings the bell once more.
 //
 // Typed lines are its commands: "exit N" ends it with code N, "count N"
 // prints N numbered lines, "flood N" prints N lines of a kilobyte as fast as
@@ -192,6 +199,9 @@ type fake struct {
 	unlinked   bool
 	refused    int
 	line       []byte
+	// attnState is the State the typed title, status and bell lines last
+	// reported, nil before the first.
+	attnState *holdwire.StateMsg
 }
 
 // major is the protocol this fake speaks: this rota's, or the one its
@@ -319,7 +329,7 @@ func (f *fake) serve(c net.Conn) {
 	w := holdwire.WelcomeMsg{Major: major, Features: []string{holdwire.FeatScreen, holdwire.FeatState, holdwire.FeatSend, holdwire.FeatStop},
 		Version: "fake", Oldest: f.ring.Oldest(), End: f.ring.End(), Cols: f.cols, Rows: f.rows}
 	f.mu.Unlock()
-	if conn.SendJSON(holdwire.Welcome, w) != nil || conn.SendJSON(holdwire.State, f.state()) != nil {
+	if conn.SendJSON(holdwire.Welcome, w) != nil || f.attnLinkState(conn) != nil {
 		return
 	}
 	conn.Clear()
@@ -542,6 +552,8 @@ func (f *fake) command(line string) {
 			}
 			f.print([]byte("flood done\r\n"))
 		}()
+	case "title", "status", "bell":
+		f.attnSay(word, arg)
 	default:
 		f.print([]byte("got:" + line + "\r\n"))
 	}
@@ -575,6 +587,64 @@ func (f *fake) count(n int) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// attnSay reports the State a typed title, status or bell line asks for:
+// the one reported last, or the environment's at first, with that one
+// thing changed. A registry is made for a status if there was none.
+func (f *fake) attnSay(word, arg string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.attnState == nil {
+		st := f.state()
+		f.attnState = &st
+	}
+	st := f.attnState
+	switch word {
+	case "title":
+		st.Title = arg
+	case "status":
+		var reg holdwire.Registry
+		if st.Registry != nil {
+			reg = *st.Registry
+		}
+		reg.Status, reg.WaitingFor, _ = strings.Cut(arg, " ")
+		st.Registry = &reg
+	case "bell":
+		st.Bells++
+	}
+	if f.link != nil {
+		_ = f.link.SendJSON(holdwire.State, *st)
+	}
+}
+
+// attnLinkState sends the State a link opens with, as the real holder does
+// right after the Welcome: what the typed lines last reported, else the
+// environment's. With FAKE_HOLDER_STATE_AFTER it is sent only once that
+// path exists, and the link goes on meanwhile.
+func (f *fake) attnLinkState(conn *share.Conn) error {
+	now := func() holdwire.StateMsg {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		if f.attnState != nil {
+			return *f.attnState
+		}
+		return f.state()
+	}
+	gate := os.Getenv("FAKE_HOLDER_STATE_AFTER")
+	if _, err := os.Stat(gate); gate == "" || err == nil {
+		return conn.SendJSON(holdwire.State, now())
+	}
+	go func() {
+		for {
+			if _, err := os.Stat(gate); err == nil {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		_ = conn.SendJSON(holdwire.State, now())
+	}()
+	return nil
 }
 
 // exit is the CLI having ended with code: the link is told, the record says
