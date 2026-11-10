@@ -40,13 +40,14 @@ const maxLine = 64 << 10
 //	data: <the event as one line of JSON>
 //
 // followed by a blank line. Time is written in UTC. Frame is always one
-// frame: the type on the event: line goes through Clean, so a line end in
-// it cannot start a frame of its own, and the JSON, which escapes every
-// control byte, carries the type as given. Frame never fails: a byte that
-// is not UTF-8 is written as U+FFFD, a Percent that is not a finite number
-// is left out, and a Time RFC 3339 cannot write (a year outside 0 to 9999)
-// is written as the zero time.
+// frame: the type goes through Clean first, so a line end in it cannot
+// start a frame of its own, and the event: line and the JSON's type are
+// always the same string. Clean leaves every real type as it is. Frame
+// never fails: a byte that is not UTF-8 is written as U+FFFD, a Percent
+// that is not a finite number is left out, and a Time RFC 3339 cannot write
+// (a year outside 0 to 9999) is written as the zero time.
 func Frame(e Event) []byte {
+	e.Type = Clean(e.Type, 0)
 	e.Time = e.Time.UTC()
 	if y := e.Time.Year(); y < 0 || y > 9999 {
 		e.Time = time.Time{}
@@ -65,7 +66,7 @@ func Frame(e Event) []byte {
 	b.WriteString("id: ")
 	b.WriteString(strconv.FormatInt(e.ID, 10))
 	b.WriteString("\nevent: ")
-	b.WriteString(Clean(e.Type, 0))
+	b.WriteString(e.Type)
 	b.WriteString("\ndata: ")
 	b.Write(data)
 	b.WriteString("\n\n")
@@ -119,9 +120,9 @@ func NewReader(r io.Reader) *Reader {
 //
 // A frame that is not an event comes back as a *FrameError, which names the
 // frame by its id: line. That error is not the stream's last: the next call
-// goes on to the next frame. A client that keeps a last id moves it to the
-// FrameError's ID when that is above 0, so a reconnect does not ask for the
-// same frame again.
+// goes on to the next frame. A client that keeps a last id moves it forward
+// to the FrameError's ID when that is above its own, and never back, so a
+// reconnect does not ask for the same frame again.
 //
 // At the end of the stream Next gives io.EOF, and a frame cut off by the end
 // is dropped, as an EventSource drops it. Any other error is the stream's
@@ -189,7 +190,11 @@ func (r *Reader) next() (Event, error) {
 			have = true
 		case "id":
 			// The JSON carries the id; this one only names a bad frame.
-			id, _ = strconv.ParseInt(string(value), 10, 64)
+			// A value that is not an int64, too large ones included, is 0.
+			id = 0
+			if v, err := strconv.ParseInt(string(value), 10, 64); err == nil {
+				id = v
+			}
 		}
 		// event: is the JSON's type again, and retry: is for browsers.
 	}

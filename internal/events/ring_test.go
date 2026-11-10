@@ -96,8 +96,27 @@ func TestSinceAndGap(t *testing.T) {
 	if again, _, _ := r.Since(ids[3]); again[0].Text != "" {
 		t.Fatal("Since handed out the ring's own storage")
 	}
-	if evs, _, _ := r.Since(r.Last() + 1000); len(evs) != 0 {
-		t.Fatalf("Since(the future) gave %v", evs)
+}
+
+func TestSinceAnIDPastLastIsAGap(t *testing.T) {
+	// An id this ring never gave: a daemon whose clock ran ahead, or a
+	// stream from another ring. Everything kept comes, after a gap.
+	r := NewRing(3, nil)
+	if evs, gap, _ := r.Since(1 << 60); gap || len(evs) != 0 {
+		t.Fatalf("an empty ring gave %d, gap %v: a gap needs an event to follow", len(evs), gap)
+	}
+	for range 2 {
+		r.Publish(Event{Type: Test})
+	}
+	evs, gap, _ := r.Since(r.Last() + 1000)
+	if !gap || len(evs) != 2 {
+		t.Fatalf("Since(Last()+1000) gave %d, gap %v; want everything kept and a gap", len(evs), gap)
+	}
+	if evs, gap, _ := r.Since(r.Last()); gap || len(evs) != 0 {
+		t.Fatalf("Since(Last()) gave %d, gap %v", len(evs), gap)
+	}
+	if evs, gap, _ := r.Since(1); gap || len(evs) != 2 {
+		t.Fatalf("an id from before the ring gave %d, gap %v; want everything and no gap", len(evs), gap)
 	}
 }
 

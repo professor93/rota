@@ -16,7 +16,9 @@ import (
 // Last-Event-ID from before the daemon restarted is older than anything the
 // new daemon publishes, so it gets the new ring's whole contents and nothing
 // twice. A wall clock stepped back keeps the ids rising by one each until it
-// catches up.
+// catches up. An id past the newest this ring gave (a daemon whose clock ran
+// ahead, or a stream from another ring) is not trusted: Since gives
+// everything kept, after a gap.
 //
 // A Ring is safe for concurrent use.
 type Ring struct {
@@ -93,9 +95,18 @@ func own(e Event) Event {
 
 // Since is every kept event whose id is after id, oldest first. The slice
 // and the events in it are the caller's own, Exit and Percent included.
-// gap is true when events after id were pushed out before they could be
-// read: the caller says so (GapFrame) before the rest. An id below 0 is
-// taken as 0, which asks for everything kept.
+// gap is true when events after id may be lost, and the caller says so
+// (GapFrame) before the rest. That is so in two cases:
+//
+//   - events after id were pushed out before they could be read;
+//   - id is past Last(), so this ring never gave it: a daemon whose clock
+//     ran ahead, or a stream from another ring. Since then gives everything
+//     kept.
+//
+// gap is never true with no events, so evs[0].ID is there for GapFrame. An
+// id from before this ring was made, such as a reconnect across a restart,
+// gives everything kept and no gap. An id below 0 is taken as 0, which asks
+// for everything kept.
 //
 // wake is closed by the next Publish, or by Close, so a reader that has
 // everything waits on it and then asks again. A Publish and a Close can
@@ -126,6 +137,10 @@ func (r *Ring) Since(id int64) (evs []Event, gap bool, wake <-chan struct{}) {
 	defer r.mu.Unlock()
 	id = max(id, 0)
 	n := len(r.buf)
+	gap = id < r.dropped
+	if id > r.last && n > 0 {
+		id, gap = 0, true // never given here: everything, after a gap
+	}
 	at := func(i int) Event { return r.buf[(r.start+i)%n] }
 	first := sort.Search(n, func(i int) bool { return at(i).ID > id })
 	if first < n {
@@ -134,7 +149,7 @@ func (r *Ring) Since(id int64) (evs []Event, gap bool, wake <-chan struct{}) {
 			evs = append(evs, own(at(i)))
 		}
 	}
-	return evs, id < r.dropped, r.wake
+	return evs, gap, r.wake
 }
 
 // Last is the newest id the ring has given, 0 before the first. A stream

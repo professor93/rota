@@ -157,9 +157,10 @@ func TestABadFrameIsSkippedAndNamed(t *testing.T) {
 		"id: 7\ndata: {}\n\n" +
 		"data: null\n\n" +
 		"id: x\ndata: {\"id\":8,\"text\":\"no type\"}\n\n" +
+		"id: 99999999999999999999\ndata: {nope\n\n" +
 		string(Frame(Event{ID: 9, Type: Test}))
 	r := NewReader(strings.NewReader(in))
-	for _, id := range []int64{5, 6, 7, 0, 0} {
+	for _, id := range []int64{5, 6, 7, 0, 0, 0} {
 		_, err := r.Next()
 		var fe *FrameError
 		if !errors.As(err, &fe) || fe.ID != id {
@@ -186,8 +187,12 @@ func TestAFrameCannotForgeAnother(t *testing.T) {
 	}
 	r := NewReader(bytes.NewReader(f))
 	got, err := r.Next()
-	if err != nil || got.ID != 3 || got.Type != forged {
+	if err != nil || got.ID != 3 || got.Type != Clean(forged, 0) {
 		t.Fatalf("read back %+v %v", got, err)
+	}
+	// The event: line and the JSON's type are one string.
+	if line := "\nevent: " + got.Type + "\n"; !bytes.Contains(f, []byte(line)) {
+		t.Fatalf("the event: line is not the JSON's type %q: %q", got.Type, f)
 	}
 	if _, err := r.Next(); err != io.EOF {
 		t.Fatalf("a second frame came out: %v", err)
