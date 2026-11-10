@@ -21,7 +21,45 @@ const assert = (cond, msg) => { if (!cond) { console.error('FAILED:', msg); proc
 const findAll = (root, pred) => (root && root._all ? root._all().filter(pred) : []);
 const byId = (root, id) => findAll(root, e => e.attrs && e.attrs.id === id)[0];
 const btn = (root, text) => findAll(root, e => e.tagName === 'BUTTON' && e.textContent.includes(text))[0];
-const ok = () => console.log('TERM_TEST_OK');
+// markup is every attempt the page made to have a string parsed as markup:
+// nothing the terminal page shows is, apart from page.js's own header.
+const markup = [];
+const ok = () => {
+  assert(!markup.length, 'the page wrote markup: ' + JSON.stringify(markup));
+  console.log('TERM_TEST_OK');
+};
+
+// trapMarkup makes every way to parse a string into nodes record what it was
+// given and throw, apart from page.js's HEADER going into the header. dom.js
+// stores innerHTML and parses nothing, so without this no test of the page
+// could see markup getting in. A throw a page swallows is still recorded.
+function trapMarkup(nodes) {
+  const refuse = (how, v) => {
+    markup.push({ how, value: String(v).slice(0, 200) });
+    throw new Error('markup is not built from strings here: ' + how);
+  };
+  const proto = Object.getPrototypeOf(document.createElement('x'));
+  const store = Object.getOwnPropertyDescriptor(proto, 'innerHTML');
+  Object.defineProperty(proto, 'innerHTML', {
+    configurable: true,
+    get() { return store.get.call(this); },
+    set(v) {
+      let header;
+      try { header = vm.runInThisContext('HEADER'); } catch {}
+      if (this === nodes['#top'] && header !== undefined && v === header) return store.set.call(this, v);
+      refuse('innerHTML', v);
+    },
+  });
+  Object.defineProperty(proto, 'outerHTML', { configurable: true, get() { return ''; }, set(v) { refuse('outerHTML', v); } });
+  for (const m of ['insertAdjacentHTML', 'setHTMLUnsafe', 'setHTML']) {
+    proto[m] = function (...args) { refuse(m, args[args.length - 1]); };
+  }
+  globalThis.DOMParser = class { parseFromString(s) { refuse('DOMParser', s); } };
+  window.DOMParser = globalThis.DOMParser;
+  document.createRange = () => ({ createContextualFragment: s => refuse('createContextualFragment', s) });
+  document.write = s => refuse('document.write', s);
+  document.writeln = s => refuse('document.writeln', s);
+}
 
 // The page's own files, in the order terminal.html loads them.
 function termScripts() {
@@ -47,7 +85,7 @@ async function load(opts = {}) {
     nodes, sockets, fakes: [], terminals: o.terminals, fetches: [], routes: [],
     role: o.role, fitSize: { cols: 96, rows: 30 }, proposeSize: { cols: 96, rows: 30 },
     history: [], clipboard: [], listeners: {}, timers: [], clock: CLOCK,
-    storage: globalThis.localStorage,
+    storage: globalThis.localStorage, markup,
   };
   let sessionDoc = null;
 
@@ -126,6 +164,7 @@ async function load(opts = {}) {
   // do, and each runs in its own mode, so a file without "use strict" or a
   // call before a later file has run fails here as it would there.
   const files = ['page.js', ...termScripts().map(f => 'assets/term/' + f)];
+  trapMarkup(nodes);
   for (const f of files) vm.runInThisContext(fs.readFileSync(T + '/' + f, 'utf8'), { filename: f });
 
   // tp reads and assigns the page's names through scripts of the same
