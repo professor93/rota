@@ -39,7 +39,7 @@ let termHolder = null;       // who holds the keyboard, null for nobody
 let termYou = null;          // {name, role, conn} from hello
 let termViewers = [];
 let termEnded = null;        // the exit code, once there is one
-let termStatus = "idle";     // idle | connecting | live | reconnecting | ended
+let termStatus = "idle";     // idle | connecting | live | reconnecting | ended | stopped
 let termWait = 0;            // seconds until the next attempt
 let termTries = 0;
 let termClaimAt = null;      // when this tab asked for the keyboard
@@ -68,10 +68,28 @@ const termIHold = () => !!termYou && !termWatcher() && !termLookOnly() &&
 // holds it. Nothing reads these until a held session's parts of the page do.
 let termHeld = false;       // from the description's held, or hello's holder_conn
 let termHolderConn = null;  // which conn holds a held session's keyboard
-let termState = null;       // {status, waiting_for, title, name}; Task 3 fills it
+let termState = null;       // {status, waiting_for, title, name}, from state frames
+let termMissing = false;    // the description answered 404: there is no such session
 const termHoldsHere = () => termIHold() && (!termHeld || termHolderConn === (termYou && termYou.conn));
 const termCanType = () => !!termYou && !watching() && !termWatcher() && !termLookOnly() && termEnded === null;
 const termWaiting = () => !!((termState && termState.waiting_for) || (termInfo && termInfo.status === "needs_you"));
+
+// termWhyNot is why the session d describes cannot be attached to from
+// here, or null when it can: a holder made by another rota speaks a
+// protocol this one may not, and a session that has stopped has no screen
+// left to show.
+function termWhyNot(d) {
+  if (!d || d.attachable !== false) return null;
+  if (d.made_by) return `made by rota ${d.made_by}, which this rota cannot attach to; stop it, or attach with that version`;
+  if (d.ended) return `this session has stopped: ${termEnding(d)}; its screen is not kept`;
+  return "this session cannot be attached to here";
+}
+
+// termWhyClosed is why the open session is given no socket, or null when
+// it is: one the server does not have, or one that cannot be attached to.
+// Every way to a socket asks it first, so a retry, a poll or a sign-in
+// never loops against a session that will only refuse.
+const termWhyClosed = () => (termMissing ? `no session ${termId} on this server` : termWhyNot(termInfo));
 
 /* ============================================================== the page == */
 // enterTerminal is this page once there is a credential: ask what there is,
@@ -130,7 +148,7 @@ async function termSelect(id) {
   termAsking = null; termClaimAt = null; termNote = "";
   termCols = 80; termRows = 24;
   termKind = null; termMode = null;
-  termHeld = false; termHolderConn = null; termState = null;
+  termHeld = false; termHolderConn = null; termState = null; termMissing = false;
   termStatus = id ? "connecting" : "idle";
   renderTerm();
   if (!id) { termRoute(null); return; }
@@ -140,9 +158,11 @@ async function termSelect(id) {
   const r = await api("GET", "/v1/terminals/" + encodeURIComponent(id));
   if (mine !== termGen) return;
   if (r.ok) termInfo = r.doc;
+  else if (r.status === 404) termMissing = true;
   termHeld = !!(termInfo && termInfo.held);
   termRoute(id);
   renderTermInfo();
+  if (termWhyClosed()) { termStopped(); return; }
   await termScreen();
   if (mine !== termGen) return;
   termConnect();
@@ -170,12 +190,33 @@ async function termScreen() {
   termFit();
 }
 
+// termDrop takes down the emulator, and whatever stood in its place.
 function termDrop() {
-  if (!termView) return;
-  try { termView.dispose(); } catch {}
-  termView = null;
+  if (termView) {
+    try { termView.dispose(); } catch {}
+    termView = null;
+  }
   const host = $("#tscreen");
   if (host) host.replaceChildren();
+}
+
+// termStopped is the open session as a page that will not attach to it
+// shows it: which one it is, why there is no screen, and what can still be
+// done to it.
+function termStopped() {
+  const why = termWhyClosed();
+  termDetach();
+  termDrop();
+  termStatus = "stopped"; termWait = 0;
+  renderTerm();
+  const host = $("#tscreen");
+  if (!host) return;
+  host.classList.add("nothing");
+  host.replaceChildren(el("div", { class: "empty" }, [
+    el("b", { text: termInfo ? termName(termInfo) : termId }),
+    el("span", { text: why }),
+    termMissing ? null : termActions(termInfo),
+  ]));
 }
 
 // termDetach closes this page's socket for good: a clean 1000, which is a
@@ -192,6 +233,7 @@ function termDetach() {
 // hello it is always the offset this page has actually been shown.
 function termConnect() {
   if (termSock || !termId || termEnded !== null) return;
+  if (termWhyClosed()) { termStopped(); return; }
   const q = termSeen ? "?since=" + termOffset : "";
   const url = wsURL("/v1/terminals/" + encodeURIComponent(termId) + "/ws" + q);
   // A browser cannot put a header on a WebSocket, so a token travels as a
@@ -290,6 +332,16 @@ function termFrame(doc) {
       renderTerm();
       refreshTerminals();
       break;
+    case "state": {
+      // A held session saying how it is, after hello and whenever that
+      // changes. The description says the same four things, and is kept in
+      // step so nothing reading either is told two stories.
+      const s = k => (typeof doc[k] === "string" ? doc[k] : "");
+      termState = { status: s("status"), waiting_for: s("waiting_for"), title: s("title"), name: s("name") };
+      if (termInfo) Object.assign(termInfo, termState);
+      renderTermStrip(); renderTermInfo(); renderTermDock(); renderTermList();
+      break;
+    }
     case "claim_request":
       // Only the holder is sent one of these, so this page is the holder.
       termAsking = { by: doc.by, id: doc.id };
@@ -373,7 +425,7 @@ function renderTermStrip() {
   // is shown one: the controls would be there only to be refused.
   if (termLookOnly()) kids.push(el("span", { class: "badge", text: "shared to be watched only" }));
   else if (termWatcher()) kids.push(el("span", { class: "badge", text: "watching" }));
-  else if (termEnded === null) kids.push(termKeyboardBox());
+  else if (termEnded === null && termStatus !== "stopped") kids.push(termKeyboardBox());
   if (termAsking && termIHold()) {
     kids.push(el("span", { class: "kbd" }, [
       el("b", { text: termAsking.by }),
@@ -399,8 +451,9 @@ const termStateText = () => ({
   live: "live",
   reconnecting: "reconnecting in " + termWait + "s",
   ended: termEnded === null ? "ended" : "ended, code " + termEnded,
+  stopped: "stopped",
 }[termStatus] || termStatus);
-const termStatePill = () => ({ live: " ok", connecting: " busy", reconnecting: " busy", ended: " bad" }[termStatus] || "");
+const termStatePill = () => ({ live: " ok", connecting: " busy", reconnecting: " busy", ended: " bad", stopped: " bad" }[termStatus] || "");
 
 // The keyboard, in three states and no more: you have it, nobody has it, or
 // somebody else has it and may be asked for it.
