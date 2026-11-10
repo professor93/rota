@@ -2090,6 +2090,11 @@ ended for being idle. `reachable` is whether the daemon's link to its
 holder is up; `conversation_cwd` is the folder the conversation is in,
 which for a worktree is not `cwd`; `resumable` is an interrupted session
 whose conversation is known; and `ended_at` is when a stopped one stopped.
+A held claude reports its conversation in its own `sessions/<pid>.json`,
+which the holder believes only when its `procStart` is the CLI's own start
+in the form Claude Code writes it on that system — the tick it started at
+on Linux, its start in UTC on macOS — and its `pidDomain`, if it names one,
+is this machine's pid space; any other file teaches the session nothing.
 
 A daemon that starts takes up every holder still running on its store, as
 if it had started it, and a viewer's offsets go on meaning the same bytes:
