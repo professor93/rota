@@ -1,2 +1,31 @@
-/* The dock under the screen, for the composer and the quick keys.
-   Nothing yet; the dock is hidden. */
+/* The dock under the screen: the composer and the quick keys. Everything a
+   finger presses is at least 44px each way, and every colour is the
+   palette's. */
+.termdock {
+  display:flex; flex-direction:column; gap:8px; flex:none;
+  padding:8px 12px calc(8px + env(safe-area-inset-bottom, 0px));
+  border-top:1px solid var(--line); background:var(--panel);
+}
+.termdock[hidden] { display:none }
+/* a session waiting on its person: the dock says so, in the warning's tone */
+.termdock.asks { border-top-color:var(--warn); background:color-mix(in oklab, var(--warn) 8%, var(--panel)) }
+.dockask { margin:0; color:var(--warn); font-weight:600; font-size:13px }
+.dockcompose { display:flex; flex-direction:column; gap:6px }
+.dockcompose > .help { margin:0 }
+/* 16px is what keeps a phone from zooming in on the box when it is touched */
+.termdock textarea.ctl {
+  min-height:44px; max-height:40vh; font-family:inherit; font-size:16px; line-height:1.4; resize:vertical;
+}
+.dockrow { display:flex; gap:8px; align-items:center; justify-content:flex-end }
+.docksay { flex:1; margin:0; min-width:0; color:var(--bad); overflow-wrap:anywhere }
+.termdock .btn { min-height:44px; min-width:44px }
+/* the keys stay one row and scroll sideways on a narrow screen */
+.dockkeys {
+  display:flex; gap:6px; flex-wrap:nowrap; overflow-x:auto; overscroll-behavior-x:contain;
+  -webkit-overflow-scrolling:touch; scrollbar-width:thin; padding-bottom:2px;
+}
+.dockkey {
+  flex:none; padding:6px 10px; font-family:ui-monospace, SFMono-Regular, Menlo, monospace; font-size:15px;
+  background:var(--sunk); border-color:var(--line); color:var(--fg); touch-action:manipulation;
+}
+.dockkey:active { background:var(--accent-soft); border-color:var(--accent) }
