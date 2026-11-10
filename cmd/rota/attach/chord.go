@@ -45,6 +45,7 @@ const (
 	chordGround = iota
 	chordEsc    // held: a lone ESC
 	chordCSI    // held: ESC [ and its parameters so far
+	chordSS3    // held: ESC O, or the Linux console's ESC [ [, while armed
 )
 
 var (
@@ -53,28 +54,31 @@ var (
 )
 
 // The kitty keyboard protocol's modifier bits, as mods-1 carries them, and
-// the codepoints of the modifier keys themselves.
+// its release event.
 const (
 	chordShift   = 1
 	chordCtrl    = 4
 	chordLocks   = 64 | 128 // caps lock, num lock
-	chordModLow  = 57441    // left shift
-	chordModHigh = 57452    // right meta
 	chordRelease = 3
 )
 
 // chord reads the person's input for the attach's prefix key and the key
 // after it. It is one incremental state machine: bytes go in as they are
-// read, and events come out in input order. Only a trailing lone ESC or a
-// cut-off CSI is ever held back, until the next read completes it or tick
-// finds holdFor has passed.
+// read, and events come out in input order.
+//
+// Only an escape sequence cut off at the end of a read is held back, until
+// the next read completes it or holdFor passes: unarmed, a lone ESC or a
+// CSI; armed, also ESC O, so that an SS3 key (F1, or an arrow under DECCKM)
+// is dropped whole rather than typing its last byte. Nothing else is held
+// unarmed.
 type chord struct {
 	key byte // the prefix as a control byte
 	cp  int  // the prefix as a kitty or modifyOtherKeys codepoint, 0 if none
 
-	state  int
-	held   []byte
-	heldAt time.Time
+	state   int
+	held    []byte
+	heldAt  time.Time
+	discard bool // reset came while held: drop the sequence whole
 
 	paste   bool
 	pasteAt int // bytes of chordPasteEnd matched so far
@@ -104,7 +108,12 @@ func chordCodepoint(k byte) int {
 }
 
 // feed reads p, which may be any part of the input, and says what it means.
+// Held bytes whose holdFor has passed go first, so a late read never
+// completes a stale sequence.
 func (c *chord) feed(p []byte, now time.Time) []chordEvent {
+	if len(p) > 0 && c.state != chordGround && !now.Before(c.heldAt.Add(holdFor)) {
+		c.flush()
+	}
 	for _, b := range p {
 		c.step(b, now)
 	}
@@ -141,9 +150,18 @@ func (c *chord) due() (time.Time, bool) {
 // armed says whether the prefix was read and the second key is awaited.
 func (c *chord) armed() bool { return c.on }
 
-// reset forgets held bytes and the armed chord, for a switch.
+// reset forgets the armed chord and the held bytes, for a switch. It keeps
+// the input's place: a paste under way is still a paste, the rest of a
+// dropped character is still dropped, and a sequence still open is dropped
+// whole when it completes, breaks or times out, so its tail is not typed
+// into the next session. A paste that starts across the reset still starts.
 func (c *chord) reset() {
-	*c = chord{key: c.key, cp: c.cp, held: c.held[:0]}
+	c.disarm()
+	c.armedAt = time.Time{}
+	if c.state != chordGround {
+		c.discard = true
+	}
+	c.out = nil
 }
 
 func (c *chord) next() (at time.Time, hold, ok bool) {
@@ -201,6 +219,15 @@ func (c *chord) drop(lead byte) {
 	}
 }
 
+// settle returns the decoder to ground, and says whether the sequence that
+// was held is to be dropped because reset came while it was open. The held
+// bytes stay readable until the next append to held.
+func (c *chord) settle() (discarded bool) {
+	discarded = c.discard
+	c.state, c.held, c.discard = chordGround, c.held[:0], false
+	return discarded
+}
+
 func (c *chord) step(b byte, now time.Time) {
 	if c.paste {
 		c.typed([]byte{b})
@@ -218,32 +245,61 @@ func (c *chord) step(b byte, now time.Time) {
 	}
 	switch c.state {
 	case chordEsc:
-		switch b {
-		case '[':
+		switch {
+		case b == '[':
 			c.held = append(c.held, b)
 			c.state = chordCSI
-		case 0x1b, c.key:
-			c.state, c.held = chordGround, c.held[:0]
-			c.loneEsc()
+		case b == 'O' && (c.on || c.discard):
+			c.held = append(c.held, b)
+			c.state = chordSS3
+		case b == 0x1b || b == c.key:
+			if !c.settle() {
+				c.loneEsc()
+			}
 			c.step(b, now)
-		default:
-			c.state, c.held = chordGround, c.held[:0]
-			if c.on {
-				c.drop(b) // alt and a key
-			} else {
+		default: // alt and a key
+			switch {
+			case c.settle():
+			case c.on:
+				c.drop(b)
+			default:
 				c.typed([]byte{0x1b, b})
 			}
 		}
 	case chordCSI:
 		switch {
+		case b == '[' && len(c.held) == 2 && (c.on || c.discard):
+			// The Linux console's F1-F5 are ESC [ [ and a letter.
+			c.held = append(c.held, b)
+			c.state = chordSS3
 		case b >= 0x40 && b <= 0x7e:
+			// seq shares held's array; nothing appends to held before
+			// csi is done with it.
 			seq := append(c.held, b)
-			c.state, c.held = chordGround, c.held[:0]
+			if c.settle() && !bytes.Equal(seq, chordPasteStart) {
+				return
+			}
 			c.csi(seq, now)
 		case b >= 0x20 && b <= 0x3f && len(c.held) < chordMax:
 			c.held = append(c.held, b)
 		default: // too long, or broken by a byte no CSI holds
 			c.noise()
+			c.step(b, now)
+		}
+	case chordSS3:
+		switch {
+		case b >= 0x30 && b <= 0x3f && c.held[1] == 'O' && len(c.held) < chordMax:
+			c.held = append(c.held, b)
+		case b >= 0x40 && b <= 0x7e:
+			// A whole key, and not the second key the chord knows.
+			if !c.settle() && c.on {
+				c.done(actCancel)
+			}
+		default:
+			// It was alt and O, or alt and [, and b is a key of its own.
+			if !c.settle() && c.on {
+				c.done(actCancel)
+			}
 			c.step(b, now)
 		}
 	default:
@@ -291,7 +347,9 @@ func (c *chord) loneEsc() {
 // long. It is not a key, so it ends a chord and is typed.
 func (c *chord) noise() {
 	held := c.held
-	c.state, c.held = chordGround, c.held[:0]
+	if c.settle() {
+		return
+	}
 	if c.on {
 		c.done(actCancel)
 	}
@@ -300,12 +358,18 @@ func (c *chord) noise() {
 
 // flush lets the held bytes go once holdFor has passed.
 func (c *chord) flush() {
-	if c.state == chordEsc {
-		c.state, c.held = chordGround, c.held[:0]
-		c.loneEsc()
-		return
+	switch c.state {
+	case chordEsc:
+		if !c.settle() {
+			c.loneEsc()
+		}
+	case chordSS3: // alt and O, or alt and [, as the second key
+		if !c.settle() && c.on {
+			c.done(actCancel)
+		}
+	default:
+		c.noise()
 	}
-	c.noise()
 }
 
 // csi takes one complete CSI sequence.
@@ -328,7 +392,11 @@ func (c *chord) csi(seq []byte, now time.Time) {
 		return
 	}
 	switch {
-	case ok && (k.event == chordRelease || k.cp >= chordModLow && k.cp <= chordModHigh):
+	case chordNotKey(seq):
+		// A mouse or focus report, or a terminal's reply, is the
+		// session's, and the chord still waits for its key.
+		c.typed(seq)
+	case ok && (k.event == chordRelease || chordModifier(k.cp)):
 		// A release, or a modifier key on its own, is not the second key.
 	case ok && c.prefix(k):
 		c.disarm()
@@ -340,16 +408,38 @@ func (c *chord) csi(seq []byte, now time.Time) {
 	}
 }
 
-// prefix says whether k is the chord's key pressed or repeated with Ctrl.
+// chordNotKey says whether a CSI sequence is an event that is not a key:
+// one with a private marker (an SGR mouse report, a terminal's reply), or
+// focus in or out.
+func chordNotKey(seq []byte) bool {
+	if len(seq) > 3 && seq[2] >= '<' && seq[2] <= '?' {
+		return true
+	}
+	return len(seq) == 3 && (seq[2] == 'I' || seq[2] == 'O')
+}
+
+// chordModifier says whether cp is a key that only modifies others under
+// kitty's report-all-keys: shift to meta, the ISO level shifts, and the
+// lock keys.
+func chordModifier(cp int) bool {
+	return cp >= 57441 && cp <= 57454 || cp >= 57358 && cp <= 57360
+}
+
+// prefix says whether k is the chord's key pressed or repeated with Ctrl,
+// by its codepoint or by the key at its place on a US layout.
 func (c *chord) prefix(k chordKey) bool {
 	if k.mods&chordCtrl == 0 || k.event != 1 && k.event != 2 || c.cp == 0 {
 		return false
 	}
+	return c.prefixAt(k.cp, k.mods) || k.base != 0 && c.prefixAt(k.base, k.mods)
+}
+
+func (c *chord) prefixAt(cp, mods int) bool {
 	switch {
-	case k.cp == c.cp:
+	case cp == c.cp:
 		return true
-	case c.cp == '^' && k.cp == '6', c.cp == '_' && k.cp == '-':
-		return k.mods&chordShift != 0
+	case c.cp == '^' && cp == '6', c.cp == '_' && cp == '-':
+		return mods&chordShift != 0
 	}
 	return false
 }
@@ -368,20 +458,27 @@ func chordSecond(b byte) action {
 }
 
 // chordSecondKey is what the kitty or modifyOtherKeys key k means as the
-// second key: unmodified, with Shift, or with Ctrl.
+// second key: unmodified, with Shift, or with Ctrl. The letter is the key's
+// codepoint, or else the key at its place on a US layout.
 func chordSecondKey(k chordKey) action {
 	m := k.mods &^ chordLocks
-	if m&^chordShift == 0 && (k.cp == '?' || k.shifted == '?') {
+	if m&^chordShift == 0 && (k.cp == '?' || k.shifted == '?' || k.text == '?') {
 		return actHelp
 	}
-	cp := k.cp
+	if m&^chordShift != 0 && (m&chordCtrl == 0 || m&^(chordCtrl|chordShift) != 0) {
+		return actCancel
+	}
+	if a := chordLetter(chordLower(k.cp)); a != actCancel || k.base == 0 {
+		return a
+	}
+	return chordLetter(chordLower(k.base))
+}
+
+func chordLower(cp int) int {
 	if cp >= 'A' && cp <= 'Z' {
-		cp += 'a' - 'A'
+		return cp + 'a' - 'A'
 	}
-	if m&^chordShift == 0 || m&chordCtrl != 0 && m&^(chordCtrl|chordShift) == 0 {
-		return chordLetter(cp)
-	}
-	return actCancel
+	return cp
 }
 
 func chordLetter(cp int) action {
@@ -402,9 +499,10 @@ func chordLetter(cp int) action {
 
 // chordKey is a key from a kitty CSI-u or a modifyOtherKeys sequence. mods
 // is the modifier bits (the sent value less one), and event is 1 for a
-// press, 2 for a repeat and 3 for a release.
+// press, 2 for a repeat and 3 for a release. shifted and base are kitty's
+// alternate keys, and text the first codepoint of its text, 0 when not sent.
 type chordKey struct {
-	cp, shifted, mods, event int
+	cp, shifted, base, text, mods, event int
 }
 
 // chordParse reads ESC [ cp[:shifted[:base]] [; mods[:event] [; text]] u
@@ -427,11 +525,12 @@ func chordParse(seq []byte) (chordKey, bool) {
 		if k.cp, ok = chordNum(cp); !ok {
 			return chordKey{}, false
 		}
-		if shifted, _, _ := bytes.Cut(alts, []byte{':'}); len(shifted) > 0 {
-			k.shifted, _ = chordNum(shifted)
-		}
+		shifted, base, _ := bytes.Cut(alts, []byte{':'})
+		k.shifted, _ = chordNum(shifted)
+		base, _, _ = bytes.Cut(base, []byte{':'})
+		k.base, _ = chordNum(base)
 		if more {
-			field, _, _ := bytes.Cut(rest, []byte{';'}) // the text field is not needed
+			field, text, _ := bytes.Cut(rest, []byte{';'})
 			m, ev, hasEv := bytes.Cut(field, []byte{':'})
 			if len(m) > 0 {
 				if mods, ok = chordNum(m); !ok {
@@ -439,10 +538,12 @@ func chordParse(seq []byte) (chordKey, bool) {
 				}
 			}
 			if hasEv {
-				if k.event, ok = chordNum(ev); !ok {
+				if k.event, ok = chordNum(ev); !ok || k.event > chordRelease {
 					return chordKey{}, false
 				}
 			}
+			text, _, _ = bytes.Cut(text, []byte{':'})
+			k.text, _ = chordNum(text)
 		}
 	case '~':
 		if bytes.IndexByte(params, ':') >= 0 {
@@ -463,7 +564,7 @@ func chordParse(seq []byte) (chordKey, bool) {
 	default:
 		return chordKey{}, false
 	}
-	if mods < 1 {
+	if mods < 1 || k.event < 1 {
 		return chordKey{}, false
 	}
 	k.mods = mods - 1

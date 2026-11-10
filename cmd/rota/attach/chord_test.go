@@ -138,7 +138,26 @@ var chordCases = []chordCase{
 	{"a UTF-8 key is dropped whole", 0x1c, "\x1c\xc3\xa9a\x1c\xe2\x82\xacb", []chordEvent{chordCxl, chordTy("a"), chordCxl, chordTy("b")}},
 	{"escape before the key", 0x1c, "\x1b\x1cd", []chordEvent{chordTy("\x1b"), chordLeave}},
 	{"escape escape", 0x1c, "\x1b\x1b[A", []chordEvent{chordTy("\x1b\x1b[A")}},
-	{"a private CSI ends the chord", 0x1c, "\x1c\x1b[?1u", []chordEvent{chordCxl}},
+	{"a terminal reply is typed while armed", 0x1c, "\x1c\x1b[?1ud", []chordEvent{chordTy("\x1b[?1u"), chordLeave}},
+	{"a mouse report is typed while armed", 0x1c, "\x1c\x1b[<35;10;5Md", []chordEvent{chordTy("\x1b[<35;10;5M"), chordLeave}},
+	{"focus in is typed while armed", 0x1c, "\x1c\x1b[Id", []chordEvent{chordTy("\x1b[I"), chordLeave}},
+	{"focus out is typed while armed", 0x1c, "\x1c\x1b[Od", []chordEvent{chordTy("\x1b[O"), chordLeave}},
+	{"an SS3 arrow is dropped whole", 0x1c, "\x1c\x1bOA", []chordEvent{chordCxl}},
+	{"F1 is dropped whole", 0x1c, "\x1c\x1bOP", []chordEvent{chordCxl}},
+	{"an SS3 key with a parameter is dropped whole", 0x1c, "\x1c\x1bO5P", []chordEvent{chordCxl}},
+	{"alt-O then a control byte", 0x1c, "\x1c\x1bO\x03", []chordEvent{chordCxl, chordTy("\x03")}},
+	{"alt-O then the key", 0x1c, "\x1c\x1bO\x1cd", []chordEvent{chordCxl, chordLeave}},
+	{"alt-O alone", 0x1c, "\x1c\x1bO", []chordEvent{chordCxl}},
+	{"an SS3 key is typed unarmed", 0x1c, "\x1bOP\x1bO", []chordEvent{chordTy("\x1bOP\x1bO")}},
+	{"a Linux console F1 is dropped whole", 0x1c, "\x1c\x1b[[Aa", []chordEvent{chordCxl, chordTy("a")}},
+	{"a Linux console F1 is typed unarmed", 0x1c, "\x1b[[A", []chordEvent{chordTy("\x1b[[A")}},
+	{"kitty text field ?", 0x1c, "\x1c\x1b[47;2;63u", []chordEvent{chordHelp}},
+	{"kitty shift-slash without text is unknown", 0x1c, "\x1c\x1b[47;2u", []chordEvent{chordCxl}},
+	{"kitty base layout key", 0x1c, "\x1c\x1b[1074::100u", []chordEvent{chordLeave}},
+	{"kitty base layout key with shift", 0x1c, "\x1c\x1b[1090:1058:110;2u", []chordEvent{chordNext}},
+	{"kitty base layout prefix", 0x1c, "\x1b[1105::92;5ud", []chordEvent{chordLeave}},
+	{"level shifts and locks ignored while armed", 0x1c, "\x1c\x1b[57453u\x1b[57454u\x1b[57358u\x1b[57360;129ud", []chordEvent{chordLeave}},
+	{"an unknown kitty event is not a key", 0x1c, "\x1c\x1b[100;1:9u", []chordEvent{chordCxl}},
 	{"a broken CSI is typed", 0x1c, "\x1b[1\x03x", []chordEvent{chordTy("\x1b[1\x03x")}},
 	{"a broken CSI ends the chord and is typed", 0x1c, "\x1c\x1b[1\x03", []chordEvent{chordCxl, chordTy("\x1b[1\x03")}},
 	{"an overlong CSI is typed", 0x1c, "\x1b[" + strings.Repeat("1", 70) + "u", []chordEvent{chordTy("\x1b[" + strings.Repeat("1", 70) + "u")}},
@@ -165,7 +184,7 @@ func TestTheChordInEveryEncoding(t *testing.T) {
 	}
 }
 
-func TestTypedBytesAreJoined(t *testing.T) {
+func TestChordJoinsTypedBytes(t *testing.T) {
 	c := newChord(0x1c)
 	got := c.feed([]byte("a\x1b[Ab\x1b[92;5:3uc"), chordT0)
 	if want := []chordEvent{chordTy("a\x1b[Ab\x1b[92;5:3uc")}; !chordSame(got, want) {
@@ -267,7 +286,7 @@ func TestALoneEscapeGoesAfterHoldFor(t *testing.T) {
 	}
 }
 
-func TestOnlyEscapesAreHeld(t *testing.T) {
+func TestChordHoldsOnlyEscapes(t *testing.T) {
 	for _, in := range []string{"a", "\xc3", "\x1b[200~\x1b", "\x1bO", "\x1b[A"} {
 		c := newChord(0x1c)
 		if got := c.feed([]byte(in), chordT0); !chordSame(got, []chordEvent{chordTy(in)}) {
@@ -334,20 +353,139 @@ func TestResetForgetsTheChord(t *testing.T) {
 	c := newChord(0x1c)
 	c.feed([]byte("\x1c"), chordT0)
 	c.reset()
+	if c.armed() {
+		t.Fatal("armed after reset")
+	}
 	if got := c.feed([]byte("d"), chordT0); !chordSame(got, []chordEvent{chordTy("d")}) {
 		t.Fatalf("got %s, want [Type \"d\"]", chordShow(got))
 	}
-	c.feed([]byte("\x1b[92"), chordT0)
-	c.reset()
 	if _, ok := c.due(); ok {
-		t.Fatal("held bytes survived reset")
-	}
-	if got := c.feed([]byte(";5ud"), chordT0); !chordSame(got, []chordEvent{chordTy(";5ud")}) {
-		t.Fatalf("after a reset mid-sequence: got %s", chordShow(got))
+		t.Fatal("a hint is still due after reset")
 	}
 }
 
-func TestEventsDoNotShareTheReadBuffer(t *testing.T) {
+func TestChordResetKeepsAPaste(t *testing.T) {
+	c := newChord(0x1c)
+	if got := c.feed([]byte("\x1cn\x1b[200~abc"), chordT0); !chordSame(got, []chordEvent{chordNext, chordTy("\x1b[200~abc")}) {
+		t.Fatalf("got %s", chordShow(got))
+	}
+	c.reset()
+	if got := c.feed([]byte("\x1cd x\x1b[201~"), chordT0); !chordSame(got, []chordEvent{chordTy("\x1cd x\x1b[201~")}) {
+		t.Fatalf("the rest of the paste: got %s", chordShow(got))
+	}
+	if c.armed() {
+		t.Fatal("a pasted key armed the chord")
+	}
+	if got := c.feed([]byte("\x1cd"), chordT0); !chordSame(got, []chordEvent{chordLeave}) {
+		t.Fatalf("after the paste: got %s", chordShow(got))
+	}
+
+	// A paste that starts across the reset is still a paste.
+	c = newChord(0x1c)
+	c.feed([]byte("\x1cn\x1b[20"), chordT0)
+	c.reset()
+	if got := c.feed([]byte("0~\x1cd\x1b[201~"), chordT0); !chordSame(got, []chordEvent{chordTy("\x1b[200~\x1cd\x1b[201~")}) {
+		t.Fatalf("a paste cut by the reset: got %s", chordShow(got))
+	}
+}
+
+func TestChordResetDropsAnOpenSequenceWhole(t *testing.T) {
+	c := newChord(0x1c)
+	c.feed([]byte("\x1cn\x1b[9"), chordT0)
+	c.reset()
+	if got := c.feed([]byte("2;5u"), chordT0); len(got) != 0 {
+		t.Fatalf("the tail of the sequence: got %s", chordShow(got))
+	}
+	if got := c.feed([]byte("d"), chordT0); !chordSame(got, []chordEvent{chordTy("d")}) {
+		t.Fatalf("after it: got %s", chordShow(got))
+	}
+
+	for _, tc := range []struct{ before, after, want string }{
+		{"\x1cn\x1b", "xy", "y"},            // alt-x
+		{"\x1cn\x1b", "\x1b[Az", "\x1b[Az"}, // a lone ESC, then an arrow of its own
+		{"\x1cn\x1b", "\x1cd", ""},          // a lone ESC, then a chord
+		{"\x1cn\x1b[1", "\x03z", "\x03z"},   // broken by a control byte
+		{"\x1c\x1bO", "Pz", "z"},            // SS3
+		{"\x1cn\x1b[<35;1", "0;5Mz", "z"},   // a mouse report
+		{"\x1c\xc3", "\xa9z", "z"},          // the rest of a dropped character
+	} {
+		c := newChord(0x1c)
+		c.feed([]byte(tc.before), chordT0)
+		c.reset()
+		var want []chordEvent
+		if tc.want != "" {
+			want = []chordEvent{chordTy(tc.want)}
+		}
+		if tc.after == "\x1cd" {
+			want = []chordEvent{chordLeave}
+		}
+		got := c.feed([]byte(tc.after), chordT0)
+		if !chordSame(got, want) {
+			t.Errorf("%q | reset | %q: got %s, want %s", tc.before, tc.after, chordShow(got), chordShow(want))
+		}
+	}
+
+	// It goes silently at holdFor, too.
+	c = newChord(0x1c)
+	c.feed([]byte("\x1cn\x1b[9"), chordT0)
+	c.reset()
+	if got := c.tick(chordT0.Add(holdFor)); len(got) != 0 {
+		t.Fatalf("tick: got %s", chordShow(got))
+	}
+	if _, ok := c.due(); ok {
+		t.Fatal("still held after holdFor")
+	}
+	if got := c.feed([]byte("2;5u"), chordT0.Add(holdFor)); !chordSame(got, []chordEvent{chordTy("2;5u")}) {
+		t.Fatalf("after the hold went: got %s", chordShow(got))
+	}
+}
+
+func TestChordLateReadDoesNotCompleteAStaleHold(t *testing.T) {
+	c := newChord(0x1c)
+	c.feed([]byte("\x1c\x1b"), chordT0)
+	if got := c.feed([]byte("d"), chordT0.Add(200*time.Millisecond)); !chordSame(got, []chordEvent{chordCxl, chordTy("d")}) {
+		t.Fatalf("armed: got %s", chordShow(got))
+	}
+	c = newChord(0x1c)
+	c.feed([]byte("\x1b[92"), chordT0)
+	if got := c.feed([]byte(";5ud"), chordT0.Add(holdFor)); !chordSame(got, []chordEvent{chordTy("\x1b[92;5ud")}) {
+		t.Fatalf("unarmed: got %s", chordShow(got))
+	}
+	if c.armed() {
+		t.Fatal("a stale hold armed the chord")
+	}
+}
+
+func TestChordNonKeyKeepsItArmed(t *testing.T) {
+	c := newChord(0x1c)
+	c.feed([]byte("\x1c"), chordT0)
+	for _, in := range []string{"\x1b[?1u", "\x1b[<35;10;5M", "\x1b[I", "\x1b[>1;2c"} {
+		if got := c.feed([]byte(in), chordT0); !chordSame(got, []chordEvent{chordTy(in)}) {
+			t.Errorf("%q: got %s", in, chordShow(got))
+		}
+		if !c.armed() {
+			t.Fatalf("%q disarmed the chord", in)
+		}
+	}
+	if got := c.tick(chordT0.Add(hintAfter)); !chordSame(got, []chordEvent{chordHint}) {
+		t.Fatalf("the hint: got %s", chordShow(got))
+	}
+}
+
+func TestChordHoldsSS3OnlyWhileArmed(t *testing.T) {
+	c := newChord(0x1c)
+	if got := c.feed([]byte("\x1c\x1bO"), chordT0); len(got) != 0 {
+		t.Fatalf("armed: got %s", chordShow(got))
+	}
+	if d, ok := c.due(); !ok || !d.Equal(chordT0.Add(holdFor)) {
+		t.Fatalf("due() = %v %v", d, ok)
+	}
+	if got := c.tick(chordT0.Add(holdFor)); !chordSame(got, []chordEvent{chordCxl}) {
+		t.Fatalf("at holdFor: got %s", chordShow(got))
+	}
+}
+
+func TestChordEventsDoNotShareTheReadBuffer(t *testing.T) {
 	c := newChord(0x1c)
 	buf := []byte("abc\x1c\x1c")
 	got := c.feed(buf, chordT0)
@@ -416,6 +554,32 @@ func FuzzChord(f *testing.F) {
 			if len(in) > 0 && !chordSame(all, []chordEvent{{act: actType, bytes: in}}) {
 				t.Fatalf("plain input %q gave %s", in, chordShow(all))
 			}
+		}
+
+		// A reset at the split never panics, never holds past holdFor, and
+		// types only input.
+		reset := newChord(key)
+		r := reset.feed(in[:split], chordT0)
+		reset.reset()
+		r = append(r, reset.feed(in[split:], chordT0)...)
+		r = append(r, reset.tick(chordT0.Add(holdFor))...)
+		if len(reset.held) != 0 || reset.state != chordGround {
+			t.Fatal("bytes held after a reset and holdFor")
+		}
+		var rt []byte
+		for _, e := range r {
+			if e.act == actType {
+				rt = append(rt, e.bytes...)
+			}
+		}
+		j = 0
+		for _, b := range in {
+			if j < len(rt) && rt[j] == b {
+				j++
+			}
+		}
+		if j != len(rt) {
+			t.Fatalf("after a reset, typed %q is not a subsequence of %q", rt, in)
 		}
 
 		// A split read gives the same events.
