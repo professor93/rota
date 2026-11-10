@@ -1,0 +1,29 @@
+/* Only what this page is: the three regions. Everything else — the palette,
+   the header, the atoms, the panes — is in the stylesheet both pages share.
+   Same three columns as the playground, in the same proportions: what there
+   is on the left, the thing itself in the middle, what is true about it on
+   the right. The list, the panel, the size and the dock have files of their
+   own beside this one. */
+.shell.term { grid-template-columns:minmax(210px,250px) minmax(320px,1fr) minmax(250px,300px) }
+@media (max-width:1040px) { .shell.term { grid-template-columns:1fr } }
+/* the strip above the screen: where the connection is, and the keyboard */
+.termstrip {
+  display:flex; gap:8px; align-items:center; flex-wrap:wrap;
+  padding:8px 12px; border-bottom:1px solid var(--line); background:var(--panel); font-size:12.5px;
+}
+.termstrip .kbd { display:flex; gap:7px; align-items:center; color:var(--muted) }
+.termstrip .kbd b { color:var(--fg); font-weight:620 }
+/* one flash, when a key was pressed by somebody who may not type */
+@keyframes nudge { 0%,100% { transform:translateX(0) } 25% { transform:translateX(-3px) } 75% { transform:translateX(3px) } }
+.termstrip .flash { animation:nudge .18s 2; color:var(--warn) }
+.termscreen { flex:1; min-height:0; min-width:0; overflow:auto; background:#000; padding:6px }
+.termscreen.nothing { display:flex; align-items:center; justify-content:center; background:var(--sunk) }
+.gate { max-width:680px; margin:0 auto; padding:24px 16px }
+/* a session's status, said as a word with a dot in its tone: running is ok,
+   needs you is a warning, quiet is muted and stopped is faint */
+.st { display:inline-flex; gap:5px; align-items:center; font-size:11.5px; font-weight:560; color:var(--muted); white-space:nowrap }
+.st::before { content:""; width:7px; height:7px; border-radius:50%; background:currentColor; flex:none }
+.st.ok { color:var(--ok) }
+.st.warn { color:var(--warn) }
+.st.muted { color:var(--muted) }
+.st.faint { color:var(--faint) }

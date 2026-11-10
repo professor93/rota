@@ -641,6 +641,7 @@ see *Who is asking, and what they may do*.
 | `GET` | `/` | open | what this is and its version. With the rest of the `playground` group |
 | `GET` | `/playground` | open | the playground, a page over the API |
 | `GET` | `/terminal` | open | the terminal page. With the `terminal` group, not this one: a server may serve either page without the other |
+| `GET` | `/assets/term/{file}` | open | the terminal page's own scripts and styles; with the `terminal` group |
 | `GET` | `/assets/{file}` | open | what both pages are made of in common — `page.css` and `page.js`; present wherever either page is |
 | `GET` | `/assets/xterm/{file}` | open | the vendored terminal emulator, with the `terminal` group |
 | `GET` | `/invite/{code}` | open | spends a single-use link and lands on a page — the terminal where there is one, the playground otherwise |
@@ -675,7 +676,7 @@ see *Who is asking, and what they may do*.
 | `POST` | `/v1/auth/{id}` | control | likewise for `POST /v1/login/{id}` |
 | `POST` | `/v1/invites` | control | `{"ttl":"10m"}` → `{"url","expires"}` — a single-use link that signs somebody in as a watcher |
 
-The `/v1/terminals` and `/assets/xterm/` rows exist only where
+The `/v1/terminals`, `/assets/xterm/` and `/assets/term/` rows exist only where
 `routes.terminal` is on, and the pages and `/assets/` only where a page is
 served. A group that is off is not registered, so its paths answer `404`
 like any path this server never had.
@@ -2289,8 +2290,18 @@ and a year of caching, under a `?v=` query carrying this server's version —
 so an upgraded rota is a different URL rather than a stale script.
 
 The pages' own Content-Security-Policy admits `'self'` for scripts and
-styles, which is these files and the two shared ones and nothing else: no
-remote host, and no `unsafe-eval`, which the emulator does not need.
+styles, which is these files, the two shared ones and the terminal page's
+own under `/assets/term/`, and nothing else: no remote host, and no
+`unsafe-eval`, which the emulator does not need. The terminal page admits no
+inline script either, since all of its script is in those files; the
+playground still runs one of its own. The pages' own files, the two shared
+ones and those under `/assets/term/`, are asked for with `?v=` and a digest
+of every file the binary carries under `/assets/` rather than the version,
+so the year of caching never keeps an old script once the files have
+changed, even between two builds of one version. Only the query this server
+names a file by earns the year; under any other, or none, the file is
+answered as it is now with `Cache-Control: no-cache`, so a page from
+another build cannot pin today's bytes under its own URL.
 
 #### Limits, the audit log and recording
 
@@ -4577,6 +4588,7 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `api/terminal.html` | The page served at `/terminal` |
 | `api/assets/page.css`, `api/assets/page.js` | What both pages are made of in common |
 | `api/assets/xterm/` | The vendored terminal emulator, with its licences and its provenance |
+| `api/assets/term/` | The terminal page's own script and styles, one file for each region of the page, loaded in the order `api/terminal.html` names them |
 | `api/config.go` | `server.toml`: the schema, its defaults, what it validates, and `--print-config` |
 | `internal/toml/` | The part of TOML that file uses, and a refusal by name for the rest |
 | `docs/server.toml` | The whole schema at its defaults, kept honest by a test |

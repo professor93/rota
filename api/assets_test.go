@@ -6,8 +6,11 @@ import (
 	"encoding/json"
 	"io/fs"
 	"net/http"
+	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/professor93/rota/wire"
 )
 
 // vendored is every file carried in assets/xterm and the SHA-256 it must
@@ -71,7 +74,9 @@ func terminalRoutes() *Routes {
 
 // The terminal page cannot draw a terminal with files it is refused, so
 // every one of them answers, says what it is, and says it may be kept: the
-// page asks under a version query, and a rota that changed is a new query.
+// page asks under the query this server names it by, the version for the
+// emulator and the assets' digest for the rest, and a rota that changed is
+// a new query.
 func TestTheEmulatorIsServedBesideTheTerminalPage(t *testing.T) {
 	h := newHarness(t, Options{Routes: terminalRoutes()})
 	for _, c := range []struct{ file, ctype string }{
@@ -83,7 +88,11 @@ func TestTheEmulatorIsServedBesideTheTerminalPage(t *testing.T) {
 		{"page.css", "text/css; charset=utf-8"},
 		{"page.js", "text/javascript; charset=utf-8"},
 	} {
-		resp, raw := h.do("GET", "/assets/"+c.file+"?v=1.2.0", nil)
+		v := assetsDigest()
+		if strings.HasPrefix(c.file, "xterm/") {
+			v = wire.Version
+		}
+		resp, raw := h.do("GET", "/assets/"+c.file+"?v="+url.QueryEscape(v), nil)
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("GET %s: %d", c.file, resp.StatusCode)
 		}
@@ -165,10 +174,16 @@ func TestEitherPageMayBeServedWithoutTheOther(t *testing.T) {
 // needs, and a policy that admits this server's own assets and nothing else.
 func TestBothPagesCarryTheSamePolicy(t *testing.T) {
 	h := newHarness(t, Options{Routes: terminalRoutes()})
-	for _, path := range []string{"/playground", "/terminal"} {
+	// The playground runs a script of its own in its markup, and the
+	// terminal page runs none, so each admits exactly what it runs.
+	for _, p := range []struct{ path, script string }{
+		{"/playground", "script-src 'self' 'unsafe-inline';"},
+		{"/terminal", "script-src 'self';"},
+	} {
+		path := p.path
 		resp, _ := h.do("GET", path, nil)
 		csp := resp.Header.Get("Content-Security-Policy")
-		for _, want := range []string{"default-src 'none'", "script-src 'self' 'unsafe-inline'",
+		for _, want := range []string{"default-src 'none'", p.script,
 			"style-src 'self' 'unsafe-inline'", "frame-ancestors 'none'"} {
 			if !strings.Contains(csp, want) {
 				t.Errorf("%s: the policy is missing %q: %s", path, want, csp)

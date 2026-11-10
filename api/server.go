@@ -750,6 +750,9 @@ func (s *Server) Handler() http.Handler {
 		// the terminal's group and behind no credential either — a server
 		// with no terminal page has nothing to draw with it.
 		mux.HandleFunc("GET /assets/xterm/{file}", s.assetsIn("xterm/"))
+		// And the page's own script and styles, in files of their own so
+		// the page runs no script inline.
+		mux.HandleFunc("GET /assets/term/{file}", s.assetsIn("term/"))
 	}
 	if s.opts.Routes.Playground || s.opts.Routes.Terminal {
 		// What the two pages are made of in common, so it exists wherever

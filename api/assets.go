@@ -1,9 +1,15 @@
 package api
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
+	"io/fs"
 	"net/http"
 	"strings"
+	"sync"
+
+	"github.com/professor93/rota/wire"
 )
 
 // What the two pages are made of, carried in the binary.
@@ -11,6 +17,9 @@ import (
 // page.css and page.js are everything the playground and the terminal have
 // in common — the palette, the header strip, the credential, the sign-in —
 // written once and served to both rather than kept in step in two files.
+//
+// assets/term is the terminal page's own script and styles, one file per
+// region of the page, so that the page runs no script inline.
 //
 // assets/xterm is the terminal emulator. It is vendored rather than fetched:
 // this server is usually on a loopback address with no route out, so a page
@@ -37,21 +46,49 @@ var assetTypes = map[string]string{
 	"xterm/LICENSE-addon-fit.txt": "text/plain; charset=utf-8",
 	// Where all of that came from, readable from the server that serves it.
 	"xterm/README": "text/plain; charset=utf-8",
+	// The terminal page's own script and styles, in the order it loads them.
+	"term/view.js":    "text/javascript; charset=utf-8",
+	"term/words.js":   "text/javascript; charset=utf-8",
+	"term/core.js":    "text/javascript; charset=utf-8",
+	"term/list.js":    "text/javascript; charset=utf-8",
+	"term/new.js":     "text/javascript; charset=utf-8",
+	"term/info.js":    "text/javascript; charset=utf-8",
+	"term/size.js":    "text/javascript; charset=utf-8",
+	"term/dock.js":    "text/javascript; charset=utf-8",
+	"term/actions.js": "text/javascript; charset=utf-8",
+	"term/events.js":  "text/javascript; charset=utf-8",
+	"term/boot.js":    "text/javascript; charset=utf-8",
+	"term/term.css":   "text/css; charset=utf-8",
+	"term/list.css":   "text/css; charset=utf-8",
+	"term/info.css":   "text/css; charset=utf-8",
+	"term/size.css":   "text/css; charset=utf-8",
+	"term/dock.css":   "text/css; charset=utf-8",
 }
 
-// asset serves one of them, and is registered under two patterns: the two
-// shared files, which exist wherever either page does, and the emulator,
-// which belongs to the terminal group alone.
+// asset serves one of them, and is registered under three patterns: the two
+// shared files, which exist wherever either page does, and the emulator and
+// the terminal page's own files, which belong to the terminal group alone.
 //
-// It is behind no credential, like the pages themselves. The page asks for
-// each file with ?v=<this server's version>, so the answer may be kept for
-// as long as a browser likes: a rota that has changed serves a page that
-// asks under a different query.
+// It is behind no credential, like the pages themselves. A page asks for
+// each of its files with ?v=<the assets' digest>, and for the emulator, whose
+// files are pinned by their sums, with ?v=<this server's version>. Under that
+// query the answer may be kept for as long as a browser likes: a rota whose
+// files have changed serves a page that asks under a different one. Under any
+// other query, or none, the bytes are today's and are not to be kept unasked:
+// a page from another build would otherwise pin them under its own URL.
 func (s *Server) assetsIn(dir string) http.HandlerFunc {
+	current := assetsDigest
+	if dir == "xterm/" {
+		current = func() string { return wire.Version }
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		name := dir + r.PathValue("file")
+		file := r.PathValue("file")
+		name := dir + file
 		ct, ok := assetTypes[name]
-		if !ok || strings.Contains(name, "..") {
+		// One segment only: an escaped slash would otherwise reach a file of
+		// another directory through this one's pattern, past the group that
+		// directory belongs to.
+		if !ok || strings.ContainsAny(file, `/\`) || strings.Contains(name, "..") {
 			fail(w, http.StatusNotFound, "no asset "+name)
 			return
 		}
@@ -66,9 +103,45 @@ func (s *Server) assetsIn(dir string) http.HandlerFunc {
 		h := w.Header()
 		h.Set("Content-Type", ct)
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Cache-Control", "public, max-age=31536000, immutable")
+		if r.URL.Query().Get("v") == current() {
+			h.Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			h.Set("Cache-Control", "no-cache")
+		}
 		h.Set("Referrer-Policy", "no-referrer")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 	}
+}
+
+// assetsDigest names what is embedded under assets/. The pages ask for their
+// files under it, so files that changed are a new URL even where the version
+// did not move, as between two builds of one beta. It is worked out the first
+// time a page or an asset is served, not when the program starts: every rota
+// command links this package, and most of them serve nothing.
+var assetsDigest = sync.OnceValue(func() string { return digestOf(assetFS, "assets") })
+
+// digestOf is the first 16 hex characters of a SHA-256 over every file under
+// root, walked in name order, each as its path, a NUL and its bytes.
+func digestOf(fsys fs.FS, root string) string {
+	h := sha256.New()
+	err := fs.WalkDir(fsys, root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		raw, err := fs.ReadFile(fsys, p)
+		if err != nil {
+			return err
+		}
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+		h.Write(raw)
+		return nil
+	})
+	if err != nil {
+		// Embedded at build time, so this does not fail on assetFS; a page
+		// would still get a query, only one that never changed.
+		return "0"
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }

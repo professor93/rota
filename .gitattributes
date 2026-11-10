@@ -5,6 +5,6 @@
 # program's table goldens are compared byte for byte the same way.
 api/assets/**  -text
 api/*.html     -text
-api/testdata/* -text
+api/testdata/** -text
 cmd/rota/testdata/* -text
 cmd/rota/hold/testdata/** -text
