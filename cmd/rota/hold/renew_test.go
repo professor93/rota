@@ -310,6 +310,47 @@ func TestAScreenComesBackPastTheLastSwitchOfScreens(t *testing.T) {
 	}
 }
 
+// A string ended by BEL, with no ESC after it, is left at its BEL: a
+// newline inside an OSC 52 is not the start of a line there either.
+func TestAScreenComesBackPastTheBELThatEndsAString(t *testing.T) {
+	s := overtaken(t, "")
+	s.took([]byte("\x1b]52;c;" + strings.Repeat("QUFBQUFB\n", 200) + "\x07prompt> "))
+	if _, repaint := kept(t, s); !strings.Contains(repaint, "prompt>") || strings.Contains(repaint, "QUFB") {
+		t.Fatalf("the screen came back showing %q", repaint)
+	}
+}
+
+// It is the last switch of screens that counts, also of two alike: a fresh
+// screen started between the last two would draw what the CLI drew on its
+// alternate screen on the main one.
+func TestAScreenComesBackPastTheLastOfTwoSwitches(t *testing.T) {
+	s := overtaken(t, "")
+	s.took([]byte("\x1b[?1049lMAIN0\r\n\x1b[?1049h\x1b[1mALTLINE\x1b[0m\r\n\x1b[?1049lMAINLINE\r\n"))
+	if h, repaint := kept(t, s); h.Modes.AltScreen || !strings.Contains(repaint, "MAINLINE") || strings.Contains(repaint, "ALTLINE") {
+		t.Fatalf("the screen came back as %+v showing %q", h, repaint)
+	}
+}
+
+// A switch of screens counts before the change of size: a CLI on its
+// alternate screen when it is fitted back, which leaves it in what it draws
+// after, comes back on the main screen with none of the alternate one's
+// lines.
+func TestASwitchOfScreensCountsBeforeTheSize(t *testing.T) {
+	s := newSession(Config{ID: testID}, newFakeChild()) // no emulator running
+	s.renewAfter = time.Hour
+	defer func() { s.screenNow().Close() }()
+	s.took([]byte("\x1b[?1049h"))
+	fitTo(t, s, 500, 401)
+	if step(s); !retired(s) {
+		t.Fatal("past the budget the screen was not retired")
+	}
+	fitTo(t, s, 80, 24)
+	s.took([]byte("\x1b[1mALTLINE\x1b[0m\r\n\x1b[?1049lMAINLINE\r\n"))
+	if h, repaint := kept(t, s); h.Modes.AltScreen || !strings.Contains(repaint, "MAINLINE") || strings.Contains(repaint, "ALTLINE") {
+		t.Fatalf("the screen came back as %+v showing %q", h, repaint)
+	}
+}
+
 // A CLI on its alternate screen since before the ring is on it in the fresh
 // screen too: when it leaves, the main screen it goes back to is not the one
 // it drew on.

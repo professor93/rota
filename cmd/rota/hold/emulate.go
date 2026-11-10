@@ -315,6 +315,7 @@ var newScreen = NewScreen
 //   - where the terminal took its size, or where the CLI began; otherwise
 //   - the first ESC, which begins a sequence whatever came before, and
 //     ends any string (an OSC, a DCS) the start was inside; otherwise
+//   - just past the last BEL, CAN or SUB, which end a string too; otherwise
 //   - just past the first newline.
 //
 // With nothing left to draw from there, a fresh screen would be empty where
@@ -343,7 +344,14 @@ func (s *Session) renewFrom(limit int64) (start int64, alt bool, wait time.Durat
 		} else if start != s.em.sizedAt && start != 0 {
 			i := bytes.IndexByte(tail, 0x1b)
 			if i < 0 {
-				if i = bytes.IndexByte(tail, '\n'); i >= 0 {
+				// With no ESC, nothing in the tail opens a string, so one
+				// the start is inside ends at a BEL, CAN or SUB: past the
+				// last of them is outside it. A DCS may hold a BEL before
+				// the CAN that ends it, so it is the last.
+				if i = bytes.LastIndexAny(tail, "\x07\x18\x1a"); i < 0 {
+					i = bytes.IndexByte(tail, '\n')
+				}
+				if i >= 0 {
 					i++
 				}
 			}

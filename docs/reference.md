@@ -2186,7 +2186,8 @@ screen starts on the last of the scrollback: no further back than the
 session last changed size, which a fit to the size it has does not do, nor
 than it can draw in a moment, 32 KiB at 80×24 and less on a larger screen.
 There it starts just past the last switch to or from the alternate screen,
-or else at the first escape sequence, or else at the start of a line; it
+or else where the size changed, or else at the first escape sequence, or
+else just past the end of a string, or else at the start of a line; it
 does not start inside a string the CLI has not finished, nor before the
 CLI has printed anything since the size changed. The holder does not ask
 the CLI to draw again, so a CLI that redraws itself when it is resized, as
