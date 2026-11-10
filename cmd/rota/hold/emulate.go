@@ -206,9 +206,14 @@ const tooLarge = "the terminal is larger than a screen is kept for; viewers get 
 
 // sized takes the screen to the size the terminal took where the ring had
 // reached z.end, or retires it for a size larger than a screen is kept for.
-// The caller holds s.em.lock.
+// A fit to the size it already has changes nothing, and is not where the
+// size was taken: the CLI is sent no SIGWINCH for it and draws nothing. The
+// caller holds s.em.lock.
 func (s *Session) sized(z sized) {
-	s.em.cols, s.em.rows, s.em.sizedAt = z.cols, z.rows, z.end
+	if z.cols != s.em.cols || z.rows != s.em.rows {
+		s.em.sizedAt = z.end
+	}
+	s.em.cols, s.em.rows = z.cols, z.rows
 	if s.em.retired {
 		return
 	}
@@ -250,12 +255,9 @@ var renewAfter = time.Second
 // which redraws only when the size it reads has changed, and a resize there
 // and back would have it draw twice, once at a size nobody asked for, in
 // front of everybody watching. So the fresh screen starts on the last of the
-// ring, as a viewer replayed the ring sees it: no further back than the
-// emulator draws in a moment at that size (drawLimit) and than the terminal
-// took its size, since what came before was printed for another size, and
-// at the start of a line or a sequence, so that it never starts inside one.
-// What the CLI drew in answer to the size that fits, when it took that size
-// a moment ago, is all there. The caller holds s.em.lock.
+// ring, as a viewer replayed the ring sees it (renewFrom says where). What
+// the CLI drew in answer to the size that fits, when it took that size a
+// moment ago, is all there. The caller holds s.em.lock.
 func (s *Session) renew() time.Duration {
 	if !s.em.retired || s.em.broken || !holdwire.ScreenFits(s.em.cols, s.em.rows) {
 		return 0
@@ -267,7 +269,7 @@ func (s *Session) renew() time.Duration {
 	}
 	// Made without s.mu, which the pump takes for every read: at the budget
 	// an emulator is 52 MB.
-	fresh := NewScreen(int(cols), int(rows))
+	fresh := newScreen(int(cols), int(rows))
 	if alt {
 		fresh.Write([]byte("\x1b[?1049h"))
 	}
@@ -293,10 +295,33 @@ func (s *Session) renew() time.Duration {
 	return 0
 }
 
-// renewFrom is where a fresh screen starts, at most limit bytes behind the
-// last ground point, and whether the CLI was on its alternate screen there;
-// or, while the CLI has not been quiet for long enough, how long until it
-// has. The caller holds s.em.lock.
+// newScreen is how renew makes a fresh screen. It is a variable so a test
+// can end the session while it is made.
+var newScreen = NewScreen
+
+// renewFrom is where a fresh screen starts, and whether the CLI was on its
+// alternate screen there; or, while the CLI has not been quiet for long
+// enough, how long until it has. ok is false with no wait when there is
+// nowhere to start yet: the next output wakes the emulator. The caller holds
+// s.em.lock.
+//
+// The start is no further back than the oldest byte the ring keeps, than
+// where the terminal took its size, since what came before was printed for
+// another size, or than limit bytes before the last ground point, what the
+// emulator draws in a moment. From there it moves on to where nothing that
+// came before can matter:
+//   - just past the last switch of the alternate screen in what is left,
+//     where the screen in use is the one the CLI is on now; otherwise
+//   - where the terminal took its size, or where the CLI began; otherwise
+//   - the first ESC, which begins a sequence whatever came before, and
+//     ends any string (an OSC, a DCS) the start was inside; otherwise
+//   - just past the first newline.
+//
+// With nothing left to draw from there, a fresh screen would be empty where
+// a replayed viewer sees the CLI, so it waits for the CLI to print. So does
+// a string the CLI has not finished, longer than the ring: the last ground
+// point is where it began, older than the oldest byte kept, and the ring
+// has nothing between two sequences to start on.
 func (s *Session) renewFrom(limit int64) (start int64, alt bool, wait time.Duration, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -310,20 +335,48 @@ func (s *Session) renewFrom(limit int64) (start int64, alt bool, wait time.Durat
 	}
 	ground := s.ground
 	start = max(s.ring.Oldest(), s.em.sizedAt, ground-limit)
-	// Where the terminal took its size, or where the CLI began, is a
-	// boundary already.
-	if start < ground && start != s.em.sizedAt && start != 0 {
+	if start < ground {
 		data, from := s.ring.Read(start)
-		i := bytes.IndexAny(data[:ground-from], "\n\x1b")
-		if i < 0 {
-			// Nothing to start on: the next output wakes the emulator.
-			return 0, false, 0, false
-		}
-		if start = from + int64(i); data[i] == '\n' {
-			start++
+		tail := data[:ground-from]
+		if i := pastAltSwitch(tail); i >= 0 {
+			start = from + int64(i)
+		} else if start != s.em.sizedAt && start != 0 {
+			i := bytes.IndexByte(tail, 0x1b)
+			if i < 0 {
+				if i = bytes.IndexByte(tail, '\n'); i >= 0 {
+					i++
+				}
+			}
+			if i < 0 {
+				return 0, false, 0, false
+			}
+			start = from + int64(i)
 		}
 	}
+	if start >= ground {
+		return 0, false, 0, false
+	}
 	return start, s.gmodes.AltScreen, 0, true
+}
+
+// altSwitches are the ways a CLI switches between the main and the
+// alternate screen, as vtscan reads them on their own.
+var altSwitches = [][]byte{
+	[]byte("\x1b[?1049h"), []byte("\x1b[?1049l"),
+	[]byte("\x1b[?1047h"), []byte("\x1b[?1047l"),
+	[]byte("\x1b[?47h"), []byte("\x1b[?47l"),
+}
+
+// pastAltSwitch is the index just past the last switch of the alternate
+// screen in p, or -1 for none.
+func pastAltSwitch(p []byte) int {
+	at := -1
+	for _, sw := range altSwitches {
+		if i := bytes.LastIndex(p, sw); i >= 0 {
+			at = max(at, i+len(sw))
+		}
+	}
+	return at
 }
 
 // putScreen makes a Screen payload. It is a variable so a test can make one

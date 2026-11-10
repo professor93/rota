@@ -36,10 +36,12 @@ func step(s *Session) time.Duration {
 	return s.renew()
 }
 
-// longQuiet makes the CLI's last output long ago.
+// longQuiet makes the CLI's last output long ago. The sessions the unit
+// tests make wait an hour for quiet, so they are quiet only once this says
+// so, however slow the machine.
 func longQuiet(s *Session) {
 	s.mu.Lock()
-	s.lastOut = time.Now().Add(-time.Hour)
+	s.lastOut = time.Now().Add(-24 * time.Hour)
 	s.mu.Unlock()
 }
 
@@ -63,6 +65,7 @@ func fitTo(t *testing.T, s *Session, cols, rows uint16) {
 // Until then, and while the size is past the budget, it stays retired.
 func TestARetiredScreenIsKeptAgainOnceItFitsAndIsQuiet(t *testing.T) {
 	s := newSession(Config{ID: testID}, newFakeChild()) // no emulator running
+	s.renewAfter = time.Hour
 	defer func() { s.screenNow().Close() }()
 	s.took([]byte("before\r\n"))
 	fitTo(t, s, 500, 401)
@@ -105,6 +108,7 @@ func TestARenewedScreenStartsOnALineOfTheTail(t *testing.T) {
 	} {
 		t.Run(fmt.Sprintf("%dx%d", c.cols, c.rows), func(t *testing.T) {
 			s := newSession(Config{ID: testID, Cols: c.cols, Rows: c.rows, Scrollback: c.scrollback}, newFakeChild())
+			s.renewAfter = time.Hour
 			defer func() { s.screenNow().Close() }()
 			var b strings.Builder
 			for i := 0; b.Len() < c.flood; i++ {
@@ -155,6 +159,7 @@ func TestAScreenWhoseEmulatorPanickedIsNotKeptAgain(t *testing.T) {
 		return orig(em, p)
 	}
 	s := newSession(Config{ID: testID}, newFakeChild()) // no emulator running
+	s.renewAfter = time.Hour
 	defer func() { s.screenNow().Close() }()
 	s.took([]byte("boom\r\n"))
 	if step(s); !retired(s) {
@@ -205,5 +210,137 @@ func TestARetiredScreenComesBackOnItsOwn(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("%d lines about keeping the screen again: %q", n, r.logLines())
+	}
+}
+
+// overtaken is a session with a ring of 1 KiB whose screen a flood of
+// numbered lines has overtaken and retired, after what start printed.
+func overtaken(t *testing.T, start string) *Session {
+	t.Helper()
+	s := newSession(Config{ID: testID, Scrollback: 1024}, newFakeChild()) // no emulator running
+	s.renewAfter = time.Hour
+	t.Cleanup(func() { s.screenNow().Close() })
+	s.took([]byte(start))
+	var b strings.Builder
+	for i := 0; b.Len() < 4096; i++ {
+		fmt.Fprintf(&b, "line %06d %s\r\n", i, strings.Repeat("y", 40))
+	}
+	s.took([]byte(b.String()))
+	if step(s); !retired(s) {
+		t.Fatal("a screen a whole ring behind was not retired")
+	}
+	return s
+}
+
+// kept says the screen was kept again on the next quiet moment, and what
+// it repaints.
+func kept(t *testing.T, s *Session) (holdwire.ScreenHead, string) {
+	t.Helper()
+	longQuiet(s)
+	if wait := step(s); wait != 0 || retired(s) {
+		t.Fatalf("after a quiet moment: renew waits %v, retired %v", wait, retired(s))
+	}
+	h, repaint, err := holdwire.ScreenOf(s.repaint(1))
+	if err != nil || !h.OK {
+		t.Fatalf("the screen kept again answered %+v (%v)", h, err)
+	}
+	return h, string(repaint)
+}
+
+// A fit to the size the session already has is no change of size: the CLI
+// is sent no SIGWINCH and draws nothing, so the screen comes back on the
+// last of the ring all the same. It came back empty from the fit on, where
+// a replayed viewer saw the CLI.
+func TestAFitToTheSameSizeIsNoChangeOfSize(t *testing.T) {
+	s := overtaken(t, "")
+	fitTo(t, s, 80, 24)
+	if _, repaint := kept(t, s); !strings.Contains(repaint, "line ") {
+		t.Fatalf("after a fit to the same size the screen came back showing %q", repaint)
+	}
+}
+
+// A screen does not come back empty: after a size the CLI draws nothing
+// for, it waits until the CLI prints, and then starts where the size was
+// taken.
+func TestAScreenWaitsForTheCLIToPrintAfterASize(t *testing.T) {
+	s := overtaken(t, "")
+	fitTo(t, s, 100, 30)
+	longQuiet(s)
+	if wait := step(s); wait != 0 || !retired(s) {
+		t.Fatalf("with nothing printed at the new size: renew waits %v, retired %v", wait, retired(s))
+	}
+	s.took([]byte("hello\r\n"))
+	if h, repaint := kept(t, s); h.Cols != 100 || h.Rows != 30 || !strings.Contains(repaint, "hello") || strings.Contains(repaint, "line ") {
+		t.Fatalf("the screen came back as %+v showing %q", h, repaint)
+	}
+}
+
+// A string the CLI has not finished, longer than the ring, leaves nowhere
+// between two sequences to start on, and the screen stays retired: a
+// repaint from inside it would have a viewer shown the rest as text.
+func TestAScreenDoesNotComeBackInsideAString(t *testing.T) {
+	s := overtaken(t, "")
+	s.took([]byte("\x1b]52;c;" + strings.Repeat("QUJD", 1024)))
+	longQuiet(s)
+	if step(s); !retired(s) {
+		t.Fatal("the screen came back inside a string")
+	}
+}
+
+// A newline inside a string is not the start of a line: a fresh screen
+// whose ring starts inside an OSC 52 wrapped at 76 columns starts at the ESC
+// that ends it, and shows none of it.
+func TestAScreenComesBackOnASequenceBeforeALine(t *testing.T) {
+	s := overtaken(t, "")
+	s.took([]byte("\x1b]52;c;" + strings.Repeat(strings.Repeat("QUJD", 19)+"\n", 30) + "\x1b\\after\r\n"))
+	if _, repaint := kept(t, s); !strings.Contains(repaint, "after") || strings.Contains(repaint, "QUJD") {
+		t.Fatalf("the screen came back showing %q", repaint)
+	}
+}
+
+// A fresh screen starts past the last switch of screens it can see, so that
+// it draws on the screen the CLI drew on: what the CLI drew on its
+// alternate screen and then left is not on the main one.
+func TestAScreenComesBackPastTheLastSwitchOfScreens(t *testing.T) {
+	s := overtaken(t, "\x1b[?1049h")
+	s.took([]byte("\x1b[1mALTLINE\x1b[0m\r\n\x1b[?1049lMAINLINE\r\n"))
+	h, repaint := kept(t, s)
+	if h.Modes.AltScreen || !strings.Contains(repaint, "MAINLINE") || strings.Contains(repaint, "ALTLINE") || strings.Contains(repaint, "line 0") {
+		t.Fatalf("the screen came back as %+v showing %q", h, repaint)
+	}
+}
+
+// A CLI on its alternate screen since before the ring is on it in the fresh
+// screen too: when it leaves, the main screen it goes back to is not the one
+// it drew on.
+func TestAScreenComesBackOnTheAlternateScreen(t *testing.T) {
+	s := overtaken(t, "\x1b[?1049h")
+	if h, repaint := kept(t, s); !h.Modes.AltScreen || !strings.Contains(repaint, "line ") {
+		t.Fatalf("the screen came back as %+v showing %q", h, repaint)
+	}
+	s.took([]byte("\x1b[?1049l"))
+	step(s)
+	h, repaint, err := holdwire.ScreenOf(s.repaint(2))
+	if err != nil || !h.OK || h.Modes.AltScreen || strings.Contains(string(repaint), "line ") {
+		t.Fatalf("back on the main screen it answered %+v showing %q (%v)", h, repaint, err)
+	}
+}
+
+// A session that ends while a fresh screen is made keeps none: the fresh
+// one is closed, and the screen life closes is the retired one.
+func TestASessionEndingWhileAScreenIsMadeKeepsNone(t *testing.T) {
+	s := overtaken(t, "")
+	var made *Screen
+	orig := newScreen
+	t.Cleanup(func() { newScreen = orig })
+	newScreen = func(cols, rows int) *Screen {
+		close(s.finished)
+		made = orig(cols, rows)
+		return made
+	}
+	s.took([]byte("more\r\n"))
+	longQuiet(s)
+	if step(s); !retired(s) || made == nil || made.OK() || s.screenNow() == made {
+		t.Fatalf("retired %v, made %v, its emulator alive %v", retired(s), made != nil, made != nil && made.OK())
 	}
 }

@@ -802,7 +802,11 @@ func TestAScreenPastItsBudgetIsReplayed(t *testing.T) {
 	c := newFakeChild()
 	s := Start(Config{ID: testID, Cols: 1000, Rows: 1000, Log: func(string, ...any) {}}, c)
 	defer func() { c.exit(0); <-s.Done() }()
-	if s.screen.OK() || s.screen.em != nil {
+	sc = s.screenNow()
+	sc.mu.Lock()
+	has := sc.ok || sc.em != nil
+	sc.mu.Unlock()
+	if has {
 		t.Fatal("a session started past the budget has an emulator")
 	}
 }
