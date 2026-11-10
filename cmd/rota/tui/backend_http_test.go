@@ -310,10 +310,11 @@ func TestBeginAndFinishALogin(t *testing.T) {
 		t.Fatalf("sent %s", c.Body)
 	}
 	_, err = r.b.FinishLogin(ctx, l.ID, "WRONG")
-	// The plan wants 400. The API at this base says a code the provider
-	// rejects as 500 "internal error" (an OAuthError of no kind), which is
-	// the server's to change; either way it is a refusal with its status.
-	if no := backendHTTPRefusal(t, err); no.Status != 400 && no.Status != 500 {
+	// A code the provider rejects is a bad request in the provider's own
+	// words, never an internal error, and the login stays parked.
+	if no := backendHTTPRefusal(t, err); no.Status != 400 || no.Reason != "" ||
+		!strings.Contains(no.Message, "Invalid authorization code") ||
+		strings.Contains(no.Message, "internal error") {
 		t.Fatalf("%d %+v", no.Status, no)
 	}
 	// The login stays parked after a wrong code, and the right one ends it.
