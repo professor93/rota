@@ -526,13 +526,14 @@ func TestTabsSwitchByNumberAndBracketUnlessTyping(t *testing.T) {
 	if slices.Contains(seen, tea.Msg(tea.QuitMsg{})) || m.mouse {
 		t.Error("typing q or M acted as a global key")
 	}
-	// ctrl+c is no text, so it quits even from a field.
-	if _, seen := run(t, m, press("ctrl+c")...); !slices.Contains(seen, tea.Msg(tea.QuitMsg{})) {
+	// ctrl+c is no text, so it quits even from a field: on a second press,
+	// as q does (the chrome's two-step quit).
+	if _, seen := run(t, m, press("ctrl+c", "ctrl+c")...); !slices.Contains(seen, tea.Msg(tea.QuitMsg{})) {
 		t.Errorf("ctrl+c from a field: saw %v", seen)
 	}
 
 	tabs[10].typing = false
-	if _, seen := run(t, m, press("q")...); !slices.Contains(seen, tea.Msg(tea.QuitMsg{})) {
+	if _, seen := run(t, m, press("q", "q")...); !slices.Contains(seen, tea.Msg(tea.QuitMsg{})) {
 		t.Errorf("q saw %v, want a quit", seen)
 	}
 }

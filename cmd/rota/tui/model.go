@@ -90,7 +90,7 @@ type modelBindings struct {
 }
 
 func modelKeys() modelBindings {
-	return modelBindings{Interrupt: key.NewBinding(key.WithKeys("ctrl+c"))}
+	return modelBindings{Interrupt: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit"))}
 }
 
 // Model is the TUI: the tabs, the overlays over them and the chrome around
@@ -178,6 +178,8 @@ func (m *Model) Init() tea.Cmd {
 // message to every tab and overlay, after the shell has taken what it
 // keeps of it.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Whatever gave a field focus, the help is not left open under it.
+	defer m.chromeFollow()
 	if cmd, ok := m.effect(msg); ok {
 		return m, cmd
 	}
@@ -188,8 +190,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.mouseAt(msg)
 	case tea.PasteMsg, tea.PasteStartMsg, tea.PasteEndMsg:
 		// A paste is typed input: it goes where a key would, never to a
-		// hidden tab or a flow put aside.
-		if m.small() {
+		// hidden tab or a flow put aside, nor under the open help.
+		if m.small() || m.chromeHelpOpen() {
 			return m, nil
 		}
 		return m, m.toFocus(msg)
@@ -392,11 +394,29 @@ func (m *Model) broadcast(msg tea.Msg) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// open puts o on top of the stack. A login flow opened while one is put
-// aside brings that one back and is dropped: one flow at a time (R17).
+// modelAbout is an overlay that says what it is about: its kind and the
+// account it acts on. One that does not say is never taken for another.
+type modelAbout interface {
+	About() (kind string, account int)
+}
+
+// open puts o on top of the stack, unless the overlay on top is about the
+// same: a key pressed twice before its overlay arrived (a double d) opens
+// one. A login flow opened while one is put aside brings that one back and
+// is dropped: one flow at a time (R17).
 func (m *Model) open(o overlay) {
 	if o == nil || o.Closed() {
 		return
+	}
+	if n := len(m.stack); n > 0 {
+		t, ok1 := m.stack[n-1].(modelAbout)
+		u, ok2 := o.(modelAbout)
+		if ok1 && ok2 {
+			tk, ta := t.About()
+			if uk, ua := u.About(); tk == uk && ta == ua {
+				return
+			}
+		}
 	}
 	if _, ok := o.(asider); ok {
 		if m.aside != nil {
@@ -463,7 +483,9 @@ func (m *Model) View() tea.View {
 	}
 	w, h := m.e.width, m.e.height
 	if m.small() {
-		v.SetContent(fmt.Sprintf("rota needs a terminal of at least %d×%d; this one is %d×%d", modelMinWidth, modelMinHeight, w, h))
+		// The toasts still show, the quit ask among them.
+		say := fmt.Sprintf("rota needs a terminal of at least %d×%d; this one is %d×%d", modelMinWidth, modelMinHeight, w, h)
+		v.SetContent(strings.Join(append([]string{say}, m.chromeToastLines(w)...), "\n"))
 		return v
 	}
 	head, foot := m.header(w), m.footer(w)

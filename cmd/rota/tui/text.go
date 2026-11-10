@@ -16,10 +16,22 @@ import (
 // is never taken as a command by the terminal, and is as wide to every
 // measure that lays the screen out as it is to the terminal that draws it.
 //
-//   - Every C0 control, DEL and every C1 control is dropped, ESC with them,
-//     so what follows an ESC shows as text. A newline, a tab and the other
-//     line breaks become a space. A byte that is not UTF-8 becomes "?": 0x9b
-//     alone is CSI to a terminal that reads 8 bits.
+//   - Every escape sequence goes whole, as a space between two words and
+//     as nothing beside a space or at either end: a CSI (ESC [, or the
+//     C1 CSI as a character or as the lone byte 0x9b) to its final byte, an
+//     OSC and the other string sequences to their BEL or ST, and any other
+//     ESC with what it takes (textEscapes). A key the sequence's parameters
+//     were glued to then stands as a word, a key a sequence split is read
+//     whole, and a key whose characters a sequence took is read with them
+//     put back (textRedact); each is taken out. What is not: a key with two
+//     sequences inside its "sk-ant-", one taking a character of it and the
+//     other putting characters of its own in, as x ESC s ESC [0m k-ant-….
+//     Whoever can place those can as well print the key without its
+//     prefix, which no redaction by shape stops; redaction is for a key
+//     echoed by accident, and no accident puts sequences inside a prefix.
+//   - Every C0 control, DEL and every C1 control left is dropped. A
+//     newline, a tab and the other line breaks become a space. A byte that
+//     is not UTF-8 becomes "?".
 //   - Format characters that are never drawn are dropped: the bidi controls a
 //     terminal may reorder a row by, the zero width space, the soft hyphen,
 //     the byte order mark. Only the joiners, ZWJ and ZWNJ, stay; they are
@@ -32,7 +44,7 @@ import (
 //     loses nothing.
 //   - Each character is then made as wide to Bubble Tea's renderer as to a
 //     terminal that counts graphemes, and to rota's own tables, and a mark
-//     with nothing to sit on is dropped (see textSame). Where they disagree,
+//     with nothing to sit on is dropped (textSamePasses). Where they disagree,
 //     a character keeps its first letter or becomes "?": an emoji its first
 //     picture, and a syllable of an Indic script (Devanagari, Bengali,
 //     Tamil, Malayalam) its first consonant, its vowel signs and conjuncts
@@ -46,17 +58,23 @@ func clean(s string) string {
 	return s
 }
 
-// textClean is clean, with the passes textSame took over it and the bytes
-// it looked at again to place joined letters: the work a test holds to
-// linear in s, which a clock under load could not.
+// textClean is clean, with the passes and the bytes looked at again that
+// textSamePasses and textRedact report: work a test holds linear in s.
 func textClean(s string) (out string, passes, scanned int) {
 	// A control stands between words as a space does, so a key just after
 	// one is taken out before the control goes, and a key that dropping
 	// controls joins up is taken out after.
-	s = wire.Unsecret(s)
+	s, seams := textEscapes(wire.Unsecret(s))
 	var b strings.Builder
 	b.Grow(len(s))
+	kept := seams[:0] // the seams, at where they are now
 	for i := 0; i < len(s); {
+		for len(seams) > 0 && seams[0].at == i {
+			sm := seams[0]
+			sm.at = b.Len()
+			kept = append(kept, sm)
+			seams = seams[1:]
+		}
 		r, n := utf8.DecodeRuneInString(s[i:])
 		i += n
 		switch {
@@ -72,12 +90,162 @@ func textClean(s string) (out string, passes, scanned int) {
 			b.WriteRune(r)
 		}
 	}
-	out, passes, scanned = textSamePasses(textHangul(b.String()))
-	return wire.Unsecret(out), passes, scanned
+	for _, sm := range seams { // at the end of s
+		sm.at = b.Len()
+		kept = append(kept, sm)
+	}
+	red, looked := textRedact(b.String(), kept)
+	out, passes, scanned = textSamePasses(textHangul(red))
+	return wire.Unsecret(out), passes, scanned + looked
 }
 
-// textSame is s with every character the measures disagree on replaced by
-// one they agree on: its first rune, or "?" when they disagree on that too.
+// textKeyByte is a character a key is made of after its prefix.
+func textKeyByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
+}
+
+// textSeam is where an escape sequence stood in what textEscapes gives: at
+// the space that stands for it (space), or where the bytes after it start,
+// and the key characters it took (ate).
+type textSeam struct {
+	at    int
+	space bool
+	ate   string
+}
+
+// textBlank is a byte that is or becomes a space.
+func textBlank(c byte) bool { return c == ' ' || c == '\t' || c == '\n' }
+
+// textEscapes is s with each escape sequence in it replaced by a space
+// where it stood between two words, and by nothing beside a blank, at
+// either end, or after another sequence, and its seams, in order. ECMA-48 delimits the
+// sequences:
+//   - ESC [, or CSI (U+009B, or 0x9b alone, which a terminal reading eight
+//     bits takes as CSI): parameter bytes 0x30-0x3F, intermediate bytes
+//     0x20-0x2F, and the final byte 0x40-0x7E;
+//   - ESC ], P, X, ^ or _, or OSC, DCS, SOS, PM or APC as C1 characters:
+//     everything up to BEL or ST (ESC \ or U+009C);
+//   - ESC with intermediate bytes 0x20-0x2F and a final byte 0x30-0x7E.
+//
+// A sequence cut short goes as far as it got. Anything else, a lone ESC
+// among them, is left for clean's control pass to drop. The scan is linear.
+func textEscapes(s string) (string, []textSeam) {
+	const esc = 0x1b
+	var b strings.Builder
+	var seams []textSeam
+	waiting := 0  // seams at the end of seams whose place is not known yet
+	blank := true // what b ends with is blank, or b is empty
+	done, any := 0, false
+	// settle places the waiting seams before what comes next: on a space
+	// of their own when that is a word after a word, else on nothing.
+	settle := func(next string) {
+		if waiting == 0 {
+			return
+		}
+		spaced := next != "" && !blank && !textBlank(next[0])
+		for x := len(seams) - waiting; x < len(seams); x++ {
+			seams[x].at, seams[x].space = b.Len(), spaced && x == len(seams)-waiting
+		}
+		if spaced {
+			b.WriteByte(' ')
+			blank = true
+		}
+		waiting = 0
+	}
+	put := func(from, to int) {
+		if from > done {
+			settle(s[done:from])
+			b.WriteString(s[done:from])
+			blank = textBlank(s[from-1])
+		}
+		var k []byte
+		for x := from; x < to; x++ {
+			if textKeyByte(s[x]) {
+				k = append(k, s[x])
+			}
+		}
+		seams = append(seams, textSeam{ate: string(k)})
+		waiting++
+		done, any = to, true
+	}
+	// csi is where the CSI whose parameters start at i ends.
+	csi := func(i int) int {
+		for i < len(s) && s[i] >= 0x30 && s[i] <= 0x3f {
+			i++
+		}
+		for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+			i++
+		}
+		if i < len(s) && s[i] >= 0x40 && s[i] <= 0x7e {
+			i++
+		}
+		return i
+	}
+	// str is where the string sequence whose text starts at i ends: past its
+	// BEL or ST, or at the end of s.
+	str := func(i int) int {
+		for i < len(s) {
+			switch {
+			case s[i] == 0x07:
+				return i + 1
+			case s[i] == esc && i+1 < len(s) && s[i+1] == '\\':
+				return i + 2
+			case strings.HasPrefix(s[i:], "\u009c"):
+				return i + 2
+			}
+			i++
+		}
+		return i
+	}
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == esc && i+1 < len(s):
+			switch c := s[i+1]; {
+			case c == '[':
+				end := csi(i + 2)
+				put(i, end)
+				i = end
+			case c == ']' || c == 'P' || c == 'X' || c == '^' || c == '_':
+				end := str(i + 2)
+				put(i, end)
+				i = end
+			case c >= 0x20 && c <= 0x7e:
+				end := i + 1
+				for end < len(s) && s[end] >= 0x20 && s[end] <= 0x2f {
+					end++
+				}
+				if end < len(s) && s[end] >= 0x30 && s[end] <= 0x7e {
+					end++
+				}
+				put(i, end)
+				i = end
+			default:
+				i++
+			}
+		case r == '\u009b' || r == utf8.RuneError && n == 1 && s[i] == 0x9b:
+			end := csi(i + n)
+			put(i, end)
+			i = end
+		case r == '\u009d' || r == '\u0090' || r == '\u0098' || r == '\u009e' || r == '\u009f':
+			end := str(i + n)
+			put(i, end)
+			i = end
+		default:
+			i += n
+		}
+	}
+	if !any {
+		return s, nil
+	}
+	settle(s[done:])
+	b.WriteString(s[done:])
+	return b.String(), seams
+}
+
+// textSamePasses is s with every character the measures disagree on
+// replaced by one they agree on: its first rune, or "?" when they disagree
+// on that too.
 //
 // Bubble Tea's renderer lays a row out by adding up its runes' widths
 // (ansi.WcWidth), as a terminal does that was never asked to count
@@ -99,16 +267,8 @@ func textClean(s string) (out string, passes, scanned int) {
 // whatever is left of the cell. A first letter that would join what follows
 // it into a new grapheme (a Prepend letter, a Hangul initial) is "?"
 // instead, which joins nothing, so one pass leaves text a second pass does
-// not change, and the work is linear in s. The second pass is the proof,
-// and a guard.
-func textSame(s string) string {
-	s, _, _ = textSamePasses(s)
-	return s
-}
-
-// textSamePasses is textSame, how many passes it took (1 when s was
-// already clean, 2 when it was not), and how many bytes it looked at again
-// to place joined letters (textAlone).
+// not change, and the work is linear in s; the second pass is the proof.
+// It says how many passes it took and the bytes it looked at again.
 func textSamePasses(s string) (out string, passes, scanned int) {
 	for passes = 1; ; passes++ {
 		t, n := textPass(s)
@@ -120,7 +280,7 @@ func textSamePasses(s string) (out string, passes, scanned int) {
 	}
 }
 
-// textPass is one pass of textSame, and the bytes textAlone looked at.
+// textPass is one pass of textSamePasses, and the bytes textAlone looked at.
 func textPass(s string) (string, int) {
 	scanned := 0
 	alone := func(c, rest string) bool {

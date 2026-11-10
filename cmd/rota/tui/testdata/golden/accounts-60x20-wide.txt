@@ -1,0 +1,18 @@
+#   account       5h               reset     state
+1   work@examp…  [#####-|-]  62%  1h 3m     ok
+2   home@examp…  [#-------]  12%  4h 10m    ok
+3   cdx@exampl…  [########]  95%  2h 0m     dead
+------------------------------------------------------------
+work@example.com  claude  id 1
+  5h              [#########--|---]  62%  1h 3m (21:20)
+  7d              [###--------|---]  21%  4d 2h (Sat 22:17)
+  status          ok
+  threshold       75%
+  place           1
+  credential      login
+  login until     2026-11-30 20:17 (20d left)
+  checked         2m ago
+  folder          not set
+  config          not set
+  sessions        shared
+  remote control  off
