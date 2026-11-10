@@ -68,18 +68,32 @@ var linkCloseWait = 200 * time.Millisecond
 // CLI that is not reading stalls this goroutine, not the screen, a signal,
 // the chord or another session's typing. Each link has its own, so a key
 // meant for one session can never be sent on another's.
+//
+// A call that panics is told to fail, and the queue goes on: the attach
+// ends on it, and the goroutine must not end the process first.
 type linkWork struct {
 	mu   sync.Mutex
 	q    []func()
 	wake chan struct{}
 	quit chan struct{}
 	once sync.Once
+	fail func(any)
 }
 
-func linkNewWork() *linkWork {
-	w := &linkWork{wake: make(chan struct{}, 1), quit: make(chan struct{})}
+func linkNewWork(fail func(any)) *linkWork {
+	w := &linkWork{wake: make(chan struct{}, 1), quit: make(chan struct{}), fail: fail}
 	go w.run()
 	return w
+}
+
+// call runs f, and hands a panic in it to fail.
+func (w *linkWork) call(f func()) {
+	defer func() {
+		if p := recover(); p != nil && w.fail != nil {
+			w.fail(p)
+		}
+	}()
+	f()
 }
 
 // do queues f. It never waits.
@@ -114,7 +128,7 @@ func (w *linkWork) run() {
 			return
 		default:
 		}
-		f()
+		w.call(f)
 	}
 }
 
@@ -131,7 +145,10 @@ type linkHeld struct {
 	closed atomic.Bool
 }
 
-func linkHold(l link) *linkHeld { return &linkHeld{l: l, work: linkNewWork()} }
+// linkHold holds l, with a queue whose panics go to fail.
+func linkHold(l link, fail func(any)) *linkHeld {
+	return &linkHeld{l: l, work: linkNewWork(fail)}
+}
 
 func (h *linkHeld) close() {
 	_ = h.l.Close()

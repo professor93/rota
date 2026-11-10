@@ -60,7 +60,7 @@ func Local(in, out *os.File) (t Terminal, restore func(), err error) {
 	if err := localSetTermios(in, localRaw(before)); err != nil {
 		return nil, nil, fmt.Errorf("attach: making the terminal raw: %w", err)
 	}
-	reader, err := cancelreader.NewReader(in)
+	reader, err := localNewReader(in)
 	if err != nil {
 		_ = localSetTermios(in, before)
 		return nil, nil, fmt.Errorf("attach: reading the terminal: %w", err)
@@ -99,11 +99,23 @@ func Local(in, out *os.File) (t Terminal, restore func(), err error) {
 	}, nil
 }
 
+// localNewReader is cancelreader.NewReader, and a variable only so that a
+// test can give the pump a read that panics.
+var localNewReader = cancelreader.NewReader
+
 // pump reads in and hands each chunk to Input, until the read fails or
-// restore cancels it. Input is closed as it stops.
+// restore cancels it. Input is closed as it stops, a panic in the read
+// included, which inputErr then says: the attach ends Lost with it and
+// puts the terminal back, where the panic would have ended the process
+// with the terminal raw.
 func (l *localTerm) pump() {
 	defer close(l.pumped)
 	defer close(l.input)
+	defer func() {
+		if p := recover(); p != nil {
+			l.inErr.Store(fmt.Errorf("input: panic: %v", p))
+		}
+	}()
 	buf := make([]byte, 4096)
 	for {
 		n, err := l.reader.Read(buf)
@@ -150,6 +162,14 @@ type localTerm struct {
 	resized chan struct{}
 	done    chan struct{}
 	last    atomic.Value // localSize: the last size the terminal gave
+	inErr   atomic.Value // error: why the pump stopped, when it panicked
+}
+
+// inputErr is why Input was closed, when it was not the terminal's own end:
+// the pump's panic. Nil otherwise.
+func (l *localTerm) inputErr() error {
+	err, _ := l.inErr.Load().(error)
+	return err
 }
 
 func (l *localTerm) Input() <-chan []byte        { return l.input }

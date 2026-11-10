@@ -40,7 +40,7 @@ func TestTheLinesSayWhyAndHowBack(t *testing.T) {
 		{"ended 0", Result{Why: Ended, Session: api, Code: 0}, Options{},
 			"rota: api ended, exit 0"},
 		{"ended -1", Result{Why: Ended, Session: api, Code: -1}, Options{},
-			"rota: api was interrupted: its holder went without its CLI's exit"},
+			"rota: api ended with no exit code: a signal stopped its CLI, or its holder went"},
 		{"lost", Result{Why: Lost, Session: api, Err: errors.New("the daemon\nwent away")}, Options{},
 			"rota: lost api: the daemon went away; rota run --attach api tries again"},
 		{"lost, custom again", Result{Why: Lost, Session: api, Err: errors.New("gone")}, custom,
@@ -65,7 +65,7 @@ func TestTheLinesSayWhyAndHowBack(t *testing.T) {
 }
 
 // TestExitCodes follows the plan's Ruling 13: 0 for a detach, the CLI's own
-// code clamped to 0–255 with an interruption as 1, and 1 for a lost or
+// code clamped to 0–255 with no code (-1) as 1, and 1 for a lost or
 // refused attach.
 func TestExitCodes(t *testing.T) {
 	for _, c := range []struct {

@@ -1,7 +1,6 @@
 package attach
 
 import (
-	"io"
 	"regexp"
 	"time"
 
@@ -43,7 +42,7 @@ func (r *runner) settle() bool {
 		case p, ok := <-r.t.Input():
 			if !ok {
 				r.inEnded = true
-				r.end(Lost, 0, io.EOF)
+				r.end(Lost, 0, runInputEnd(r.t))
 				return false
 			}
 			held = append(held, p...)

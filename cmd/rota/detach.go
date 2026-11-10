@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/professor93/rota/cmd/rota/attach"
 	rotaclient "github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/pty"
@@ -131,13 +132,9 @@ func heldAccount(s *rotaclient.Session) string { return heldCell(s.Provider + "/
 // sendWord is what to type after rota send to reach s: its name, quoted for
 // a shell where it needs it, or its id when the name has a character
 // heldCell would print as something else, since the name as printed would
-// then match nothing.
-func sendWord(s *rotaclient.Session) string {
-	if s.Name == "" || heldCell(s.Name) != s.Name {
-		return heldCell(s.ID)
-	}
-	return shellWord(s.Name)
-}
+// then match nothing. It is the word an attach says to come back with, so
+// every line of rota's names a session alike.
+func sendWord(s *rotaclient.Session) string { return attach.Word(*s) }
 
 // detachArgs is what --detach hands the CLI: what follows --, or what is
 // left around -i, or nothing at all. Anything else is a prompt, which a
@@ -217,15 +214,4 @@ func (c *cli) remoteControlOff() map[int]bool {
 		}
 	}
 	return off
-}
-
-// shellWord is s as one word a shell reads back as s: as it is when nothing
-// in it means anything to a shell, and in single quotes otherwise.
-func shellWord(s string) string {
-	if s != "" && !strings.ContainsFunc(s, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._-/@%+=:,", r))
-	}) {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }

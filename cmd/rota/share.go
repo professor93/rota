@@ -84,16 +84,18 @@ const shareMaxPath = 100
 // shareAsk is what --share asked for: whether at all, whether the page may
 // type, and what to call the terminal. detach is --detach, which asks for a
 // terminal the daemon holds instead, and is lifted out here for the same
-// reasons; --label names that one too.
+// reasons; --label names that one too. attach is --attach's session, the
+// held one to show at this terminal, as the person named it.
 type shareAsk struct {
 	on     bool
 	mode   string
 	label  string
 	detach bool
+	attach string
 }
 
-// takeShareFlags lifts --share, --detach and --label out of what was typed,
-// and hands back the rest untouched.
+// takeShareFlags lifts --share, --detach, --attach and --label out of what
+// was typed, and hands back the rest untouched.
 //
 // It is done here rather than in a flag set because the arguments around it
 // are not rota's: `rota run 2 -- --share` is a CLI's own flag and must
@@ -131,6 +133,25 @@ func takeShareFlags(args []string) ([]string, shareAsk, error) {
 				return nil, ask, usageErr("--detach takes no value")
 			}
 			ask.detach = true
+			continue
+		case "attach":
+			if !strings.HasPrefix(name, "-") {
+				break
+			}
+			// The session is what follows =, or the next word. A flag in
+			// its place, --, or nothing names none: a session whose name
+			// begins with a dash is given after =.
+			if !hasValue && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				value = args[i]
+			}
+			switch {
+			case value == "":
+				return nil, ask, usageErr("%s", attachNoSession)
+			case ask.attach != "":
+				return nil, ask, usageErr("%s", attachTwice)
+			}
+			ask.attach = value
 			continue
 		case "label":
 			if !strings.HasPrefix(name, "-") {

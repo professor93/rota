@@ -87,6 +87,7 @@ func (r *runner) move(dir int) {
 	// On a goroutine of its own, so it waits neither behind this session's
 	// typing nor holds up the loop.
 	go func() {
+		defer r.guard()
 		all, err := src.list()
 		select {
 		case r.listed <- runListed{gen: gen, dir: dir, all: all, err: err}:
@@ -358,7 +359,7 @@ func (r *runner) show(l link, sess client.Session, now time.Time) {
 		}
 	}
 	r.ln, r.hello, r.sess, r.id = l, l.Hello(), sess, sess.ID
-	r.cur = linkHold(l)
+	r.cur = linkHold(l, r.fail)
 	r.held = append(r.held, r.cur)
 	r.holder, r.holderConn = r.hello.Holder, r.hello.HolderConn
 	r.askedAt = time.Time{}
@@ -423,6 +424,7 @@ func (r *runner) dial() {
 	gen, src, redial, id, watch := r.gen, r.src, r.o.Redial, r.id, r.o.Watch
 	go func() {
 		op := runOpened{gen: gen, src: src, at: time.Now()}
+		defer r.guardOpen(&op)
 		c, err := redial()
 		if err != nil {
 			op.err = err
