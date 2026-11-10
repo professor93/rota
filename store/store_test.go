@@ -179,7 +179,7 @@ func TestPendingLoginsExpireAndCorruptFileStartsOver(t *testing.T) {
 	s := openTemp(t)
 	l, _ := s.BeginLogin(context.Background(), "t-ttl")
 	m, _ := s.loadPendings()
-	m[l.ID].CreatedAt = time.Now().Add(-pendingTTL - time.Minute).UnixMilli()
+	m[l.ID].CreatedAt = time.Now().Add(-PendingTTL - time.Minute).UnixMilli()
 	s.savePendings(m)
 	if _, _, err := s.FinishLogin(context.Background(), l.ID, "x"); !errors.Is(err, rota.ErrNoLogin) {
 		t.Fatalf("expired login must be gone: %v", err)

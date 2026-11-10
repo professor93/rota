@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,9 +18,29 @@ import (
 // rota.Begin and Login.Complete — need no storage at all; a caller that keeps
 // its own accounts uses those directly and never touches a Store.
 
-// pendingTTL bounds how long a half-finished login is kept; the
-// authorization code dies server-side within minutes anyway.
-const pendingTTL = 15 * time.Minute
+// PendingTTL bounds how long a half-finished login is kept, counted from its
+// CreatedAt; the authorization code dies server-side within minutes anyway.
+// Past it, FinishLogin no longer finds the login (rota.ErrNoLogin), so a
+// caller waiting on somebody to approve one can say how long is left.
+const PendingTTL = 15 * time.Minute
+
+// Unfinishable reports whether err is FinishLogin turning down a login no
+// approval can finish: one begun for an account that has since been removed,
+// or approved by that account's e-mail under another of the provider's ids,
+// which approving again would only repeat. The login stays parked, as after
+// every refusal, and runs out by itself; a caller waiting for somebody to
+// approve it again stops waiting. Every other error, rota.ErrNoLogin and a
+// rejected code included, is not this.
+func Unfinishable(err error) bool {
+	var u unfinishable
+	return errors.As(err, &u)
+}
+
+// unfinishable marks a refusal as one Unfinishable reports, and is otherwise
+// the refusal it carries, rota.ErrInvalidRequest and all.
+type unfinishable struct{ error }
+
+func (u unfinishable) Unwrap() error { return u.error }
 
 // BeginLogin starts a login with a provider ("" for DefaultProvider) and
 // parks its state so a later FinishLogin — in another process — can pick it
@@ -185,8 +206,8 @@ func (s *Store) boundAccount(l *rota.Login, tok *rota.Token, approved *rota.Acco
 	}
 	named := s.Find(l.Account)
 	if named == nil {
-		return nil, rota.Invalid("%s account %d, which this login was begun for, is no longer here; nothing was stored, and `rota login %s` starts a login of its own",
-			l.Provider, l.Account, l.Provider)
+		return nil, unfinishable{rota.Invalid("%s account %d, which this login was begun for, is no longer here; nothing was stored, and `rota login %s` starts a login of its own",
+			l.Provider, l.Account, l.Provider)}
 	}
 	if approved == named {
 		return named, nil
@@ -210,8 +231,8 @@ func (s *Store) boundAccount(l *rota.Login, tok *rota.Token, approved *rota.Acco
 		if approved != nil {
 			out = fmt.Sprintf("that approval is account %d's", approved.ID)
 		}
-		return nil, rota.Invalid("this login is for account %d, and the e-mail %s matches, but the provider's account id differs: %s here, %s approved; nothing was stored; %s, and `rota remove %d` drops the old one",
-			named.ID, name, idOrNone(named.UUID), idOrNone(id.UUID), out, named.ID)
+		return nil, unfinishable{rota.Invalid("this login is for account %d, and the e-mail %s matches, but the provider's account id differs: %s here, %s approved; nothing was stored; %s, and `rota remove %d` drops the old one",
+			named.ID, name, idOrNone(named.UUID), idOrNone(id.UUID), out, named.ID)}
 	}
 	if approved != nil {
 		return nil, rota.Invalid("this login is for account %d (%s), but it was approved as %s, which is account %d; nothing was stored; %s",
@@ -388,7 +409,7 @@ func (s *Store) loadPendings() (map[string]*rota.Login, error) {
 		return map[string]*rota.Login{}, nil
 	}
 	for id, l := range m {
-		if l == nil || time.Since(time.UnixMilli(l.CreatedAt)) > pendingTTL {
+		if l == nil || time.Since(time.UnixMilli(l.CreatedAt)) > PendingTTL {
 			delete(m, id)
 		}
 	}

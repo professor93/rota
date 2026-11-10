@@ -186,6 +186,9 @@ func TestFinishLoginRefusesWhenTheNamedAccountIsGone(t *testing.T) {
 	if !bytes.Equal(before, w.saved(t)) || len(w.s.Accounts) != 1 {
 		t.Fatalf("written: %s", w.saved(t))
 	}
+	if !Unfinishable(err) {
+		t.Fatalf("no approval can finish a login for an account that is gone: %v", err)
+	}
 	if l, _ := w.s.PendingLogin(w.login.ID); l == nil {
 		t.Fatal("the parked login must stay")
 	}
@@ -244,6 +247,26 @@ func TestFinishLoginSaysSoWhenOnlyTheEmailMatches(t *testing.T) {
 	if strings.Contains(err.Error(), "approve again") {
 		t.Fatalf("telling them to do again what cannot work: %v", err)
 	}
+	if !Unfinishable(err) || !errors.Is(err, rota.ErrInvalidRequest) {
+		t.Fatalf("a refusal approving again cannot put right: %v", err)
+	}
+}
+
+// A refusal approving again can put right is not one that ends the login,
+// and neither is anything else FinishLogin says.
+func TestOnlyWhatNoApprovalCanFinishIsUnfinishable(t *testing.T) {
+	w := newBoundWorld(t, "t-bound-finishable")
+	for _, as := range []*rota.Identity{{UUID: "u-other", Email: "other@x"}, {UUID: "u-new", Email: "s@x"}, nil} {
+		if err := w.refused(t, as); Unfinishable(err) {
+			t.Fatalf("approving again can finish this: %v", err)
+		}
+	}
+	if _, _, err := w.s.FinishLogin(context.Background(), w.login.ID, "bad"); err == nil || Unfinishable(err) {
+		t.Fatalf("a rejected code: %v", err)
+	}
+	if _, _, err := w.s.FinishLogin(context.Background(), "zzzzzz", ""); Unfinishable(err) || Unfinishable(nil) {
+		t.Fatalf("no such login: %v", err)
+	}
 }
 
 // When the same e-mail is another account already, the way out is that
@@ -257,6 +280,9 @@ func TestFinishLoginNamesTheAccountThatHasTheSameEmail(t *testing.T) {
 	err := w.refused(t, &rota.Identity{UUID: "u-other", Email: "named@x"}, "u-named", "u-other", "account 2", "`rota remove 1`")
 	if strings.Contains(err.Error(), "of its own") || strings.Contains(err.Error(), "approve again") {
 		t.Fatalf("offers what would not happen: %v", err)
+	}
+	if !Unfinishable(err) {
+		t.Fatalf("a refusal approving again cannot put right: %v", err)
 	}
 }
 
