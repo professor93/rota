@@ -27,6 +27,7 @@ import (
 	"slices"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/crypto/ssh"
 
@@ -67,6 +68,11 @@ type Options struct {
 // TUISession is what Options.TUI is given: the person's terminal, its TERM
 // (Env holds only TERM=…) and size, its resizes, a client for the API as
 // that person, the chord's key, and whether a person has been shown it.
+//
+// Slot is taken before each attach the TUI makes and given back after it,
+// by calling done: an attach keeps a copy of a session's screen in the
+// daemon, so a TUI's attaches count against the same places an `ssh host
+// attach` does. Its error is the sentence to show.
 type TUISession struct {
 	In         io.Reader
 	Out        io.Writer
@@ -76,6 +82,7 @@ type TUISession struct {
 	Client     *client.Client
 	Key        byte
 	Taught     func(person string) bool
+	Slot       func() (done func(), err error)
 }
 
 // Timings, test knobs both: how long a connection has to sign in, and how
@@ -98,7 +105,7 @@ const (
 // signing in, so a peer that opens them and says nothing cannot shut out
 // everybody else. And each attach keeps a copy of a session's screen in the
 // daemon, up to about 52 MB, so the server holds at most maxAttaches of
-// them, and one connection at most maxAttachesPerConn; Channel.Slot is how
+// them, and one connection at most maxAttachesPerConn; Channel.slot is how
 // an attach takes its place.
 const (
 	maxUnauthedPerAddr = 8
@@ -106,21 +113,47 @@ const (
 	maxAttachesPerConn = 2
 )
 
-// sshdIdleWait is how long a signed-in connection may sit with no channel
-// open before it is closed: answering keepalives is not using a place. A
-// test knob.
+// One person's share, whatever their role: a quarter of the connections and
+// half the attaches, so one key, even a watcher's, cannot hold every place
+// and shut out everybody else.
+const (
+	maxConnsPerUser    = 16
+	maxAttachesPerUser = 8
+)
+
+// sshdIdleWait is how long a signed-in connection may sit with no command
+// running before it is closed: answering keepalives, or holding a channel
+// that never asks for anything, is not using a place. A test knob.
 var sshdIdleWait = 60 * time.Second
 
+// sshdRefusedEvery is how often a refusal from one address is logged; the
+// ones between are counted on the next line. A peer can connect and fail as
+// fast as it likes, and the log is not its to fill. A test knob.
+var sshdRefusedEvery = time.Minute
+
+// sshdRefusedKept is how many addresses' refusal counts are kept; past it,
+// those older than sshdRefusedEvery are forgotten.
+const sshdRefusedKept = 1024
+
 // sshdPeer is the address a connection's share of the unauthenticated
-// places is counted by: its host, whatever its port. A test knob.
+// places is counted by: its host, whatever its port, and for IPv6 its /64,
+// which is what one host is given. A test knob.
 var sshdPeer = func(a net.Addr) string {
+	var ip net.IP
 	if t, ok := a.(*net.TCPAddr); ok {
-		return t.IP.String()
+		ip = t.IP
+	} else if host, _, err := net.SplitHostPort(a.String()); err == nil {
+		ip = net.ParseIP(host)
+		if ip == nil {
+			return host
+		}
+	} else {
+		return a.String()
 	}
-	if host, _, err := net.SplitHostPort(a.String()); err == nil {
-		return host
+	if v4 := ip.To4(); v4 != nil {
+		return v4.String()
 	}
-	return a.String()
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
 // sshdKeepalives is how many keepalive intervals may pass with one
@@ -139,6 +172,10 @@ var sshdKeyExchanges = []string{
 	ssh.KeyExchangeECDHP256, ssh.KeyExchangeECDHP384, ssh.KeyExchangeECDHP521,
 }
 
+// sshdMACs are the MACs a cipher that is not an AEAD may use: SHA-2 alone,
+// never SHA-1 and never one cut to 96 bits.
+var sshdMACs = []string{ssh.HMACSHA256ETM, ssh.HMACSHA512ETM, ssh.HMACSHA256, ssh.HMACSHA512}
+
 // sshdDefaultKey is Ctrl-\, the chord's key when Options names none.
 const sshdDefaultKey = 0x1C
 
@@ -154,6 +191,7 @@ type Server struct {
 	wait     time.Duration      // handshakeWait when it started
 	every    time.Duration      // keepaliveEvery when it started
 	idle     time.Duration      // sshdIdleWait when it started
+	refusing time.Duration      // sshdRefusedEvery when it started
 	peer     func(net.Addr) string
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -163,8 +201,17 @@ type Server struct {
 	conns    map[net.Conn]struct{}
 	unauthed int
 	peers    map[string]int // unauthenticated connections by sshdPeer
+	people   map[string]int // signed-in connections by person
 	attached int
+	attachAs map[string]int // attaches by person
+	refused  map[string]*sshdRefusal
 	wg       sync.WaitGroup
+}
+
+// sshdRefusal is one address's refusals since its last log line.
+type sshdRefusal struct {
+	at         time.Time
+	suppressed int
 }
 
 // sshdConn is one signed-in connection, as its channels need it.
@@ -176,8 +223,10 @@ type sshdConn struct {
 	handler http.Handler
 
 	mu       sync.Mutex
-	channels int
+	channels int // open
+	running  int // running a command
 	attached int
+	ended    bool
 	idle     *time.Timer
 }
 
@@ -209,8 +258,10 @@ func Listen(o Options) (*Server, error) {
 	return &Server{
 		o: o, log: log, ln: ln, key: key, fp: ssh.FingerprintSHA256(key.PublicKey()),
 		known: known, commands: maps.Clone(commands),
-		wait: handshakeWait, every: keepaliveEvery, idle: sshdIdleWait, peer: sshdPeer,
-		ctx: ctx, cancel: cancel, conns: map[net.Conn]struct{}{}, peers: map[string]int{},
+		wait: handshakeWait, every: keepaliveEvery, idle: sshdIdleWait, refusing: sshdRefusedEvery,
+		peer: sshdPeer, ctx: ctx, cancel: cancel,
+		conns: map[net.Conn]struct{}{}, peers: map[string]int{}, people: map[string]int{},
+		attachAs: map[string]int{}, refused: map[string]*sshdRefusal{},
 	}, nil
 }
 
@@ -294,6 +345,38 @@ func (s *Server) sshdRecover(end func()) {
 	}
 }
 
+// sshdRefused logs a refusal from peer, at most once every s.refusing for
+// each peer; the line says how many were not logged since the last one.
+func (s *Server) sshdRefused(peer string, args ...any) {
+	now := time.Now()
+	s.mu.Lock()
+	r := s.refused[peer]
+	if r != nil && now.Sub(r.at) < s.refusing {
+		r.suppressed++
+		s.mu.Unlock()
+		return
+	}
+	suppressed := 0
+	if r != nil {
+		suppressed = r.suppressed
+	}
+	if len(s.refused) >= sshdRefusedKept {
+		for p, old := range s.refused {
+			if now.Sub(old.at) >= s.refusing {
+				delete(s.refused, p)
+			}
+		}
+	}
+	if r != nil || len(s.refused) < sshdRefusedKept {
+		s.refused[peer] = &sshdRefusal{at: now}
+	}
+	s.mu.Unlock()
+	if suppressed > 0 {
+		args = append(args, "suppressed", suppressed)
+	}
+	s.log.Info("ssh refused", args...)
+}
+
 // sshdConfig is the server's configuration for one connection: offered
 // gathers the fingerprints of the keys it refused. The person and the key
 // that signed in are carried only in the Permissions the accepting callback
@@ -301,7 +384,7 @@ func (s *Server) sshdRecover(end func()) {
 // checked.
 func (s *Server) sshdConfig(offered *[]string) *ssh.ServerConfig {
 	c := &ssh.ServerConfig{
-		Config:                  ssh.Config{KeyExchanges: sshdKeyExchanges},
+		Config:                  ssh.Config{KeyExchanges: sshdKeyExchanges, MACs: sshdMACs},
 		MaxAuthTries:            3,
 		ServerVersion:           "SSH-2.0-rota",
 		PublicKeyAuthAlgorithms: keysAlgorithms,
@@ -331,28 +414,54 @@ func (s *Server) sshdServe(nc net.Conn, peer string) {
 		s.mu.Unlock()
 		nc.Close()
 	}()
+	// The place it holds among those signing in is given back once, after
+	// the handshake, or by this if the handshake panics.
+	var signedIn sync.Once
+	giveBack := func() {
+		signedIn.Do(func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			s.unauthed--
+			if s.peers[peer]--; s.peers[peer] <= 0 {
+				delete(s.peers, peer)
+			}
+		})
+	}
+	defer giveBack()
 	defer s.sshdRecover(nil)
 	addr := nc.RemoteAddr().String()
 	var offered []string
 	_ = nc.SetDeadline(time.Now().Add(s.wait))
 	sc, chans, reqs, err := ssh.NewServerConn(nc, s.sshdConfig(&offered))
-	s.mu.Lock()
-	s.unauthed--
-	if s.peers[peer]--; s.peers[peer] <= 0 {
-		delete(s.peers, peer)
-	}
-	closed := s.closed
-	s.mu.Unlock()
+	giveBack()
 	if err != nil {
-		if !closed {
-			s.log.Info("ssh refused", "addr", addr, "fingerprints", offered)
+		if !s.sshdClosed() {
+			s.sshdRefused(peer, "addr", addr, "fingerprints", offered)
 		}
 		return
 	}
+	defer sc.Close()
 	_ = nc.SetDeadline(time.Time{})
 
 	ext := sc.Permissions.Extensions
 	u := s.sshdUser(ext["rota-user"])
+	s.mu.Lock()
+	if s.people[u.Name] >= maxConnsPerUser {
+		s.mu.Unlock()
+		s.sshdRefused(peer, "addr", addr, "name", u.Name, "fingerprint", ext["rota-fp"],
+			"reason", fmt.Sprintf("too many connections (%d)", maxConnsPerUser))
+		return
+	}
+	s.people[u.Name]++
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.people[u.Name]--; s.people[u.Name] <= 0 {
+			delete(s.people, u.Name)
+		}
+	}()
+
 	c := &sshdConn{s: s, sc: sc, user: u, login: sc.User()}
 	c.idle = time.AfterFunc(s.idle, func() { sc.Close() })
 	ctx, cancel := context.WithCancel(s.ctx)
@@ -363,6 +472,7 @@ func (s *Server) sshdServe(nc net.Conn, peer string) {
 		cancel()
 		sc.Close()
 		c.mu.Lock()
+		c.ended = true
 		c.idle.Stop()
 		c.mu.Unlock()
 		wg.Wait()
@@ -414,8 +524,7 @@ func (s *Server) sshdServe(nc net.Conn, peer string) {
 	}
 }
 
-// sshdOpen counts a channel open, if there is room for it, and stops the
-// idle clock.
+// sshdOpen counts a channel open, if there is room for it.
 func (c *sshdConn) sshdOpen() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -423,35 +532,53 @@ func (c *sshdConn) sshdOpen() bool {
 		return false
 	}
 	c.channels++
-	c.idle.Stop()
 	return true
 }
 
-// sshdShut counts a channel closed, and starts the idle clock when it was
-// the last.
+// sshdShut counts a channel closed.
 func (c *sshdConn) sshdShut() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.channels--; c.channels == 0 {
+	c.channels--
+}
+
+// sshdBusy counts a command started, which stops the idle clock.
+func (c *sshdConn) sshdBusy() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.running++
+	c.idle.Stop()
+}
+
+// sshdRest counts a command ended, and starts the idle clock when it was
+// the last running, unless the connection has ended meanwhile.
+func (c *sshdConn) sshdRest() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.running--; c.running == 0 && !c.ended {
 		c.idle.Reset(c.s.idle)
 	}
 }
 
-// sshdSlot takes one attach's place, on the server and on this connection,
-// and gives back the func that returns it, once however often it is called.
+// sshdSlot takes one attach's place, on the connection, for the person and
+// on the server, and gives back the func that returns it, once however
+// often it is called.
 func (c *sshdConn) sshdSlot() (func(), error) {
-	s := c.s
+	s, name := c.s, c.user.Name
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.attached >= maxAttachesPerConn {
+	switch {
+	case c.attached >= maxAttachesPerConn:
 		return nil, fmt.Errorf("rota over ssh has %d sessions attached on this connection; leave one first", maxAttachesPerConn)
-	}
-	if s.attached >= maxAttaches {
+	case s.attachAs[name] >= maxAttachesPerUser:
+		return nil, fmt.Errorf("rota over ssh has %d sessions attached as %s; leave one first", maxAttachesPerUser, name)
+	case s.attached >= maxAttaches:
 		return nil, fmt.Errorf("rota over ssh has %d sessions attached; leave one first", maxAttaches)
 	}
 	s.attached++
+	s.attachAs[name]++
 	c.attached++
 	var once sync.Once
 	return func() {
@@ -461,6 +588,9 @@ func (c *sshdConn) sshdSlot() (func(), error) {
 			c.mu.Lock()
 			defer c.mu.Unlock()
 			s.attached--
+			if s.attachAs[name]--; s.attachAs[name] <= 0 {
+				delete(s.attachAs, name)
+			}
 			c.attached--
 		})
 	}, nil
@@ -513,11 +643,16 @@ func (s *Server) sshdKeepalive(ctx context.Context, sc *ssh.ServerConn, wg *sync
 }
 
 // sshdLogin is the login name as the log gives it: what the client typed,
-// cut short. It decides nothing, so it is never worth a long line.
+// cut short at a character's edge. It decides nothing, so it is never worth
+// a long line.
 func sshdLogin(login string) string {
 	const most = 64
-	if len(login) > most {
-		return login[:most] + "…"
+	if len(login) <= most {
+		return login
 	}
-	return login
+	cut := most
+	for cut > 0 && !utf8.RuneStart(login[cut]) {
+		cut--
+	}
+	return login[:cut] + "…"
 }

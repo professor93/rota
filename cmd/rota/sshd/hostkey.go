@@ -114,5 +114,18 @@ func hostkeyMake(path string) error {
 	if err := os.Link(tmp, path); err != nil && !errors.Is(err, fs.ErrExist) {
 		return err
 	}
+	hostkeySyncDir(filepath.Dir(path))
 	return nil
+}
+
+// hostkeySyncDir makes the key's name durable, so a crash right after cannot
+// lose it and have the next start make a different key. A system that cannot
+// sync a directory (Windows) is left as it is.
+func hostkeySyncDir(dir string) {
+	d, err := os.Open(dir)
+	if err != nil {
+		return
+	}
+	_ = d.Sync()
+	d.Close()
 }

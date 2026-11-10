@@ -35,11 +35,12 @@ type Channel struct {
 	// it, both from Options.
 	Key    byte
 	Taught func(string) bool
-	// Slot takes one of the places an attach needs, since each keeps a copy
-	// of a session's screen in the daemon: at most maxAttaches on the server
-	// and maxAttachesPerConn on one connection. Its error is the sentence to
-	// print, and done gives the place back.
-	Slot func() (done func(), err error)
+	// slot takes one of the places an attach needs, since each keeps a copy
+	// of a session's screen in the daemon: at most maxAttaches on the
+	// server, maxAttachesPerUser for one person and maxAttachesPerConn on one
+	// connection. Its error is the sentence to print, and done gives the
+	// place back. A bare command hands it on as TUISession.Slot.
+	slot func() (done func(), err error)
 }
 
 // channelResizes is how many window-changes wait for a command to read them.
@@ -52,15 +53,24 @@ const channelResizes = 4
 // the command once it is running.
 func channelServe(ctx context.Context, sc *sshdConn, ch ssh.Channel, reqs <-chan *ssh.Request) {
 	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	resize := make(chan [2]int, channelResizes)
 	c := &Channel{
 		In: ch, Out: ch, Err: ch.Stderr(), Resize: resize,
 		User: sc.user, Login: sc.login, Handler: sc.handler,
 		Key: sc.s.o.Key, Taught: sc.s.o.Taught,
-		Slot: sc.sshdSlot,
+		slot: sc.sshdSlot,
 	}
 	var done chan struct{}
+	// However this loop ends, the client closing the channel, the connection
+	// going or a panic here, the command is told and waited for, so Close
+	// never returns with one still running.
+	defer func() {
+		cancel()
+		_ = ch.Close()
+		if done != nil {
+			<-done
+		}
+	}()
 	for req := range reqs {
 		ok, run, bare, line := false, false, false, ""
 		switch req.Type {
@@ -106,8 +116,12 @@ func channelServe(ctx context.Context, sc *sshdConn, ch ssh.Channel, reqs <-chan
 		}
 		if run {
 			done = make(chan struct{})
+			// A command running is the connection in use: the idle clock
+			// stops until it ends.
+			sc.sshdBusy()
 			go func() {
 				defer close(done)
+				defer sc.sshdRest()
 				// A command that panics ends its connection, not the daemon.
 				defer sc.s.sshdRecover(func() { sc.sc.Close() })
 				code := dispatchRun(ctx, c, line, bare, sc.s.commands, sc.s.log)
@@ -116,13 +130,6 @@ func channelServe(ctx context.Context, sc *sshdConn, ch ssh.Channel, reqs <-chan
 				_ = ch.Close()
 			}()
 		}
-	}
-	// The client closed the channel, or the connection went: the command is
-	// told, and waited for.
-	cancel()
-	_ = ch.Close()
-	if done != nil {
-		<-done
 	}
 }
 
