@@ -57,14 +57,14 @@ var linesKeep = []int{0, 4, 3, 1, 2, 5}
 // hintRow is the one row drawn when no second key follows the chord key in
 // time:
 //
-//	Ctrl-\  d leave · n/p next/prev · k keyboard · z fit · ? help · Ctrl-\ itself
+//	Ctrl-\  d leave | n/p next/prev | k keyboard | z fit | ? help | Ctrl-\ itself
 //
 // A window narrower than that drops whole items, so none is cut in half.
 // It takes them in this order, each that still fits: d leave, ? help,
 // z fit, n/p next/prev, k keyboard, the key itself. Those kept are written
 // in the row's own order, so a 40-cell window reads
 //
-//	Ctrl-\  d leave · z fit · ? help
+//	Ctrl-\  d leave | z fit | ? help
 //
 // A window with no room for d leave shows the key alone, and one too
 // narrow for that gets as much of the key as fits. It is never wider than
@@ -90,7 +90,7 @@ func hintRow(key byte, cols int) string {
 	for i, it := range items {
 		if kept[i] {
 			row += sep + it
-			sep = " · "
+			sep = " | "
 		}
 	}
 	return row
@@ -123,9 +123,9 @@ func helpCard(key byte, teach bool) []string {
 // last row: first the key that fits the session here, so a phone's narrow
 // row still says it, then how big each is.
 //
-//	rota: Ctrl-\ z fits; api is 100×30, this window 40×12
+//	rota: Ctrl-\ z fits; api is 100x30, this window 40x12
 func cropNote(name string, key byte, sessCols, sessRows, winCols, winRows int) string {
-	return fmt.Sprintf("rota: %s z fits; %s is %d×%d, this window %d×%d",
+	return fmt.Sprintf("rota: %s z fits; %s is %dx%d, this window %dx%d",
 		KeyName(key), OneLine(name), sessCols, sessRows, winCols, winRows)
 }
 
@@ -145,8 +145,11 @@ func drawRow(row int, text string, cols int) []byte {
 }
 
 // drawCard draws lines as a card centred in a window cols by rows: a
-// one-cell border, a space inside it either side, and each line cleaned and
-// cut or padded to the card's width. A card that does not fit is cut, to
+// one-cell border of + - and |, a space inside it either side, and each line
+// cleaned and cut or padded to the card's width. The border, like every word
+// this package draws, is ASCII, since some terminals draw a character of
+// ambiguous East-Asian width (· × or a box-drawing line) two cells wide and
+// a row drawn to the last column would wrap. A card that does not fit is cut, to
 // the window's width and to as many of its first lines as there are rows,
 // so it never writes past the window. The cursor is saved and put back, as
 // drawRow does, with the attributes reset while the card is drawn. A window
@@ -168,11 +171,11 @@ func drawCard(lines []string, cols, rows int) []byte {
 		fmt.Fprintf(&b, "\x1b[%d;%dH", top+row, left)
 		b.WriteString(s)
 	}
-	at(0, "┌"+strings.Repeat("─", w-2)+"┐")
+	at(0, "+"+strings.Repeat("-", w-2)+"+")
 	for i, l := range lines[:h-2] {
-		at(1+i, "│ "+linesFit(OneLine(l), w-4)+" │")
+		at(1+i, "| "+linesFit(OneLine(l), w-4)+" |")
 	}
-	at(h-1, "└"+strings.Repeat("─", w-2)+"┘")
+	at(h-1, "+"+strings.Repeat("-", w-2)+"+")
 	b.WriteString("\x1b[0m\x1b8")
 	return []byte(b.String())
 }

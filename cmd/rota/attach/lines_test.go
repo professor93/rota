@@ -90,10 +90,10 @@ func TestExitCodes(t *testing.T) {
 // TestTheCopyIsFixed: the hint row, the help card and the crop note say the
 // plan's words, with the chord key named.
 func TestTheCopyIsFixed(t *testing.T) {
-	if got, want := hintRow(0x1c, 200), `Ctrl-\  d leave · n/p next/prev · k keyboard · z fit · ? help · Ctrl-\ itself`; got != want {
+	if got, want := hintRow(0x1c, 200), `Ctrl-\  d leave | n/p next/prev | k keyboard | z fit | ? help | Ctrl-\ itself`; got != want {
 		t.Errorf("hintRow:\n got %q\nwant %q", got, want)
 	}
-	if got, want := hintRow(0x1d, 200), "Ctrl-]  d leave · n/p next/prev · k keyboard · z fit · ? help · Ctrl-] itself"; got != want {
+	if got, want := hintRow(0x1d, 200), "Ctrl-]  d leave | n/p next/prev | k keyboard | z fit | ? help | Ctrl-] itself"; got != want {
 		t.Errorf("hintRow(Ctrl-]):\n got %q\nwant %q", got, want)
 	}
 	card := []string{
@@ -112,15 +112,15 @@ func TestTheCopyIsFixed(t *testing.T) {
 	if got := helpCard(0x1c, false); strings.Join(got, "\n") != strings.Join(card[1:], "\n") {
 		t.Errorf("helpCard:\n got %q\nwant %q", got, card[1:])
 	}
-	if got, want := cropNote("api", 0x1c, 100, 30, 40, 12), `rota: Ctrl-\ z fits; api is 100×30, this window 40×12`; got != want {
+	if got, want := cropNote("api", 0x1c, 100, 30, 40, 12), `rota: Ctrl-\ z fits; api is 100x30, this window 40x12`; got != want {
 		t.Errorf("cropNote:\n got %q\nwant %q", got, want)
 	}
-	if got, want := cropNote("a\x1bb", 0x1c, 100, 30, 40, 12), `rota: Ctrl-\ z fits; a b is 100×30, this window 40×12`; got != want {
+	if got, want := cropNote("a\x1bb", 0x1c, 100, 30, 40, 12), `rota: Ctrl-\ z fits; a b is 100x30, this window 40x12`; got != want {
 		t.Errorf("cropNote of a dirty name:\n got %q\nwant %q", got, want)
 	}
 	// On a 40-cell phone the row it is drawn in still says how to fit, and
 	// the session's size.
-	if got := ansi.Strip(string(drawRow(12, cropNote("api", 0x1c, 100, 30, 40, 12), 40))); !strings.Contains(got, `Ctrl-\ z fits`) || !strings.Contains(got, "100×30") {
+	if got := ansi.Strip(string(drawRow(12, cropNote("api", 0x1c, 100, 30, 40, 12), 40))); !strings.Contains(got, `Ctrl-\ z fits`) || !strings.Contains(got, "100x30") {
 		t.Errorf("a 40-cell crop note lost its instruction or the size: %q", got)
 	}
 }
@@ -133,18 +133,18 @@ func TestAHintRowKeepsWholeItems(t *testing.T) {
 		cols int
 		want string
 	}{
-		{40, `Ctrl-\  d leave · z fit · ? help`},
-		{32, `Ctrl-\  d leave · z fit · ? help`},
-		{31, `Ctrl-\  d leave · ? help`},
-		{24, `Ctrl-\  d leave · ? help`},
-		{23, `Ctrl-\  d leave · z fit`},
+		{40, `Ctrl-\  d leave | z fit | ? help`},
+		{32, `Ctrl-\  d leave | z fit | ? help`},
+		{31, `Ctrl-\  d leave | ? help`},
+		{24, `Ctrl-\  d leave | ? help`},
+		{23, `Ctrl-\  d leave | z fit`},
 		{22, `Ctrl-\  d leave`},
 		{15, `Ctrl-\  d leave`},
 		{14, `Ctrl-\`},
-		{60, `Ctrl-\  d leave · n/p next/prev · z fit · ? help`},
-		{61, `Ctrl-\  d leave · n/p next/prev · k keyboard · z fit · ? help`},
-		{76, `Ctrl-\  d leave · n/p next/prev · k keyboard · z fit · ? help`},
-		{77, `Ctrl-\  d leave · n/p next/prev · k keyboard · z fit · ? help · Ctrl-\ itself`},
+		{60, `Ctrl-\  d leave | n/p next/prev | z fit | ? help`},
+		{61, `Ctrl-\  d leave | n/p next/prev | k keyboard | z fit | ? help`},
+		{76, `Ctrl-\  d leave | n/p next/prev | k keyboard | z fit | ? help`},
+		{77, `Ctrl-\  d leave | n/p next/prev | k keyboard | z fit | ? help | Ctrl-\ itself`},
 	} {
 		if got := hintRow(0x1c, c.cols); got != c.want {
 			t.Errorf("hintRow at %d:\n got %q\nwant %q", c.cols, got, c.want)
@@ -156,6 +156,27 @@ func TestAHintRowKeepsWholeItems(t *testing.T) {
 	for cols := 0; cols <= 90; cols++ {
 		if w := ansi.StringWidth(hintRow(0x1c, cols)); w > cols {
 			t.Errorf("hintRow at %d is %d cells", cols, w)
+		}
+	}
+}
+
+// TestWhatIsDrawnIsASCII: an overlay holds no character of ambiguous
+// East-Asian width, such as · × or a box-drawing line, which some terminals
+// draw two cells wide, so a row drawn to the last column never wraps.
+func TestWhatIsDrawnIsASCII(t *testing.T) {
+	drawn := map[string]string{
+		"hintRow":  hintRow(0x1c, 200),
+		"cropNote": cropNote("api", 0x1c, 100, 30, 40, 12),
+		"helpCard": strings.Join(helpCard(0x1c, true), "\n"),
+		"drawRow":  string(drawRow(24, hintRow(0x1c, 80), 80)),
+		"drawCard": string(drawCard(helpCard(0x1c, true), 80, 24)),
+	}
+	for what, s := range drawn {
+		for i := 0; i < len(s); i++ {
+			if s[i] >= 0x80 {
+				t.Errorf("%s holds a byte that is not ASCII at %d: %q", what, i, s)
+				break
+			}
 		}
 	}
 }
