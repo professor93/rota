@@ -173,12 +173,12 @@ every JSON path here already had to ask for by hand.
 rota "summarize this repo"    # the usual thing: no verb at all
 rota 2 "summarize this repo"  # ...on account 2
 
-rota login                    # start a claude login: prints an id and a URL
+rota login                    # start a claude login: prints a URL, then waits for the code
 rota login codex              # ...for another provider
 rota login --long             # a year-long token for an account already here
 rota login --key              # an account on a Claude Console API key, pasted, not shown
 rota login 2 --token          # paste a `claude setup-token` token as account 2's long-lived one
-rota login <login-id> <code>  # finish it with the code from the page
+rota login <login-id> <code>  # off a terminal, or after --json: finish it with the code
 rota login <login-id>         # finish a delegated login, which takes no code (grok)
 rota login 2                  # sign account 2 in again: only account 2's approval finishes it
 rota list                     # every account, in rotation order, with usage
@@ -248,8 +248,9 @@ there, it is refused without being repeated.
 An account id signs that account in again, and how depends on who keeps its
 credential. For an account whose login rota holds, dead or alive, it starts an
 ordinary login on that account's provider: it prints the URL and the account to
-approve as, and `Then: rota login <login-id> <code>` finishes it, as any login
-is finished (`--json` prints the login, with `account` set to the id). Only
+approve as, and is finished as any login is: on a terminal it waits for the
+code, and otherwise `rota login <login-id> <code>` finishes it (`--json` prints
+the login, with `account` set to the id). Only
 that account's approval finishes it. Approved as another account or as one rota
 does not hold, it is refused, saying who approved and which account was named.
 A reply that names nobody is refused, naming the account, and a login whose
@@ -486,8 +487,21 @@ with `-i` or `--`, stdout belongs to the CLI. Either way the CLI's exit
 status becomes rota's.
 
 Login is one command and never opens a browser. `rota login` prints a URL and
-a short id; open the URL yourself, approve, then pass the code back with that
-id.
+a short id; open the URL yourself and approve. On a terminal, on Linux and
+macOS, the same command then waits for what finishes the login: the code from
+the page, read as it is typed, since it is good once and for nothing without
+what stays on this machine; a key, with the echo off; and for a device login
+nothing at all, since rota asks the provider by itself until it is approved.
+The prompt says how much of its 15 minutes the login has left. A rejected code,
+and an approval by the wrong account, are said and asked for again on the same
+login; where approving again cannot help, because the account was removed
+meanwhile or its e-mail approved under another of the provider's ids, the wait
+stops with that error. An empty line asks again. `^D` ends the wait and not the
+login, exiting 1, and `^C` does the same with 130: the login stays open, and the
+line that finishes it later is printed. A login that runs out says so and exits
+1. A delegated login is still the vendor CLI's to finish. In a pipe, a script or
+CI, and always with `--json`, a login is two steps: pass the code back with
+`rota login <login-id> <code>`.
 
 One command, because the difference between the two it used to be — whether
 rota holds the credential or the vendor CLI keeps its own — is rota's business
@@ -4463,7 +4477,7 @@ defer s.Close()
 
 l, _ := s.BeginLogin(ctx, "codex")            // parks the login for another process
 l, _ = s.BeginLoginFor(ctx, 2)                // ...or one only account 2's approval finishes
-a, added, _ := s.FinishLogin(ctx, l.ID, code)
+a, added, err := s.FinishLogin(ctx, l.ID, code) // kept for store.PendingTTL; store.Unfinishable(err): stop asking
 errs := s.Refresh(ctx, false)                 // quota for metered providers, cached; a provider's wait kept
 errs = s.Refresh(store.WithCaller(ctx, "mine"), false) // the same, journalled as mine.renew
 res, _ := s.Run(ctx, a, rota.Spec{Prompt: "hi"}, nil, os.Stdout)
