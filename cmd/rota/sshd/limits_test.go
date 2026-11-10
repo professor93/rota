@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -137,7 +138,8 @@ func TestAtMostSixtyFourConnections(t *testing.T) {
 	var keys []ssh.Signer
 	r := sshdStart(t, func(o *Options) {
 		for i := range maxConns / maxConnsPerUser {
-			keys = append(keys, limitsPerson(t, o, fmt.Sprintf("p%d", i), api.RoleWatch))
+			// Control people: the last places are kept for them.
+			keys = append(keys, limitsPerson(t, o, fmt.Sprintf("p%d", i), api.RoleControl))
 		}
 	})
 	var clients []*ssh.Client
@@ -393,77 +395,78 @@ func TestAPanicSigningInGivesItsPlaceBack(t *testing.T) {
 	}
 }
 
+// limitsSeat takes an attach's place on c, through the rig's seat command,
+// and holds it until the session it gives is closed.
+func limitsSeat(t *testing.T, r *sshdRig, c *ssh.Client) *ssh.Session {
+	t.Helper()
+	s, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	if err := s.Start("seat"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-r.blocked:
+	case <-time.After(3 * time.Second):
+		t.Fatal("a seat was not taken")
+	}
+	return s
+}
+
+// limitsNoSeat says a seat on c is refused with want.
+func limitsNoSeat(t *testing.T, r *sshdRig, c *ssh.Client, want string) {
+	t.Helper()
+	s, err := c.NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var errb bytes.Buffer
+	s.Stderr = &errb
+	if err := s.Start("seat"); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- s.Wait() }()
+	select {
+	case err := <-done:
+		var exit *ssh.ExitError
+		if !errors.As(err, &exit) || exit.ExitStatus() != 1 || errb.String() != want+"\n" {
+			t.Errorf("seat: %v %q; want 1 %q", err, errb.String(), want)
+		}
+	case <-r.blocked:
+		t.Fatalf("a seat past the limit was taken; want %q", want)
+	case <-time.After(3 * time.Second):
+		t.Fatalf("seat neither took a place nor was refused")
+	}
+}
+
 func TestAttachesAreCounted(t *testing.T) {
 	var third ssh.Signer
 	r := sshdStart(t, func(o *Options) { third = limitsPerson(t, o, "third", api.RoleControl) })
-	seat := func(c *ssh.Client) *ssh.Session {
-		t.Helper()
-		s, err := c.NewSession()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := s.Start("seat"); err != nil {
-			t.Fatal(err)
-		}
-		select {
-		case <-r.blocked:
-		case <-time.After(3 * time.Second):
-			t.Fatal("a seat was not taken")
-		}
-		return s
-	}
-	refused := func(c *ssh.Client, want string) {
-		t.Helper()
-		s, err := c.NewSession()
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer s.Close()
-		var errb bytes.Buffer
-		s.Stderr = &errb
-		if err := s.Start("seat"); err != nil {
-			t.Fatal(err)
-		}
-		done := make(chan error, 1)
-		go func() { done <- s.Wait() }()
-		select {
-		case err := <-done:
-			var exit *ssh.ExitError
-			if !errors.As(err, &exit) || exit.ExitStatus() != 1 || errb.String() != want+"\n" {
-				t.Errorf("seat: %v %q; want 1 %q", err, errb.String(), want)
-			}
-		case <-r.blocked:
-			t.Fatalf("a seat past the limit was taken; want %q", want)
-		case <-time.After(3 * time.Second):
-			t.Fatalf("seat neither took a place nor was refused")
-		}
-	}
 	var held []*ssh.Session
-	defer func() {
-		for _, s := range held {
-			s.Close()
-		}
-	}()
 	take := func(k ssh.Signer, conns int) {
 		for range conns {
 			c := r.signIn(k)
 			for range maxAttachesPerConn {
-				held = append(held, seat(c))
+				held = append(held, limitsSeat(t, r, c))
 			}
 		}
 	}
 
 	// One connection holds two.
 	first := r.signIn(r.me)
-	held = append(held, seat(first), seat(first))
-	refused(first, "rota over ssh has 2 sessions attached on this connection; leave one first")
+	held = append(held, limitsSeat(t, r, first), limitsSeat(t, r, first))
+	limitsNoSeat(t, r, first, "rota over ssh has 2 sessions attached on this connection; leave one first")
 	// One person holds eight, over any connections.
 	take(r.me, maxAttachesPerUser/maxAttachesPerConn-1)
-	refused(r.signIn(r.me), "rota over ssh has 8 sessions attached as me; leave one first")
+	limitsNoSeat(t, r, r.signIn(r.me), "rota over ssh has 8 sessions attached as me; leave one first")
 	// And the server sixteen.
 	take(r.eye, (maxAttaches-maxAttachesPerUser)/maxAttachesPerConn)
 	last := r.signIn(third)
-	refused(last, "rota over ssh has 16 sessions attached; leave one first")
+	limitsNoSeat(t, r, last, "rota over ssh has 16 sessions attached; leave one first")
 
 	// A place given back is taken again.
 	held[0].Close()
@@ -598,7 +601,7 @@ func TestARefusalIsLoggedOncePerMinute(t *testing.T) {
 	}
 
 	// Once the minute is up, the next line counts those not logged.
-	sshdKnob(t, &sshdRefusedEvery, 300*time.Millisecond)
+	sshdKnob(t, &limitsRefusedEvery, 300*time.Millisecond)
 	r = sshdStart(t)
 	refuse(r, 3)
 	time.Sleep(400 * time.Millisecond)
@@ -610,4 +613,149 @@ func TestARefusalIsLoggedOncePerMinute(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+func TestAFullRefusalTableStillLimits(t *testing.T) {
+	sshdKnob(t, &limitsRefusedEvery, 300*time.Millisecond)
+	r := sshdStart(t)
+	count := func() int { return strings.Count(r.log.String(), "ssh refused") }
+	for i := range limitsRefusedKept {
+		r.s.limitsRefused(fmt.Sprintf("filler %d", i), "addr", "filler")
+	}
+	if got := count(); got != limitsRefusedKept {
+		t.Fatalf("%d fillers logged %d lines", limitsRefusedKept, got)
+	}
+	// The table is full and nothing in it is old enough to forget: new
+	// addresses are counted together past the table, and logged once a
+	// window all the same, and the table does not grow.
+	for i := range 50 {
+		r.s.limitsRefused(fmt.Sprintf("new %d", i), "addr", "new")
+	}
+	if got := count() - limitsRefusedKept; got != 1 {
+		t.Errorf("50 refusals from new addresses with the table full logged %d lines; want 1", got)
+	}
+	r.s.mu.Lock()
+	kept := len(r.s.refused)
+	r.s.mu.Unlock()
+	if kept > limitsRefusedKept+1 {
+		t.Errorf("the table holds %d addresses; want at most %d", kept, limitsRefusedKept+1)
+	}
+	time.Sleep(400 * time.Millisecond)
+	r.s.limitsRefused("one more", "addr", "one more")
+	if !strings.Contains(r.log.String(), "suppressed=49") {
+		t.Errorf("the 49 not logged are never counted:\n%s", r.log.String()[len(r.log.String())-400:])
+	}
+}
+
+func TestControlKeepsItsShare(t *testing.T) {
+	// Three watchers at their full share, and a fourth: together they may
+	// not take the places kept for control.
+	var watchers []ssh.Signer
+	r := sshdStart(t, func(o *Options) {
+		for i := range 3 {
+			watchers = append(watchers, limitsPerson(t, o, fmt.Sprintf("w%d", i), api.RoleWatch))
+		}
+	})
+	conns := map[int][]*ssh.Client{}
+	for i, k := range watchers {
+		for range maxConnsPerUser {
+			conns[i] = append(conns[i], r.signIn(k))
+		}
+	}
+	if c, err := r.dial("eye", ssh.PublicKeys(r.eye)); err == nil && !limitsEnded(c, 2*time.Second) {
+		t.Fatalf("a watcher took connection %d, which is kept for control", maxConns-limitsControlConns+1)
+	}
+	// Attaches: twelve between the watchers, and the last four are kept.
+	for _, c := range conns[0][:maxAttachesPerUser/maxAttachesPerConn] {
+		limitsSeat(t, r, c)
+		limitsSeat(t, r, c)
+	}
+	for _, c := range conns[1][:(maxAttaches-limitsControlAttaches-maxAttachesPerUser)/maxAttachesPerConn] {
+		limitsSeat(t, r, c)
+		limitsSeat(t, r, c)
+	}
+	limitsNoSeat(t, r, conns[2][0], "rota over ssh keeps the last 4 attached sessions for control; leave one first")
+
+	// The owner still has every place kept: sixteen connections and four
+	// attaches.
+	var mine []*ssh.Client
+	for range limitsControlConns {
+		mine = append(mine, r.signIn(r.me))
+	}
+	for _, c := range mine {
+		if limitsEnded(c, 0) {
+			t.Fatal("the owner's connection was closed")
+		}
+	}
+	for _, c := range mine[:limitsControlAttaches/maxAttachesPerConn] {
+		limitsSeat(t, r, c)
+		limitsSeat(t, r, c)
+	}
+	if out, _, code := sshdRun(t, mine[len(mine)-1], "echo mine"); code != 0 || out != `["mine"]` {
+		t.Fatalf("echo: %q %d", out, code)
+	}
+	if !strings.Contains(r.log.String(), "kept for control") {
+		t.Errorf("the refused watcher is not in the log:\n%s", r.log)
+	}
+}
+
+// limitsChan is a session channel with nobody at the other end: reads wait
+// until it is closed, and writes go nowhere.
+type limitsChan struct {
+	once   sync.Once
+	closed chan struct{}
+}
+
+func (c *limitsChan) Read([]byte) (int, error)                       { <-c.closed; return 0, io.EOF }
+func (c *limitsChan) Write(p []byte) (int, error)                    { return len(p), nil }
+func (c *limitsChan) Close() error                                   { c.once.Do(func() { close(c.closed) }); return nil }
+func (c *limitsChan) CloseWrite() error                              { return nil }
+func (c *limitsChan) SendRequest(string, bool, []byte) (bool, error) { return false, nil }
+func (c *limitsChan) Stderr() io.ReadWriter                          { return limitsDiscard{} }
+
+type limitsDiscard struct{}
+
+func (limitsDiscard) Read([]byte) (int, error)    { return 0, io.EOF }
+func (limitsDiscard) Write(p []byte) (int, error) { return len(p), nil }
+
+func TestAPanicInTheRequestLoopWaitsForTheCommand(t *testing.T) {
+	r := sshdStart(t)
+	sc := &sshdConn{s: r.s, user: User{Name: "me", Role: api.RoleControl}, idle: time.AfterFunc(time.Hour, func() {})}
+	defer sc.idle.Stop()
+	ch := &limitsChan{closed: make(chan struct{})}
+	reqs := make(chan *ssh.Request, 2)
+	type unwound struct {
+		panicked, endedFirst bool
+	}
+	result := make(chan unwound, 1)
+	go func() {
+		defer func() {
+			p := recover()
+			select {
+			case <-r.ended:
+				result <- unwound{p != nil, true}
+			default:
+				result <- unwound{p != nil, false}
+			}
+		}()
+		channelServe(r.s.ctx, sc, ch, reqs)
+	}()
+	reqs <- &ssh.Request{Type: "exec", Payload: ssh.Marshal(struct{ C string }{"block"})}
+	<-r.blocked
+	// A request made by hand has no connection to answer through, so its
+	// Reply panics inside the loop.
+	reqs <- &ssh.Request{Type: "env", WantReply: true}
+	select {
+	case got := <-result:
+		if !got.panicked || !got.endedFirst {
+			t.Errorf("panicked %v, the command ended before the loop unwound %v; want both", got.panicked, got.endedFirst)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("channelServe neither returned nor panicked")
+	}
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	if sc.running != 0 {
+		t.Errorf("%d commands still counted running", sc.running)
+	}
 }

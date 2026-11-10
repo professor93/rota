@@ -113,27 +113,10 @@ const (
 	maxAttachesPerConn = 2
 )
 
-// One person's share, whatever their role: a quarter of the connections and
-// half the attaches, so one key, even a watcher's, cannot hold every place
-// and shut out everybody else.
-const (
-	maxConnsPerUser    = 16
-	maxAttachesPerUser = 8
-)
-
 // sshdIdleWait is how long a signed-in connection may sit with no command
 // running before it is closed: answering keepalives, or holding a channel
 // that never asks for anything, is not using a place. A test knob.
 var sshdIdleWait = 60 * time.Second
-
-// sshdRefusedEvery is how often a refusal from one address is logged; the
-// ones between are counted on the next line. A peer can connect and fail as
-// fast as it likes, and the log is not its to fill. A test knob.
-var sshdRefusedEvery = time.Minute
-
-// sshdRefusedKept is how many addresses' refusal counts are kept; past it,
-// those older than sshdRefusedEvery are forgotten.
-const sshdRefusedKept = 1024
 
 // sshdPeer is the address a connection's share of the unauthenticated
 // places is counted by: its host, whatever its port, and for IPv6 its /64,
@@ -191,7 +174,7 @@ type Server struct {
 	wait     time.Duration      // handshakeWait when it started
 	every    time.Duration      // keepaliveEvery when it started
 	idle     time.Duration      // sshdIdleWait when it started
-	refusing time.Duration      // sshdRefusedEvery when it started
+	refusing time.Duration      // limitsRefusedEvery when it started
 	peer     func(net.Addr) string
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -201,17 +184,8 @@ type Server struct {
 	conns    map[net.Conn]struct{}
 	unauthed int
 	peers    map[string]int // unauthenticated connections by sshdPeer
-	people   map[string]int // signed-in connections by person
-	attached int
-	attachAs map[string]int // attaches by person
-	refused  map[string]*sshdRefusal
 	wg       sync.WaitGroup
-}
-
-// sshdRefusal is one address's refusals since its last log line.
-type sshdRefusal struct {
-	at         time.Time
-	suppressed int
+	limits   // the signed-in shares, under mu
 }
 
 // sshdConn is one signed-in connection, as its channels need it.
@@ -258,10 +232,9 @@ func Listen(o Options) (*Server, error) {
 	return &Server{
 		o: o, log: log, ln: ln, key: key, fp: ssh.FingerprintSHA256(key.PublicKey()),
 		known: known, commands: maps.Clone(commands),
-		wait: handshakeWait, every: keepaliveEvery, idle: sshdIdleWait, refusing: sshdRefusedEvery,
+		wait: handshakeWait, every: keepaliveEvery, idle: sshdIdleWait, refusing: limitsRefusedEvery,
 		peer: sshdPeer, ctx: ctx, cancel: cancel,
-		conns: map[net.Conn]struct{}{}, peers: map[string]int{}, people: map[string]int{},
-		attachAs: map[string]int{}, refused: map[string]*sshdRefusal{},
+		conns: map[net.Conn]struct{}{}, peers: map[string]int{}, limits: limitsNew(),
 	}, nil
 }
 
@@ -345,38 +318,6 @@ func (s *Server) sshdRecover(end func()) {
 	}
 }
 
-// sshdRefused logs a refusal from peer, at most once every s.refusing for
-// each peer; the line says how many were not logged since the last one.
-func (s *Server) sshdRefused(peer string, args ...any) {
-	now := time.Now()
-	s.mu.Lock()
-	r := s.refused[peer]
-	if r != nil && now.Sub(r.at) < s.refusing {
-		r.suppressed++
-		s.mu.Unlock()
-		return
-	}
-	suppressed := 0
-	if r != nil {
-		suppressed = r.suppressed
-	}
-	if len(s.refused) >= sshdRefusedKept {
-		for p, old := range s.refused {
-			if now.Sub(old.at) >= s.refusing {
-				delete(s.refused, p)
-			}
-		}
-	}
-	if r != nil || len(s.refused) < sshdRefusedKept {
-		s.refused[peer] = &sshdRefusal{at: now}
-	}
-	s.mu.Unlock()
-	if suppressed > 0 {
-		args = append(args, "suppressed", suppressed)
-	}
-	s.log.Info("ssh refused", args...)
-}
-
 // sshdConfig is the server's configuration for one connection: offered
 // gathers the fingerprints of the keys it refused. The person and the key
 // that signed in are carried only in the Permissions the accepting callback
@@ -436,7 +377,7 @@ func (s *Server) sshdServe(nc net.Conn, peer string) {
 	giveBack()
 	if err != nil {
 		if !s.sshdClosed() {
-			s.sshdRefused(peer, "addr", addr, "fingerprints", offered)
+			s.limitsRefused(peer, "addr", addr, "fingerprints", offered)
 		}
 		return
 	}
@@ -445,22 +386,12 @@ func (s *Server) sshdServe(nc net.Conn, peer string) {
 
 	ext := sc.Permissions.Extensions
 	u := s.sshdUser(ext["rota-user"])
-	s.mu.Lock()
-	if s.people[u.Name] >= maxConnsPerUser {
-		s.mu.Unlock()
-		s.sshdRefused(peer, "addr", addr, "name", u.Name, "fingerprint", ext["rota-fp"],
-			"reason", fmt.Sprintf("too many connections (%d)", maxConnsPerUser))
+	leave, why := s.limitsAdmit(u)
+	if why != "" {
+		s.limitsRefused(peer, "addr", addr, "name", u.Name, "fingerprint", ext["rota-fp"], "reason", why)
 		return
 	}
-	s.people[u.Name]++
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		defer s.mu.Unlock()
-		if s.people[u.Name]--; s.people[u.Name] <= 0 {
-			delete(s.people, u.Name)
-		}
-	}()
+	defer leave()
 
 	c := &sshdConn{s: s, sc: sc, user: u, login: sc.User()}
 	c.idle = time.AfterFunc(s.idle, func() { sc.Close() })
@@ -558,42 +489,6 @@ func (c *sshdConn) sshdRest() {
 	if c.running--; c.running == 0 && !c.ended {
 		c.idle.Reset(c.s.idle)
 	}
-}
-
-// sshdSlot takes one attach's place, on the connection, for the person and
-// on the server, and gives back the func that returns it, once however
-// often it is called.
-func (c *sshdConn) sshdSlot() (func(), error) {
-	s, name := c.s, c.user.Name
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	switch {
-	case c.attached >= maxAttachesPerConn:
-		return nil, fmt.Errorf("rota over ssh has %d sessions attached on this connection; leave one first", maxAttachesPerConn)
-	case s.attachAs[name] >= maxAttachesPerUser:
-		return nil, fmt.Errorf("rota over ssh has %d sessions attached as %s; leave one first", maxAttachesPerUser, name)
-	case s.attached >= maxAttaches:
-		return nil, fmt.Errorf("rota over ssh has %d sessions attached; leave one first", maxAttaches)
-	}
-	s.attached++
-	s.attachAs[name]++
-	c.attached++
-	var once sync.Once
-	return func() {
-		once.Do(func() {
-			s.mu.Lock()
-			defer s.mu.Unlock()
-			c.mu.Lock()
-			defer c.mu.Unlock()
-			s.attached--
-			if s.attachAs[name]--; s.attachAs[name] <= 0 {
-				delete(s.attachAs, name)
-			}
-			c.attached--
-		})
-	}, nil
 }
 
 // sshdUser is the person a sign-in named.

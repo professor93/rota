@@ -58,7 +58,7 @@ func channelServe(ctx context.Context, sc *sshdConn, ch ssh.Channel, reqs <-chan
 		In: ch, Out: ch, Err: ch.Stderr(), Resize: resize,
 		User: sc.user, Login: sc.login, Handler: sc.handler,
 		Key: sc.s.o.Key, Taught: sc.s.o.Taught,
-		slot: sc.sshdSlot,
+		slot: sc.limitsSlot,
 	}
 	var done chan struct{}
 	// However this loop ends, the client closing the channel, the connection
