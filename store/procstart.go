@@ -36,15 +36,18 @@ import (
 //     instead would otherwise make every live session west of UTC read as
 //     started hours after its record, and rota would refresh under it.
 //
-// Either is believed only of a record written in this machine's pid space,
-// `pidDomain`: a pid from another host or container sharing the home names
-// nothing here.
+// Either is believed only of a record that says it was written in this
+// machine's pid space, `pidDomain`: a pid from another host or container
+// sharing the home names nothing here, and a record that names no pid space
+// at all, from a build older than the field, is judged by its pid alone, as
+// before rota read procStart.
 //
 // Every doubt is read as alive, as everywhere else in this file: a record
-// with no procStart, or one in the shape another system writes, a macOS one
-// with no startedAt or one that disagrees with it, one from another pid
-// space, and a process whose start cannot be read (on Windows Claude Code
-// writes a procStartFt that rota does not read) are kept, as before.
+// with no procStart or no pidDomain, one in the shape another system
+// writes, a macOS one with no startedAt or one that disagrees with it, one
+// from another pid space, and a process whose start cannot be read (on
+// Windows Claude Code writes a procStartFt that rota does not read) are
+// kept, as before.
 
 // procStartSlack is how much later than its macOS record a process may have
 // started and still be the record's writer. procStart is whole seconds and
@@ -74,7 +77,7 @@ var (
 // recycled reports whether the process now at a record's pid is provably
 // not the one that wrote the record.
 func recycled(r record) bool {
-	if r.procStart == "" || r.pidDomain != "" && r.pidDomain != ourPidDomain() {
+	if r.procStart == "" || r.pidDomain == "" || r.pidDomain != ourPidDomain() {
 		return false
 	}
 	if startsInTicks {

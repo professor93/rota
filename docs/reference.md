@@ -3294,8 +3294,9 @@ crash or a reboot, does not: each record carries its writer's start,
 Either is believed only of a record whose `pidDomain` is this machine's pid
 space — `darwin` on macOS, `linux:<machine-id>:<pid namespace>` on Linux — so
 a record written on another host or in another container that shares the
-home is judged by its pid alone. So is a record with no `procStart`, one with
-a start in another system's form, and every record on Windows. When nothing
+home is judged by its pid alone. So is a record with no `pidDomain`, from a
+Claude Code older than that field, one with no `procStart`, one with a start
+in another system's form, and every record on Windows. When nothing
 is alive, rota may refresh, and a refresh is followed at once — after the
 store is saved — by writing the new login into the home.
 Before rota refreshes — for a launch, a listing, usage read over HTTP or a

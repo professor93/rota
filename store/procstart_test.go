@@ -124,7 +124,7 @@ func aliveIn(t *testing.T, rec claudeRecord, name string) bool {
 // is the writer exactly when it started at the same tick, and a leftover
 // whose pid went to another process — after a crash, or any process after a
 // reboot — started at another. Every record that leaves a doubt is alive:
-// one from another pid space, one with a start in the shape macOS writes,
+// one from another pid space or naming none, one with a start in the shape macOS writes,
 // none, or a number that is no tick, and one whose process's start cannot
 // be read.
 func TestOnLinuxARecordIsItsWritersByTheTickItStarted(t *testing.T) {
@@ -141,7 +141,11 @@ func TestOnLinuxARecordIsItsWritersByTheTickItStarted(t *testing.T) {
 			{"a writer that started a tick earlier", linuxWrittenBy(pid, 48273614), false},
 			{"a writer from before a reboot", linuxWrittenBy(pid, 912), false},
 			{"a writer that started later", linuxWrittenBy(pid, 48273715), false},
-			{"no pidDomain, another tick", same.with(func(r *claudeRecord) { r.pidDomain, r.procStart = "", "912" }), false},
+			// A record from a build older than pidDomain is judged by its
+			// pid alone, as before rota read procStart: alive while the pid
+			// is, gone once it is not.
+			{"no pidDomain, another tick", same.with(func(r *claudeRecord) { r.pidDomain, r.procStart = "", "912" }), true},
+			{"no pidDomain, a pid that is gone", same.with(func(r *claudeRecord) { r.pid, r.pidDomain = deadPID, "" }), false},
 			{"another machine", same.with(func(r *claudeRecord) { r.pidDomain, r.procStart = "linux:another:pid:[4026531836]", "912" }), true},
 			{"another pid namespace", same.with(func(r *claudeRecord) {
 				r.pidDomain, r.procStart = "linux:5f0c2a1e7b3d4e8a9c612d4f8a0b3e17:pid:[4026532001]", "912"
@@ -163,7 +167,8 @@ func TestOnLinuxARecordIsItsWritersByTheTickItStarted(t *testing.T) {
 // On macOS a record's procStart is its writer's start as a UTC time, and a
 // process at the pid that started more than two minutes after it is not
 // the writer. It is believed only when the record's own startedAt bears it
-// out, and only in this machine's pid space; every doubt is alive. The
+// out, and only of a record that names this machine's pid space; every
+// doubt is alive. The
 // process here is this test's, whatever its name.
 func TestOnMacARecordIsItsWritersByTheTimeItStarted(t *testing.T) {
 	started, err := proc.StartTime(os.Getpid())
@@ -183,7 +188,8 @@ func TestOnMacARecordIsItsWritersByTheTimeItStarted(t *testing.T) {
 			{"its own start a second off", macWrittenBy(me, started.Add(-time.Second)), true},
 			{"a start an hour before this process's", before, false},
 			{"a start before the last reboot", macWrittenBy(me, started.Add(-72*time.Hour)), false},
-			{"a start before, with no pidDomain", before.with(func(r *claudeRecord) { r.pidDomain = "" }), false},
+			{"a start before, with no pidDomain", before.with(func(r *claudeRecord) { r.pidDomain = "" }), true},
+			{"no pidDomain, a pid that is gone", before.with(func(r *claudeRecord) { r.pid, r.pidDomain = deadPID, "" }), false},
 			// A writer that started after the process now at its pid is not
 			// one a recycled pid makes; whatever it is, it is not proof.
 			{"a start an hour after this process's", macWrittenBy(me, started.Add(time.Hour)), true},
