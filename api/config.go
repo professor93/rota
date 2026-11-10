@@ -42,6 +42,8 @@ type Config struct {
 	Runs     RunsSection     `toml:"runs"`
 	Terminal TerminalSection `toml:"terminal"`
 	Store    StoreSection    `toml:"store"`
+	// Events is where the daemon sends what happens; nothing by default.
+	Events EventsSection `toml:"events"`
 	// Users and Tokens are the principals besides the one bearer token: the
 	// people who sign in on the page, and the tokens a script carries. They
 	// are arrays of tables rather than more keys under [auth] because each
@@ -325,7 +327,7 @@ func (c *Config) Check() error {
 		return fmt.Errorf("server.log_file must be an absolute path, not %q: "+
 			"a relative one would depend on the directory the server was started in", p)
 	}
-	return nil
+	return c.checkEvents()
 }
 
 // checkTerminal says what is wrong with a terminal this file asks for, and
@@ -641,6 +643,13 @@ func (c *Config) Print(w io.Writer, token string) error {
 	yes := func(name string, v bool) { key(name, strconv.FormatBool(v)) }
 	num := func(name string, v int) { key(name, strconv.Itoa(v)) }
 	span := func(name string, v time.Duration) { key(name, quote(duration(v))) }
+	list := func(name string, v []string) {
+		quoted := make([]string, 0, len(v))
+		for _, s := range v {
+			quoted = append(quoted, quote(s))
+		}
+		key(name, "["+strings.Join(quoted, ", ")+"]")
+	}
 
 	body.WriteString("[server]\n")
 	str("server.listen", c.Server.Listen)
@@ -674,11 +683,7 @@ func (c *Config) Print(w io.Writer, token string) error {
 	span("runs.input_grace", c.Runs.InputGrace)
 	num("runs.replay", c.Runs.Replay)
 	span("runs.refresh_every", c.Runs.RefreshEvery)
-	quoted := make([]string, 0, len(c.Runs.Roots))
-	for _, r := range c.Runs.Roots {
-		quoted = append(quoted, quote(r))
-	}
-	key("runs.roots", "["+strings.Join(quoted, ", ")+"]")
+	list("runs.roots", c.Runs.Roots)
 	yes("runs.allow_dangerous", c.Runs.AllowDangerous)
 	yes("runs.allow_raw_flags", c.Runs.AllowRawFlags)
 
@@ -694,6 +699,8 @@ func (c *Config) Print(w io.Writer, token string) error {
 
 	body.WriteString("\n[store]\n")
 	str("store.dir", c.Store.Dir)
+
+	c.printEvents(&body, str, list)
 
 	for i, u := range c.Users {
 		body.WriteString("\n[[users]]\n")
