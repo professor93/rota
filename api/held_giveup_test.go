@@ -104,6 +104,50 @@ func TestAHolderThatWillNotStopIsKilledInTheEnd(t *testing.T) {
 	}
 }
 
+// One that has become a session by then is not: it is past its prepare, so no
+// refresh of its is under way, and killing it would end a session the daemon
+// lists and anyone may be at work in. This one does not act on its SIGTERM, as
+// an older holder could fail to when it came just as its prepare ended.
+func TestAHolderThatBecameASessionIsNotKilledInTheEnd(t *testing.T) {
+	const killAfter = 4 * time.Second
+	old := holdKillAfter
+	holdKillAfter = func() time.Duration { return killAfter }
+	t.Cleanup(func() { holdKillAfter = old })
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	gaveUp := giveUpOn(t)
+	p := withHeld(t, []string{"FAKE_HOLDER_IGNORE_TERM=1", "FAKE_HOLDER_SLOW=100ms", "FAKE_HOLDER_PIDFILE=" + pidfile})
+	go func() {
+		heldPID(t, pidfile)
+		close(gaveUp)
+	}()
+	if resp, raw := p.do("POST", "/v1/terminals", map[string]any{"account": 1, "cols": 80, "rows": 24}); resp.StatusCode == 201 {
+		t.Fatalf("a holder that never answered was a session: %s", raw)
+	}
+	backstop := time.Now().Add(killAfter)
+	pid := heldPID(t, pidfile)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	state := func() string {
+		p.api.sweepRecords()
+		for _, doc := range p.list() {
+			return doc["state"].(string)
+		}
+		return "not listed"
+	}
+	for state() != heldLive {
+		if time.Now().After(backstop) {
+			t.Fatalf("the holder never became a session: %s, alive=%v", state(), alive(pid))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	time.Sleep(time.Until(backstop) + time.Second)
+	if !alive(pid) {
+		t.Fatalf("a session was killed when its holder was given up on: %s", state())
+	}
+	if got := state(); got != heldLive {
+		t.Fatalf("the session is %s, not live", got)
+	}
+}
+
 // A daemon that gives up on a holder must not lose a refresh it is waiting on.
 // The holder presents R1, the provider rotates it and keeps its answer, and the
 // daemon gives up and answers the request with its error. Then the provider

@@ -190,7 +190,7 @@ func (s *Server) spawnHolder(req *holdwire.Request) (*exec.Cmd, *holdwire.Ready,
 		}
 		return cmd, &a.r, nil
 	case <-holdDeadline():
-		s.giveUpOnHolder(cmd)
+		s.giveUpOnHolder(cmd, req.ID)
 		return nil, nil, fmt.Errorf("the holder of %s did not answer within %s", req.ID, holdReady)
 	}
 }
@@ -200,18 +200,28 @@ func (s *Server) spawnHolder(req *holdwire.Request) (*exec.Cmd, *holdwire.Ready,
 var holdDeadline = func() <-chan time.Time { return time.After(holdReady) }
 
 // holdKillAfter is how long a holder that has not answered has, once it is told
-// to stop, before it is killed: all a refresh under way may take, and a margin
-// for its save. A variable so that a test need not wait for it.
+// to stop, before it is killed if it has not become a session: all a refresh
+// under way may take, and a margin for its save. A variable so that a test need
+// not wait for it.
 var holdKillAfter = func() time.Duration { return store.RefreshTimeout() + stopMargin }
 
 // giveUpOnHolder tells a holder that has not answered in time to stop, and kills
-// it only once it has had all the time a refresh under way can take. It may be
-// preparing its account, with the provider's answer still to come: a SIGTERM
-// lets that finish, the save and the write into the home included, and starts
-// nothing else, where a SIGKILL would lose the new token with the one it
-// replaced already spent. The holder is this server's child until it is reaped
-// here, so its pid can be nobody else's while it is signalled.
-func (s *Server) giveUpOnHolder(cmd *exec.Cmd) {
+// it only once it has had all the time a refresh under way can take, and only
+// if it has not become a session. It may be preparing its account, with the
+// provider's answer still to come: a SIGTERM lets that finish, the save and the
+// write into the home included, and starts nothing else, where a SIGKILL would
+// lose the new token with the one it replaced already spent. The holder is this
+// server's child until it is reaped here, so its pid can be nobody else's while
+// it is signalled.
+//
+// One that goes on regardless, having lost the signal as an older holder could
+// when it came just as its prepare ended, may become a session, which a sweep
+// links to and lists and somebody may be at work in by then. A holder writes its record only once its prepare is
+// over and its CLI has started, so one with a record has no refresh under way,
+// and it is left to live as any session does. One that writes it between the
+// look and the kill is killed with a CLI that started a moment before, which
+// nobody had been told of.
+func (s *Server) giveUpOnHolder(cmd *exec.Cmd, id string) {
 	_ = cmd.Process.Signal(syscall.SIGTERM)
 	exited := make(chan struct{})
 	go func() {
@@ -222,7 +232,9 @@ func (s *Server) giveUpOnHolder(cmd *exec.Cmd) {
 		select {
 		case <-exited:
 		case <-time.After(s.killHolderAfter):
-			_ = cmd.Process.Kill()
+			if m, err := holdwire.ReadMeta(holdwire.Dir(s.terminals, id)); err != nil || m.HolderPID != cmd.Process.Pid {
+				_ = cmd.Process.Kill()
+			}
 		}
 	}()
 }
