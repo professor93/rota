@@ -4578,7 +4578,7 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `store/claudejson.go` | An account's own `.claude.json` for Remote Control: switching it, the identity in it, and the one-way fold |
 | `internal/claudecode/` | The macOS keychain item and `claude daemon stop`, behind variables every test replaces |
 | `internal/proc/` | Whether a process is still alive and when it started, for the session listing, the store and the daemon alike, and which process is at the other end of a unix socket |
-| `internal/fakecli/` | The test binary standing in for a vendor CLI, on a pseudo-terminal too, so no test needs a real one or a shell |
+| `internal/fakecli/` | The test binary standing in for a vendor CLI, on a pseudo-terminal too, so no test needs a real one or a shell; and the PATH every test binary runs with, which leaves out each directory holding a real vendor CLI, so no test can start one |
 | `api/server.go`, `api/run.go` | Routing, the token, the rate limit, requests and streaming |
 | `api/runs.go`, `api/ws.go` | The runs that stay open, and the WebSocket that carries one both ways |
 | `api/principal.go` | Who is asking: the two roles, the route table, the middleware and the cross-site rule |
