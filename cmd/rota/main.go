@@ -1017,7 +1017,7 @@ conversation, which every provider can find without being told its id, and
   rota run --share=watch --label api offered to be read, under that name
   rota run 2 --remote-control=laptop open it, controllable from claude.ai
   rota run 2 --detach --label api    held by the daemon, with no terminal open
-  rota run --attach api              this terminal on held session api; Ctrl-\ d leaves
+  rota run --attach api              show held session api here; Ctrl-\ d leaves
 
 Flags:
 `

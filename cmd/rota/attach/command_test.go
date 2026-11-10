@@ -4,11 +4,13 @@ package attach
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -92,12 +94,38 @@ func (w *commandBuf) String() string {
 // wait waits until what was written holds want.
 func (w *commandBuf) wait(t *testing.T, want string) {
 	t.Helper()
+	w.waitAfter(t, 0, want)
+}
+
+// waitAfter waits until what was written after its first mark bytes holds
+// want.
+func (w *commandBuf) waitAfter(t *testing.T, mark int, want string) {
+	t.Helper()
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if strings.Contains(w.String(), want) {
+		if strings.Contains(w.String()[mark:], want) {
 			return
 		}
 	}
-	t.Fatalf("%q never came; the screen has %q", want, w.String())
+	t.Fatalf("%q never came; the screen has %q", want, w.String()[mark:])
+}
+
+// commandRun runs x in the background, and gives what Run returned.
+func commandRun(x *Cmd) <-chan error {
+	done := make(chan error, 1)
+	go func() { done <- x.Run() }()
+	return done
+}
+
+// commandEnd waits for Run to return.
+func commandEnd(t *testing.T, done <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run never returned")
+	}
+	return nil
 }
 
 // An attach is a command bubbletea's tea.Exec can run: its streams set, a
@@ -164,5 +192,177 @@ func TestCommandIsAnExecCommand(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("the key typed after the attach never reached the next reader")
+	}
+}
+
+// The window SetWindow gives is the one the attach draws for: a 40x12
+// window on an 80x24 session is a crop with its note, and once the window
+// says it is 80x24 the crop goes and the session is passed through.
+func TestCommandFitsTheWindowItIsGiven(t *testing.T) {
+	c, id := commandRig(t, 80, 24)
+	in, typing, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { in.Close(); typing.Close() })
+	var (
+		out, errb  commandBuf
+		mu         sync.Mutex
+		cols, rows = 40, 12
+	)
+	resized := make(chan struct{}, 1)
+	x := Command(c, id, Options{})
+	x.SetStdin(in)
+	x.SetStdout(&out)
+	x.SetStderr(&errb)
+	x.SetWindow(func() (int, int) { mu.Lock(); defer mu.Unlock(); return cols, rows }, resized)
+	done := commandRun(x)
+
+	out.wait(t, "z fits")
+	mark := len(out.String())
+	mu.Lock()
+	cols, rows = 80, 24
+	mu.Unlock()
+	resized <- struct{}{}
+	out.waitAfter(t, mark, "\x1b[?1049l") // the crop's own screen left
+	if _, err := typing.Write([]byte("x\r")); err != nil {
+		t.Fatal(err)
+	}
+	out.waitAfter(t, mark, "got:x")
+	after := out.String()[mark:]
+	if i := strings.LastIndex(after, "\x1b[?1049l"); strings.Contains(after[i:], "z fits") {
+		t.Fatalf("the crop's note is drawn on a window that holds the session: %q", after[i:])
+	}
+	if _, err := typing.Write([]byte("\x1cd")); err != nil {
+		t.Fatal(err)
+	}
+	if err := commandEnd(t, done); err != nil {
+		t.Fatalf("Run after Ctrl-\\ d: %v", err)
+	}
+}
+
+// With no window set and this process's own terminal for stdin and stdout,
+// Cmd attaches it as Local does: raw while it runs, given back after, and
+// the line said with a plain newline, since the terminal turns it into a
+// carriage return and a newline again.
+func TestCommandOnThisTerminalIsRaw(t *testing.T) {
+	c, id := commandRig(t, 80, 24)
+	master, slave := localPair(t, 80, 24)
+	before := localMustTermios(t, slave)
+	var screen, errb commandBuf
+	go func() { _, _ = io.Copy(&screen, master) }()
+	x := Command(c, id, Options{})
+	x.SetStdin(slave)
+	x.SetStdout(slave)
+	x.SetStderr(&errb)
+	done := commandRun(x)
+
+	screen.wait(t, "ready 80x24")
+	if raw := localMustTermios(t, slave); raw.Lflag&(syscall.ICANON|syscall.ECHO) != 0 {
+		t.Fatalf("attached, the terminal still has line editing or echo: lflag %#x", raw.Lflag)
+	}
+	if _, err := master.Write([]byte("hi\r")); err != nil {
+		t.Fatal(err)
+	}
+	screen.wait(t, "got:hi")
+	if _, err := master.Write([]byte("\x1cd")); err != nil {
+		t.Fatal(err)
+	}
+	if err := commandEnd(t, done); err != nil {
+		t.Fatalf("Run after Ctrl-\\ d: %v", err)
+	}
+	now := localMustTermios(t, slave)
+	if now.Iflag != before.Iflag || now.Oflag != before.Oflag || now.Lflag != before.Lflag || now.Cflag != before.Cflag {
+		t.Fatalf("the terminal's settings were %+v and are left %+v", before, now)
+	}
+	if want := x.Result().Line(Options{}) + "\n"; !strings.HasSuffix(errb.String(), want) || strings.HasSuffix(errb.String(), "\r\n") {
+		t.Fatalf("stderr %q, want it to end with %q", errb.String(), want)
+	}
+}
+
+// When stdin ends, so does the attach: Lost, and Run says what went wrong.
+func TestCommandEndsWhenItsInputEnds(t *testing.T) {
+	c, id := commandRig(t, 80, 24)
+	in, typing, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { in.Close() })
+	var out, errb commandBuf
+	x := Command(c, id, Options{})
+	x.SetStdin(in)
+	x.SetStdout(&out)
+	x.SetStderr(&errb)
+	x.SetWindow(func() (int, int) { return 80, 24 }, nil)
+	done := commandRun(x)
+	out.wait(t, "ready 80x24")
+	typing.Close()
+	err = commandEnd(t, done)
+	if err == nil || x.Result().Why != Lost || !errors.Is(x.Result().Err, io.EOF) {
+		t.Fatalf("Run with its input ended: %v, Result %+v; want an error and Lost", err, x.Result())
+	}
+	if !strings.HasPrefix(errb.String(), "rota: lost ") {
+		t.Fatalf("stderr %q, want the lost line", errb.String())
+	}
+}
+
+// A raw stream for stdin is refused before anything is attached: a reader
+// Run started over it would take the next key after Run.
+func TestCommandRefusesARawStream(t *testing.T) {
+	var out, errb commandBuf
+	x := Command(nil, "0123456789abcdef", Options{})
+	x.SetStdin(strings.NewReader("typed"))
+	x.SetStdout(&out)
+	x.SetStderr(&errb)
+	err := x.Run()
+	if !errors.Is(err, commandRaw) || x.Result().Why != Refused {
+		t.Fatalf("Run over a raw stream: %v, Result %+v; want the refusal", err, x.Result())
+	}
+	if out.String() != "" {
+		t.Fatalf("a refused attach drew %q", out.String())
+	}
+	if want := "rota: " + commandRaw.Error() + "\r\n"; errb.String() != want {
+		t.Fatalf("stderr %q, want %q", errb.String(), want)
+	}
+}
+
+// commandFeed is a stdin that is already a pump, as an SSH channel's one
+// reader gives it: never read, only received from.
+type commandFeed struct{ ch chan []byte }
+
+func (f commandFeed) Read([]byte) (int, error) { panic("a pump's stream is never read") }
+func (f commandFeed) Input() <-chan []byte     { return f.ch }
+
+// A pump for stdin is received from while Run runs, and never after: the
+// next chunk sent is left for whoever receives next.
+func TestCommandTakesAPump(t *testing.T) {
+	c, id := commandRig(t, 80, 24)
+	feed := commandFeed{ch: make(chan []byte)}
+	var out, errb commandBuf
+	x := Command(c, id, Options{})
+	x.SetStdin(feed)
+	x.SetStdout(&out)
+	x.SetStderr(&errb)
+	x.SetWindow(func() (int, int) { return 80, 24 }, nil)
+	done := commandRun(x)
+	out.wait(t, "ready 80x24")
+	send := func(s string) {
+		t.Helper()
+		select {
+		case feed.ch <- []byte(s):
+		case <-time.After(5 * time.Second):
+			t.Fatalf("nobody received %q", s)
+		}
+	}
+	send("hi\r")
+	out.wait(t, "got:hi")
+	send("\x1cd")
+	if err := commandEnd(t, done); err != nil {
+		t.Fatalf("Run after Ctrl-\\ d: %v", err)
+	}
+	select {
+	case feed.ch <- []byte("z"):
+		t.Fatal("something received from the pump after Run returned")
+	case <-time.After(300 * time.Millisecond):
 	}
 }

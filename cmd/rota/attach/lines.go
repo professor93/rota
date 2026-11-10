@@ -15,7 +15,7 @@ import (
 //
 //	rota: detached from api; rota run --attach api returns to it
 //	rota: api ended, exit 0
-//	rota: api was interrupted: its holder went without its CLI's exit
+//	rota: api ended with no exit code: a signal stopped its CLI, or its holder went
 //	rota: lost api: <why>; rota run --attach api tries again
 //	rota: <why it was refused>
 //
@@ -34,7 +34,7 @@ func (r Result) Line(o Options) string {
 		return "rota: detached from " + name + "; " + again + " returns to it"
 	case Ended:
 		if r.Code < 0 {
-			return "rota: " + name + " was interrupted: its holder went without its CLI's exit"
+			return "rota: " + name + " ended with no exit code: a signal stopped its CLI, or its holder went"
 		}
 		return "rota: " + name + " ended, exit " + strconv.Itoa(r.Code)
 	case Lost:

@@ -145,8 +145,11 @@ func takeShareFlags(args []string) ([]string, shareAsk, error) {
 				i++
 				value = args[i]
 			}
-			if value == "" {
+			switch {
+			case value == "":
 				return nil, ask, usageErr("%s", attachNoSession)
+			case ask.attach != "":
+				return nil, ask, usageErr("%s", attachTwice)
 			}
 			ask.attach = value
 			continue

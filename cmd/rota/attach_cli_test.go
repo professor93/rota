@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,6 +27,7 @@ func TestAttachFlagRefusals(t *testing.T) {
 		args    = "--attach takes no prompt or CLI arguments"
 		others  = "--attach joins a session that is running; it takes no --detach, --share, --label or --remote-control"
 		none    = "--attach takes the session to show here: rota run --attach <session>"
+		twice   = "--attach takes one session; it was given more than once"
 		off     = `--attach needs a terminal; rota send <session> "text" types into one from a script`
 	)
 	for _, c := range []struct {
@@ -46,11 +48,22 @@ func TestAttachFlagRefusals(t *testing.T) {
 		{[]string{"run", "--attach="}, none},
 		{[]string{"run", "--attach", "--detach"}, none},
 		{[]string{"run", "--attach", "--", "api"}, none},
+		{[]string{"run", "--attach", "a", "--attach", "b"}, twice},
+		{[]string{"run", "--attach=a", "--attach=a"}, twice},
+		{[]string{"run", "--attach", "api", "--", "--json"}, args},
 	} {
 		out, errb, code := call(t, c.args...)
 		if code != 2 || out != "" || !strings.Contains(errb, "error: "+c.want+"\n") {
 			t.Errorf("rota %s: exit %d %q %q, want 2 and %q", strings.Join(c.args, " "), code, out, errb, c.want)
 		}
+	}
+
+	// --json before -- is rota's, as it is for --detach: not an argument,
+	// and the refusal it reaches is JSON.
+	out, errb, code := call(t, "run", "--attach", "api", "--json")
+	var doc map[string]string
+	if code != 2 || errb != "" || json.Unmarshal([]byte(out), &doc) != nil || doc["error"] != off {
+		t.Errorf("rota run --attach api --json off a terminal: exit %d %q %q, want 2 and {\"error\": %q}", code, out, errb, off)
 	}
 
 	// Standard input a pipe, with standard output a terminal, and the other

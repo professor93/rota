@@ -100,10 +100,14 @@ func Local(in, out *os.File) (t Terminal, restore func(), err error) {
 }
 
 // pump reads in and hands each chunk to Input, until the read fails or
-// restore cancels it. Input is closed as it stops.
+// restore cancels it. Input is closed as it stops, a panic in the read
+// included: the attach then ends as an input that ended, and puts the
+// terminal back, where the panic would have ended the process with the
+// terminal raw.
 func (l *localTerm) pump() {
 	defer close(l.pumped)
 	defer close(l.input)
+	defer func() { _ = recover() }()
 	buf := make([]byte, 4096)
 	for {
 		n, err := l.reader.Read(buf)

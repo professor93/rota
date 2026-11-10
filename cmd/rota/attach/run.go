@@ -3,6 +3,7 @@ package attach
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"sync"
@@ -150,7 +151,8 @@ type runner struct {
 	frames  chan runFrame
 	opened  chan runOpened
 	listed  chan runListed
-	inEnded bool // Input was closed
+	failed  chan error // a panic on one of the attach's other goroutines
+	inEnded bool       // Input was closed
 
 	ch     *chord
 	eating bool   // the key that took a card down is still being read
@@ -197,6 +199,7 @@ func run(ctx context.Context, t Terminal, src source, id string, o Options) Resu
 		frames: make(chan runFrame),
 		opened: make(chan runOpened),
 		listed: make(chan runListed),
+		failed: make(chan error),
 		ch:     newChord(key),
 		id:     id,
 		sess:   client.Session{ID: id},
@@ -216,6 +219,7 @@ func run(ctx context.Context, t Terminal, src source, id string, o Options) Resu
 // next hands the link's frames to the loop until it ends or the attach is
 // over.
 func (r *runner) next(gen int, l link) {
+	defer r.guard()
 	for {
 		f, err := l.Next()
 		select {
@@ -234,11 +238,33 @@ func (r *runner) next(gen int, l link) {
 func (r *runner) start(id string) {
 	gen, src, watch := r.gen, r.src, r.o.Watch
 	go func() {
+		defer r.guard()
 		op := runOpened{gen: gen, src: src, at: time.Now()}
 		op.ln, op.err = src.open(id, watch)
 		op.sess = runFind(src, id)
 		r.deliver(op)
 	}()
+}
+
+// guard is deferred by every goroutine an attach starts but its loop: a
+// panic there ends the attach Lost, with the panic as its error, so the
+// loop still runs finish and the terminal is put back. Unrecovered, a panic
+// off the loop's goroutine would end the process with the terminal as the
+// session left it, raw and on the session's screen. A panic on the loop's
+// own goroutine unwinds to Run's caller, whose defers put the terminal back.
+func (r *runner) guard() {
+	if p := recover(); p != nil {
+		r.fail(p)
+	}
+}
+
+// fail hands the loop the panic p to end the attach with, or drops it when
+// the attach is already over.
+func (r *runner) fail(p any) {
+	select {
+	case r.failed <- fmt.Errorf("attach: panic: %v", p):
+	case <-r.done:
+	}
 }
 
 // deliver hands op to the loop, or closes what it opened once the attach is
@@ -296,6 +322,9 @@ func (r *runner) step() {
 			break
 		}
 		r.onInput(p, nil, time.Now())
+	case err := <-r.failed:
+		r.end(Lost, 0, err)
+		return
 	case f := <-r.frames:
 		if f.gen == r.gen {
 			r.onFrame(f, time.Now())
@@ -512,6 +541,9 @@ func (r *runner) finish() Result {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				// The attach has its end already; a close that panics
+				// changes nothing of it, and must not end the process.
+				defer func() { _ = recover() }()
 				h.close()
 			}()
 		}

@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"os/exec"
@@ -208,7 +209,8 @@ func TestAttachRunsTheSessionHere(t *testing.T) {
 // The session ends while it is shown, by its CLI exiting and by `serve stop
 // --all` from elsewhere: each time the command exits with the code the
 // session ended with, the terminal has its settings back, and the last
-// thing drawn is every mode reset and then the line saying how it ended.
+// thing drawn is every mode reset and then, below the window's last row,
+// the line saying how it ended, written once the terminal was given back.
 func TestAttachGivesTheTerminalBack(t *testing.T) {
 	r := newDaemonRig(t)
 	// A CLI that exits 3 when it is told bye.
@@ -216,14 +218,17 @@ func TestAttachGivesTheTerminalBack(t *testing.T) {
 	r.env = append(r.env, "PATH="+bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	r.start()
 
-	// The line this attach was to end with, after the reset.
+	// The line this attach was to end with, after the reset: a newline
+	// first, so it is not written over the session's last row, and its own
+	// newline drawn as a carriage return and a newline, which only a
+	// terminal given back does.
 	endsWith := func(a *attachProc, line string) {
 		t.Helper()
 		a.waitAfter(0, line, 10*time.Second)
 		text := a.screen.text()
 		i := strings.LastIndex(text, string(vtscan.ResetAll()))
-		if i < 0 || !strings.Contains(text[i:], line) {
-			t.Fatalf("the terminal's last bytes are not every mode reset and then %q:\n%q", line, text[max(len(text)-400, 0):])
+		if i < 0 || !strings.Contains(text[i:], "\r\n"+line+"\r\n") {
+			t.Fatalf("the terminal's last bytes are not every mode reset and then %q on a line of its own:\n%q", line, text[max(len(text)-400, 0):])
 		}
 	}
 
@@ -239,7 +244,7 @@ func TestAttachGivesTheTerminalBack(t *testing.T) {
 	endsWith(a, "rota: api ended, exit 3")
 
 	// The daemon and every session stopped from elsewhere: the CLI is hung
-	// up, and ends as its record says.
+	// up, dies of it with no exit code, and the attach says so.
 	id := r.newSession("job")
 	a = r.attachHere(100, 30, false, "job")
 	a.waitAfter(0, "ready 100x30", 10*time.Second)
@@ -248,17 +253,88 @@ func TestAttachGivesTheTerminalBack(t *testing.T) {
 	}
 	got := a.end()
 	rec := holdwire.Judge(r.terminals, id)
-	if rec.State != holdwire.StateEnded || rec.Meta == nil || rec.Meta.Exit == nil {
-		t.Fatalf("after stop --all the record reads %+v %+v", rec, rec.Meta)
+	if rec.State != holdwire.StateEnded || rec.Meta == nil || rec.Meta.Exit == nil || *rec.Meta.Exit != -1 {
+		t.Fatalf("after stop --all the record reads %+v %+v; the tty fake dies of its hang-up, -1", rec, rec.Meta)
 	}
-	t.Logf("stop --all ended the session with %d, and the attach exited %d", *rec.Meta.Exit, got)
-	ended := attach.Result{Why: attach.Ended, Session: rotaclient.Session{ID: id, Name: "job"}, Code: *rec.Meta.Exit}
-	if got != ended.ExitCode() {
-		t.Fatalf("the session ended %d, and rota run --attach exited %d, want %d; the terminal showed:\n%q",
-			*rec.Meta.Exit, got, ended.ExitCode(), a.screen.text())
+	if got != 1 {
+		t.Fatalf("the session ended with no exit code, and rota run --attach exited %d, want 1; the terminal showed:\n%q", got, a.screen.text())
 	}
 	a.givenBack()
-	endsWith(a, ended.Line(attach.Options{}))
+	endsWith(a, "rota: job ended with no exit code: a signal stopped its CLI, or its holder went")
+}
+
+// A session that has ended, named by its id, is not attached to: the
+// command says so and exits 1, as it does for a name that finds no session
+// at all, and the terminal is left as it was.
+func TestAttachRefusesAnEndedSession(t *testing.T) {
+	r := newDaemonRig(t)
+	r.start()
+	id := r.newSession("api")
+	p := r.attach(id)
+	p.waitOut("ready 100x30")
+	p.send(0x2, []byte("bye\r"))
+	for deadline := time.Now().Add(10 * time.Second); r.session(id).State == "live"; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the session never ended after bye")
+		}
+	}
+	for _, c := range []struct{ name, want string }{
+		{id, "rota: session api has ended; rota list --sessions shows it\n"},
+		{"nosuch", `rota: no session is "nosuch": it is not an id, the start of one, or the name of a live session` + "\n"},
+	} {
+		a := r.attachHere(100, 30, true, c.name)
+		if code := a.end(); code != 1 {
+			t.Fatalf("rota run --attach %s: exit %d, want 1; stderr %q", c.name, code, a.stderr.String())
+		}
+		if got := a.stderr.String(); got != c.want {
+			t.Fatalf("rota run --attach %s: stderr %q, want %q", c.name, got, c.want)
+		}
+		a.givenBack()
+	}
+}
+
+// A panic while the attach has the terminal gives it back before the panic
+// goes on: the session's modes off, the pen and scroll region reset and the
+// cursor below the window, then the terminal's own settings. The attach is
+// run in this process, so that it can be made to panic.
+func TestAPanicGivesTheTerminalBack(t *testing.T) {
+	r := newDaemonRig(t)
+	r.start()
+	r.newSession("api")
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { master.Close(); slave.Close() })
+	if err := pty.Resize(master, 100, 30); err != nil {
+		t.Fatal(err)
+	}
+	before := attachTermios(t, master)
+	screen := watchScreen(master)
+
+	wasRun, wasIn := attachRun, stdin
+	t.Cleanup(func() { attachRun, stdin = wasRun, wasIn })
+	stdin = slave
+	attachRun = func(_ context.Context, term attach.Terminal, _ *rotaclient.Client, _ string, _ attach.Options) attach.Result {
+		// What a session leaves on: the alternate screen, the mouse, the
+		// cursor hidden.
+		_, _ = term.Write([]byte("\x1b[?1049h\x1b[?1000h\x1b[?25lsession"))
+		panic("boom")
+	}
+	var errb bytes.Buffer
+	got := func() (p any) {
+		defer func() { p = recover() }()
+		run([]string{"run", "--attach", "api"}, slave, &errb)
+		return nil
+	}()
+	if got != "boom" {
+		t.Fatalf("the panic went on as %v, want boom", got)
+	}
+	want := string(vtscan.ResetAll()) + "\x1b[0m\x1b[r\x1b[30;1H\r\n"
+	screen.wait(t, "session"+want)
+	if now := attachTermios(t, master); now.Iflag != before.Iflag || now.Oflag != before.Oflag || now.Lflag != before.Lflag || now.Cflag != before.Cflag {
+		t.Fatalf("after a panic the terminal's settings were %+v and are left %+v", before, now)
+	}
 }
 
 // The daemon stopped and started again under an attach: the attach waits
@@ -366,8 +442,8 @@ func TestASignalGivesTheTerminalBack(t *testing.T) {
 		t.Fatalf("SIGTERM: exit %d, want 1; stderr %q", code, a.stderr.String())
 	}
 	a.givenBack()
-	if got := a.stderr.String(); !strings.HasPrefix(got, "rota: lost api: ") || !strings.HasSuffix(got, "; rota run --attach api tries again\n") {
-		t.Fatalf("stderr %q, want the lost line", got)
+	if got, want := a.stderr.String(), "rota: lost api: rota was signalled to stop; rota run --attach api tries again\n"; got != want {
+		t.Fatalf("stderr %q, want %q", got, want)
 	}
 	if s := r.session(id); s.State != "live" {
 		t.Fatalf("after a signal the session is %q, want live", s.State)
