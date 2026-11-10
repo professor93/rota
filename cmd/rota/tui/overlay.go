@@ -8,9 +8,12 @@ import (
 )
 
 // overlay is a view over the tabs: a form, a confirm, the login flow. It is
-// opened by an openMsg. Overlays stack: the top one has the keys, every
-// open one hears every other message, and one that says it is Closed is
-// dropped, giving the keys back to the one under it, or to the tab.
+// opened by an openMsg. Overlays stack: the top one has the keys, pastes
+// and the mouse, every open one hears every other message, and one that
+// says it is Closed is dropped, giving the keys back to the one under it,
+// or to the tab. An overlay that holds something open (a page's listener)
+// also has Leave(ctx context.Context), which Run calls after the program
+// ends, as it does a tab's.
 type overlay interface {
 	Update(msg tea.Msg) (overlay, tea.Cmd)
 	// View draws the overlay in the space the chrome leaves, as a tab's.
@@ -22,8 +25,9 @@ type overlay interface {
 }
 
 // asider is an overlay the shell can keep while it is put aside: the login
-// flow. Put aside, it gets no keys and still hears every other message,
-// and its Badge is shown in the footer.
+// flow. Put aside, it gets no keys or pastes and still hears every other
+// message, and its Badge is shown in the footer. An asider is a pointer:
+// Return changes it in place, and a copy would stay aside.
 type asider interface {
 	overlay
 	// Aside says the flow is put aside. The shell takes it off the stack

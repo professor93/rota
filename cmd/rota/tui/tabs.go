@@ -10,8 +10,10 @@ import (
 )
 
 // tab is one screen of the TUI: Accounts, Sessions, Ask or Services. The
-// shell gives it the keys while it is the one shown and no overlay is
-// open, and every other message always, shown or not.
+// shell gives it the keys, pastes and the mouse while it is the one shown
+// and no overlay is open, and every other message always, shown or not.
+// A tea.WindowSizeMsg it hears is the whole terminal's; it draws within
+// the width and height View is given, which leave out the chrome.
 type tab interface {
 	Title() string
 	Update(msg tea.Msg) (tab, tea.Cmd)

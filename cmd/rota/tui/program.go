@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"runtime/debug"
+	"slices"
 	"sync"
 	"time"
 
@@ -45,12 +45,12 @@ func Run(ctx context.Context, o Options) (Result, error) {
 	p := tea.NewProgram(m, opts...)
 	var wg sync.WaitGroup
 	if o.Resize != nil {
-		programResize(ctx, &wg, p, m.e.win, o.Resize)
+		programResize(ctx, &wg, p.Send, m.e.win, o.Resize)
 	}
 	_, err := p.Run()
 	cancel()
 	wg.Wait()
-	if lerr := programLeave(m.tabs); lerr != nil {
+	if lerr := programLeave(m.leavers()); lerr != nil {
 		err = errors.Join(err, lerr)
 	}
 	return m.result(), err
@@ -60,9 +60,9 @@ func Run(ctx context.Context, o Options) (Result, error) {
 // once, which an attach holding the terminal reads, and reaches the model
 // as a resize when the program next takes a message; sizes that arrive
 // meanwhile are coalesced into the latest.
-func programResize(ctx context.Context, wg *sync.WaitGroup, p *tea.Program, win *envWindow, sizes <-chan [2]int) {
+func programResize(ctx context.Context, wg *sync.WaitGroup, send func(tea.Msg), win *envWindow, sizes <-chan [2]int) {
 	kick := make(chan struct{}, 1)
-	programGo(wg, p, "reading the terminal's size", func() {
+	programGo(wg, send, "reading the terminal's size", func() {
 		for {
 			select {
 			case <-ctx.Done():
@@ -79,14 +79,14 @@ func programResize(ctx context.Context, wg *sync.WaitGroup, p *tea.Program, win 
 			}
 		}
 	})
-	programGo(wg, p, "resizing the screen", func() {
+	programGo(wg, send, "resizing the screen", func() {
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-kick:
 				c, r := win.size()
-				p.Send(tea.WindowSizeMsg{Width: c, Height: r})
+				send(tea.WindowSizeMsg{Width: c, Height: r})
 			}
 		}
 	})
@@ -94,34 +94,64 @@ func programResize(ctx context.Context, wg *sync.WaitGroup, p *tea.Program, win 
 
 // programGo runs f in a goroutine of its own that recovers: a panic there
 // is said as a toast and ends only f, never the process, which over SSH is
-// the daemon and every session it links (F31).
-func programGo(wg *sync.WaitGroup, p *tea.Program, what string, f func()) {
+// the daemon and every session it links (F31). send is the program's Send,
+// which returns at once after the program has ended.
+func programGo(wg *sync.WaitGroup, send func(tea.Msg), what string, f func()) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		defer func() {
 			if r := recover(); r != nil {
-				p.Send(toastMsg{Text: fmt.Sprintf("%s failed: %v", what, r), Level: levelErr})
+				send(toastMsg{Text: fmt.Sprintf("%s failed: %v", what, r), Level: levelErr})
 			}
 		}()
 		f()
 	}()
 }
 
-// programLeave leaves each tab under one deadline. A tab that panics is
-// said in the error, and the others are still left.
-func programLeave(tabs []tab) error {
+// programLeaver is what Run leaves after the program ends: every tab, and
+// an open overlay or the flow put aside that holds something open.
+type programLeaver interface {
+	Leave(ctx context.Context)
+}
+
+// leavers is every tab, then every open overlay and the flow put aside
+// that has a Leave.
+func (m *Model) leavers() []programLeaver {
+	var out []programLeaver
+	for _, t := range m.tabs {
+		out = append(out, t)
+	}
+	open := slices.Clone(m.stack)
+	if m.aside != nil {
+		open = append(open, m.aside)
+	}
+	for _, o := range open {
+		if l, ok := o.(programLeaver); ok {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// programLeave leaves each one under one deadline. One that panics is said
+// in the error, in one line, and the others are still left.
+func programLeave(ls []programLeaver) error {
 	ctx, cancel := context.WithTimeout(context.Background(), programLeaveTimeout)
 	defer cancel()
 	var errs []error
-	for _, t := range tabs {
+	for _, l := range ls {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					errs = append(errs, fmt.Errorf("tui: leaving %s: %v\n%s", t.Title(), r, debug.Stack()))
+					name := "an overlay"
+					if t, ok := l.(tab); ok {
+						name = t.Title()
+					}
+					errs = append(errs, fmt.Errorf("tui: leaving %s: %v", name, r))
 				}
 			}()
-			t.Leave(ctx)
+			l.Leave(ctx)
 		}()
 	}
 	return errors.Join(errs...)

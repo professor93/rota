@@ -5,8 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"image/color"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -27,7 +31,7 @@ import (
 // error saying it is not set. Later tests configure it and never edit it.
 type fakeBackend struct {
 	mu  sync.Mutex
-	log []fakeBackendCall
+	log []shellCall
 
 	WhoFn          func(ctx context.Context) (Principal, error)
 	AccountsFn     func(ctx context.Context, how Refresh) (Listing, error)
@@ -43,15 +47,15 @@ type fakeBackend struct {
 	CloseRunFn     func(ctx context.Context, run string) error
 }
 
-// fakeBackendCall is one call a fakeBackend took: the method and its
+// shellCall is one call a fakeBackend took: the method and its
 // arguments after the context.
-type fakeBackendCall struct {
+type shellCall struct {
 	Method string
 	Args   []any
 }
 
 // String is the call as Method(arg, …), a Refresh by its name.
-func (c fakeBackendCall) String() string {
+func (c shellCall) String() string {
 	args := make([]string, len(c.Args))
 	for i, a := range c.Args {
 		switch a := a.(type) {
@@ -67,7 +71,7 @@ func (c fakeBackendCall) String() string {
 func (b *fakeBackend) took(method string, args ...any) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	b.log = append(b.log, fakeBackendCall{Method: method, Args: args})
+	b.log = append(b.log, shellCall{Method: method, Args: args})
 }
 
 // calls is every call so far, as strings, in the order taken.
@@ -89,10 +93,10 @@ func (b *fakeBackend) count() int {
 }
 
 // named is every call of one method, with its arguments.
-func (b *fakeBackend) named(method string) []fakeBackendCall {
+func (b *fakeBackend) named(method string) []shellCall {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	var out []fakeBackendCall
+	var out []shellCall
 	for _, c := range b.log {
 		if c.Method == method {
 			out = append(out, c)
@@ -101,7 +105,7 @@ func (b *fakeBackend) named(method string) []fakeBackendCall {
 	return out
 }
 
-func fakeBackendUnset(method string) error {
+func shellUnset(method string) error {
 	return errors.New("fakeBackend: " + method + " is not set")
 }
 
@@ -126,7 +130,7 @@ func (b *fakeBackend) Change(ctx context.Context, id int, c Change) (wire.Accoun
 	if b.ChangeFn != nil {
 		return b.ChangeFn(ctx, id, c)
 	}
-	return wire.Account{}, fakeBackendUnset("Change")
+	return wire.Account{}, shellUnset("Change")
 }
 
 func (b *fakeBackend) Remove(ctx context.Context, id int) error {
@@ -134,7 +138,7 @@ func (b *fakeBackend) Remove(ctx context.Context, id int) error {
 	if b.RemoveFn != nil {
 		return b.RemoveFn(ctx, id)
 	}
-	return fakeBackendUnset("Remove")
+	return shellUnset("Remove")
 }
 
 func (b *fakeBackend) BeginLogin(ctx context.Context, lb LoginBegin) (backendLogin, error) {
@@ -142,7 +146,7 @@ func (b *fakeBackend) BeginLogin(ctx context.Context, lb LoginBegin) (backendLog
 	if b.BeginLoginFn != nil {
 		return b.BeginLoginFn(ctx, lb)
 	}
-	return backendLogin{}, fakeBackendUnset("BeginLogin")
+	return backendLogin{}, shellUnset("BeginLogin")
 }
 
 func (b *fakeBackend) FinishLogin(ctx context.Context, id, code string) (LoginEnd, error) {
@@ -150,7 +154,7 @@ func (b *fakeBackend) FinishLogin(ctx context.Context, id, code string) (LoginEn
 	if b.FinishLoginFn != nil {
 		return b.FinishLoginFn(ctx, id, code)
 	}
-	return LoginEnd{}, fakeBackendUnset("FinishLogin")
+	return LoginEnd{}, shellUnset("FinishLogin")
 }
 
 func (b *fakeBackend) PasteKey(ctx context.Context, k, label string) (LoginEnd, error) {
@@ -158,7 +162,7 @@ func (b *fakeBackend) PasteKey(ctx context.Context, k, label string) (LoginEnd, 
 	if b.PasteKeyFn != nil {
 		return b.PasteKeyFn(ctx, k, label)
 	}
-	return LoginEnd{}, fakeBackendUnset("PasteKey")
+	return LoginEnd{}, shellUnset("PasteKey")
 }
 
 func (b *fakeBackend) PasteToken(ctx context.Context, account int, token string) (LoginEnd, error) {
@@ -166,7 +170,7 @@ func (b *fakeBackend) PasteToken(ctx context.Context, account int, token string)
 	if b.PasteTokenFn != nil {
 		return b.PasteTokenFn(ctx, account, token)
 	}
-	return LoginEnd{}, fakeBackendUnset("PasteToken")
+	return LoginEnd{}, shellUnset("PasteToken")
 }
 
 func (b *fakeBackend) Ask(ctx context.Context, q Question, each func(message.Event)) (wire.End, error) {
@@ -174,7 +178,7 @@ func (b *fakeBackend) Ask(ctx context.Context, q Question, each func(message.Eve
 	if b.AskFn != nil {
 		return b.AskFn(ctx, q, each)
 	}
-	return wire.End{}, fakeBackendUnset("Ask")
+	return wire.End{}, shellUnset("Ask")
 }
 
 func (b *fakeBackend) SendRun(ctx context.Context, run, text string) error {
@@ -182,7 +186,7 @@ func (b *fakeBackend) SendRun(ctx context.Context, run, text string) error {
 	if b.SendRunFn != nil {
 		return b.SendRunFn(ctx, run, text)
 	}
-	return fakeBackendUnset("SendRun")
+	return shellUnset("SendRun")
 }
 
 func (b *fakeBackend) InterruptRun(ctx context.Context, run string) error {
@@ -190,7 +194,7 @@ func (b *fakeBackend) InterruptRun(ctx context.Context, run string) error {
 	if b.InterruptRunFn != nil {
 		return b.InterruptRunFn(ctx, run)
 	}
-	return fakeBackendUnset("InterruptRun")
+	return shellUnset("InterruptRun")
 }
 
 func (b *fakeBackend) CloseRun(ctx context.Context, run string) error {
@@ -198,7 +202,7 @@ func (b *fakeBackend) CloseRun(ctx context.Context, run string) error {
 	if b.CloseRunFn != nil {
 		return b.CloseRunFn(ctx, run)
 	}
-	return fakeBackendUnset("CloseRun")
+	return shellUnset("CloseRun")
 }
 
 // assertNoIO fails the test if b takes any call while f runs: Update does
@@ -248,13 +252,16 @@ type shellTab struct {
 	keys   []string
 	got    []string
 	mice   []string // each mouse message, as "click 3,2"
+	pastes []string
 	typing bool
 	busy   string
-	e      *env
-	sizes  chan<- [2]int        // each resize, when set
-	held   chan<- struct{}      // told when b holds Update, when set
-	hold   <-chan struct{}      // b holds Update until it closes, as tea.Exec holds the program
-	left   chan<- time.Duration // the time Leave was given, when set
+	// leaveFails makes Leave panic with it.
+	leaveFails string
+	e          *env
+	sizes      chan<- [2]int        // each resize, when set
+	held       chan<- struct{}      // told when b holds Update, when set
+	hold       <-chan struct{}      // b holds Update until it closes, as tea.Exec holds the program
+	left       chan<- time.Duration // the time Leave was given, when set
 }
 
 func (s *shellTab) Title() string { return s.title }
@@ -278,6 +285,8 @@ func (s *shellTab) Update(msg tea.Msg) (tab, tea.Cmd) {
 		s.mice = append(s.mice, fmt.Sprintf("click %d,%d", msg.X, msg.Y))
 	case tea.MouseWheelMsg:
 		s.mice = append(s.mice, fmt.Sprintf("wheel %d,%d", msg.X, msg.Y))
+	case tea.PasteMsg:
+		s.pastes = append(s.pastes, msg.Content)
 	case shellPing:
 		s.got = append(s.got, string(msg))
 	}
@@ -296,6 +305,9 @@ func (s *shellTab) Typing() bool { return s.typing }
 func (s *shellTab) Busy() string { return s.busy }
 
 func (s *shellTab) Leave(ctx context.Context) {
+	if s.leaveFails != "" {
+		panic(s.leaveFails)
+	}
 	if s.left != nil {
 		d := time.Duration(-1)
 		if dl, ok := ctx.Deadline(); ok {
@@ -320,10 +332,13 @@ func shellTabs(t *testing.T, places ...int) map[int]*shellTab {
 }
 
 // shellOverlay is an overlay that records what reaches it, and closes on
-// esc. As an asider it goes aside on esc instead, and back on Return.
+// esc or on shellPing(closeOn). As an asider it goes aside on esc instead,
+// and back on Return.
 type shellOverlay struct {
 	keys, got []string
 	mice      []string
+	pastes    []string
+	closeOn   string
 	closed    bool
 	asider    bool
 	aside     bool
@@ -343,8 +358,13 @@ func (o *shellOverlay) Update(msg tea.Msg) (overlay, tea.Cmd) {
 		}
 	case tea.MouseClickMsg:
 		o.mice = append(o.mice, fmt.Sprintf("click %d,%d", msg.X, msg.Y))
+	case tea.PasteMsg:
+		o.pastes = append(o.pastes, msg.Content)
 	case shellPing:
 		o.got = append(o.got, string(msg))
+		if o.closeOn != "" && string(msg) == o.closeOn {
+			o.closed = true
+		}
 	}
 	return o, nil
 }
@@ -367,6 +387,19 @@ func (a shellAsider) Aside() bool                { return a.aside }
 func (a shellAsider) Badge(now time.Time) string { return "login abc123 · aside" }
 func (a shellAsider) Return()                    { a.aside = false }
 func (a shellAsider) Pending() *backendLogin     { return a.pending }
+
+// shellLeaving is an overlay that holds something open, as a page's
+// listener: Run leaves it.
+type shellLeaving struct {
+	*shellOverlay
+	left *bool
+}
+
+func (l shellLeaving) Update(msg tea.Msg) (overlay, tea.Cmd) {
+	l.shellOverlay.Update(msg)
+	return l, nil
+}
+func (l shellLeaving) Leave(context.Context) { *l.left = true }
 
 func TestTabsRegisterInPlace(t *testing.T) {
 	shellRegistry(t)
@@ -656,6 +689,7 @@ func TestTheDaemonIsPolled(t *testing.T) {
 }
 
 func TestEffectsBecomeTerminalCommands(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
 	shellTabs(t, 10)
 	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
 	shellStart(t, m)
@@ -668,18 +702,34 @@ func TestEffectsBecomeTerminalCommands(t *testing.T) {
 	if got := copyText("abc")(); got != (clipboardMsg{Text: "abc"}) {
 		t.Errorf("copyText gave %+v", got)
 	}
-	for _, msg := range []tea.Msg{handOffMsg{Cmd: c, Done: done}, clipboardMsg{Text: "abc"}, bellMsg{}} {
-		_, cmd := m.Update(msg)
+	for _, e := range []struct {
+		msg  tea.Msg
+		want tea.Msg // what Bubble Tea's own command gives, or nil for any of its own
+	}{
+		{handOffMsg{Cmd: c, Done: done}, nil},
+		{clipboardMsg{Text: "abc"}, tea.SetClipboard("abc")()},
+		{bellMsg{}, tea.Raw("\a")()},
+	} {
+		_, cmd := m.Update(e.msg)
 		if cmd == nil {
-			t.Errorf("%T gave no command", msg)
+			t.Errorf("%T gave no command", e.msg)
 			continue
 		}
-		if got := fmt.Sprintf("%T", cmd()); !strings.HasPrefix(got, "tea.") {
-			t.Errorf("%T became %s, not one of Bubble Tea's own", msg, got)
+		got := cmd()
+		if s := fmt.Sprintf("%T", got); !strings.HasPrefix(s, "tea.") {
+			t.Errorf("%T became %s, not one of Bubble Tea's own", e.msg, s)
+		}
+		if e.want != nil && got != e.want {
+			t.Errorf("%T became %#v, want %#v", e.msg, got, e.want)
 		}
 		if plain(m) != before {
-			t.Errorf("%T changed the view", msg)
+			t.Errorf("%T changed the view", e.msg)
 		}
+	}
+	// Nothing to hand the terminal to is ignored: Bubble Tea would panic on
+	// it and end the program.
+	if _, cmd := m.Update(handOffMsg{Done: done}); cmd != nil {
+		t.Errorf("a hand-off of nothing gave %v", cmd())
 	}
 }
 
@@ -708,7 +758,9 @@ func TestOpenURLUsesTheBrowserOrSaysThereIsNone(t *testing.T) {
 }
 
 func TestExecTailKeepsTheLastWords(t *testing.T) {
-	path := fakecli.Install(t, t.TempDir(), "tailer", fakecli.Spec{
+	bin := t.TempDir()
+	t.Setenv("PATH", bin)
+	path := fakecli.Install(t, bin, "tailer", fakecli.Spec{
 		Stderr: []string{strings.Repeat("x", 6<<10), "boom"},
 		Exit:   3,
 	})
@@ -763,6 +815,7 @@ func TestWatchGatesControlKeys(t *testing.T) {
 }
 
 func TestUpdateDoesNoIO(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
 	shellTabs(t, 10, 30)
 	ticks := &fakeTicks{}
 	var mu sync.Mutex
@@ -781,7 +834,8 @@ func TestUpdateDoesNoIO(t *testing.T) {
 		handOffMsg{Cmd: c, Done: func(error) tea.Msg { return nil }}, clipboardMsg{Text: "c"}, bellMsg{},
 		modelPollMsg{Poll: modelPollList}, modelPollMsg{Poll: modelPollStale}, modelPollMsg{Poll: modelPollDaemon},
 		modelWhoMsg{Who: Principal{Role: "control"}}, tea.BackgroundColorMsg{}, tea.MouseClickMsg{X: 1, Y: 3},
-		tea.MouseWheelMsg{X: 1, Y: 3, Button: tea.MouseWheelDown}, size(30, 10), press("q")[0],
+		tea.MouseWheelMsg{X: 1, Y: 3, Button: tea.MouseWheelDown}, tea.PasteMsg{Content: "p"},
+		handOffMsg{}, size(30, 10), press("q")[0],
 	}
 	assertNoIO(t, b, func() {
 		m.Init()
@@ -814,5 +868,300 @@ func TestStubsAreSafeToOpen(t *testing.T) {
 	s, cmd := s.Update(press("enter")[0])
 	if s == nil || cmd != nil || s.View(80) != "not yet" || s.Typing() || len(s.Keys()) != 0 {
 		t.Errorf("the placeholder step is %#v", s)
+	}
+}
+
+// A call makes one context, which ends with it, so the program's context
+// holds none for long; and it answers for a callee that ignores its
+// deadline or panics, so no kind of call stays in flight for good.
+func TestCallMakesOneContextAndAnswersForItsCallee(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	e := &env{ctx: parent}
+	for range 1000 {
+		e.call(envCallTimeout, func(context.Context) tea.Msg { return nil })()
+		e.call(0, func(context.Context) tea.Msg { return nil })()
+	}
+	children := reflect.ValueOf(parent).Elem().FieldByName("children")
+	if !children.IsValid() {
+		t.Fatalf("%T has no children to count; the test needs another way in", parent)
+	}
+	if n := children.Len(); n != 0 {
+		t.Errorf("after 2000 finished calls the program's context holds %d", n)
+	}
+
+	failed := func(err error) tea.Msg { return shellPing("failed: " + err.Error()) }
+	block := make(chan struct{})
+	defer close(block)
+	start := time.Now()
+	got := e.callOr(20*time.Millisecond, func(context.Context) tea.Msg { <-block; return shellPing("late") }, failed)()
+	if took := time.Since(start); got != shellPing("failed: no answer: context deadline exceeded") || took > envCallGrace+2*time.Second {
+		t.Errorf("a callee that ignored its deadline gave %v after %v", got, took)
+	}
+	got = e.callOr(20*time.Millisecond, func(ctx context.Context) tea.Msg { <-ctx.Done(); return shellPing("its own") }, failed)()
+	if got != shellPing("its own") {
+		t.Errorf("a callee that saw its deadline gave %v, want its own answer", got)
+	}
+	got = e.callOr(time.Second, func(context.Context) tea.Msg { panic("boom") }, failed)()
+	if got != shellPing("failed: the call failed: boom") {
+		t.Errorf("a callee that panicked gave %v", got)
+	}
+	if got, ok := e.call(time.Second, func(context.Context) tea.Msg { panic("boom") })().(toastMsg); !ok || got.Level != levelErr || !strings.Contains(got.Text, "boom") {
+		t.Errorf("call's own answer for a panic is %v", got)
+	}
+}
+
+// The header never stays at a daemon that is gone: a Daemon func that
+// panics is a daemon that does not run, and the next poll asks again.
+func TestADaemonThatFailsIsNotRunning(t *testing.T) {
+	shellTabs(t, 10)
+	ticks := &fakeTicks{}
+	var mu sync.Mutex
+	asked := 0
+	daemon := func(context.Context) Daemon {
+		mu.Lock()
+		asked++
+		n := asked
+		mu.Unlock()
+		if n == 2 {
+			panic("ctl.sock went away")
+		}
+		return Daemon{Running: true}
+	}
+	m := shellModel(t, &fakeBackend{}, ticks, func(o *Options) { o.Daemon = daemon })
+	shellStart(t, m)
+	if !m.e.daemon.Running {
+		t.Fatal("the first answer was not taken")
+	}
+	run(t, m, ticks.advance(5*time.Second)...)
+	if m.e.daemon.Running || !strings.Contains(m.e.daemon.Err, "ctl.sock went away") || !strings.Contains(plain(m), "no daemon") {
+		t.Errorf("after a panic the daemon is %+v and the header\n%s", m.e.daemon, plain(m))
+	}
+	run(t, m, ticks.advance(5*time.Second)...)
+	if !m.e.daemon.Running || asked != 3 {
+		t.Errorf("the next poll did not ask again: asked %d, %+v", asked, m.e.daemon)
+	}
+}
+
+// R29, with the listing's own deadline for a read that refreshes.
+func TestEveryCallHasItsDeadline(t *testing.T) {
+	shellTabs(t, 10)
+	ticks := &fakeTicks{}
+	var mu sync.Mutex
+	got := map[string]time.Duration{}
+	took := func(name string, ctx context.Context) {
+		d := time.Duration(-1)
+		if dl, ok := ctx.Deadline(); ok {
+			d = time.Until(dl)
+		}
+		mu.Lock()
+		got[name] = d
+		mu.Unlock()
+	}
+	b := &fakeBackend{
+		WhoFn: func(ctx context.Context) (Principal, error) { took("Who", ctx); return Principal{Role: "control"}, nil },
+		AccountsFn: func(ctx context.Context, how Refresh) (Listing, error) {
+			took(shellCall{Method: "Accounts", Args: []any{how}}.String(), ctx)
+			return Listing{}, nil
+		},
+	}
+	m := shellModel(t, b, ticks, func(o *Options) {
+		o.Daemon = func(ctx context.Context) Daemon { took("Daemon", ctx); return Daemon{} }
+	})
+	shellStart(t, m)
+	run(t, m, refreshMsg{How: RefreshForce})
+	run(t, m, ticks.advance(15*time.Second)...)
+	want := map[string]time.Duration{
+		"Who": 30 * time.Second, "Accounts(none)": 30 * time.Second, "Daemon": 30 * time.Second,
+		"Accounts(stale)": 60 * time.Second, "Accounts(force)": 60 * time.Second,
+	}
+	for name, w := range want {
+		if d, ok := got[name]; !ok || d > w || d < w-5*time.Second {
+			t.Errorf("%s had %v to answer, want %v", name, d, w)
+		}
+	}
+}
+
+// A timer that fires while its call is still out sends no second one, and
+// sends again once the answer has come.
+func TestATimerSkipsACallStillOut(t *testing.T) {
+	shellTabs(t, 10)
+	ticks := &fakeTicks{}
+	release := make(chan struct{})
+	var mu sync.Mutex
+	daemonAsked := 0
+	b := &fakeBackend{AccountsFn: func(ctx context.Context, how Refresh) (Listing, error) {
+		<-release
+		return Listing{}, nil
+	}}
+	m := shellModel(t, b, ticks, func(o *Options) {
+		o.Daemon = func(context.Context) Daemon {
+			mu.Lock()
+			daemonAsked++
+			mu.Unlock()
+			<-release
+			return Daemon{}
+		}
+	})
+	run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
+	for range 3 {
+		run(t, m, ticks.advance(15*time.Second)...)
+	}
+	run(t, m, ticks.advance(2*time.Minute)...)
+	mu.Lock()
+	asked := daemonAsked
+	mu.Unlock()
+	if none, stale := len(slices.DeleteFunc(b.calls(), func(s string) bool { return s != "Accounts(none)" })),
+		len(slices.DeleteFunc(b.calls(), func(s string) bool { return s != "Accounts(stale)" })); none != 1 || stale != 1 || asked != 1 {
+		t.Errorf("with each call still out: %d cached reads, %d stale reads, %d daemon asks; want one each", none, stale, asked)
+	}
+	close(release)
+	for i := 0; i < 5 && len(harnessDriverOf(t).leftover()) > 0; i++ {
+		await(t, m)
+	}
+	n := b.count()
+	run(t, m, ticks.advance(15*time.Second)...)
+	if got := b.calls()[n:]; !slices.Contains(got, "Accounts(none)") {
+		t.Errorf("once answered, the next tick sent %q", got)
+	}
+}
+
+// Locally the model keeps the attach's window. Over SSH Run owns it, and a
+// resize that differs from it is stale: the model answers it with the
+// latest, and leaves the window alone.
+func TestTheWindowIsTheModelsLocallyAndRunsOverSSH(t *testing.T) {
+	shellTabs(t, 10)
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	run(t, m, size(100, 30))
+	if c, r := m.e.win.size(); c != 100 || r != 30 {
+		t.Errorf("locally the window is %d×%d after a resize to 100×30", c, r)
+	}
+	m = shellModel(t, &fakeBackend{}, &fakeTicks{}, func(o *Options) {
+		o.Resize, o.Remote, o.Cols, o.Rows = make(chan [2]int), true, 80, 24
+	})
+	m.e.win.set(120, 40) // as Run's reader does when a resize arrives
+	_, seen := run(t, m, size(80, 24))
+	if !slices.Contains(seen, tea.Msg(tea.WindowSizeMsg{Width: 120, Height: 40})) {
+		t.Errorf("a stale size was not answered with the latest: saw %v", seen)
+	}
+	if c, r := m.e.win.size(); c != 120 || r != 40 || m.e.width != 120 || m.e.height != 40 {
+		t.Errorf("the window is %d×%d and the model %d×%d, want 120×40", c, r, m.e.width, m.e.height)
+	}
+}
+
+// A paste is typed input: it reaches only what has focus, never a hidden
+// tab or a login flow put aside (I2).
+func TestAPasteGoesOnlyToTheFocus(t *testing.T) {
+	tabs := shellTabs(t, 10, 30)
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	shellStart(t, m)
+	flow := shellAsider{&shellOverlay{asider: true}}
+	run(t, m, openMsg{O: flow}, press("esc")[0], press("3")[0], tea.PasteMsg{Content: "question for Ask"})
+	if !slices.Equal(tabs[30].pastes, []string{"question for Ask"}) || len(tabs[10].pastes) != 0 || len(flow.pastes) != 0 {
+		t.Errorf("the paste reached the shown tab %q, the hidden one %q and the flow aside %q", tabs[30].pastes, tabs[10].pastes, flow.pastes)
+	}
+	o := &shellOverlay{}
+	run(t, m, openMsg{O: o}, tea.PasteMsg{Content: "code"})
+	if !slices.Equal(o.pastes, []string{"code"}) || len(tabs[30].pastes) != 1 {
+		t.Errorf("with an overlay open the paste reached it %q and the tab %q", o.pastes, tabs[30].pastes)
+	}
+	run(t, m, size(40, 10), tea.PasteMsg{Content: "unseen"}, size(80, 24))
+	if len(o.pastes) != 1 {
+		t.Errorf("a paste while too small reached %q", o.pastes)
+	}
+}
+
+// One flow at a time (R17) holds with the flow open as well as aside, and
+// the result is its parked login either way (R18).
+func TestOneLoginFlowAtATime(t *testing.T) {
+	tabs := shellTabs(t, 10)
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	shellStart(t, m)
+	first := shellAsider{&shellOverlay{asider: true, pending: &backendLogin{ID: "first"}}}
+	run(t, m, openMsg{O: first})
+	if got := m.result().Pending; got == nil || got.ID != "first" {
+		t.Errorf("with the flow open the result is %+v", got)
+	}
+	second := shellAsider{&shellOverlay{asider: true, pending: &backendLogin{ID: "second"}}}
+	run(t, m, openMsg{O: second}, press("k")[0])
+	if !slices.Equal(first.keys, []string{"k"}) || len(second.keys) != 0 || len(m.stack) != 1 {
+		t.Errorf("a second flow over an open one: first %q, second %q, %d open", first.keys, second.keys, len(m.stack))
+	}
+	// An overlay that a message closes gives the keys back at once.
+	o := &shellOverlay{closeOn: "done"}
+	run(t, m, openMsg{O: o}, shellPing("done"), press("j")[0])
+	if !o.closed || !slices.Equal(first.keys, []string{"k", "j"}) || len(tabs[10].keys) != 0 {
+		t.Errorf("after a message closed the top: under it %q, tab %q", first.keys, tabs[10].keys)
+	}
+}
+
+// Every goroutine the shell starts and every Leave recovers (F31): a panic
+// there is said, and the rest still runs.
+func TestPanicsInTheShellsOwnGoroutinesAreSaid(t *testing.T) {
+	var mu sync.Mutex
+	var sent []tea.Msg
+	send := func(msg tea.Msg) { mu.Lock(); sent = append(sent, msg); mu.Unlock() }
+	var wg sync.WaitGroup
+	programGo(&wg, send, "testing", func() { panic("boom") })
+	wg.Wait()
+	if len(sent) != 1 || sent[0] != (toastMsg{Text: "testing failed: boom", Level: levelErr}) {
+		t.Errorf("the panic was said as %v", sent)
+	}
+
+	tabs := shellTabs(t, 10, 30)
+	tabs[10].leaveFails = "no way out"
+	left := make(chan time.Duration, 1)
+	tabs[30].left = left
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	overlayLeft := false
+	m.stack = []overlay{shellLeaving{&shellOverlay{}, &overlayLeft}, &shellOverlay{}}
+	err := programLeave(m.leavers())
+	if err == nil || err.Error() != "tui: leaving Ten: no way out" {
+		t.Errorf("Leave's panic is %q, want one line naming the tab", err)
+	}
+	if len(left) != 1 || !overlayLeft {
+		t.Errorf("after one panicked the rest were not left: tab %d, overlay %v", len(left), overlayLeft)
+	}
+}
+
+func TestTheBackgroundPicksTheTheme(t *testing.T) {
+	shellTabs(t, 10)
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	run(t, m, tea.BackgroundColorMsg{Color: color.White})
+	if m.e.th.Dark {
+		t.Error("a white background gave the dark theme")
+	}
+	run(t, m, tea.BackgroundColorMsg{}, tea.BackgroundColorMsg{Color: color.Black})
+	if !m.e.th.Dark {
+		t.Error("a black background gave the light theme")
+	}
+}
+
+// A process the command leaves behind holding its stderr does not keep
+// the TUI from coming back (I4).
+func TestExecTailDoesNotWaitForWhatTheCommandLeftBehind(t *testing.T) {
+	bin := t.TempDir()
+	t.Setenv("PATH", bin)
+	ready := filepath.Join(t.TempDir(), "helper.pid")
+	helper := fakecli.Install(t, bin, "helper", fakecli.Spec{Ready: ready, Sleep: "30s"})
+	cli := fakecli.Install(t, bin, "cli", fakecli.Spec{Detach: helper, Stderr: []string{"bye"}})
+	tl := execTail(exec.Command(cli))
+	tl.SetStdin(strings.NewReader(""))
+	tl.SetStdout(io.Discard)
+	tl.SetStderr(io.Discard)
+	start := time.Now()
+	err := tl.Run()
+	took := time.Since(start)
+	pid := fakecli.WaitReady(t, ready)
+	t.Cleanup(func() {
+		if p, err := os.FindProcess(pid); err == nil {
+			p.Kill()
+		}
+	})
+	if err != nil || took > effectsWaitDelay+5*time.Second {
+		t.Errorf("Run returned %v after %v, with the helper still holding stderr", err, took)
+	}
+	if got := tl.Last(); got != "bye" {
+		t.Errorf("Last is %q", got)
 	}
 }

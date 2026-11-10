@@ -27,6 +27,8 @@ type Options struct {
 	// {cols, rows}; an SSH session sets them, where no terminal can be
 	// asked. Run is the one reader of Resize: it hands every size to the
 	// model, and to an attach that holds the terminal meanwhile (Attach).
+	// Once Run has returned nobody reads it, so its sender must not block
+	// on it for ever.
 	Cols, Rows int
 	Resize     <-chan [2]int
 
@@ -49,10 +51,16 @@ type Options struct {
 	OpenURL func(url string) error
 
 	// Attach opens a held session on account and attaches it to the
-	// terminal: the command to hand the terminal to. size answers the
-	// terminal's size whenever asked, and resized has a value each time it
-	// changes, while the attach holds the terminal; the shell makes both
-	// (env.window). Nil: an account's CLI runs directly through Exec.
+	// terminal: the command to hand the terminal to. Nil: an account's CLI
+	// runs directly through Exec.
+	//
+	// size and resized come from the shell (env.window) and follow
+	// Options.Resize: over SSH, size answers the latest size and resized has
+	// a value each time it changes, even while the attach holds the
+	// terminal. Locally there is no Resize, and Bubble Tea delivers nothing
+	// while it has handed the terminal over, so they hold the size at the
+	// hand-off and never signal: a local attach watches its own terminal
+	// (SIGWINCH) instead.
 	Attach func(ctx context.Context, account int, size func() (cols, rows int), resized <-chan struct{}) (Attached, error)
 
 	// Now and Loc are the clock and the zone times are shown in. Nil means
@@ -87,6 +95,16 @@ type Live struct {
 // Attached is a held session's attach, as Options.Attach makes it: a
 // command Bubble Tea hands the terminal to, which says how it ended once it
 // has.
+//
+// Run must leave no read of the reader SetStdin gave it pending when it
+// returns: the TUI reads that input again at once, and a read left behind
+// would take the next key typed to the TUI into a session it has left. An
+// attach hands its input through a channel it stops reading, or cancels its
+// reader, before Run returns.
+//
+// SetStderr is always given os.Stderr, which over SSH is the daemon's
+// stderr, not the person's channel: an attach over SSH writes what the
+// person should read to the SetStdout writer.
 type Attached interface {
 	tea.ExecCommand
 	// Ended is how the attach ended. It is read after Run returns.

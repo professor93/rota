@@ -2,10 +2,12 @@ package tui
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 )
@@ -56,11 +58,12 @@ func openURL(e *env, url string) tea.Cmd {
 func (m *Model) effect(msg tea.Msg) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case handOffMsg:
-		done := msg.Done
-		if done == nil {
-			done = func(error) tea.Msg { return nil }
+		// Nothing to hand the terminal to (an Attach that answered nil, nil)
+		// is ignored: Bubble Tea would panic on it and end the program.
+		if msg.Cmd == nil {
+			return nil, true
 		}
-		return tea.Exec(msg.Cmd, done), true
+		return tea.Exec(msg.Cmd, msg.Done), true
 	case clipboardMsg:
 		return tea.SetClipboard(msg.Text), true
 	case bellMsg:
@@ -69,13 +72,24 @@ func (m *Model) effect(msg tea.Msg) (tea.Cmd, bool) {
 	return nil, false
 }
 
-// effectsTailSize is how much of a command's stderr tailed keeps.
-const effectsTailSize = 4 << 10
+const (
+	// effectsTailSize is how much of a command's stderr tailed keeps.
+	effectsTailSize = 4 << 10
+	// effectsWaitDelay is how long tailed waits, after its command exits,
+	// for whatever else holds the command's stderr.
+	effectsWaitDelay = 2 * time.Second
+)
 
 // tailed is a command handed the terminal that keeps the last 4 KiB of
 // what it writes to stderr, so a failure can be said in a toast after the
 // alternate screen comes back and hides it (R28). Everything still reaches
-// the writer the program set.
+// the writer the program set; the command's stderr is then a pipe, not the
+// terminal itself.
+//
+// A process the command leaves behind holding that pipe (an MCP server, an
+// updater) would keep Run from returning, and the TUI from coming back, for
+// as long as it lives. So Run waits effectsWaitDelay past the command's
+// exit at most, and a command that exited cleanly is then a success.
 type tailed struct {
 	c      *exec.Cmd
 	stderr io.Writer
@@ -109,7 +123,12 @@ func (t *tailed) Run() error {
 		w = t.c.Stderr
 	}
 	t.c.Stderr = effectsTee{tail: t.tail, w: w}
-	return t.c.Run()
+	t.c.WaitDelay = effectsWaitDelay
+	err := t.c.Run()
+	if errors.Is(err, exec.ErrWaitDelay) {
+		err = nil
+	}
+	return err
 }
 
 // Last is the last line of the tail that is not blank, trimmed.

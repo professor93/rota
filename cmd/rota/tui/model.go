@@ -178,6 +178,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.key(msg)
 	case tea.MouseMsg:
 		return m, m.mouseAt(msg)
+	case tea.PasteMsg, tea.PasteStartMsg, tea.PasteEndMsg:
+		// A paste is typed input: it goes where a key would, never to a
+		// hidden tab or a flow put aside.
+		if m.small() {
+			return m, nil
+		}
+		return m, m.toFocus(msg)
 	case openMsg:
 		m.open(msg.O)
 		return m, nil
@@ -186,7 +193,14 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.e.width, m.e.height = msg.Width, msg.Height
-		m.e.win.set(msg.Width, msg.Height)
+		if m.e.o.Resize == nil {
+			m.e.win.set(msg.Width, msg.Height)
+		} else if c, r := m.e.win.size(); c != msg.Width || r != msg.Height {
+			// Run owns the size over SSH. One that differs is stale, as
+			// Bubble Tea's own first size is when a resize was already
+			// waiting: answer it with the latest, which converges.
+			cmds = append(cmds, func() tea.Msg { return tea.WindowSizeMsg{Width: c, Height: r} })
+		}
 	case tea.BackgroundColorMsg:
 		if msg.Color != nil {
 			m.e.th = NewTheme(m.e.th.Profile, msg.IsDark())
@@ -487,15 +501,14 @@ func modelFrame(s string, w, h int) string {
 func (m *Model) askWho() tea.Cmd {
 	m.whoAsked = true
 	b := m.e.b
-	return m.e.call(envCallTimeout, func(ctx context.Context) tea.Msg {
+	return m.e.callOr(envCallTimeout, func(ctx context.Context) tea.Msg {
 		p, err := b.Who(ctx)
 		return modelWhoMsg{Who: p, Err: err}
-	})
+	}, func(err error) tea.Msg { return modelWhoMsg{Err: err} })
 }
 
-// askAccounts reads the listing. A read that refreshes usage waits on the
-// providers, up to the store's own refresh timeout, so it has a login
-// finish's deadline rather than an ordinary call's.
+// askAccounts reads the listing. A read that refreshes usage has
+// envRefreshTimeout rather than an ordinary call's deadline.
 func (m *Model) askAccounts(how Refresh) tea.Cmd {
 	if how < RefreshNone || how > RefreshForce {
 		how = RefreshNone
@@ -503,20 +516,22 @@ func (m *Model) askAccounts(how Refresh) tea.Cmd {
 	m.listing[how]++
 	b, d := m.e.b, envCallTimeout
 	if how != RefreshNone {
-		d = envFinishTimeout
+		d = envRefreshTimeout
 	}
-	return m.e.call(d, func(ctx context.Context) tea.Msg {
+	return m.e.callOr(d, func(ctx context.Context) tea.Msg {
 		l, err := b.Accounts(ctx, how)
 		return listingMsg{Listing: l, Err: err, How: how}
-	})
+	}, func(err error) tea.Msg { return listingMsg{Err: err, How: how} })
 }
 
+// askDaemon asks Options.Daemon. One that panics or does not answer is a
+// daemon that does not run, so the header never stays at a daemon gone.
 func (m *Model) askDaemon() tea.Cmd {
 	m.daemonAt = true
 	ask := m.e.o.Daemon
-	return m.e.call(envCallTimeout, func(ctx context.Context) tea.Msg {
+	return m.e.callOr(envCallTimeout, func(ctx context.Context) tea.Msg {
 		return daemonMsg{Daemon: ask(ctx)}
-	})
+	}, func(err error) tea.Msg { return daemonMsg{Daemon: Daemon{Err: err.Error()}} })
 }
 
 func (m *Model) pollIn(p modelPoll) tea.Cmd {

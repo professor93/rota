@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -16,6 +17,14 @@ import (
 const (
 	envCallTimeout   = 30 * time.Second
 	envFinishTimeout = 60 * time.Second
+	// envRefreshTimeout is a listing read that refreshes usage (stale or
+	// forced). The server first takes a run slot for it, which can wait
+	// while Asks run, and then refreshes under the store's RefreshTimeout,
+	// 30 s plus a 5 s margin; 30 s would cut a refresh that is going well.
+	envRefreshTimeout = 60 * time.Second
+	// envCallGrace is how long a call waits, past its deadline, for a callee
+	// that has not noticed it, before it answers for the callee.
+	envCallGrace = time.Second
 )
 
 // env is what the shell shares with every tab and overlay: the Backend, the
@@ -61,22 +70,63 @@ func (e *env) gate(bs ...*key.Binding) {
 
 // call is a command that runs f under a deadline of d from now, and under
 // the program's life, and returns what f returns. A d of zero or less sets
-// no deadline but the program's.
+// no deadline but the program's. A failure f cannot answer for itself, a
+// panic or a deadline it ignored, is a levelErr toast; callOr says what it
+// is instead.
 func (e *env) call(d time.Duration, f func(ctx context.Context) tea.Msg) tea.Cmd {
+	return e.callOr(d, f, func(err error) tea.Msg {
+		return toastMsg{Text: err.Error(), Level: levelErr}
+	})
+}
+
+// callOr is call, with failed making the message for a call that panicked,
+// or that had not returned envCallGrace after its context ended. Such a
+// callee is left to finish by itself and what it returns goes nowhere, so
+// a kind of call kept in flight until its answer comes is never stuck there.
+func (e *env) callOr(d time.Duration, f func(ctx context.Context) tea.Msg, failed func(error) tea.Msg) tea.Cmd {
 	parent := e.ctx
 	return func() tea.Msg {
-		ctx, cancel := context.WithCancel(parent)
+		var (
+			ctx    context.Context
+			cancel context.CancelFunc
+		)
 		if d > 0 {
 			ctx, cancel = context.WithTimeout(parent, d)
+		} else {
+			ctx, cancel = context.WithCancel(parent)
 		}
 		defer cancel()
-		return f(ctx)
+		got := make(chan tea.Msg, 1)
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					got <- failed(fmt.Errorf("the call failed: %v", r))
+				}
+			}()
+			got <- f(ctx)
+		}()
+		select {
+		case msg := <-got:
+			return msg
+		case <-ctx.Done():
+		}
+		grace := time.NewTimer(envCallGrace)
+		defer grace.Stop()
+		select {
+		case msg := <-got:
+			return msg
+		case <-grace.C:
+			return failed(fmt.Errorf("no answer: %w", ctx.Err()))
+		}
 	}
 }
 
 // window is the terminal's size for an attach that holds it (Options.Attach):
 // size answers the latest, resized has a value each time it changes, and
-// release, called once the attach has ended, stops the signals.
+// release, called once the attach has ended, stops the signals. Both follow
+// Options.Resize, which Run reads even while Bubble Tea is held. Locally
+// there is none: they hold the size at the hand-off and never signal, and a
+// local attach watches its own terminal.
 func (e *env) window() (size func() (cols, rows int), resized <-chan struct{}, release func()) {
 	ch, release := e.win.watch()
 	return e.win.size, ch, release
@@ -84,8 +134,10 @@ func (e *env) window() (size func() (cols, rows int), resized <-chan struct{}, r
 
 // envWindow is the terminal's latest size, shared between the model, Run's
 // reader of Options.Resize and an attach that holds the terminal, which
-// asks for it from its own goroutine. While an attach runs, Bubble Tea
-// calls no Update, so Run sets it directly.
+// asks for it from its own goroutine. With Options.Resize, Run alone sets
+// it, as each size arrives, since Bubble Tea calls no Update while an attach
+// runs and may deliver its own first size after a later one. Without, the
+// model sets it on each resize.
 type envWindow struct {
 	mu         sync.Mutex
 	cols, rows int

@@ -106,7 +106,20 @@ func TestKeysComeOnlyFromBindings(t *testing.T) {
 		}
 		// Every binding is made inside a function whose name ends in Keys,
 		// so the keys of a view are in one place and its help is drawn
-		// from them.
+		// from them. The key package is found by its path, under whatever
+		// name the file imports it.
+		pkg := ""
+		for _, imp := range f.parsed.Imports {
+			if imp.Path.Value == `"charm.land/bubbles/v2/key"` {
+				pkg = "key"
+				if imp.Name != nil {
+					pkg = imp.Name.Name
+				}
+			}
+		}
+		if pkg == "" {
+			continue
+		}
 		ast.Inspect(f.parsed, func(n ast.Node) bool {
 			switch d := n.(type) {
 			case *ast.FuncDecl:
@@ -115,7 +128,7 @@ func TestKeysComeOnlyFromBindings(t *testing.T) {
 				}
 			case *ast.CallExpr:
 				if sel, ok := d.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "NewBinding" {
-					if id, ok := sel.X.(*ast.Ident); ok && id.Name == "key" {
+					if id, ok := sel.X.(*ast.Ident); ok && id.Name == pkg {
 						t.Errorf("%s:%d makes a key.Binding outside a function whose name ends in Keys", f.name, f.fset.Position(d.Pos()).Line)
 					}
 				}
@@ -139,6 +152,10 @@ func TestTheBannedCallsStayOut(t *testing.T) {
 		{regexp.MustCompile(`\b(textinput|textarea)\.Paste\b`), nil, "Paste reads the clipboard of the machine the TUI runs on"},
 		{regexp.MustCompile(`\.CopySelection\(`), nil, "CopySelection writes the clipboard of the machine the TUI runs on"},
 		{regexp.MustCompile(`\bDefaultKeyMap\b`), []string{"theme_test.go"}, "a default key map binds the clipboard again"},
+		// R31: every terminal effect is a message of this package, which the
+		// shell turns into Bubble Tea's own command in effects.go; a test
+		// compares what it became with Bubble Tea's.
+		{regexp.MustCompile(`\btea\.(Exec|ExecProcess|SetClipboard|Raw)\(`), []string{"effects.go", "shell_test.go"}, "a terminal effect goes through the shell: handOff, copyText or bellMsg (R31)"},
 	}
 	for _, f := range rulesFiles(t) {
 		if f.name == "rules_test.go" {

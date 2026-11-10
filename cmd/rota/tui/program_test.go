@@ -3,6 +3,7 @@ package tui
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"runtime"
 	"strings"
@@ -113,7 +114,7 @@ func TestRunHandsEveryResizeOnAndLeavesEachTab(t *testing.T) {
 		Rows:    24,
 		Resize:  resize,
 	})
-	e := <-envs
+	e := programRecv(t, envs, "the tab was never made")
 	programSize(t, sizes, [2]int{80, 24})
 	size, resized, release := e.window()
 	if c, r := size(); c != 80 || r != 24 {
@@ -132,7 +133,7 @@ func TestRunHandsEveryResizeOnAndLeavesEachTab(t *testing.T) {
 	// While the program is held, as it is while an attach has the
 	// terminal, the attach still hears of every resize.
 	programType(in, "b")
-	<-held
+	programRecv(t, held, "the key that holds the program never reached it")
 	resize <- [2]int{110, 35}
 	select {
 	case <-resized:
@@ -163,6 +164,58 @@ func TestRunHandsEveryResizeOnAndLeavesEachTab(t *testing.T) {
 		}
 	default:
 		t.Error("the tab was never left")
+	}
+}
+
+// programRecv is the next value from ch, or a failure after five seconds.
+func programRecv[T any](t *testing.T, ch <-chan T, why string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatal(why)
+		var zero T
+		return zero
+	}
+}
+
+// A resize already waiting when Run starts (a pane that settles its size
+// as the session opens) is where the screen and the attach's window end
+// up, though Bubble Tea delivers its own first size after it (I3).
+func TestRunTakesAResizeWaitingBeforeItStarts(t *testing.T) {
+	for i := range 5 {
+		t.Run(fmt.Sprint(i), func(t *testing.T) {
+			shellRegistry(t)
+			sizes := make(chan [2]int, 32)
+			envs := make(chan *env, 1)
+			register(10, func(e *env) tab { envs <- e; return &shellTab{title: "Ten", sizes: sizes} })
+			resize := make(chan [2]int, 1)
+			resize <- [2]int{120, 40}
+			in, wait := programRun(t, Options{
+				Backend: &fakeBackend{}, Out: &programOut{}, Env: []string{"TERM=xterm"},
+				Remote: true, Cols: 80, Rows: 24, Resize: resize,
+			})
+			e := programRecv(t, envs, "the tab was never made")
+			last := [2]int{}
+			for quiet := time.NewTimer(5 * time.Second); ; {
+				select {
+				case s := <-sizes:
+					last = s
+					quiet.Reset(300 * time.Millisecond)
+					continue
+				case <-quiet.C:
+				}
+				break
+			}
+			if c, r := e.win.size(); last != [2]int{120, 40} || c != 120 || r != 40 {
+				t.Errorf("the model ended at %v and the attach's window at %d×%d; the terminal is 120×40", last, c, r)
+			}
+			programType(in, "qq")
+			if _, err := wait(); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+		})
 	}
 }
 
