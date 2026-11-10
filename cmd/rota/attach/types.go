@@ -49,8 +49,10 @@ const (
 	// Ended is the session itself ending while it was shown: its CLI exited,
 	// or its holder went without saying how.
 	Ended
-	// Lost is the link to the daemon going, and not coming back while it was
-	// redialled. The session may well go on.
+	// Lost is the attach ending while the session may go on: the link to the
+	// daemon gone and not back within the redial, the context ended (a
+	// signal, or the SSH connection closing), or the person's terminal
+	// failing a write.
 	Lost
 	// Refused is the attach never starting: no such session, one that is not
 	// attachable, or a daemon that said no.
@@ -94,17 +96,18 @@ func (r Result) ExitCode() int {
 }
 
 // Options are what a caller sets on an attach. The zero value is a local
-// attach that takes the keyboard, with Ctrl-\, no first-attach card and no
-// redial.
+// attach that types where the keyboard rules allow it, with Ctrl-\, no
+// first-attach card and no redial.
 type Options struct {
 	// Key is the chord key, a control byte, named to the person as KeyName
 	// names it. 0 is DefaultKey. The daemon names the one `[terminal]
 	// detach_key` sets.
 	Key byte
 
-	// Watch shows the session without taking its keyboard. What the person
-	// types is dropped here rather than sent and refused, and the chord is
-	// still read, so d, n, p, z and ? work and k takes the keyboard.
+	// Watch shows the session and never types into it. What the person
+	// types is dropped here rather than sent and refused. The chord is still
+	// read, so d, n, p and ? work, and z and k are answered with a note,
+	// since a watcher neither fits the session nor holds its keyboard.
 	Watch bool
 
 	// Settle drops the replies the person's terminal still owes to whatever
