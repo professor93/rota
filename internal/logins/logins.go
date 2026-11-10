@@ -1,7 +1,8 @@
 // Package logins is what the store, the HTTP API and the rota command share
 // about a login between its two halves, and keep out of the SDK: how long a
-// parked login is kept, which refusals no approval can put right, and how a
-// login just begun is shown in a reply.
+// parked login is kept, which refusals no approval can put right, which say
+// the account signs in through its own CLI, and how a login just begun is
+// shown in a reply.
 package logins
 
 import (
@@ -37,6 +38,23 @@ func Unfinishable(err error) bool {
 type unfinishable struct{ error }
 
 func (u unfinishable) Unwrap() error { return u.error }
+
+// MarkDelegated marks a refusal to begin a login for an account whose own CLI
+// signs it in, which Delegated then reports. It is otherwise the refusal it
+// carries, the rota.ErrInvalidRequest beneath it and all.
+func MarkDelegated(err error) error { return delegated{err} }
+
+// Delegated reports whether err is the store refusing to begin a login for an
+// account that signs in through its own CLI, so that a caller can send the
+// person there instead of to a browser.
+func Delegated(err error) bool {
+	var d delegated
+	return errors.As(err, &d)
+}
+
+type delegated struct{ error }
+
+func (d delegated) Unwrap() error { return d.error }
 
 // Reply is a login just begun as `rota login --json` and POST /v1/login show
 // it: everything rota.Login says about it but its State, and the account it
