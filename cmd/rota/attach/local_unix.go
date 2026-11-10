@@ -3,6 +3,7 @@
 package attach
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"unsafe"
+
+	"github.com/muesli/cancelreader"
 
 	"github.com/professor93/rota/internal/pty"
 )
@@ -33,12 +36,19 @@ var localNotATerminal = errors.New("attach: standard input is not a terminal")
 // among them, and the CLI's own terminal does the echoing and editing. The
 // window's size is asked of in each time, and Resized fires on SIGWINCH.
 //
-// restore must be called on every way out: it sets the settings Local found,
-// stops following the window, and drops whatever was typed and not yet read,
-// such as the key release a kitty terminal reports after the last key, so it
-// never reaches the shell. It is safe to call twice, and the second call does
-// nothing. An in that is not a terminal is refused, and then t and restore
-// are nil.
+// One goroutine reads in and sends each chunk on Input. Its read can be
+// cancelled without taking a byte: it waits for in to be readable, and
+// restore wakes it.
+//
+// restore must be called on every way out, and at once when the attach
+// returns: a key typed between the attach's last receive and restore is
+// dropped, taken by the reader or flushed, as everything typed before the
+// terminal is handed back is. restore stops that reader, so a key typed
+// after it is read by whatever reads in next and by nothing else; then it sets the settings Local found, stops following the window,
+// and drops whatever was typed and not yet read, such as the key release a
+// kitty terminal reports after the last key, so it never reaches the shell.
+// It is safe to call twice, and the second call does nothing. An in that is
+// not a terminal is refused, and then t and restore are nil.
 func Local(in, out *os.File) (t Terminal, restore func(), err error) {
 	before, err := localTermios(in)
 	if err != nil {
@@ -50,9 +60,17 @@ func Local(in, out *os.File) (t Terminal, restore func(), err error) {
 	if err := localSetTermios(in, localRaw(before)); err != nil {
 		return nil, nil, fmt.Errorf("attach: making the terminal raw: %w", err)
 	}
+	reader, err := cancelreader.NewReader(in)
+	if err != nil {
+		_ = localSetTermios(in, before)
+		return nil, nil, fmt.Errorf("attach: reading the terminal: %w", err)
+	}
 	l := &localTerm{
 		in:      in,
 		out:     out,
+		reader:  reader,
+		input:   make(chan []byte),
+		pumped:  make(chan struct{}),
 		winch:   make(chan os.Signal, 1),
 		resized: make(chan struct{}, 1),
 		done:    make(chan struct{}),
@@ -61,15 +79,45 @@ func Local(in, out *os.File) (t Terminal, restore func(), err error) {
 	l.Size()
 	signal.Notify(l.winch, syscall.SIGWINCH)
 	go l.follow()
+	go l.pump()
 	var once sync.Once
 	return l, func() {
 		once.Do(func() {
-			signal.Stop(l.winch)
+			// The reader first, before anything is put back: once it has
+			// stopped, no key is taken from in on nobody's behalf.
 			close(l.done)
+			if l.reader.Cancel() {
+				// A reader that cannot be woken, cancelreader's fallback,
+				// is not waited for: it ends at the next key, and drops it.
+				<-l.pumped
+			}
+			_ = l.reader.Close()
+			signal.Stop(l.winch)
 			_ = localSetTermios(in, before)
 			_ = localFlushInput(in)
 		})
 	}, nil
+}
+
+// pump reads in and hands each chunk to Input, until the read fails or
+// restore cancels it. Input is closed as it stops.
+func (l *localTerm) pump() {
+	defer close(l.pumped)
+	defer close(l.input)
+	buf := make([]byte, 4096)
+	for {
+		n, err := l.reader.Read(buf)
+		if n > 0 {
+			select {
+			case l.input <- bytes.Clone(buf[:n]):
+			case <-l.done:
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
 }
 
 // localRaw is before with everything the terminal does on its own turned
@@ -95,13 +143,16 @@ type localSize struct{ cols, rows int }
 // localTerm is Local's Terminal.
 type localTerm struct {
 	in, out *os.File
+	reader  cancelreader.CancelReader
+	input   chan []byte
+	pumped  chan struct{} // closed once pump has stopped
 	winch   chan os.Signal
 	resized chan struct{}
 	done    chan struct{}
 	last    atomic.Value // localSize: the last size the terminal gave
 }
 
-func (l *localTerm) Read(p []byte) (int, error)  { return l.in.Read(p) }
+func (l *localTerm) Input() <-chan []byte        { return l.input }
 func (l *localTerm) Write(p []byte) (int, error) { return l.out.Write(p) }
 func (l *localTerm) Resized() <-chan struct{}    { return l.resized }
 
@@ -147,9 +198,10 @@ func localSetTermios(f *os.File, t syscall.Termios) error {
 	return localIoctl(f, localSetTermiosNow, unsafe.Pointer(&t))
 }
 
-// localIoctl runs one ioctl on f without taking its descriptor out of the
-// runtime's poller, as internal/pty does: os.File.Fd would put it in
-// blocking mode, and a blocking read cannot be woken by closing the file.
+// localIoctl runs one ioctl on f through its SyscallConn, as internal/pty
+// does. cancelreader calls Fd on the same file, which leaves it in blocking
+// mode; that costs nothing here, since Local's reads are woken by
+// cancelreader's own pipe, never by closing the file or by a deadline.
 func localIoctl(f *os.File, req uintptr, arg unsafe.Pointer) error {
 	conn, err := f.SyscallConn()
 	if err != nil {

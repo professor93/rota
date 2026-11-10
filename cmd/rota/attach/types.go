@@ -27,13 +27,20 @@ import (
 // Ctrl-] was not taken because Claude Code binds it itself.
 const DefaultKey byte = 0x1c
 
-// Terminal is the person's side of an attach. Read is what they type, Write
+// Terminal is the person's side of an attach. Input is what they type, Write
 // is their screen, Size is their window in cells, and Resized fires when that
 // window changes, after which Size reads the new one. It is the person's own
 // terminal for `rota run --attach`, an SSH channel with a pty, or the TUI's
 // screen handed over for the attach.
+//
+// Whoever made the Terminal owns its reads: one goroutine of theirs reads it
+// and sends each chunk on Input, a chunk the receiver keeps, and closes Input
+// when the input ends. An attach receives from Input only while it runs, and
+// never once it has returned, so a key typed after it is read by whatever
+// reads the terminal next. A reader that is never waited on, one blocked in
+// Read when the attach ends, would instead take that key and drop it.
 type Terminal interface {
-	io.Reader
+	Input() <-chan []byte
 	io.Writer
 	Size() (cols, rows int)
 	Resized() <-chan struct{}

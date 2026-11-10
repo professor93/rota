@@ -4,6 +4,7 @@ package attach
 
 import (
 	"os"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -47,6 +48,22 @@ func localReadWithin(t *testing.T, what string, r interface{ Read([]byte) (int, 
 			t.Fatalf("reading %s: %v", what, g.err)
 		}
 		return g.s
+	case <-time.After(5 * time.Second):
+		t.Fatalf("reading %s: nothing within 5s", what)
+	}
+	return ""
+}
+
+// localInputWithin receives one chunk of term's Input, failing the test if
+// nothing comes within five seconds or Input is closed.
+func localInputWithin(t *testing.T, what string, term Terminal) string {
+	t.Helper()
+	select {
+	case p, ok := <-term.Input():
+		if !ok {
+			t.Fatalf("reading %s: Input was closed", what)
+		}
+		return string(p)
 	case <-time.After(5 * time.Second):
 		t.Fatalf("reading %s: nothing within 5s", what)
 	}
@@ -100,13 +117,13 @@ func TestLocalRestoresWhatItChanged(t *testing.T) {
 		t.Errorf("Size = %dx%d, want 100x30", c, r)
 	}
 
-	// A key reaches Read as typed, with no line to wait for, and Ctrl-\ is a
-	// byte rather than a signal.
+	// A key reaches Input as typed, with no line to wait for, and Ctrl-\ is
+	// a byte rather than a signal.
 	if _, err := master.Write([]byte("a\x1c")); err != nil {
 		t.Fatal(err)
 	}
-	if got := localReadWithin(t, "a key", term, 2); got != "a" && got != "a\x1c" {
-		t.Errorf("Read = %q, want the keys as typed", got)
+	if got := localInputWithin(t, "a key", term); got != "a" && got != "a\x1c" {
+		t.Errorf("Input = %q, want the keys as typed", got)
 	}
 	// Output is written as it is, with no newline turned into CR LF.
 	if _, err := term.Write([]byte("out\n")); err != nil {
@@ -141,8 +158,8 @@ func TestLocalRestoresWhatItChanged(t *testing.T) {
 	}
 	// Reading the x proves the ! has arrived beside it, written together.
 	for {
-		got := localReadWithin(t, "the typed x", term, 1)
-		if got == "x" {
+		got := localInputWithin(t, "the typed x", term)
+		if strings.HasPrefix(got, "x") {
 			break
 		}
 		if got != "\x1c" {
@@ -150,6 +167,9 @@ func TestLocalRestoresWhatItChanged(t *testing.T) {
 		}
 	}
 	restore()
+	if _, ok := <-term.Input(); ok {
+		t.Error("Input was not closed by restore")
+	}
 
 	after := localMustTermios(t, slave)
 	if after.Lflag != before.Lflag || after.Iflag != before.Iflag || after.Oflag != before.Oflag || after.Cflag != before.Cflag {
@@ -200,5 +220,33 @@ func TestLocalRefusesAPipe(t *testing.T) {
 	}
 	if term != nil || restore != nil {
 		t.Error("Local on a pipe handed back a terminal or a restore")
+	}
+}
+
+// TestLocalLeavesTheNextKeyToTheNextReader: once restore has run, Local's
+// reader takes nothing more, so the first key typed after an attach reaches
+// whatever reads the terminal next, the TUI or the shell, and is not taken
+// and dropped by a read left over from the attach.
+func TestLocalLeavesTheNextKeyToTheNextReader(t *testing.T) {
+	master, slave := localPair(t, 80, 24)
+	term, restore, err := Local(slave, slave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := master.Write([]byte("a")); err != nil {
+		t.Fatal(err)
+	}
+	if got := localInputWithin(t, "the key during the attach", term); got != "a" {
+		t.Fatalf("Input = %q, want a", got)
+	}
+	// Nobody receives from Input now: the attach has returned, and its
+	// reader is waiting for the next key when restore stops it.
+	time.Sleep(20 * time.Millisecond)
+	restore()
+	if _, err := master.Write([]byte("z\n")); err != nil {
+		t.Fatal(err)
+	}
+	if got := localReadWithin(t, "the key after the attach", slave, 64); got != "z\n" {
+		t.Errorf("the next reader got %q, want %q", got, "z\n")
 	}
 }
