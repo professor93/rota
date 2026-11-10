@@ -1362,6 +1362,34 @@ transcript is copied into the target's home before the launch, so a
 conversation continues where the quota ran out — on the next account.
 Credentials never move with it.
 
+A claude conversation that moves to an account in another organization can
+lose its earlier thinking on the way. This is read from Claude Code
+2.1.322's own code, not measured. Claude Code notes the organization a
+conversation was written in, and the models its catalog marks as keeping
+thinking to that organization — Sonnet 5.5, Haiku 5.5 and Fable 5.2 there,
+not Opus 5.5 or anything older — cannot use thinking written in another.
+When it sees the change, it says so: *"Claude's earlier thinking was written
+while you were signed in to another organization, so Claude can't use it
+now. It isn't deleted: resume this session signed in to that organization
+to use it again. Claude's next responses may be slower and use more tokens
+because it has to reread this session and generate new thinking."* It takes
+the current organization from `oauthAccount.organizationUuid` in the home's
+`.claude.json`, which is the account's own only while Remote Control is on
+and otherwise names whoever last signed in to your own Claude Code; on a
+token in the environment it reads `CLAUDE_CODE_ORGANIZATION_UUID` instead,
+which rota does not pass on; and it shows the notice only while a switch it
+reads from Anthropic is on. So a conversation can change organization
+without that notice. By the same reading, a move between accounts of one
+organization changes nothing.
+
+A resume moves when the rotation picks the account — `rota run --resume <id>` or
+`POST /v1/run` — or when it names another account than the one that wrote
+it. To keep one where it was written, name that account: `rota run 2 "..."
+--resume <id>`, or `POST /v1/accounts/2/run`. The account is the one `-v`
+names after a run, in the very command it suggests, and the one a reply's
+`account` carries. rota does not yet remember which account wrote a
+conversation, nor keep a resume there by itself.
+
 `resume: "last"` means the most recent session on every provider — it used
 to be codex's word and a literal session id to everyone else. On the command
 line a bare `--resume` says the same thing; `--resume <id>` still names one.
@@ -1428,7 +1456,7 @@ the same events `POST /v1/run` sends, so a caller can move between the two
 transports without changing what reads them.
 
 ```json
-{"type":"init","seq":1,"account":1,"provider":"claude","model":"claude-opus-5","effort":"high"}
+{"type":"init","seq":1,"account":1,"provider":"claude","model":"claude-opus-5-5","effort":"high"}
 {"type":"text","seq":4,"account":1,"provider":"claude","session_id":"91ebe527…","text":"ndjson works"}
 {"type":"done","exit_code":0,"is_error":false,"account":1,"session_id":"91ebe527…","duration_ms":3436,"num_turns":1,"cost_usd":0.0159,"usage":{"input_tokens":10,"output_tokens":53,…}}
 ```
@@ -2738,7 +2766,7 @@ codex has no model "gpt-5.6-sol"; it accepts: gpt-5.6-terra, gpt-5.6-luna, gpt-5
 
 | Provider | Models | Effort | Default |
 |---|---|---|---|
-| `claude` | claude-opus-5, claude-fable-5, claude-sonnet-5, claude-haiku-4-5-20251001 (aliases `opus`, `fable`, `sonnet`, `haiku`) | low, medium, high, xhigh, max | opus-5 + high |
+| `claude` | claude-opus-5-5, claude-opus-5, claude-fable-5-2, claude-fable-5-1, claude-fable-5, claude-sonnet-5-5, claude-sonnet-5, claude-haiku-5-5, claude-haiku-4-5-20251001 (aliases `opus`, `fable`, `sonnet`, `haiku` name the newest of each line, as in Claude Code 2.1.322) | low, medium, high, xhigh, max | opus-5-5 + high |
 | `codex` | per account — see below | low, medium, high, xhigh, max, ultra | the CLI's choice + medium |
 | `kimi` | whatever the account's own config.toml lists — rota advertises none | — | the CLI's own |
 | `grok` | grok-4.6, grok-4.5 | low, medium, high, xhigh | grok-4.6 + high |
