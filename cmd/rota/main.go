@@ -58,6 +58,7 @@ Usage:
                                 Remote Control on, as this account
   rota run [id] --detach        hand the CLI to a session the daemon holds,
                                 which runs on with no terminal open
+  rota run --attach <session>   look at and type into a held session here
   rota send <run-or-session> "..."   send into a --input run, or type into
                                 a held session
   rota set <id> [flags]         where an account sits and what it reads:
@@ -1016,6 +1017,7 @@ conversation, which every provider can find without being told its id, and
   rota run --share=watch --label api offered to be read, under that name
   rota run 2 --remote-control=laptop open it, controllable from claude.ai
   rota run 2 --detach --label api    held by the daemon, with no terminal open
+  rota run --attach api              this terminal on held session api; Ctrl-\ d leaves
 
 Flags:
 `
@@ -1045,8 +1047,8 @@ func (c *cli) run(args []string) error {
 		rest = rest[1:]
 	}
 
-	// --share, --detach and --label are rota's own and belong to the
-	// handover, so they are taken out here rather than in the flag set a
+	// --share, --detach, --attach and --label are rota's own and belong to
+	// the handover, so they are taken out here rather than in the flag set a
 	// question is parsed with: two of the three ways to open a CLI never
 	// reach one.
 	rest, ask, err := takeShareFlags(rest)
@@ -1056,6 +1058,9 @@ func (c *cli) run(args []string) error {
 	rest, remote, err := takeRemoteControl(rest)
 	if err != nil {
 		return err
+	}
+	if ask.attach != "" {
+		return c.attachTo(id, rest, ask, remote)
 	}
 	if ask.detach {
 		return c.detach(id, rest, ask, remote)
