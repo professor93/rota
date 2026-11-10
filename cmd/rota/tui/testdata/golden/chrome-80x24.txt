@@ -1,0 +1,49 @@
+ rota   Accounts  Ask                         ● daemon  2 live  alice · control
+ #  account          5h      7d      reset
+ 1  work@example     62%     21%     1h 3m (21:20)
+ 2  home@example     12%      7%     4h 10m (00:27)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                copied the link
+                           the accounts could not be read: the daemon went away
+ login abc123 · aside  ↑/k up  n add  d remove  r refresh  ? help  q quit
+
+ rota   Accounts  Ask                         ● daemon  2 live  alice · control
+  Accounts                 Everywhere
+  ↑/k   up                 q    quit
+  n     add                ?    help
+  d     remove             M    mouse
+  r     refresh            ]    next tab
+  ↓/j   down               [    previous tab
+  ⏎     run                1-4  go to tab
+  ⇧↑/K  move up
+  ⇧↓/J  move down
+  +/-   max % by 5
+  %     type max %
+  x     out of rotation
+  u     first
+  l     sign in again
+  e     edit
+
+
+
+
+
+                                                                copied the link
+                           the accounts could not be read: the daemon went away
+ login abc123 · aside  esc close  q quit
