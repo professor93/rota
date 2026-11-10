@@ -1,11 +1,13 @@
 // Package fakecli makes a test binary stand in for a vendor CLI.
 //
-// Tests need a claude, codex or grok on PATH that answers the way the real
-// one would, without a network or a real CLI. A shell script did that on
+// Tests need a claude, codex, grok or kimi on PATH that answers the way the
+// real one would, without a network or a real CLI. A shell script did that on
 // unix and nowhere else. Here the test binary itself is installed under the
 // vendor's name, next to a small spec saying what to print and how to exit,
 // and TestMain hands the process to Maybe, which plays the part when it sees
-// the spec. One mechanism, every platform, no shell.
+// the spec. One mechanism, every platform, no shell. When it sees none, Maybe
+// leaves every directory holding a real vendor CLI — claude, codex, grok,
+// kimi — out of PATH, so the only one a test can ever start is a fake.
 package fakecli
 
 import (
@@ -354,20 +356,30 @@ func WaitReady(t testing.TB, path string) int {
 
 func specPath(exe string) string { return exe + ".spec.json" }
 
+// ownSpec is the spec beside this executable, if there is one: if this
+// process is a fake.
+func ownSpec() ([]byte, bool) {
+	exe, err := os.Executable()
+	if err != nil {
+		return nil, false
+	}
+	raw, err := os.ReadFile(specPath(exe))
+	return raw, err == nil
+}
+
 // Maybe plays the fake when this process is one — a spec sits beside the
 // executable — and never returns in that case. TestMain calls it first;
-// a real test binary has no spec and carries on.
+// a real test binary has no spec and carries on, with every directory that
+// holds a real vendor CLI left out of its PATH (see scrubPath), so that no
+// test it runs can start one.
 func Maybe() {
 	if len(os.Args) == 2 && os.Args[1] == warmArg {
 		refuseWarm()
 		os.Exit(0)
 	}
-	exe, err := os.Executable()
-	if err != nil {
-		return
-	}
-	raw, err := os.ReadFile(specPath(exe))
-	if err != nil {
+	raw, ok := ownSpec()
+	if !ok {
+		scrubPath()
 		return
 	}
 	var spec Spec

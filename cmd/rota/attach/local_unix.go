@@ -1,0 +1,167 @@
+//go:build linux || darwin
+
+package attach
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"os/signal"
+	"sync"
+	"sync/atomic"
+	"syscall"
+	"unsafe"
+
+	"github.com/professor93/rota/internal/pty"
+)
+
+// The person's own terminal, for `rota run --attach`.
+//
+// Raw mode is two ioctls, as in package main's rawMode, copied here because
+// this package cannot import main and rota takes no module for it: read the
+// settings, set them with line editing, echo, signals and output processing
+// off, and set the ones read back at the end. The ioctl names differ by
+// kernel, so they are in local_linux.go and local_darwin.go.
+
+// localNotATerminal is what Local says of standard input that is not a
+// terminal: a pipe, a file, or /dev/null.
+var localNotATerminal = errors.New("attach: standard input is not a terminal")
+
+// Local is the person's own terminal as an attach's Terminal: what they type
+// is read from in, the screen is out, and the window is in's. It puts in in
+// raw mode, so every key reaches the session as typed, Ctrl-C and Ctrl-\
+// among them, and the CLI's own terminal does the echoing and editing. The
+// window's size is asked of in each time, and Resized fires on SIGWINCH.
+//
+// restore must be called on every way out: it sets the settings Local found,
+// stops following the window, and drops whatever was typed and not yet read,
+// such as the key release a kitty terminal reports after the last key, so it
+// never reaches the shell. It is safe to call twice, and the second call does
+// nothing. An in that is not a terminal is refused, and then t and restore
+// are nil.
+func Local(in, out *os.File) (t Terminal, restore func(), err error) {
+	before, err := localTermios(in)
+	if err != nil {
+		if errors.Is(err, syscall.ENOTTY) || errors.Is(err, syscall.ENODEV) {
+			return nil, nil, localNotATerminal
+		}
+		return nil, nil, fmt.Errorf("attach: reading the terminal's settings: %w", err)
+	}
+	if err := localSetTermios(in, localRaw(before)); err != nil {
+		return nil, nil, fmt.Errorf("attach: making the terminal raw: %w", err)
+	}
+	l := &localTerm{
+		in:      in,
+		out:     out,
+		winch:   make(chan os.Signal, 1),
+		resized: make(chan struct{}, 1),
+		done:    make(chan struct{}),
+	}
+	l.last.Store(localSize{80, 24})
+	l.Size()
+	signal.Notify(l.winch, syscall.SIGWINCH)
+	go l.follow()
+	var once sync.Once
+	return l, func() {
+		once.Do(func() {
+			signal.Stop(l.winch)
+			close(l.done)
+			_ = localSetTermios(in, before)
+			_ = localFlushInput(in)
+		})
+	}, nil
+}
+
+// localRaw is before with everything the terminal does on its own turned
+// off, as main's rawMode sets it: no echo, no line editing, no signals from
+// ^C or ^\, no CR and NL translation either way, eight bits, and a read that
+// returns as soon as one byte is there.
+func localRaw(before syscall.Termios) syscall.Termios {
+	raw := before
+	raw.Iflag &^= syscall.IGNBRK | syscall.BRKINT | syscall.PARMRK | syscall.ISTRIP |
+		syscall.INLCR | syscall.IGNCR | syscall.ICRNL | syscall.IXON
+	raw.Oflag &^= syscall.OPOST
+	raw.Lflag &^= syscall.ECHO | syscall.ECHONL | syscall.ICANON | syscall.ISIG | syscall.IEXTEN
+	raw.Cflag &^= syscall.CSIZE | syscall.PARENB
+	raw.Cflag |= syscall.CS8
+	raw.Cc[syscall.VMIN] = 1
+	raw.Cc[syscall.VTIME] = 0
+	return raw
+}
+
+// localSize is a window in cells.
+type localSize struct{ cols, rows int }
+
+// localTerm is Local's Terminal.
+type localTerm struct {
+	in, out *os.File
+	winch   chan os.Signal
+	resized chan struct{}
+	done    chan struct{}
+	last    atomic.Value // localSize: the last size the terminal gave
+}
+
+func (l *localTerm) Read(p []byte) (int, error)  { return l.in.Read(p) }
+func (l *localTerm) Write(p []byte) (int, error) { return l.out.Write(p) }
+func (l *localTerm) Resized() <-chan struct{}    { return l.resized }
+
+// Size asks the terminal, and keeps the last answer for when it cannot say
+// or says 0, which a serial line or a half-made window may: 80x24 until the
+// terminal has given a size once.
+func (l *localTerm) Size() (cols, rows int) {
+	c, r, err := pty.Size(l.in)
+	if err == nil && c > 0 && r > 0 {
+		z := localSize{int(c), int(r)}
+		l.last.Store(z)
+		return z.cols, z.rows
+	}
+	z := l.last.Load().(localSize)
+	return z.cols, z.rows
+}
+
+// follow turns SIGWINCH into Resized until restore. Several signals before
+// anyone looks are one Resized, since Size reads the window as it is then.
+func (l *localTerm) follow() {
+	for {
+		select {
+		case <-l.winch:
+			select {
+			case l.resized <- struct{}{}:
+			default:
+			}
+		case <-l.done:
+			return
+		}
+	}
+}
+
+// localTermios reads f's terminal settings.
+func localTermios(f *os.File) (syscall.Termios, error) {
+	var t syscall.Termios
+	err := localIoctl(f, localGetTermios, unsafe.Pointer(&t))
+	return t, err
+}
+
+// localSetTermios sets them, at once.
+func localSetTermios(f *os.File, t syscall.Termios) error {
+	return localIoctl(f, localSetTermiosNow, unsafe.Pointer(&t))
+}
+
+// localIoctl runs one ioctl on f without taking its descriptor out of the
+// runtime's poller, as internal/pty does: os.File.Fd would put it in
+// blocking mode, and a blocking read cannot be woken by closing the file.
+func localIoctl(f *os.File, req uintptr, arg unsafe.Pointer) error {
+	conn, err := f.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var ioerr error
+	if err := conn.Control(func(fd uintptr) {
+		if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, req, uintptr(arg)); errno != 0 {
+			ioerr = errno
+		}
+	}); err != nil {
+		return err
+	}
+	return ioerr
+}

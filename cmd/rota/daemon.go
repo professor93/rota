@@ -279,8 +279,13 @@ func daemonConfig(conf, home string) (*api.Config, api.Options, api.Listener, er
 		return nil, api.Options{}, api.Listener{}, err
 	}
 	// The control socket's principal is local, so no user or token of a
-	// daemon may be; foreground serve's may.
-	if err := api.ReservedNames(opts.Users, opts.Tokens); err != nil {
+	// daemon may be; foreground serve's may. Every [[users]] entry counts,
+	// those who sign in by key alone too, whom opts.Users leaves out.
+	people := make([]api.User, len(cfg.Users))
+	for i, u := range cfg.Users {
+		people[i] = api.User{Name: u.Name}
+	}
+	if err := api.ReservedNames(people, opts.Tokens); err != nil {
 		return nil, api.Options{}, api.Listener{}, err
 	}
 	if dir := opts.Dir; dir != "" {

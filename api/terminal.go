@@ -466,7 +466,9 @@ func (tc *termConn) write() {
 			continue
 		}
 		if f.op == opBinary && !f.alone {
-			f.data = tc.join(f.data)
+			if f.data = tc.join(f.data); len(f.data) == 0 {
+				continue // a wake (repaintViewers) that found nothing to join
+			}
 		}
 		if err := tc.c.send(f.op, f.data); err != nil {
 			tc.stop()
@@ -509,6 +511,8 @@ func (tc *termConn) goodbye(late []termFrame) {
 			switch {
 			case behind && f.op == opBinary:
 				continue
+			case f.op == opBinary && !f.alone && len(f.data) == 0:
+				continue // a wake (repaintViewers): no output in it
 			case behind && f.late:
 				late = append(late, f)
 				continue
@@ -1163,6 +1167,10 @@ func (ts *termSession) lapse() {
 func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 	var scr *heldScreen
 	if h, ok := ts.back.(*heldTerm); ok && replayAll {
+		// A screen that comes back between this ask and the lock is
+		// missed (accepted as rare): this viewer is not yet among those
+		// repaintViewers repaints, and keeps the replay until it falls
+		// behind.
 		scr = h.screen()
 	}
 	ts.mu.Lock()
@@ -1417,6 +1425,9 @@ func (ts *termSession) outputAt(off int64, p []byte) {
 func (ts *termSession) catchUp(tc *termConn) []termFrame {
 	var scr *heldScreen
 	if h, ok := ts.back.(*heldTerm); ok {
+		// A screen that comes back between this ask and the lock is
+		// missed (accepted as rare): repaintViewers skips a viewer behind
+		// already, and this one keeps the replay until it falls behind.
 		if scr = h.screen(); scr == nil {
 			scr = h.screen()
 		}

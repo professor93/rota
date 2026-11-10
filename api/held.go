@@ -172,6 +172,11 @@ type heldTerm struct {
 	convCwd string
 	// convName is the name the CLI gave the conversation, kept the same way.
 	convName string
+	// stated is the holder having sent a State, and kept what its last one
+	// said of its screen: a screen that comes back is one it said was gone.
+	// Both outlive a relink, which dials the same holder process; a server
+	// that adopts the session starts them afresh.
+	stated, kept bool
 
 	lastOut time.Time
 	seq     uint64
@@ -411,8 +416,8 @@ func (h *heldTerm) read(conn *share.Conn) (code int, ended bool) {
 			return msg.Code, true
 		case holdwire.State:
 			var msg holdwire.StateMsg
-			if share.Unmarshal(payload, &msg) == nil {
-				h.noteState(&msg)
+			if share.Unmarshal(payload, &msg) == nil && h.noteState(&msg) {
+				h.ts.repaintViewers()
 			}
 		case holdwire.Screen:
 			h.screened(payload)
@@ -523,10 +528,16 @@ func (h *heldTerm) setState(state string, code int) {
 }
 
 // noteState keeps what the holder last said about the session. A registry
-// that has gone keeps the conversation it last named.
-func (h *heldTerm) noteState(msg *holdwire.StateMsg) {
+// that has gone keeps the conversation it last named. cameBack is the
+// holder's screen kept again after it said it was retired, on this link or
+// one before it. The first State this server has from the holder says only
+// what is so, and a holder older than the field never says it keeps one, so
+// neither ever comes back.
+func (h *heldTerm) noteState(msg *holdwire.StateMsg) (cameBack bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	cameBack = h.stated && !h.kept && msg.Screen
+	h.stated, h.kept = true, msg.Screen
 	h.title = msg.Title
 	if msg.Registry != nil {
 		h.reg = *msg.Registry
@@ -538,6 +549,29 @@ func (h *heldTerm) noteState(msg *holdwire.StateMsg) {
 		}
 		if msg.Registry.Cwd != "" {
 			h.convCwd = msg.Registry.Cwd
+		}
+	}
+	return cameBack
+}
+
+// repaintViewers repaints every viewer of a held session from its screen,
+// by the path a viewer that fell behind takes: the output still in its
+// queue is dropped, and once that is gone it is sent repaint, the screen and
+// the output after it. A viewer behind already is repainted anyway. Its
+// writer is woken with a piece of output holding nothing, which a viewer
+// that is behind never sees.
+func (ts *termSession) repaintViewers() {
+	ts.mu.Lock()
+	defer ts.mu.Unlock()
+	for _, tc := range ts.conns {
+		if tc.catchUp == nil || tc.behind.Swap(true) {
+			continue
+		}
+		tc.queued.Add(1)
+		select {
+		case tc.out <- termFrame{op: opBinary}:
+		default:
+			tc.queued.Add(-1) // a writer with a full queue is awake
 		}
 	}
 }

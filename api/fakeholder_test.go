@@ -69,13 +69,19 @@ import (
 //	                              session that is busy for a while
 //	FAKE_HOLDER_RESIZE=none       take no resize and answer none, as a holder
 //	                              whose CLI is ending
+//	FAKE_HOLDER_KEPT=yes          say in State that a screen is kept; with
+//	                              nothing, say nothing of it, as an older
+//	                              holder does
 //
 // The conversation and its folder are written into meta.json as well, as a
 // real holder keeps them there for a session that has stopped.
 //
 // Typed lines are its commands: "exit N" ends it with code N, "count N"
 // prints N numbered lines, "flood N" prints N lines of a kilobyte as fast as
-// it can and then "flood done", and anything else is answered "got:<line>". A send is
+// it can and then "flood done", "kept yes" or "kept no" sends a State saying
+// so and then prints "kept:yes" or "kept:no", "relink yes" or "relink no"
+// takes that for the next State, drops the link, and prints "relinked" once
+// the next is taken, and anything else is answered "got:<line>". A send is
 // typed as its text and Enter. Ctrl-C throws away the line so far and
 // prints "^C".
 func fakeHolder() {
@@ -120,7 +126,7 @@ func fakeHolder() {
 		keep = 1 << 20
 	}
 	f := &fake{terminals: terminals, dir: holdwire.Dir(terminals, req.ID),
-		ring: ring.New(keep), cols: req.Cols, rows: req.Rows}
+		ring: ring.New(keep), cols: req.Cols, rows: req.Rows, kept: os.Getenv("FAKE_HOLDER_KEPT") == "yes"}
 	if err := f.open(&req); err != nil {
 		fakeReady(holdwire.Ready{Error: err.Error(), Kind: holdwire.KindOther})
 		os.Exit(1)
@@ -192,6 +198,7 @@ type fake struct {
 	unlinked   bool
 	refused    int
 	line       []byte
+	kept       bool // what a State says of the screen
 }
 
 // major is the protocol this fake speaks: this rota's, or the one its
@@ -355,7 +362,10 @@ func (f *fake) unlink(conn *share.Conn) {
 }
 
 func (f *fake) state() holdwire.StateMsg {
-	st := holdwire.StateMsg{Title: os.Getenv("FAKE_HOLDER_TITLE")}
+	f.mu.Lock()
+	kept := f.kept
+	f.mu.Unlock()
+	st := holdwire.StateMsg{Title: os.Getenv("FAKE_HOLDER_TITLE"), Screen: kept}
 	conv, wait, name := os.Getenv("FAKE_HOLDER_CONVERSATION"), os.Getenv("FAKE_HOLDER_WAITING"), os.Getenv("FAKE_HOLDER_CONVERSATION_NAME")
 	if conv != "" || wait != "" || name != "" {
 		st.Registry = &holdwire.Registry{SessionID: conv, Name: name, Status: "idle", WaitingFor: wait,
@@ -535,6 +545,17 @@ func (f *fake) command(line string) {
 		go f.exit(n)
 	case "count":
 		go f.count(n)
+	case "kept":
+		f.mu.Lock()
+		f.kept = arg == "yes"
+		link := f.link
+		f.mu.Unlock()
+		if link != nil {
+			_ = link.SendJSON(holdwire.State, f.state())
+		}
+		f.print([]byte("kept:" + arg + "\r\n"))
+	case "relink":
+		f.relink(arg == "yes")
 	case "flood":
 		go func() {
 			for i := 1; i <= n; i++ {
@@ -575,6 +596,31 @@ func (f *fake) count(n int) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// relink takes what the next State says of the screen without saying it,
+// drops the link, and prints "relinked" once the daemon has linked again:
+// that output follows the new link's first State down it.
+func (f *fake) relink(kept bool) {
+	f.mu.Lock()
+	f.kept = kept
+	old := f.link
+	if old != nil {
+		old.Close()
+		f.link = nil
+	}
+	f.mu.Unlock()
+	go func() {
+		for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			f.mu.Lock()
+			back := f.link != nil && f.link != old
+			f.mu.Unlock()
+			if back {
+				f.print([]byte("relinked\r\n"))
+				return
+			}
+		}
+	}()
 }
 
 // exit is the CLI having ended with code: the link is told, the record says

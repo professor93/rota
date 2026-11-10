@@ -33,7 +33,9 @@ func TestMain(m *testing.M) {
 		fakeHolder()
 	}
 	// A fake installed with a spec plays that; the harness's own claude and
-	// codex links carry none and are played below.
+	// codex links carry none and are played below. Anything else carries on
+	// with every directory holding a real vendor CLI left out of PATH: a
+	// test that forgets its fake finds none, never the real one.
 	fakecli.Maybe()
 	switch strings.TrimSuffix(filepath.Base(os.Args[0]), ".exe") {
 	case "claude":
@@ -76,6 +78,10 @@ func TestMain(m *testing.M) {
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
+
+// No test here can start a real vendor CLI: TestMain left every directory
+// holding one out of PATH.
+func TestNoVendorCLIIsOnPath(t *testing.T) { fakecli.NoneOnPath(t) }
 
 // offline points every endpoint of every provider at an address nothing
 // answers on, so a made-up token never leaves the machine; a test that wants

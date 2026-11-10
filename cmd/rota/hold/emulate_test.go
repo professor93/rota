@@ -84,7 +84,7 @@ func TestABatchOfRepeatsHoldsTheScreenBriefly(t *testing.T) {
 	if !sh.OK || sh.Offset != int64(len(in)) {
 		t.Fatalf("Screen %+v after %d bytes", sh, len(in))
 	}
-	if d := screenDiff("x/vt", "screen", doc(t, want), doc(t, r.s.screen)); d != "" {
+	if d := screenDiff("x/vt", "screen", doc(t, want), doc(t, r.s.screenNow())); d != "" {
 		t.Errorf("%d pieces of a REP between characters:\n%s", k, d)
 	}
 
@@ -98,7 +98,7 @@ func TestABatchOfRepeatsHoldsTheScreenBriefly(t *testing.T) {
 	}
 	r.c.print(t, unit)
 	answered(answers.String() + string(vtscan.CPRReply(at.Y+1, at.X+1, false)))
-	if d := screenDiff("x/vt", "screen", doc(t, want), doc(t, r.s.screen)); d != "" {
+	if d := screenDiff("x/vt", "screen", doc(t, want), doc(t, r.s.screenNow())); d != "" {
 		t.Errorf("a REP in the batch after:\n%s", d)
 	}
 }

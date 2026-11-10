@@ -9,7 +9,9 @@ import (
 	rota "github.com/professor93/rota/lib"
 )
 
-// The test binary doubles as every fake vendor CLI the tests install.
+// The test binary doubles as every fake vendor CLI the tests install. As
+// itself it runs with every directory holding a real one left out of PATH,
+// so a test that forgets its fake finds none, never the real one.
 //
 // It also runs in a Claude Code configuration directory of its own. Every
 // claude run mirrors the directory this process is in, and the one belonging
@@ -52,6 +54,10 @@ func TestMain(m *testing.M) {
 	os.RemoveAll(dir)
 	os.Exit(code)
 }
+
+// No test here can start a real vendor CLI: TestMain left every directory
+// holding one out of PATH.
+func TestNoVendorCLIIsOnPath(t *testing.T) { fakecli.NoneOnPath(t) }
 
 // offline points every endpoint of every provider at an address nothing
 // answers on, so a made-up token never leaves the machine; a test that wants
