@@ -1004,11 +1004,10 @@ It exits `1`, naming what the supervisor said and what became of the
 daemon: *<path> is removed, but systemctl --user disable --now <unit>: …;
 the rota daemon (pid N) was stopped as rota serve stop stops one, and N
 sessions keep running*, or *the rota daemon (pid N) is no longer running*
-for one that went on its own before it was signalled. A file that cannot
-be deleted is named in the error, which still says what became of the
-daemon and ends *; <path> is kept*. With no daemon running there is
-nothing to stop, and the error is the supervisor's alone. A daemon that
-cannot be stopped, or whose process has not exited within those 12
+for one that went on its own before it was signalled, where its file may
+go (below). A file that cannot be deleted is named in the error, which
+still says what became of the daemon and ends *; <path> is kept*. A daemon
+that cannot be stopped, or whose process has not exited within those 12
 seconds, keeps the file and the link where they are, and uninstall says so
 and where to run it again: *…; the rota daemon (pid N) is still running
 and could not be stopped (…), so <path> is kept: with it gone, systemd
@@ -1017,6 +1016,27 @@ uninstall again from a login that has a user bus* — *a rota daemon*, with
 no pid, when `daemon.pid` names no process this rota can check, and on
 macOS *launchd still has the agent loaded* and *a login in the Mac's GUI
 session*.
+
+With no daemon running — none to begin with, or one that went on its own
+before it was signalled — there is nothing to stop, but on Linux there may
+be one to come: 5 seconds after a daemon fails, systemd starts the unit
+again from what it loaded, and whether it is waiting to is in its memory
+alone, in no file under `/run` or `/sys/fs/cgroup`. A daemon it starts
+then, under a unit whose file is gone, is the one the next reload strips
+of `KillMode=process`. So the file goes only when no user manager of yours
+runs: no process of yours in `/proc` is `systemd --user`, and
+`/sys/fs/cgroup` has no `user@<uid>.service`. Then the error is the
+supervisor's alone, or names the daemon that is no longer running, and no
+reload is asked for, since nobody would hear it. Otherwise the file and
+the link are kept, and uninstall says so in one line: *systemctl --user
+disable --now <unit>: …; no rota daemon is running, but systemd may be
+about to start one again, as it does 5 seconds after one fails, which only
+systemd can tell, so <path> is kept: with it gone, systemd would end the
+unit's sessions when the daemon stops; run rota serve uninstall again from
+a login that has a user bus* — *the rota daemon (pid N) is no longer
+running*, for one that went on its own. On macOS the file goes: launchd
+reads a plist only to load the agent, and one it starts again goes on as
+it was loaded, `AbandonProcessGroup` and all.
 
 Like `rota serve stop`, `install` and `uninstall` are refused inside a held
 session, since either may stop the daemon: *rota serve install is refused
