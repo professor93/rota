@@ -45,6 +45,40 @@ func TestASignalDuringALookEndsTheLookNotTheProcess(t *testing.T) {
 	}
 }
 
+// One that reaches the process as the look ends is not lost on the way to the
+// signals going back: the look reads as interrupted, so nothing is started
+// after it, rather than the signal being taken and the command going on.
+func TestASignalAsALookEndsIsNotLost(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP} {
+		t.Run(sig.String(), func(t *testing.T) {
+			if signal.Ignored(sig) {
+				t.Skip("left as this process was started, by design")
+			}
+			// Taken here too, to know when it has reached this process,
+			// which on Linux may be after kill returns: a signal sent to a
+			// process may be taken by another of its threads than the sender.
+			kept := make(chan os.Signal, 1)
+			signal.Notify(kept, sig)
+			t.Cleanup(func() { signal.Stop(kept) })
+			for i := range 50 {
+				cut := interruptedDuring(func(context.Context) {
+					if err := syscall.Kill(os.Getpid(), sig); err != nil {
+						t.Fatal(err)
+					}
+					select {
+					case <-kept:
+					case <-time.After(10 * time.Second):
+						t.Fatal("the signal never reached the process")
+					}
+				})
+				if !cut {
+					t.Fatalf("try %d: the signal was taken and the command went on", i)
+				}
+			}
+		})
+	}
+}
+
 // watchLooks remembers the context of the latest look a command began.
 func watchLooks(t *testing.T) (latest func() context.Context) {
 	t.Helper()

@@ -21,6 +21,7 @@ import (
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/lend"
 	"github.com/professor93/rota/internal/proc"
+	"github.com/professor93/rota/internal/signals"
 	"github.com/professor93/rota/internal/termenv"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/store"
@@ -330,11 +331,9 @@ func (h *holder) plan(st *store.Store) (*plan, error) {
 // spent; taken, the store finishes the refresh under way, the save and the
 // write into the home included, and starts nothing else, and no CLI is started.
 // A signal this process was started ignoring stays ignored. Once the launch is
-// made both go back to what they were, before the CLI starts.
-//
-// Whether one came is asked only once they have gone back, so that none is
-// taken and then lost: each came while they were taken, and is counted, or
-// after, and does what it always did.
+// made both go back to what they were, before the CLI starts, and only then is
+// it asked whether one came, so that none is taken and then lost (see
+// signals.During).
 func finishingOnSignal(prepare func(context.Context)) (cut bool) {
 	var sigs []os.Signal
 	for _, sig := range []os.Signal{syscall.SIGHUP, syscall.SIGTERM} {
@@ -342,34 +341,12 @@ func finishingOnSignal(prepare func(context.Context)) (cut bool) {
 			sigs = append(sigs, sig)
 		}
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	came := make(chan os.Signal, 1)
-	heard := make(chan struct{})
-	if len(sigs) > 0 { // with none, Notify would take every signal
-		signal.Notify(came, sigs...)
-		go func() {
-			defer close(heard)
-			select {
-			case <-came:
-				cut = true
-				cancel()
-			case <-ctx.Done():
-			}
-		}()
-	} else {
-		close(heard)
-	}
-	if prepareBegun != nil {
-		prepareBegun(ctx)
-	}
-	prepare(ctx)
-	// Once Stop has returned, a signal delivered to came is in it, if the
-	// goroutine has not taken it.
-	signal.Stop(came)
-	cancel()
-	<-heard
-	return cut || len(came) > 0
+	return signals.During(sigs, func(ctx context.Context) {
+		if prepareBegun != nil {
+			prepareBegun(ctx)
+		}
+		prepare(ctx)
+	})
 }
 
 // prepareBegun, when set, is told of a launch's context: how a test waits for a
