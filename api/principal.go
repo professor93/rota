@@ -111,6 +111,10 @@ var roleFor = map[string]Role{
 	"POST /v1/auth/{id}":       RoleControl,
 	// Handing somebody else a way in.
 	"POST /v1/invites": RoleControl,
+	// The server's events: reading them is reading, and the test event
+	// sends a message through every sink, which is a change.
+	"GET /v1/events":  RoleWatch,
+	"POST /v1/events": RoleControl,
 	// The terminals. Looking at one is reading; starting one runs a CLI on
 	// this machine, and ending one takes it away from whoever is using it.
 	"GET /v1/terminals":         RoleWatch,
