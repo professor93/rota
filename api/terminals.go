@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/proc"
 	"github.com/professor93/rota/internal/pty"
 	"github.com/professor93/rota/internal/ring"
 	"github.com/professor93/rota/internal/termenv"
@@ -556,16 +557,40 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest, cw
 		return s.planShell(req)
 	}
 	defer st.Close()
-	args, _, err := s.argsFor(r, st, a, req, cwd)
+	// A private place for the guard against Remote Control, should the
+	// account get one; it goes with the terminal's CLI.
+	guardPath, unguard := "", func() {}
+	if rota.Flavor(a.Provider) == "claude" {
+		if guardPath, unguard, err = guardPlace(st); err != nil {
+			return nil, err
+		}
+	}
+	placed := false
+	defer func() {
+		if !placed {
+			unguard()
+		}
+	}()
+	args, _, guard, err := s.argsFor(r, st, a, req, cwd, guardPath)
 	if err != nil {
 		return nil, err
+	}
+	if guard != nil {
+		if err := holdwire.WriteGuard(guardPath, guard); err != nil {
+			return nil, err
+		}
 	}
 	// Prepared for the directory the terminal starts in, whose project
 	// settings its Claude Code reads, rather than for the server's own.
-	path, env, release, err := st.PrepareIn(ctx, a, cwd)
+	path, env, claimed, err := st.PrepareIn(ctx, a, cwd)
 	if err != nil {
 		return nil, err
 	}
+	release := func() {
+		claimed()
+		unguard()
+	}
+	placed = true
 	// The claim goes with the plan, or — should building it panic — goes.
 	handed := false
 	defer func() {
@@ -642,26 +667,29 @@ func (s *Server) chooseTerminal(r *http.Request, kind string, id int) (*store.St
 // this machine's own terminal can type into: a page's user, an SSH user, or
 // whoever attaches to a held session. So a claude account whose remote
 // control setting is off is launched behind Claude Code's own guard against
-// Remote Control (holdwire.GuardRemoteControl). It is their last --settings,
-// with a --settings of theirs folded in, so Remote Control cannot be started
-// in that session under the identity a shared .claude.json names: not from
-// /remote-control, nor auto-started by a remoteControlAtStartup that /config
-// wrote into the settings every account shares. An account whose setting is
-// on has its own identity and is left as it is.
+// Remote Control (holdwire.GuardRemoteControl). It is --settings at both
+// ends of their arguments, with a --settings of theirs folded in, so Remote
+// Control cannot be started in that session under the identity a shared
+// .claude.json names: not from /remote-control, nor auto-started by a
+// remoteControlAtStartup that /config wrote into the settings every account
+// shares. An account whose setting is on has its own identity and is left
+// as it is.
 //
-// keep is what a held session's record keeps (holdwire.Request.Keep): the
-// arguments before the guard, rota's own --remote-control included, as
-// every launch decides the guard afresh.
-func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req *termRequest, cwd string) (args, keep []string, err error) {
+// The guard is named by guardPath, never given inline: guard is the document
+// the caller writes there, privately, before the CLI starts, and nil when
+// there is no guard. keep is what a held session's record keeps
+// (holdwire.Request.Keep): the arguments before the guard, rota's own
+// --remote-control included, as every launch decides the guard afresh.
+func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req *termRequest, cwd, guardPath string) (args, keep []string, guard []byte, err error) {
 	args = slices.Clone(req.Args)
 	rc := req.RemoteControl
 	asks, err := remoteArgs(r, a, args, cwd)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if rc.on || asks {
 		if err := s.readyRemoteControl(r, st, a); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 	}
 	if rc.on {
@@ -671,21 +699,66 @@ func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req 
 		}
 	}
 	if rota.Flavor(a.Provider) != "claude" || a.RemoteControl {
-		return args, args, nil
+		return args, args, nil, nil
 	}
 	// The policy tier ranks above --settings, so one that turns
 	// disableRemoteControl off would lift the guard from above it.
 	if holdwire.ReadManaged(args).Reenables {
-		return nil, nil, refuse(http.StatusBadRequest, managedReenables)
+		return nil, nil, nil, refuse(http.StatusBadRequest, managedReenables)
 	}
-	guarded, err := holdwire.GuardRemoteControl(args, cwd)
+	guarded, guard, err := holdwire.GuardRemoteControl(args, cwd, guardPath)
 	if err != nil {
-		return nil, nil, refuse(http.StatusBadRequest, guardUnread)
+		return nil, nil, nil, refuse(http.StatusBadRequest, guardUnread)
 	}
 	if args == nil {
 		args = []string{} // said, so the record keeps nothing rather than the guard
 	}
-	return guarded, args, nil
+	return guarded, args, guard, nil
+}
+
+// guardPlace makes a private directory for one process's guard against
+// Remote Control: under the store's terminals directory, in guards/, readable
+// by this machine's user alone, and named for this process so a later sweep
+// can tell a dead process's from a live one's (sweepGuards). It answers the
+// file to write the guard to, and how to take the directory away again, once
+// the process it is for has ended.
+func guardPlace(st *store.Store) (path string, remove func(), err error) {
+	terminals, err := st.TerminalDir()
+	if err != nil {
+		return "", nil, err
+	}
+	root := filepath.Join(terminals, "guards")
+	if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+		return "", nil, err
+	}
+	if fi, err := os.Lstat(root); err != nil || !fi.IsDir() {
+		return "", nil, fmt.Errorf("%s is not a directory", root)
+	}
+	if _, done := guardsSwept.LoadOrStore(root, true); !done {
+		sweepGuards(root)
+	}
+	dir, err := os.MkdirTemp(root, strconv.Itoa(os.Getpid())+"-")
+	if err != nil {
+		return "", nil, err
+	}
+	return filepath.Join(dir, "guard.json"), func() { _ = os.RemoveAll(dir) }, nil
+}
+
+// guardsSwept is the guard directories swept already by this process.
+var guardsSwept sync.Map
+
+// sweepGuards takes away the guard directories processes that have ended
+// left behind: one named for a pid that is not alive, or not this one.
+func sweepGuards(root string) {
+	entries, _ := os.ReadDir(root)
+	for _, e := range entries {
+		pid, _, ok := strings.Cut(e.Name(), "-")
+		n, err := strconv.Atoi(pid)
+		if !ok || err != nil || n == os.Getpid() || proc.Alive(n) {
+			continue
+		}
+		_ = os.RemoveAll(filepath.Join(root, e.Name()))
+	}
 }
 
 // readyRemoteControl readies an account for a session or a run with Remote

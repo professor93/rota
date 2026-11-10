@@ -155,13 +155,17 @@ func runArgs(spec *rota.Spec) []string {
 // (holdwire.GuardRemoteControl), checked and resolved already. Claude Code
 // reads only the last --settings. The settings a run asks for come first on
 // its command line, and its raw args last. So where there are raw args the
-// guard goes last among them. It folds in their own --settings in a flag's
-// position, or, failing one, the run's settings, leaving the run's settings
-// as they are. A run with no raw args, which is every run a server that
-// allows none takes, has its settings gain the guard, inline or read from
-// their file. A --managed-settings that would lift the guard refuses the
-// run, and so does a --settings that cannot be read.
-func guardRun(spec *rota.Spec) error {
+// guard goes at both ends of them, as the file place makes, never inline: it
+// folds in their own --settings in a flag's position, or, failing one, the
+// run's settings, and a raw --settings may name any file the server can
+// read. The run's settings are left as they are. A run with no raw args,
+// which is every run a server that allows none takes, has its settings gain
+// the guard. Those are inline already, since every settings document a
+// caller under limits sends is vetted and handed over inline by the run
+// itself, so the guard adds nothing to its command line that was not there.
+// A --managed-settings that would lift the guard refuses the run, and so
+// does a --settings that cannot be read.
+func guardRun(spec *rota.Spec, place func() (string, error)) error {
 	if holdwire.ReadManaged(spec.Extra).Reenables {
 		return refuse(http.StatusBadRequest, managedReenables)
 	}
@@ -170,9 +174,16 @@ func guardRun(spec *rota.Spec) error {
 		value = string(spec.Settings)
 	}
 	if len(spec.Extra) > 0 {
-		guarded, err := holdwire.GuardRemoteControlOver(spec.Extra, spec.Cwd, value, have)
+		path, err := place()
+		if err != nil {
+			return err
+		}
+		guarded, doc, err := holdwire.GuardRemoteControlOver(spec.Extra, spec.Cwd, value, have, path)
 		if err != nil {
 			return refuse(http.StatusBadRequest, guardUnread)
+		}
+		if err := holdwire.WriteGuard(path, doc); err != nil {
+			return err
 		}
 		spec.Extra = guarded
 		return nil
@@ -330,7 +341,15 @@ func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, 
 	// much as a terminal: one that stays open takes messages from whoever
 	// sent it.
 	if rota.Flavor(a.Provider) == "claude" && !a.RemoteControl {
-		if err := guardRun(&req.Spec); err != nil {
+		// The guard's file, should there be one, goes when the run does.
+		place := func() (string, error) {
+			path, remove, err := guardPlace(st)
+			if err == nil {
+				hold.add(remove)
+			}
+			return path, err
+		}
+		if err := guardRun(&req.Spec, place); err != nil {
 			return nil, err
 		}
 	}

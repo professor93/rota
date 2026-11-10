@@ -91,6 +91,7 @@ type holder struct {
 
 	terminals, dir string
 	made           bool   // dir is this holder's: it made it
+	guarded        bool   // the guard file is in dir, and goes with the CLI
 	unlock         func() // the session's lock, held for life
 	logs           *logFile
 	log            func(msg string, args ...any)
@@ -132,6 +133,15 @@ func (h *holder) start(in io.Reader, open func() (*store.Store, error)) error {
 	defer st.Close()
 	if err := h.claimDir(st); err != nil {
 		return err
+	}
+	// The guard against Remote Control its CLI names by path, written where
+	// only this machine's user can read it, since the document may hold what
+	// a person's settings file does. It goes when the CLI does.
+	if h.req.Guard != "" {
+		if err := holdwire.WriteGuard(holdwire.GuardFile(h.dir), []byte(h.req.Guard)); err != nil {
+			return fmt.Errorf("writing the session's guard against Remote Control: %w", err)
+		}
+		h.guarded = true
 	}
 	p, err := h.plan(st)
 	if err != nil {
@@ -399,6 +409,9 @@ func (h *holder) fail(err error) {
 	if h.release != nil {
 		h.release()
 	}
+	if h.guarded {
+		_ = os.Remove(holdwire.GuardFile(h.dir))
+	}
 	if h.made {
 		_ = os.RemoveAll(h.dir)
 	}
@@ -442,6 +455,11 @@ func (h *holder) hold() int {
 	h.unsignal()
 	<-kept
 	h.release()
+	if h.guarded {
+		if err := os.Remove(holdwire.GuardFile(h.dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			h.log("removing the guard against Remote Control", "err", err)
+		}
+	}
 	_ = h.ln.Close()
 	if err := os.Remove(holdwire.SockPath(h.dir)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		h.log("removing the socket", "err", err)

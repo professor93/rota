@@ -32,10 +32,15 @@ type Request struct {
 	// carries no guard onto an account whose Remote Control is on by then.
 	// Nil keeps Args.
 	Keep []string `json:"keep,omitzero"`
-	Cwd  string   `json:"cwd"`
-	Name string   `json:"name"`
-	Cols uint16   `json:"cols"`
-	Rows uint16   `json:"rows"`
+	// Guard, when set, is the guard document against Remote Control that
+	// Args name by path, GuardFile in the session's directory: the holder
+	// writes it there, readable by this user alone, before the CLI starts,
+	// and removes it when the CLI ends. It never goes on a command line.
+	Guard string `json:"guard,omitempty"`
+	Cwd   string `json:"cwd"`
+	Name  string `json:"name"`
+	Cols  uint16 `json:"cols"`
+	Rows  uint16 `json:"rows"`
 	// Env, when set, is the environment the session starts from — the
 	// caller's own, already filtered of anything that is a credential — in
 	// place of the daemon's.

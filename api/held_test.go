@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -339,9 +340,11 @@ func TestTheHolderIsToldWhatToRunAndNoSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := seen.Request
+	guard := holdwire.GuardFile(holdwire.Dir(p.terminals(), r.ID))
 	if r.ID != doc["id"] || r.Kind != "account" || r.Account != 1 || r.Name != "x" ||
 		r.Cols != 100 || r.Rows != 30 || r.Scrollback <= 0 ||
-		strings.Join(r.Args, " ") != `--settings {"disableRemoteControl":true} --model opus --settings {"disableRemoteControl":true}` {
+		!slices.Equal(r.Args, []string{"--settings", guard, "--model", "opus", "--settings", guard}) ||
+		r.Guard != `{"disableRemoteControl":true}` {
 		t.Errorf("the request is %+v", r)
 	}
 	if seen.RotaHome != p.dir || !filepath.IsAbs(seen.RotaHome) {

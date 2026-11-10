@@ -89,6 +89,74 @@ func claudeSettings(args []string, required, optional map[string]bool) string {
 	return found
 }
 
+// guardInline and guardOverInline are the guard with the document itself in
+// place of the file a launch puts it in, so a test can read where it goes.
+func guardInline(args []string, cwd string) ([]string, error) {
+	out, _, err := GuardRemoteControl(args, cwd, "")
+	return out, err
+}
+
+func guardOverInline(args []string, cwd, before string) ([]string, error) {
+	out, _, err := GuardRemoteControlOver(args, cwd, before, true, "")
+	return out, err
+}
+
+// A launch passes the guard as a file, never its document: the document can
+// hold what a person's settings file does, an env block with a token say,
+// and a command line is for anybody on the machine to read. Both copies are
+// the file's path, and the document is the caller's to write there.
+func TestTheGuardIsPassedAsAFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sec.json"), []byte(`{"env":{"SOME_TOKEN":"FAKE-VALUE-123"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	const path = "/private/guard.json"
+	out, doc, err := GuardRemoteControl([]string{"--settings", "sec.json", "--model", "opus"}, dir, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"--settings", path, "--model", "opus", "--settings", path}; !slices.Equal(out, want) {
+		t.Fatalf("%q, want %q", out, want)
+	}
+	if strings.Contains(strings.Join(out, " "), "FAKE-VALUE-123") {
+		t.Fatalf("the token is on the command line: %q", out)
+	}
+	if !strings.Contains(string(doc), "FAKE-VALUE-123") || !strings.Contains(string(doc), `"disableRemoteControl":true`) {
+		t.Fatalf("the document to write is %s", doc)
+	}
+}
+
+// Claude Code's subcommands take the arguments after them as their own, so
+// the first operand that is one ends the options for the guard as a "--"
+// does: the guard goes before it, and no copy after it, where the subcommand
+// would be handed a --settings it does not take. A --settings in a flag's
+// position after it is still folded in and left out, since Claude Code's
+// early reading of --settings walks past subcommands. A word that is a
+// subcommand only as the first operand is a word anywhere else.
+func TestASubcommandEndsTheOptionsForTheGuard(t *testing.T) {
+	dir := t.TempDir()
+	const (
+		bare = `{"disableRemoteControl":true}`
+		x    = `{"disableRemoteControl":true,"model":"x"}`
+	)
+	for _, c := range []struct{ in, want []string }{
+		{[]string{"mcp", "list"}, []string{"--settings", bare, "mcp", "list"}},
+		{[]string{"doctor"}, []string{"--settings", bare, "doctor"}},
+		{[]string{"--verbose", "mcp", "list"}, []string{"--settings", bare, "--verbose", "--settings", bare, "mcp", "list"}},
+		{[]string{"--model", "opus", "update"}, []string{"--settings", bare, "--model", "opus", "--settings", bare, "update"}},
+		{[]string{"mcp", "list", "--settings", `{"model":"x"}`}, []string{"--settings", x, "mcp", "list"}},
+		// A prompt first: the word after it is no subcommand.
+		{[]string{"fix it", "mcp"}, []string{"--settings", bare, "fix it", "mcp", "--settings", bare}},
+		// A value is no operand.
+		{[]string{"--name", "doctor"}, []string{"--settings", bare, "--name", "doctor", "--settings", bare}},
+	} {
+		got, err := guardInline(c.in, dir)
+		if err != nil || !slices.Equal(got, c.want) {
+			t.Errorf("%q: %q %v, want %q", c.in, got, err, c.want)
+		}
+	}
+}
+
 // rota's own sets are Claude Code 2.1.322's, whole.
 func TestTheValueFlagsAreClaudeCodes(t *testing.T) {
 	if want := setOf(claudeRequired...); !maps.Equal(requiredFlags, want) {
@@ -143,7 +211,7 @@ func TestGuardRemoteControlFoldsTheLastSettingsIn(t *testing.T) {
 		{[]string{"--verbose", "--model"}, []string{"--settings", bare, "--verbose", "--settings", bare, "--model"}},
 		{[]string{"--settings"}, []string{"--settings", bare, "--settings"}},
 	} {
-		got, err := GuardRemoteControl(c.in, dir)
+		got, err := guardInline(c.in, dir)
 		if err != nil || !slices.Equal(got, c.want) {
 			t.Errorf("%q: %q %v, want %q", c.in, got, err, c.want)
 		}
@@ -153,7 +221,7 @@ func TestGuardRemoteControlFoldsTheLastSettingsIn(t *testing.T) {
 		{"--settings", `{"model":"x"}`, "--settings", "missing.json"},
 		{"--settings", "[1].json"},
 	} {
-		if got, err := GuardRemoteControl(in, dir); err == nil {
+		if got, err := guardInline(in, dir); err == nil {
 			t.Errorf("%q gave %q, want an error", in, got)
 		}
 	}
@@ -168,7 +236,7 @@ func TestGuardRemoteControlFoldsTheLastSettingsIn(t *testing.T) {
 		{[]string{"-n", "--settings"}, []string{"--settings", a, "-n", "--settings", "--settings", a}},
 		{[]string{"--settings", `{"model":"x"}`}, []string{"--settings", x}},
 	} {
-		if got, err := GuardRemoteControlOver(c.in, dir, `{"a":1}`, true); err != nil || !slices.Equal(got, c.want) {
+		if got, err := guardOverInline(c.in, dir, `{"a":1}`); err != nil || !slices.Equal(got, c.want) {
 			t.Errorf("%q over a settings of their own: %q %v, want %q", c.in, got, err, c.want)
 		}
 	}
@@ -186,7 +254,7 @@ func TestTheGuardIsWhatClaudeCodeLoads(t *testing.T) {
 	const bare = `{"disableRemoteControl":true}`
 	for _, f := range append(slices.Clone(claudeRequired), claudeOptional...) {
 		for _, in := range [][]string{{f}, {"--model", "opus", f}, {f, "{}"}} {
-			got, err := GuardRemoteControl(in, dir)
+			got, err := guardInline(in, dir)
 			if err != nil {
 				t.Fatalf("%q: %v", in, err)
 			}
@@ -203,7 +271,7 @@ func TestTheGuardIsWhatClaudeCodeLoads(t *testing.T) {
 	unknown := maps.Clone(required)
 	unknown["--zzz"] = true
 	for _, in := range [][]string{{"--zzz"}, {"--model", "opus", "--zzz"}} {
-		got, err := GuardRemoteControl(in, dir)
+		got, err := guardInline(in, dir)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -215,7 +283,7 @@ func TestTheGuardIsWhatClaudeCodeLoads(t *testing.T) {
 	}
 	// A --settings rota reads as -n's value, in a bundle Claude Code's early
 	// reading does not split.
-	got, err := GuardRemoteControl([]string{"-cn", "--settings", `{"x":1}`}, dir)
+	got, err := guardInline([]string{"-cn", "--settings", `{"x":1}`}, dir)
 	if err != nil {
 		t.Fatal(err)
 	}

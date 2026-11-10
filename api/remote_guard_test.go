@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -63,7 +65,7 @@ func TestASessionWithRemoteControlOffIsLaunchedWithItsGuard(t *testing.T) {
 	args := func(r *http.Request, id int, in []string) ([]string, error) {
 		t.Helper()
 		a := st.Find(id)
-		got, _, err := h.api.argsFor(r, st, a, &termRequest{Args: in}, h.root)
+		got, _, _, err := h.api.argsFor(r, st, a, &termRequest{Args: in}, h.root, "")
 		return got, err
 	}
 	for name, r := range map[string]*http.Request{"a token": token, "the socket": local} {
@@ -160,6 +162,9 @@ func TestARunWithRemoteControlOffIsGuarded(t *testing.T) {
 		}
 		return out.Result
 	}
+	// The run's own settings, inline already, gain the guard where they
+	// stand; raw args take the guard's file, GUARD here, at both their ends.
+	file := regexp.MustCompile(`\S*` + regexp.QuoteMeta(string(filepath.Separator)+"guards"+string(filepath.Separator)) + `\S*guard\.json`)
 	for _, c := range []struct {
 		body   map[string]any
 		want   string
@@ -167,17 +172,20 @@ func TestARunWithRemoteControlOffIsGuarded(t *testing.T) {
 	}{
 		{map[string]any{}, `--settings {"disableRemoteControl":true}`, 1},
 		{map[string]any{"settings": map[string]any{"a": 1}}, `--settings {"a":1,"disableRemoteControl":true}`, 1},
-		{map[string]any{"args": []string{"--settings", `{"model":"x"}`}}, `--settings {"disableRemoteControl":true,"model":"x"}`, 1},
+		{map[string]any{"args": []string{"--settings", `{"model":"x"}`}}, `--settings GUARD`, 1},
 		{map[string]any{"args": []string{"--append-system-prompt", "--settings"}},
-			`--settings {"disableRemoteControl":true} --append-system-prompt --settings --settings {"disableRemoteControl":true}`, 2},
+			`--settings GUARD --append-system-prompt --settings --settings GUARD`, 2},
 		// Raw args that carry no --settings of their own still come after
 		// the one the settings become, so the guard is theirs, at both their
 		// ends, with the settings folded in.
 		{map[string]any{"settings": map[string]any{"a": 1}, "args": []string{"--verbose"}},
-			`--settings {"a":1,"disableRemoteControl":true} --verbose --settings {"a":1,"disableRemoteControl":true}`, 2},
+			`--settings GUARD --verbose --settings GUARD`, 2},
 	} {
-		if got := result(1, c.body); !strings.Contains(got, c.want) || strings.Count(got, "disableRemoteControl") != c.copies {
-			t.Errorf("%v: %q, want %q, the guard %d times", c.body, got, c.want, c.copies)
+		got := result(1, c.body)
+		named := file.ReplaceAllString(got, "GUARD")
+		copies := strings.Count(named, "GUARD") + strings.Count(named, "disableRemoteControl")
+		if !strings.Contains(named, c.want) || copies != c.copies {
+			t.Errorf("%v: %q, want %q, the guard %d times", c.body, named, c.want, c.copies)
 		}
 	}
 	if got := result(2, map[string]any{}); strings.Contains(got, "disableRemoteControl") {
@@ -228,12 +236,12 @@ func TestNoValueFlagTakesTheGuard(t *testing.T) {
 			continue // the guard's own, read for what they say
 		}
 		for _, in := range [][]string{{f}, {"--model", "opus", f}} {
-			got, _, err := h.api.argsFor(local, st, st.Find(1), &termRequest{Args: in}, h.root)
+			got, _, _, err := h.api.argsFor(local, st, st.Find(1), &termRequest{Args: in}, h.root, "")
 			if err != nil || len(got) < 2 || got[0] != "--settings" || taken(got, f) {
 				t.Errorf("a terminal with %q: %q %v, want the guard first and never as %s's value", in, got, err, f)
 			}
 			spec := rota.Spec{Extra: slices.Clone(in), Cwd: h.root}
-			if err := guardRun(&spec); err != nil || spec.Extra[0] != "--settings" || taken(spec.Extra, f) {
+			if err := guardRun(&spec, func() (string, error) { return filepath.Join(t.TempDir(), "guard.json"), nil }); err != nil || spec.Extra[0] != "--settings" || taken(spec.Extra, f) {
 				t.Errorf("a run with %q: %q %v, want the guard first and never as %s's value", in, spec.Extra, err, f)
 			}
 		}
@@ -254,7 +262,7 @@ func TestRemoteControlIsReadBeforeTheGuard(t *testing.T) {
 	defer st.Close()
 	local := withPrincipal(httptest.NewRequest("POST", "/v1/terminals", nil), &localControl)
 	for _, word := range []string{"remote", "sync", "bridge"} {
-		if guarded, _ := holdwire.GuardRemoteControl([]string{"--model", "opus"}, h.root); slices.Contains(guarded, word) {
+		if guarded, _, _ := holdwire.GuardRemoteControl([]string{"--model", "opus"}, h.root, ""); slices.Contains(guarded, word) {
 			t.Fatal("the guard carries a word it should not")
 		}
 		if asks, _ := holdwire.AsksRemoteControl(append([]string{"--settings", `{"disableRemoteControl":true}`}, word), h.root); asks {
@@ -262,9 +270,80 @@ func TestRemoteControlIsReadBeforeTheGuard(t *testing.T) {
 		}
 		a := st.Find(1)
 		a.RemoteControl = false
-		got, _, err := h.api.argsFor(local, st, a, &termRequest{Args: []string{word}}, h.root)
+		got, _, _, err := h.api.argsFor(local, st, a, &termRequest{Args: []string{word}}, h.root, "")
 		if !a.RemoteControl || slices.Contains(got, "--settings") {
 			t.Errorf("%s first: %q %v, want the account readied and no guard", word, got, err)
 		}
+	}
+}
+
+// The guard document can hold what a person's settings file does, a token
+// in its env block say, and a command line is for anybody on the machine to
+// read: so the CLI is handed the guard's file, twice, never the document,
+// and the file is this user's alone, in a directory of its own, gone once
+// the run is. Its CLI here answers with its own arguments.
+func TestTheGuardsDocumentNeverReachesTheCommandLine(t *testing.T) {
+	h := newHarness(t, Options{AllowRawFlags: true})
+	if err := os.WriteFile(filepath.Join(h.root, "sec.json"), []byte(`{"env":{"SOME_TOKEN":"FAKE-VALUE-123"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, out, raw := h.run(1, map[string]any{"prompt": "hi", "cwd": h.root, "args": []string{"--settings", "sec.json", "--verbose"}})
+	if code != http.StatusOK {
+		t.Fatalf("%d %s", code, raw)
+	}
+	args := out.Result[strings.Index(out.Result, "ARGS="):]
+	if strings.Contains(args, "FAKE-VALUE-123") || strings.Contains(args, "disableRemoteControl") {
+		t.Fatalf("the guard's document is on the command line: %s", args)
+	}
+	guards := filepath.Join(h.dir, "terminals", "guards") + string(filepath.Separator)
+	if strings.Count(args, "--settings "+guards) != 2 {
+		t.Fatalf("the CLI is not handed the guard's file at both ends: %s", args)
+	}
+	if left, _ := os.ReadDir(guards); len(left) != 0 {
+		t.Fatalf("the run's guard is left behind: %v", left)
+	}
+}
+
+// A guard's file is written readable by this user alone, in a directory of
+// its own no other user can enter, named for the process it is for; and a
+// directory a process that has ended left behind is swept the first time
+// another makes one, while a live process's is left alone.
+func TestAGuardsFileIsPrivate(t *testing.T) {
+	h := newHarness(t, Options{})
+	st, err := h.api.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	root := filepath.Join(h.dir, "terminals", "guards")
+	if err := os.MkdirAll(filepath.Join(root, "2147483000-dead"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mine := filepath.Join(root, strconv.Itoa(os.Getpid())+"-mine")
+	if err := os.MkdirAll(mine, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path, remove, err := guardPlace(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := holdwire.WriteGuard(path, []byte(`{"disableRemoteControl":true}`)); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("the guard's file: %v %v, want 0600", fi.Mode(), err)
+	}
+	if fi, err := os.Stat(filepath.Dir(path)); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("its directory: %v %v, want 0700", fi.Mode(), err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "2147483000-dead")); !os.IsNotExist(err) {
+		t.Fatal("an ended process's guard was not swept")
+	}
+	if _, err := os.Stat(mine); err != nil {
+		t.Fatal("a live process's guard was swept")
+	}
+	remove()
+	if _, err := os.Stat(filepath.Dir(path)); !os.IsNotExist(err) {
+		t.Fatal("the guard's directory is left behind")
 	}
 }

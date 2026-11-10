@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/professor93/rota/internal/holdwire"
 )
@@ -87,27 +88,15 @@ func TestArgsCarryingRemoteControlAreReadied(t *testing.T) {
 func TestAHeldSessionIsHandedTheGuardOnlyWithRemoteControlOff(t *testing.T) {
 	log := filepath.Join(t.TempDir(), "request.json")
 	p := withHeld(t, []string{"FAKE_HOLDER_LOG=" + log})
-	handed := func() []string {
-		t.Helper()
-		raw, err := os.ReadFile(log)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var seen struct {
-			Request holdwire.Request `json:"request"`
-		}
-		if err := json.Unmarshal(raw, &seen); err != nil {
-			t.Fatal(err)
-		}
-		return seen.Request.Args
-	}
+	handed := func() []string { return heldRequest(t, log).Args }
 	local := p.door(&localControl)
 	for name, h := range map[string]*harness{"a token": p.harness, "the socket": local.harness} {
 		if resp, raw := h.do("POST", "/v1/terminals", map[string]any{"account": 1, "args": []string{"--model", "opus"}}); resp.StatusCode != http.StatusCreated {
 			t.Fatalf("%s: %d %s", name, resp.StatusCode, raw)
 		}
-		if got := handed(); guardDoc(t, got) == nil || !slices.Equal(guardRest(got), []string{"--model", "opus"}) {
-			t.Errorf("%s, remote control off: the holder was handed %q, want the guard at both ends", name, got)
+		r := heldRequest(t, log)
+		if heldGuard(t, p, r) == nil || !slices.Equal(guardRest(r.Args), []string{"--model", "opus"}) {
+			t.Errorf("%s, remote control off: the holder was handed %q, want the guard's file at both ends", name, r.Args)
 		}
 	}
 	raw, err := os.ReadFile(filepath.Join(p.dir, "accounts.json"))
@@ -150,22 +139,17 @@ func TestAHeldSessionsRecordIsTheArgumentsBeforeTheGuard(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(p.root, "mine.json"), []byte(`{"model":"y"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	request := func() holdwire.Request {
-		t.Helper()
-		raw, err := os.ReadFile(log)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var seen struct {
-			Request holdwire.Request `json:"request"`
-		}
-		if err := json.Unmarshal(raw, &seen); err != nil {
-			t.Fatal(err)
-		}
-		return seen.Request
+	request := func() holdwire.Request { return heldRequest(t, log) }
+	local := p.door(&localControl)
+	// No arguments at all: the record keeps none, said as none, rather
+	// than the holder falling back to the guarded ones.
+	if resp, raw := local.do("POST", "/v1/terminals", map[string]any{"account": 1, "cwd": p.root}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("%d %s", resp.StatusCode, raw)
+	}
+	if r := request(); r.Keep == nil || len(r.Keep) != 0 || heldGuard(t, p, r) == nil {
+		t.Fatalf("no arguments: kept %#v, handed %q; want an empty Keep and the guard", r.Keep, r.Args)
 	}
 	given := []string{"--settings", "mine.json", "--model", "opus"}
-	local := p.door(&localControl)
 	if resp, raw := local.do("POST", "/v1/terminals", map[string]any{"account": 1, "cwd": p.root, "args": given}); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("%d %s", resp.StatusCode, raw)
 	}
@@ -173,16 +157,78 @@ func TestAHeldSessionsRecordIsTheArgumentsBeforeTheGuard(t *testing.T) {
 	if !slices.Equal(r.Keep, given) {
 		t.Fatalf("the record is to keep %q, want %q as given", r.Keep, given)
 	}
-	if doc := guardDoc(t, r.Args); doc == nil || doc["model"] != "y" || slices.Contains(r.Args, "mine.json") {
-		t.Fatalf("the CLI is handed %q, want the guard with the file folded in", r.Args)
+	if doc := heldGuard(t, p, r); doc == nil || doc["model"] != "y" || slices.Contains(r.Args, "mine.json") {
+		t.Fatalf("the CLI is handed %q with %s, want the guard with the file folded in", r.Args, r.Guard)
 	}
 	p.turnOn(1)
 	if resp, raw := local.do("POST", "/v1/terminals", map[string]any{"account": 1, "cwd": p.root, "args": r.Keep}); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("started again: %d %s", resp.StatusCode, raw)
 	}
 	again := request()
-	if !slices.Equal(again.Args, given) || !slices.Equal(again.Keep, given) ||
-		strings.Contains(strings.Join(again.Args, " "), "disableRemoteControl") {
-		t.Fatalf("started again with remote control on: handed %q, kept %q; want %q and no guard", again.Args, again.Keep, given)
+	if !slices.Equal(again.Args, given) || !slices.Equal(again.Keep, given) || again.Guard != "" {
+		t.Fatalf("started again with remote control on: handed %q, kept %q, guard %q; want %q and no guard", again.Args, again.Keep, again.Guard, given)
+	}
+}
+
+// heldRequest is the request the fake holder logged last.
+func heldRequest(t *testing.T, log string) holdwire.Request {
+	t.Helper()
+	raw, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seen struct {
+		Request holdwire.Request `json:"request"`
+	}
+	if err := json.Unmarshal(raw, &seen); err != nil {
+		t.Fatal(err)
+	}
+	return seen.Request
+}
+
+// heldGuard is a held session's guard document, or nil unless the request
+// carries one and its arguments name the session's guard file at both ends:
+// the document goes to the holder on its input, never on a command line.
+func heldGuard(t *testing.T, p *terms, r holdwire.Request) map[string]any {
+	t.Helper()
+	path := holdwire.GuardFile(holdwire.Dir(p.terminals(), r.ID))
+	a := r.Args
+	if len(a) < 2 || a[0] != "--settings" || a[1] != path || a[len(a)-2] != "--settings" || a[len(a)-1] != path ||
+		strings.Contains(strings.Join(a, " "), "disableRemoteControl") {
+		return nil
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(r.Guard), &doc); err != nil || doc["disableRemoteControl"] != true {
+		return nil
+	}
+	return doc
+}
+
+// A terminal this server runs itself has its guard written to a file of its
+// own, readable by this user alone in a directory nobody else may enter,
+// for as long as its CLI runs, and taken away when the terminal ends.
+func TestAServerRunTerminalsGuardIsAPrivateFileForItsLife(t *testing.T) {
+	p := withTerminals(t)
+	id, _ := p.start(nil)["id"].(string)
+	files, _ := filepath.Glob(filepath.Join(p.dir, "terminals", "guards", "*", "guard.json"))
+	if len(files) != 1 {
+		t.Fatalf("guard files: %q, want one", files)
+	}
+	if fi, err := os.Stat(files[0]); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("the guard's file: %v %v, want 0600", fi, err)
+	}
+	if di, err := os.Stat(filepath.Dir(files[0])); err != nil || di.Mode().Perm() != 0o700 {
+		t.Fatalf("its directory: %v %v, want 0700", di, err)
+	}
+	if resp, raw := p.do("DELETE", "/v1/terminals/"+id, nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("%d %s", resp.StatusCode, raw)
+	}
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Dir(files[0])); os.IsNotExist(err) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the guard outlives its terminal")
+		}
 	}
 }

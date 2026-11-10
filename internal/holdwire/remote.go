@@ -6,6 +6,7 @@ import (
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -75,6 +76,16 @@ var (
 func ValueFlags() (required, optional []string) {
 	return slices.Sorted(maps.Keys(requiredFlags)), slices.Sorted(maps.Keys(optionalFlags))
 }
+
+// subcommands are Claude Code 2.1.322's own, which it dispatches from the
+// first operand and hands every argument after: documented in its CLI
+// reference and found in its binary (kill, rollback, forward-home-settings).
+// None of them takes a --settings of its own; only the main program does.
+var subcommands = setOf(
+	"agents", "attach", "auth", "auto-mode", "daemon", "doctor", "gateway", "import", "install", "logs",
+	"mcp", "plugin", "purge", "remote-control", "respawn", "rm", "self-hosted-runner", "setup-token", "stop",
+	"ultrareview", "update", "rc", "kill", "rollback", "forward-home-settings",
+)
 
 func setOf(flags ...string) map[string]bool {
 	set := make(map[string]bool, len(flags))
@@ -288,18 +299,24 @@ const remoteGuardKey = "disableRemoteControl"
 // first, so that a value flag rota does not know, one a later Claude Code
 // adds say, cannot take the guard away by taking the last copy for its
 // value: Claude Code then reads the first, the only other --settings in a
-// flag's position. Both copies are the same document. When the last
-// --settings cannot be read as one JSON object, the answer is the error, and
-// the session is never to be launched without its guard.
-func GuardRemoteControl(args []string, cwd string) ([]string, error) {
-	return GuardRemoteControlOver(args, cwd, "", false)
+// flag's position. A first operand that is one of Claude Code's subcommands
+// ends the options as a "--" does.
+//
+// Both copies are path, the file the caller writes the document (doc) to:
+// the document may hold what a person's settings file does, an env block
+// with a token say, and a command line is for anybody on the machine to read.
+// path "" puts the document itself in its place, which only a test does.
+// When the last --settings cannot be read as one JSON object, the answer is
+// the error, and the session is never to be launched without its guard.
+func GuardRemoteControl(args []string, cwd, path string) (out []string, doc []byte, err error) {
+	return GuardRemoteControlOver(args, cwd, "", false, path)
 }
 
 // GuardRemoteControlOver is GuardRemoteControl for arguments that come after
 // a --settings of their own, a run's settings say, whose value is folded in
 // when the arguments carry none in a flag's position, since it is then the
 // last that counts.
-func GuardRemoteControlOver(args []string, cwd, before string, haveBefore bool) ([]string, error) {
+func GuardRemoteControlOver(args []string, cwd, before string, haveBefore bool, path string) (out []string, doc []byte, err error) {
 	settings, end := flagWalk(args)
 	drop := map[int]bool{}
 	last, have := before, haveBefore
@@ -315,9 +332,13 @@ func GuardRemoteControlOver(args []string, cwd, before string, haveBefore bool) 
 		}
 		last = value
 	}
-	guard, err := GuardedSettings(last, have, cwd)
+	doc, err = GuardedSettings(last, have, cwd)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	guard := path
+	if guard == "" {
+		guard = string(doc)
 	}
 	// The guard where the options end, as far as flagWalk can tell.
 	body := make([]string, 0, len(args)+2)
@@ -325,7 +346,7 @@ func GuardRemoteControlOver(args []string, cwd, before string, haveBefore bool) 
 	for i, a := range args {
 		if i == end {
 			at = len(body)
-			body = append(body, settingsFlag, string(guard))
+			body = append(body, settingsFlag, guard)
 		}
 		if !drop[i] {
 			body = append(body, a)
@@ -333,15 +354,37 @@ func GuardRemoteControlOver(args []string, cwd, before string, haveBefore bool) 
 	}
 	if end == len(args) {
 		at = len(body)
-		body = append(body, settingsFlag, string(guard))
+		body = append(body, settingsFlag, guard)
 	}
 	// And again first, unless that is where it already is: should a flag
 	// rota does not know take the last copy for its value, Claude Code reads
 	// this one, since every other --settings in a flag's position is gone.
 	if at == 0 {
-		return body, nil
+		return body, doc, nil
 	}
-	return append([]string{settingsFlag, string(guard)}, body...), nil
+	return append([]string{settingsFlag, guard}, body...), doc, nil
+}
+
+// GuardFile is where a held session's guard document is written: in the
+// session's own directory, which only its holder and this machine's user can
+// read, beside its record. The holder writes it before its CLI starts and
+// removes it when the CLI ends; a daemon sweeps any a holder left behind.
+func GuardFile(dir string) string { return filepath.Join(dir, "guard.json") }
+
+// WriteGuard writes a guard document to path, readable by this user alone,
+// in place of whatever is there, in a directory that must already be private.
+func WriteGuard(path string, doc []byte) error {
+	_ = os.Remove(path)
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(doc)
+	if err := errors.Join(werr, f.Close()); err != nil {
+		_ = os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 // HasFlagSettings reports whether the arguments carry a --settings in a
@@ -373,14 +416,20 @@ func GuardedSettings(value string, have bool, cwd string) ([]byte, error) {
 // "-", and a short flag in a bundle such as -cn takes the rest of the bundle,
 // or else the next argument, as its value. A flag rota does not know takes
 // none. It answers the indices of the --settings that stand in a flag's
-// position, and where the options end: at the "--" that ends them, before a
-// last flag left without its value, or after the last argument.
+// position, and where the options end: at the "--" that ends them, at a first
+// operand that is one of Claude Code's subcommands, before a last flag left
+// without its value, or after the last argument. Past a subcommand it goes on
+// finding --settings, which Claude Code's early reading of them walks past
+// subcommands to find, but the options end there.
 func flagWalk(args []string) (settings []int, end int) {
 	end = len(args)
+	ends := func(i int) {
+		end = min(end, i)
+	}
 	takes := func(i int, flag string) (next int) {
 		switch {
 		case requiredFlags[flag] && i+1 == len(args):
-			end = i // left without its value
+			ends(i) // left without its value
 			return i
 		case requiredFlags[flag]:
 			return i + 1
@@ -389,12 +438,18 @@ func flagWalk(args []string) (settings []int, end int) {
 		}
 		return i
 	}
+	operand := false
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--":
-			return settings, i
+			ends(i)
+			return settings, end
 		case !strings.HasPrefix(a, "-") || a == "-":
+			if !operand && subcommands[a] {
+				ends(i)
+			}
+			operand = true
 		case strings.HasPrefix(a, "--"):
 			name, _, inline := strings.Cut(a, "=")
 			if inline {

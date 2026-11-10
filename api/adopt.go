@@ -111,6 +111,11 @@ func (s *Server) sweepRecords() {
 		case holdwire.StateUnreadable:
 			// Another rota's, running: listed, and left alone.
 		default:
+			// A guard against Remote Control a holder that is gone did not
+			// take away with its CLI.
+			if !r.Locked {
+				_ = os.Remove(holdwire.GuardFile(r.Dir))
+			}
 			s.tidy(&r, now)
 		}
 	}
