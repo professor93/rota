@@ -224,6 +224,14 @@ rota serve uninstall          # take it back from them; its sessions go on runni
 rota version                  # which rota this is
 ```
 
+Bare `rota`, with no command, opens the TUI when both its input and its
+output are a terminal, on Linux and macOS, and the terminal is not a dumb
+one; anywhere else — a pipe, a script, CI, Windows — and as `rota --json`,
+it prints the short usage and exits 0, as it always has. The TUI is
+answered by rota's own API served inside the process, which opens no port
+and no socket; a run it starts, an Ask kept open included, is cut only
+after 24 hours rather than at the API's ten minutes.
+
 ### Every command, and every flag it takes
 
 `--json` works before a command or among its flags and turns that command's
