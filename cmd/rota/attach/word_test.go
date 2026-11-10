@@ -8,7 +8,8 @@ import (
 
 // TestWordQuotesOrUsesTheID: what to type to reach a session is its name when
 // a shell takes the name as it is, the name in single quotes when it is clean
-// but has a space, and the id when the name is empty or not clean.
+// but needs them, its own quotes written as a shell reads them back, and the
+// id when the name is empty or not clean.
 func TestWordQuotesOrUsesTheID(t *testing.T) {
 	const id = "4f2a9c1e"
 	for _, c := range []struct{ name, want string }{
@@ -17,7 +18,8 @@ func TestWordQuotesOrUsesTheID(t *testing.T) {
 		{"my api", "'my api'"},
 		{"a\x1bb", id},
 		{"a\nb", id},
-		{"it's", id},
+		{"it's", `'it'\''s'`},
+		{"bob's api", `'bob'\''s api'`},
 		{"", id},
 	} {
 		if got := Word(client.Session{ID: id, Name: c.name}); got != c.want {

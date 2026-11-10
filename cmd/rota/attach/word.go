@@ -26,19 +26,24 @@ var wordPlain = regexp.MustCompile(`^[A-Za-z0-9._@%+=:,/-]+$`)
 
 // Word is what to type to reach s again, as the last line of an attach says
 // it: its name when a shell takes the name as it is; the name in single
-// quotes when it is clean, with no control character and no quote of its
-// own, but needs them; and otherwise its id. The name is what client.Match
-// finds a live session by, and the id finds it, live or stopped, always.
+// quotes when it is clean, with no control character, but needs them, each
+// quote of its own ended, escaped and begun again, so a shell reads the
+// name back as it is; and otherwise its id. A session called it's is
+//
+//	'it'\''s'
+//
+// That is the word `rota run --detach` prints after rota send. The name is
+// what client.Match finds a live session by, and the id finds it, live or
+// stopped, always.
 func Word(s client.Session) string {
 	n := s.Name
 	switch {
 	case n == "" || OneLine(n) != n:
+		return OneLine(s.ID)
 	case wordPlain.MatchString(n):
 		return n
-	case !strings.ContainsRune(n, '\''):
-		return "'" + n + "'"
 	}
-	return OneLine(s.ID)
+	return "'" + strings.ReplaceAll(n, "'", `'\''`) + "'"
 }
 
 // OneLine is s with every control character, a newline among them, and every
