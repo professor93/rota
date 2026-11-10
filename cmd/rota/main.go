@@ -51,6 +51,8 @@ Usage:
   rota login <account-id>       sign that account in again: a login only its
                                 approval finishes, or its own CLI's if that
                                 keeps its credentials
+  rota login ... --web [addr]   take the code, key or token from a one-time
+                                page on addr instead of the terminal
   rota list [provider] [-r]     accounts with usage (-r forces a quota refresh)
   rota list --sessions          ...and what the CLIs are running or could resume
   rota run [id] <prompt>        ask an account and print the answer
@@ -139,6 +141,9 @@ type cli struct {
 	// cols is the width a listing fits, when it is known without asking;
 	// 0 asks out whether it is a terminal and how wide (see termWidth).
 	cols int
+	// web is `rota login --web`: what finishes the login comes from a
+	// one-time page rather than the terminal (see login_web.go).
+	web *webAsk
 }
 
 // width is how wide a terminal the listing is drawn on, or 0 for none.
@@ -365,6 +370,14 @@ func (c *cli) login(args []string) error {
 	if err != nil {
 		return err
 	}
+	// --web next, so that its address is never read as anything else; the
+	// word after it is the address only when it reads as one (takeWeb).
+	if args, c.web, err = takeWeb(args); err != nil {
+		return err
+	}
+	if c.web != nil && c.json {
+		return usageError(webUsage)
+	}
 	// A provider name is taken out first because it can also be written
 	// --provider=x, and because naming one always means "start a new one".
 	name, rest := takeProvider(args)
@@ -429,6 +442,20 @@ func (c *cli) login(args []string) error {
 		} else if len(rest) > 1 {
 			return usageError(loginUsage)
 		}
+		if c.web != nil {
+			// The page brings the code, so none is written here.
+			if len(rest) > 1 {
+				return usageError(webUsage)
+			}
+			l, err := s.PendingLogin(rest[0])
+			if err != nil {
+				return err
+			}
+			if l == nil {
+				return rota.WrapNoLogin(rest[0])
+			}
+			return c.webWait(s, l, 0)
+		}
 		return c.finish(s, rest[0], strings.Join(rest[1:], ""))
 	}
 	if numeric {
@@ -445,8 +472,10 @@ const loginUsage = `usage: rota login [provider]             start a new account
        rota login <login-id> [code]      finish a login later, or one begun off a terminal or with --json
        rota login <account-id>           sign it in again; only that account's approval finishes it
        rota login <account-id> [options] one whose CLI keeps its own credentials, through that CLI
+       rota login ... --web [addr]       the code, key or token from a one-time page on addr instead
 
 At a terminal, a login started here waits for the code from the page.
+After --web, an address is an IP address, localhost or :port, so --web 12 is account 12.
 
 `
 
@@ -529,7 +558,7 @@ func (c *cli) thenFinish(l *rota.Login) {
 }
 
 func (c *cli) finish(s *store.Store, id, code string) error {
-	waiting, err := c.finishOnce(s, id, code)
+	waiting, err := c.finishOnce(context.Background(), s, id, code)
 	if err != nil || !waiting {
 		return err
 	}
@@ -545,7 +574,10 @@ func (c *cli) finish(s *store.Store, id, code string) error {
 // has not been approved yet, and nothing is printed for that: what to do
 // next depends on who asked, a person running the command again or a wait
 // asking again by itself.
-func (c *cli) finishOnce(s *store.Store, id, code string) (waiting bool, err error) {
+//
+// ctx bounds the provider's answer: a wait at the terminal passes one that
+// never ends, the one-time page one that ends with the page.
+func (c *cli) finishOnce(ctx context.Context, s *store.Store, id, code string) (waiting bool, err error) {
 	// What kind of login this is was settled when it began; the person
 	// finishing it says nothing but the code, so the answer they get has to
 	// be looked up rather than asked for.
@@ -554,7 +586,7 @@ func (c *cli) finishOnce(s *store.Store, id, code string) (waiting bool, err err
 		return false, err
 	}
 	long := pending != nil && pending.Long
-	a, added, err := s.FinishLogin(context.Background(), id, code)
+	a, added, err := s.FinishLogin(ctx, id, code)
 	if errors.Is(err, rota.ErrAuthPending) {
 		return true, nil
 	}
@@ -2233,6 +2265,9 @@ func (c *cli) signIn(id int, extra []string) error {
 			return usageErr("usage: rota login <account-id> — account %d signs in through rota, so there is no vendor CLI to pass anything after the id to", id)
 		}
 		return c.beginFor(s, a)
+	}
+	if c.web != nil {
+		return usageErr("account %d signs in through its own CLI, which takes nothing from a page; `rota login %d` runs that CLI's login", id, id)
 	}
 	// The same claim a run takes. This hands the home to the vendor's own
 	// login, which writes a new credential file over whatever is there — so of
