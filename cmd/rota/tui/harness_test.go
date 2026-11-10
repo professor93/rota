@@ -18,51 +18,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-
-	"github.com/professor93/rota/internal/claudecode"
-	"github.com/professor93/rota/internal/fakecli"
-	rota "github.com/professor93/rota/lib"
 )
-
-// TestMain keeps every test here away from the person running them: no
-// keychain, no Claude Code daemon, no provider and no home of theirs.
-func TestMain(m *testing.M) {
-	fakecli.Maybe()
-	// No keychain and no Claude Code daemon of anybody's is reached from
-	// here, nor from anything run from here.
-	claudecode.StandIn()
-	// No provider call a test did not stand in for reaches the real one.
-	harnessOffline()
-	// Nor the person's own home, Claude Code directory or profiles.
-	person, err := os.MkdirTemp("", "rota-person")
-	if err != nil {
-		panic(err)
-	}
-	os.Unsetenv("ROTA_CLAUDE_HOME")
-	os.Unsetenv("ROTA_ACCOUNT_ID")
-	os.Setenv("HOME", person)
-	os.Setenv("USERPROFILE", person)
-	os.Unsetenv("ANTHROPIC_CONFIG_DIR")
-	os.Unsetenv("XDG_CONFIG_HOME")
-	dir, err := os.MkdirTemp("", "rota-claude")
-	if err != nil {
-		panic(err)
-	}
-	os.Setenv("CLAUDE_CONFIG_DIR", dir)
-	code := m.Run()
-	os.RemoveAll(dir)
-	os.RemoveAll(person)
-	os.Exit(code)
-}
-
-// harnessOffline points every endpoint of every provider at an address
-// nothing answers on, so a made-up token never leaves the machine.
-func harnessOffline() {
-	const u = claudecode.Unreachable
-	rota.ClaudeEndpoints.Authorize, rota.ClaudeEndpoints.Token, rota.ClaudeEndpoints.Profile, rota.ClaudeEndpoints.Usage = u, u, u, u
-	rota.ClaudeModelsEndpoint = u
-	rota.CodexEndpoints.Authorize, rota.CodexEndpoints.Token = u, u
-}
 
 // The driver. Bubble Tea runs every command in a goroutine of its own and
 // hands the model each message as it comes back; run does the same without
