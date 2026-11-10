@@ -46,6 +46,9 @@ type Spec struct {
 	// Touch names a file to create before exiting, so a test can prove the
 	// fake ran — or did not.
 	Touch string `json:"touch,omitempty"`
+	// StdinTo names a file to write what was read on stdin to, byte for
+	// byte, before exiting, so a test can see what a program was handed.
+	StdinTo string `json:"stdin_to,omitempty"`
 	// KeepStdin leaves stdin unread. The default reads it to the end, as
 	// every real CLI does with a piped prompt.
 	KeepStdin bool `json:"keep_stdin,omitempty"`
@@ -446,10 +449,10 @@ func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	if spec.Echo {
 		return echo(spec, stdin, stdout)
 	}
-	in := ""
+	in, read := "", []byte(nil)
 	if !spec.KeepStdin {
-		raw, _ := io.ReadAll(stdin)
-		in = strings.TrimRight(string(raw), "\n")
+		read, _ = io.ReadAll(stdin)
+		in = strings.TrimRight(string(read), "\n")
 	}
 	if spec.Exec != "" {
 		fmt.Fprintln(stderr, "fake cli:", execFromThread(spec.Exec))
@@ -510,6 +513,9 @@ func run(spec Spec, args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	}
 	for _, l := range spec.Stderr {
 		fmt.Fprintln(stderr, expand(l))
+	}
+	if spec.StdinTo != "" {
+		_ = os.WriteFile(spec.StdinTo, read, 0o600)
 	}
 	if spec.Touch != "" {
 		_ = os.WriteFile(spec.Touch, nil, 0o600)
