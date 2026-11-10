@@ -2,6 +2,7 @@ package sshd
 
 import (
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
@@ -184,8 +185,44 @@ func TestHostKeyIsMadeOnceAndKeptPrivate(t *testing.T) {
 	if err := os.WriteFile(other.HostKey, pem.EncodeToMemory(block), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Listen(other); err == nil || !strings.Contains(err.Error(), "ed25519") {
-		t.Errorf("an ecdsa host key: %v", err)
+	want := "ssh.host_key " + other.HostKey + " is a ecdsa-sha2-nistp256 key; rota's host key is ed25519"
+	if _, err := Listen(other); err == nil || err.Error() != want {
+		t.Errorf("an ecdsa host key: %v; want %q", err, want)
+	}
+
+	// Encrypted: refused, saying so.
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err = ssh.MarshalPrivateKeyWithPassphrase(priv, "", []byte("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	locked := o
+	locked.HostKey = filepath.Join(t.TempDir(), "locked_key")
+	if err := os.WriteFile(locked.HostKey, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want = "ssh.host_key " + locked.HostKey + " is encrypted; rota reads a key without a passphrase"
+	if _, err := Listen(locked); err == nil || err.Error() != want {
+		t.Errorf("an encrypted host key: %v; want %q", err, want)
+	}
+
+	// Making a key never replaces one already there: two servers starting
+	// at once keep the one key whichever made it.
+	before, err := os.ReadFile(o.HostKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := hostkeyMake(o.HostKey); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := os.ReadFile(o.HostKey); string(after) != string(before) {
+		t.Error("making a host key replaced the one there")
+	}
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(o.HostKey), "*")); len(left) != 1 {
+		t.Errorf("the directory holds %q; want the key alone", left)
 	}
 
 	if runtime.GOOS == "windows" {

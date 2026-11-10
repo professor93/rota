@@ -35,6 +35,11 @@ type Channel struct {
 	// it, both from Options.
 	Key    byte
 	Taught func(string) bool
+	// Slot takes one of the places an attach needs, since each keeps a copy
+	// of a session's screen in the daemon: at most maxAttaches on the server
+	// and maxAttachesPerConn on one connection. Its error is the sentence to
+	// print, and done gives the place back.
+	Slot func() (done func(), err error)
 }
 
 // channelResizes is how many window-changes wait for a command to read them.
@@ -53,6 +58,7 @@ func channelServe(ctx context.Context, sc *sshdConn, ch ssh.Channel, reqs <-chan
 		In: ch, Out: ch, Err: ch.Stderr(), Resize: resize,
 		User: sc.user, Login: sc.login, Handler: sc.handler,
 		Key: sc.s.o.Key, Taught: sc.s.o.Taught,
+		Slot: sc.sshdSlot,
 	}
 	var done chan struct{}
 	for req := range reqs {
@@ -65,13 +71,19 @@ func channelServe(ctx context.Context, sc *sshdConn, ch ssh.Channel, reqs <-chan
 				W, H       uint32
 				Modes      string
 			}
-			if done == nil && ssh.Unmarshal(req.Payload, &p) == nil && channelTerm(p.Term) {
-				ok, c.PTY, c.Term = true, true, p.Term
+			// A TERM that is not a terminal's name leaves the terminal
+			// without one; a size of zero is the ordinary 80×24.
+			if done == nil && ssh.Unmarshal(req.Payload, &p) == nil {
+				ok, c.PTY, c.Term = true, true, ""
+				if channelTerm(p.Term) {
+					c.Term = p.Term
+				}
 				c.Cols, c.Rows = channelSize(p.Cols, p.Rows)
 			}
 		case "window-change":
+			// A zero here is no size at all, and is dropped.
 			var z struct{ Cols, Rows, W, H uint32 }
-			if ssh.Unmarshal(req.Payload, &z) == nil {
+			if ssh.Unmarshal(req.Payload, &z) == nil && z.Cols > 0 && z.Rows > 0 {
 				cols, rows := channelSize(z.Cols, z.Rows)
 				channelResize(resize, [2]int{cols, rows})
 				ok = true
@@ -96,7 +108,9 @@ func channelServe(ctx context.Context, sc *sshdConn, ch ssh.Channel, reqs <-chan
 			done = make(chan struct{})
 			go func() {
 				defer close(done)
-				code := dispatchRun(ctx, c, line, bare, sc.s.log)
+				// A command that panics ends its connection, not the daemon.
+				defer sc.s.sshdRecover(func() { sc.sc.Close() })
+				code := dispatchRun(ctx, c, line, bare, sc.s.commands, sc.s.log)
 				_ = ch.CloseWrite()
 				_, _ = ch.SendRequest("exit-status", false, ssh.Marshal(struct{ Status uint32 }{channelStatus(code)}))
 				_ = ch.Close()
