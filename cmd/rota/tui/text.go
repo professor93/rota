@@ -124,8 +124,8 @@ func textBlank(c byte) bool { return c == ' ' || c == '\t' || c == '\n' }
 
 // textEscapes is s with each escape sequence in it replaced by a space
 // where it stood between two words, and by nothing beside a blank, at
-// either end, or after another sequence, and its seams, in order. ECMA-48 delimits the
-// sequences:
+// either end, or after another sequence, and its seams, in order. ECMA-48
+// delimits the sequences:
 //   - ESC [, or CSI (U+009B, or 0x9b alone, which a terminal reading eight
 //     bits takes as CSI): parameter bytes 0x30-0x3F, intermediate bytes
 //     0x20-0x2F, and the final byte 0x40-0x7E;

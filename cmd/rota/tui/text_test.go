@@ -245,6 +245,12 @@ func TestTextKeysInEveryArrangement(t *testing.T) {
 	b1, b2 := key[:21], key[21:]
 	for _, c := range []struct{ name, in string }{
 		{"whole", "x " + key},
+		// A dropped format character stands between words, as the control
+		// it is: a key glued after one still starts a word.
+		{"glued after ZWSP", "x\u200b" + key},
+		{"glued after VS16", "x\ufe0f" + key},
+		{"glued after a soft hyphen", "x\u00ad" + key},
+		{"glued after a bidi mark", "x\u200e" + key},
 		// A key a dropped control splits is read whole, not taken out up
 		// to the control with the rest left showing.
 		{"split by BEL past 16 body characters", "\x07" + key[:28] + "\x07" + key[28:]},
@@ -295,10 +301,11 @@ func TestTextKeysInEveryArrangement(t *testing.T) {
 
 // TestTextKeyFuzzLeaksNothingNew: of 20,000 random arrangements of a key
 // (textKeyFuzz, a fixed seed), none shows its body that clean at da8b9bb
-// took out, and none shows 12 of its body characters after a marker. testdata/text-key-fuzz-da8b9bb.txt lists the ones that showed
-// there: a key glued to a letter, which wire.Unsecret leaves by design, a
-// key split before a control after enough of it to be taken out by
-// itself, and the residue clean's comment names.
+// took out, and none shows 12 of its body characters after a marker.
+// testdata/text-key-fuzz-da8b9bb.txt lists the ones that showed there: a
+// key glued to a letter, which wire.Unsecret leaves by design, a key split
+// before a control after enough of it to be taken out by itself, and the
+// residue clean's comment names.
 func TestTextKeyFuzzLeaksNothingNew(t *testing.T) {
 	data, err := os.ReadFile("testdata/text-key-fuzz-da8b9bb.txt")
 	if err != nil {
@@ -634,8 +641,9 @@ const textModeVar = "ROTA_TUI_TEXT_MODE"
 // their own, in the mode this run is not: with RUNEWIDTH_EASTASIAN=1, the
 // supported setting for a terminal that draws ambiguous characters wide, or
 // without it. x/ansi reads the variable as the binary starts, so only a new
-// process changes the measure, and this run covers its own mode. The child is this binary, started by its own path, with PATH
-// still the empty directory TestMain made, so it finds no CLI.
+// process changes the measure, and this run covers its own mode. The child
+// is this binary, started by its own path, with PATH still the empty
+// directory TestMain made, so it finds no CLI.
 func TestTextBothEastAsianModes(t *testing.T) {
 	if os.Getenv(textModeVar) != "" {
 		t.Skip("a child run")
