@@ -58,6 +58,23 @@ func Start(cmd *exec.Cmd, cols, rows uint16) (*os.File, error) {
 	return master, nil
 }
 
+// Open opens a pseudo-terminal pair and hands back both ends, for a caller
+// that needs the slave itself rather than a process on it: a test standing
+// in for the person's own terminal. The slave is not made anyone's
+// controlling terminal. Both ends are the caller's to close.
+func Open() (master, slave *os.File, err error) {
+	master, name, err := open()
+	if err != nil {
+		return nil, nil, err
+	}
+	slave, err = os.OpenFile(name, os.O_RDWR|syscall.O_NOCTTY, 0)
+	if err != nil {
+		master.Close()
+		return nil, nil, fmt.Errorf("opening the terminal %s: %w", name, err)
+	}
+	return master, slave, nil
+}
+
 // winsize is the kernel's struct winsize, the same four shorts in the same
 // order on both platforms. It is declared here because package syscall
 // exports the ioctl number and not the argument it takes.
