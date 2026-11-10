@@ -2298,7 +2298,10 @@ playground still runs one of its own. The pages' own files, the two shared
 ones and those under `/assets/term/`, are asked for with `?v=` and a digest
 of every file the binary carries under `/assets/` rather than the version,
 so the year of caching never keeps an old script once the files have
-changed, even between two builds of one version.
+changed, even between two builds of one version. Only the query this server
+names a file by earns the year; under any other, or none, the file is
+answered as it is now with `Cache-Control: no-cache`, so a page from
+another build cannot pin today's bytes under its own URL.
 
 #### Limits, the audit log and recording
 

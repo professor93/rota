@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/professor93/rota/wire"
 )
 
 // termFileRe finds the files under /assets/term/ that terminal.html asks
@@ -122,11 +124,11 @@ var assetRefRe = regexp.MustCompile(`(?:src|href)="([^"]*)"`)
 // a digest of what is embedded: files that changed are a different URL, never
 // a stale script, even where the version did not move.
 func TestThePagesAskForTheirAssetsByDigest(t *testing.T) {
-	if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(assetsDigest) {
-		t.Fatalf("the assets' digest is %q, want 16 hex characters", assetsDigest)
+	if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(assetsDigest()) {
+		t.Fatalf("the assets' digest is %q, want 16 hex characters", assetsDigest())
 	}
 	h := newHarness(t, Options{Routes: terminalRoutes()})
-	want := "?v=" + url.QueryEscape(assetsDigest)
+	want := "?v=" + url.QueryEscape(assetsDigest())
 	for _, p := range []string{"/playground", "/terminal"} {
 		resp, raw := h.do("GET", p, nil)
 		if resp.StatusCode != http.StatusOK {
@@ -188,7 +190,7 @@ func TestTheAssetsDigestFollowsTheirBytes(t *testing.T) {
 
 // Every file the terminal page names answers, with its type and the year's
 // cache; nothing else is reachable under /assets/term/, and none of it is
-// there without the terminal group.
+// there without the terminal group, by any spelling of its path.
 func TestTheTerminalPagesOwnFilesAreServed(t *testing.T) {
 	h := newHarness(t, Options{Routes: terminalRoutes()})
 	named := termFiles(t)
@@ -196,12 +198,18 @@ func TestTheTerminalPagesOwnFilesAreServed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(embedded) != len(named) {
-		t.Errorf("assets/term holds %d files and terminal.html names %d", len(embedded), len(named))
+	var have []string
+	for _, e := range embedded {
+		have = append(have, e.Name())
+	}
+	want := append([]string(nil), named...)
+	sort.Strings(want)
+	if strings.Join(have, " ") != strings.Join(want, " ") {
+		t.Errorf("assets/term holds %v and terminal.html names %v", have, want)
 	}
 	for _, name := range named {
 		ctype := map[string]string{".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}[path.Ext(name)]
-		resp, _ := h.do("GET", "/assets/term/"+name+"?v="+url.QueryEscape(assetsDigest), nil)
+		resp, _ := h.do("GET", "/assets/term/"+name+"?v="+url.QueryEscape(assetsDigest()), nil)
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("GET /assets/term/%s: %d", name, resp.StatusCode)
 			continue
@@ -216,24 +224,72 @@ func TestTheTerminalPagesOwnFilesAreServed(t *testing.T) {
 			t.Errorf("%s is not cacheable: %q", name, got)
 		}
 	}
-	for _, p := range []string{"/assets/term/nothing.js", "/assets/term/..%2fpage.js"} {
+	for _, p := range []string{"/assets/term/nothing.js", "/assets/term/..%2fpage.js",
+		"/assets/term%2Fcore.js", "/assets/term%5Ccore.js", "/assets/xterm%2Fxterm.js"} {
 		if resp, _ := h.do("GET", p, nil); resp.StatusCode != http.StatusNotFound {
 			t.Errorf("GET %s answered %d, want 404", p, resp.StatusCode)
 		}
 	}
 	off := newHarness(t, Options{})
-	if resp, _ := off.do("GET", "/assets/term/core.js", nil); resp.StatusCode != http.StatusNotFound {
-		t.Errorf("GET /assets/term/core.js answered %d with the terminal group off, want 404", resp.StatusCode)
+	for _, p := range []string{"/assets/term/core.js", "/assets/term%2Fcore.js", "/assets/term%2fcore.js",
+		"/assets/xterm%2Fxterm.js", "/assets/term%5Ccore.js"} {
+		if resp, _ := off.do("GET", p, nil); resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s answered %d with the terminal group off, want 404", p, resp.StatusCode)
+		}
+	}
+}
+
+// Only the query a page asks under may be kept for a year. A request under
+// another one, or none, is answered with today's bytes and kept by nobody,
+// or a page from another build would pin them under its own URL for good.
+func TestAStaleAssetQueryIsNotKept(t *testing.T) {
+	h := newHarness(t, Options{Routes: terminalRoutes()})
+	const year = "public, max-age=31536000, immutable"
+	for _, c := range []struct{ path, cache string }{
+		{"/assets/page.js?v=" + assetsDigest(), year},
+		{"/assets/term/core.js?v=" + assetsDigest(), year},
+		{"/assets/xterm/xterm.js?v=" + url.QueryEscape(wire.Version), year},
+		{"/assets/page.js", "no-cache"},
+		{"/assets/page.js?v=0123456789abcdef", "no-cache"},
+		{"/assets/page.js?v=" + url.QueryEscape(wire.Version), "no-cache"},
+		{"/assets/term/core.js?v=", "no-cache"},
+		{"/assets/term/core.js?v=" + assetsDigest() + "&v=x", year},
+		{"/assets/xterm/xterm.js?v=" + assetsDigest(), "no-cache"},
+		{"/assets/xterm/xterm.js", "no-cache"},
+	} {
+		resp, _ := h.do("GET", c.path, nil)
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET %s: %d", c.path, resp.StatusCode)
+			continue
+		}
+		if got := resp.Header.Get("Cache-Control"); got != c.cache {
+			t.Errorf("GET %s is kept as %q, want %q", c.path, got, c.cache)
+		}
 	}
 }
 
 var (
 	bareScriptRe = regexp.MustCompile(`<script(?:\s[^>]*)?>`)
 	styleTagRe   = regexp.MustCompile(`<style[\s>]`)
+	inlineOnRe   = regexp.MustCompile(`(?i)\son[a-z]+\s*=|javascript:`)
 )
 
+// scriptDirectives is every directive of a policy whose name starts
+// script-src, with its sources.
+func scriptDirectives(csp string) map[string][]string {
+	out := map[string][]string{}
+	for _, d := range strings.Split(csp, ";") {
+		f := strings.Fields(d)
+		if len(f) > 0 && strings.HasPrefix(strings.ToLower(f[0]), "script-src") {
+			out[strings.ToLower(f[0])] = append(out[strings.ToLower(f[0])], f[1:]...)
+		}
+	}
+	return out
+}
+
 // The terminal page has no script of its own in its markup, so its policy
-// admits none; the playground still has one, and keeps 'unsafe-inline'.
+// admits none, by any directive; the playground still has one, and keeps
+// 'unsafe-inline'.
 func TestTheTerminalPageRunsNoInlineScript(t *testing.T) {
 	for _, tag := range bareScriptRe.FindAllString(string(terminalHTML), -1) {
 		if !strings.Contains(tag, "src=") {
@@ -243,20 +299,53 @@ func TestTheTerminalPageRunsNoInlineScript(t *testing.T) {
 	if styleTagRe.Match(terminalHTML) {
 		t.Error("terminal.html has a <style> of its own")
 	}
+	// The policy would block an inline handler without a word, so none is
+	// written: el() binds every handler with addEventListener.
+	for _, m := range inlineOnRe.FindAllString(string(terminalHTML), -1) {
+		t.Errorf("terminal.html has inline script: %q", m)
+	}
 	h := newHarness(t, Options{Routes: terminalRoutes()})
 	resp, _ := h.do("GET", "/terminal", nil)
 	csp := resp.Header.Get("Content-Security-Policy")
-	i := strings.Index(csp, "script-src 'self';")
-	if i < 0 {
-		t.Fatalf("the terminal page's policy has no `script-src 'self';`: %s", csp)
+	got := scriptDirectives(csp)
+	if len(got) != 1 || strings.Join(got["script-src"], " ") != "'self'" {
+		t.Errorf("the terminal page's script directives are %v, want only script-src 'self': %s", got, csp)
 	}
-	directive := csp[i:]
-	directive = directive[:strings.Index(directive, ";")]
-	if strings.Contains(directive, "unsafe-inline") {
-		t.Errorf("the terminal page's script-src admits inline script: %s", directive)
+	for name, sources := range got {
+		for _, src := range sources {
+			l := strings.ToLower(src)
+			if strings.Contains(l, "unsafe-") || strings.HasPrefix(l, "'nonce-") || strings.HasPrefix(l, "'sha") {
+				t.Errorf("the terminal page's %s admits inline script: %s", name, src)
+			}
+		}
 	}
 	resp, _ = h.do("GET", "/playground", nil)
-	if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
-		t.Errorf("the playground's policy lost its inline script: %s", csp)
+	if got := scriptDirectives(resp.Header.Get("Content-Security-Policy")); strings.Join(got["script-src"], " ") != "'self' 'unsafe-inline'" {
+		t.Errorf("the playground's policy lost its inline script: %v", got)
+	}
+}
+
+// scriptDirectives itself, so the check above can fail: a policy that lets
+// inline script in by any of the three names is seen to.
+func TestTheScriptDirectivesAreReadWhole(t *testing.T) {
+	for csp, want := range map[string]string{
+		"default-src 'none'; script-src 'self'; connect-src 'self'":                            "script-src='self'",
+		"script-src 'self' 'unsafe-inline'":                                                    "script-src='self' 'unsafe-inline'",
+		"script-src 'self'; script-src-elem 'unsafe-inline'":                                   "script-src='self' script-src-elem='unsafe-inline'",
+		"script-src 'self';script-src-attr 'unsafe-hashes' 'sha256-x'; Script-Src-Elem 'self'": "script-src='self' script-src-attr='unsafe-hashes' 'sha256-x' script-src-elem='self'",
+	} {
+		got := scriptDirectives(csp)
+		var names []string
+		for n := range got {
+			names = append(names, n)
+		}
+		sort.Strings(names)
+		var parts []string
+		for _, n := range names {
+			parts = append(parts, n+"="+strings.Join(got[n], " "))
+		}
+		if strings.Join(parts, " ") != want {
+			t.Errorf("%q reads as %q, want %q", csp, strings.Join(parts, " "), want)
+		}
 	}
 }

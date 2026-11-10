@@ -5,6 +5,7 @@ import (
 	_ "embed"
 	"net/http"
 	"net/url"
+	"sync"
 )
 
 // The two pages this server serves, each in its own route group: the
@@ -23,29 +24,30 @@ var terminalHTML []byte
 // The pages as they are served: every asset either one asks for carries a
 // digest of every embedded asset, so the year-long cache on /assets never
 // keeps a stale script after the files change — whatever the version says,
-// which stays the same across builds between releases. Stamped once.
+// which stays the same across builds between releases. Stamped once, when
+// the page is first served.
 var (
-	playgroundBody = stamp(playgroundHTML)
-	terminalBody   = stamp(terminalHTML)
+	playgroundBody = sync.OnceValue(func() []byte { return stamp(playgroundHTML) })
+	terminalBody   = sync.OnceValue(func() []byte { return stamp(terminalHTML) })
 )
 
 // stamp puts the assets' digest where a page says {{v}}.
 func stamp(page []byte) []byte {
-	return bytes.ReplaceAll(page, []byte("{{v}}"), []byte(url.QueryEscape(assetsDigest)))
+	return bytes.ReplaceAll(page, []byte("{{v}}"), []byte(url.QueryEscape(assetsDigest())))
 }
 
 // playground serves a single page for trying this server by hand. It ships
 // no token of its own: the page asks for one, checks it against
 // /v1/accounts, and keeps it only in the browser.
 func (s *Server) playground(w http.ResponseWriter, _ *http.Request) {
-	writePage(w, playgroundBody, true)
+	writePage(w, playgroundBody(), true)
 }
 
 // terminalPage serves the page a terminal is watched and typed at from. It
 // is in the terminal group, so a server that holds no terminals does not
 // have it, and a server that holds them without a playground does.
 func (s *Server) terminalPage(w http.ResponseWriter, _ *http.Request) {
-	writePage(w, terminalBody, false)
+	writePage(w, terminalBody(), false)
 }
 
 // writePage serves a page. inlineScript is whether the page runs a script

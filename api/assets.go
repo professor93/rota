@@ -7,6 +7,9 @@ import (
 	"io/fs"
 	"net/http"
 	"strings"
+	"sync"
+
+	"github.com/professor93/rota/wire"
 )
 
 // What the two pages are made of, carried in the binary.
@@ -68,14 +71,24 @@ var assetTypes = map[string]string{
 //
 // It is behind no credential, like the pages themselves. A page asks for
 // each of its files with ?v=<the assets' digest>, and for the emulator, whose
-// files are pinned by their sums, with ?v=<this server's version>; so the
-// answer may be kept for as long as a browser likes: a rota whose files have
-// changed serves a page that asks under a different query.
+// files are pinned by their sums, with ?v=<this server's version>. Under that
+// query the answer may be kept for as long as a browser likes: a rota whose
+// files have changed serves a page that asks under a different one. Under any
+// other query, or none, the bytes are today's and are not to be kept unasked:
+// a page from another build would otherwise pin them under its own URL.
 func (s *Server) assetsIn(dir string) http.HandlerFunc {
+	current := assetsDigest
+	if dir == "xterm/" {
+		current = func() string { return wire.Version }
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		name := dir + r.PathValue("file")
+		file := r.PathValue("file")
+		name := dir + file
 		ct, ok := assetTypes[name]
-		if !ok || strings.Contains(name, "..") {
+		// One segment only: an escaped slash would otherwise reach a file of
+		// another directory through this one's pattern, past the group that
+		// directory belongs to.
+		if !ok || strings.ContainsAny(file, `/\`) || strings.Contains(name, "..") {
 			fail(w, http.StatusNotFound, "no asset "+name)
 			return
 		}
@@ -90,7 +103,11 @@ func (s *Server) assetsIn(dir string) http.HandlerFunc {
 		h := w.Header()
 		h.Set("Content-Type", ct)
 		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("Cache-Control", "public, max-age=31536000, immutable")
+		if r.URL.Query().Get("v") == current() {
+			h.Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			h.Set("Cache-Control", "no-cache")
+		}
 		h.Set("Referrer-Policy", "no-referrer")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
@@ -99,8 +116,10 @@ func (s *Server) assetsIn(dir string) http.HandlerFunc {
 
 // assetsDigest names what is embedded under assets/. The pages ask for their
 // files under it, so files that changed are a new URL even where the version
-// did not move, as between two builds of one beta.
-var assetsDigest = digestOf(assetFS, "assets")
+// did not move, as between two builds of one beta. It is worked out the first
+// time a page or an asset is served, not when the program starts: every rota
+// command links this package, and most of them serve nothing.
+var assetsDigest = sync.OnceValue(func() string { return digestOf(assetFS, "assets") })
 
 // digestOf is the first 16 hex characters of a SHA-256 over every file under
 // root, walked in name order, each as its path, a NUL and its bytes.
