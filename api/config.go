@@ -42,6 +42,8 @@ type Config struct {
 	Runs     RunsSection     `toml:"runs"`
 	Terminal TerminalSection `toml:"terminal"`
 	Store    StoreSection    `toml:"store"`
+	// Events is where the daemon sends what happens; nothing by default.
+	Events EventsSection `toml:"events"`
 	// Users and Tokens are the principals besides the one bearer token: the
 	// people who sign in on the page, and the tokens a script carries. They
 	// are arrays of tables rather than more keys under [auth] because each
@@ -325,7 +327,7 @@ func (c *Config) Check() error {
 		return fmt.Errorf("server.log_file must be an absolute path, not %q: "+
 			"a relative one would depend on the directory the server was started in", p)
 	}
-	return nil
+	return c.checkEvents()
 }
 
 // checkTerminal says what is wrong with a terminal this file asks for, and
@@ -364,17 +366,30 @@ func (c *Config) checkTerminal() error {
 // loopback reports whether an address is reachable only from this machine.
 // A host that is not an address at all — a name somebody put in the file —
 // counts as reachable from elsewhere unless it is localhost: what a name
-// resolves to is not this file's to decide.
+// resolves to is not this file's to decide. localhost is compared as ASCII,
+// because Unicode case folding would let another spelling, such as one with
+// a long s, pass for it.
 func loopback(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		return false
 	}
-	if strings.EqualFold(host, "localhost") {
+	if asciiLower(host) == "localhost" {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// asciiLower lowers A-Z and leaves every other byte as it is.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if 'A' <= c && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 // checkPrincipals says what is wrong with the people and the tokens this
@@ -641,6 +656,18 @@ func (c *Config) Print(w io.Writer, token string) error {
 	yes := func(name string, v bool) { key(name, strconv.FormatBool(v)) }
 	num := func(name string, v int) { key(name, strconv.Itoa(v)) }
 	span := func(name string, v time.Duration) { key(name, quote(duration(v))) }
+	list := func(name string, v []string) {
+		if len(v) > 0 && isSecret(name) {
+			key(name, quote("(set)"))
+			masked = true
+			return
+		}
+		quoted := make([]string, 0, len(v))
+		for _, s := range v {
+			quoted = append(quoted, quote(s))
+		}
+		key(name, "["+strings.Join(quoted, ", ")+"]")
+	}
 
 	body.WriteString("[server]\n")
 	str("server.listen", c.Server.Listen)
@@ -674,11 +701,7 @@ func (c *Config) Print(w io.Writer, token string) error {
 	span("runs.input_grace", c.Runs.InputGrace)
 	num("runs.replay", c.Runs.Replay)
 	span("runs.refresh_every", c.Runs.RefreshEvery)
-	quoted := make([]string, 0, len(c.Runs.Roots))
-	for _, r := range c.Runs.Roots {
-		quoted = append(quoted, quote(r))
-	}
-	key("runs.roots", "["+strings.Join(quoted, ", ")+"]")
+	list("runs.roots", c.Runs.Roots)
 	yes("runs.allow_dangerous", c.Runs.AllowDangerous)
 	yes("runs.allow_raw_flags", c.Runs.AllowRawFlags)
 
@@ -694,6 +717,8 @@ func (c *Config) Print(w io.Writer, token string) error {
 
 	body.WriteString("\n[store]\n")
 	str("store.dir", c.Store.Dir)
+
+	c.printEvents(&body, str, list)
 
 	for i, u := range c.Users {
 		body.WriteString("\n[[users]]\n")
