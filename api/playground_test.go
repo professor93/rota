@@ -1,6 +1,7 @@
 package api
 
 import (
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,5 +139,27 @@ func TestThePagesAreSelfContained(t *testing.T) {
 	}
 	if !strings.Contains(string(view), "new Terminal(") || !strings.Contains(string(view), "new FitAddon") {
 		t.Error("xterm is not constructed in view.js")
+	}
+	// Nothing the terminal page shows is parsed as markup: every node is
+	// built with el() and server data goes in as text. dom.js never parses
+	// markup, so a test of the page in Node cannot see this; the source can.
+	sinks := regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\bhtml\s*:`)
+	files, err := fs.ReadDir(assetFS, "assets/term")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		raw, err := assetFS.ReadFile("assets/term/" + f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range sinks.FindAllString(string(raw), -1) {
+			t.Errorf("assets/term/%s writes markup: %q", f.Name(), m)
+		}
+		// Each script is strict on its own, as the inline script it was
+		// taken from was: a browser runs each file in its own mode.
+		if strings.HasSuffix(f.Name(), ".js") && !strings.HasPrefix(string(raw), "\"use strict\";\n") {
+			t.Errorf("assets/term/%s does not begin with \"use strict\";", f.Name())
+		}
 	}
 }
