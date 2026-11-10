@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/user"
@@ -98,24 +99,29 @@ func noManager(t *testing.T) {
 	t.Cleanup(func() { procDir, cgroupDir = oldProc, oldCgroup })
 }
 
-// systemctl --user from sudo -u, su or cron has no XDG_RUNTIME_DIR of its
-// own — none, or the invoker's — and so no bus. When this user's manager
-// listens at /run/user/<uid>/systemd/private, its own socket in its own
-// directory, systemctl is given that directory: the same manager,
-// user@<uid>.service, without a bus. One already named and this user's is
-// left alone, and so is a socket that is not there or not a socket.
+// systemctl --user from sudo -u, su or cron has no XDG_RUNTIME_DIR that
+// reaches a manager — none, the invoker's, or one of this user's own with
+// no manager in it. An XDG_RUNTIME_DIR with a manager's socket in it is
+// left alone, whoever's it is: root given a user's, as sudo -E gives it,
+// reaches that user's manager, which has the unit. Otherwise, when this
+// user's manager listens at /run/user/<uid>/systemd/private, its own socket
+// in its own directory, systemctl is given that directory: the same
+// manager, user@<uid>.service, without a bus.
 func TestSystemctlIsGivenTheUserManagersRuntimeDirectory(t *testing.T) {
 	uid := os.Getuid()
-	base := filepath.Join(t.TempDir(), "u")
+	root := t.TempDir()
+	base := filepath.Join(root, "u")
 	dir := filepath.Join(base, fmt.Sprint(uid))
-	if err := os.MkdirAll(filepath.Join(dir, "systemd"), 0o700); err != nil {
-		t.Fatal(err)
+	other := filepath.Join(root, "o")
+	for _, d := range []string{filepath.Join(dir, "systemd"), filepath.Join(other, "systemd")} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
 	}
 	old := runtimeBase
 	runtimeBase = base
 	t.Cleanup(func() { runtimeBase = old })
 	private := filepath.Join(dir, "systemd", "private")
-	own := t.TempDir()
 	ask := func(t *testing.T, xdg string) []string {
 		t.Helper()
 		t.Setenv("XDG_RUNTIME_DIR", xdg)
@@ -139,27 +145,68 @@ func TestSystemctlIsGivenTheUserManagersRuntimeDirectory(t *testing.T) {
 	if err := os.Remove(private); err != nil {
 		t.Fatal(err)
 	}
-	l, err := net.Listen("unix", private)
-	if err != nil {
-		t.Skipf("no socket here: %v", err)
+	for _, p := range []string{private, filepath.Join(other, "systemd", "private")} {
+		l, err := net.Listen("unix", p)
+		if err != nil {
+			t.Skipf("no socket here: %v", err)
+		}
+		t.Cleanup(func() { l.Close() })
 	}
-	t.Cleanup(func() { l.Close() })
 	for _, c := range []struct {
 		name, xdg string
 		want      []string
 	}{
 		{"unset", "", given},
-		{"one that is not there", filepath.Join(own, "absent"), given},
-		{"this user's own", own, plain},
+		{"one that is not there", filepath.Join(root, "absent"), given},
+		{"this user's own, with no manager in it", t.TempDir(), given},
+		{"one with a manager in it", other, plain},
 	} {
 		if got := ask(t, c.xdg); !slices.Equal(got, c.want) {
 			t.Fatalf("XDG_RUNTIME_DIR %s: asked %q, want %q", c.name, got, c.want)
 		}
 	}
-	if uid != 0 {
-		if got := ask(t, "/"); !slices.Equal(got, given) {
-			t.Fatalf("XDG_RUNTIME_DIR somebody else's: asked %q, want %q", got, given)
+	// Whose each is, as a seam says, so that a directory or socket not this
+	// user's can be had without root, and as root.
+	real := ownerOf
+	t.Cleanup(func() { ownerOf = real })
+	for _, c := range []struct {
+		name, foreign, xdg string
+		want               []string
+	}{
+		{"somebody else's, with a manager in it", "o", other, plain},
+		{"/run/user/<uid> somebody else's", fmt.Sprint(uid), "", plain},
+		{"its socket somebody else's", "private", "", plain},
+	} {
+		ownerOf = func(fi fs.FileInfo) int {
+			if fi.Name() == c.foreign {
+				return 65534
+			}
+			return real(fi)
 		}
+		if got := ask(t, c.xdg); !slices.Equal(got, c.want) {
+			t.Fatalf("%s: asked %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+// ownedBy compares the owner's uid with the one asked for, and the kind:
+// a directory of this user's is this user's, not another uid's, and not a
+// socket. Nothing here needs another user, so root is checked as well.
+func TestOwnedByComparesTheUid(t *testing.T) {
+	uid, dir := os.Getuid(), t.TempDir()
+	if !ownedBy(dir, uid, fs.ModeDir) {
+		t.Fatalf("%s is not taken for uid %d's", dir, uid)
+	}
+	for _, c := range []struct {
+		uid  int
+		kind fs.FileMode
+	}{{uid + 1, fs.ModeDir}, {65534, fs.ModeDir}, {uid, fs.ModeSocket}} {
+		if ownedBy(dir, c.uid, c.kind) {
+			t.Fatalf("%s is taken for uid %d's %v", dir, c.uid, c.kind)
+		}
+	}
+	if ownedBy(filepath.Join(dir, "absent"), uid, fs.ModeDir) {
+		t.Fatal("a path that is not there is taken for one")
 	}
 }
 

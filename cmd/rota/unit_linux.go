@@ -37,13 +37,14 @@ func unitFile(store string) (string, error) {
 }
 
 // systemctl asks the user's systemd, one argv as launchctl is asked. From
-// sudo -u, su or cron there is no XDG_RUNTIME_DIR of this user's — none,
-// or the invoker's — and systemctl --user then finds no bus; so where this
-// user's manager listens on its private socket in its own runtime
-// directory, systemctl is given that directory, which it reaches the
-// manager through with no bus at all. It is the one manager of this uid,
-// user@<uid>.service, which the unit was installed with. Only a setup that
-// runs a second manager at a runtime directory of its own would differ.
+// sudo -u, su or cron there is no XDG_RUNTIME_DIR that reaches a manager —
+// none, the invoker's, or one with no manager in it — and systemctl --user
+// then finds no bus; so where this user's manager listens on its private
+// socket in its own runtime directory, systemctl is given that directory,
+// which it reaches the manager through with no bus at all. It is the one
+// manager of this uid, user@<uid>.service, which the unit was installed
+// with. Only a setup that runs a second manager at a runtime directory of
+// its own would differ.
 func systemctl(args ...string) error {
 	argv := append([]string{"--user"}, args...)
 	if dir := managerRuntimeDir(); dir != "" {
@@ -57,14 +58,19 @@ func systemctl(args ...string) error {
 var runtimeBase = "/run/user"
 
 // managerRuntimeDir is the runtime directory systemctl is to be given, or
-// "" when it is to be left as it is: XDG_RUNTIME_DIR already names one of
-// this user's, or runtimeBase/<uid> is not this user's own directory with
-// this user's own socket at systemd/private.
+// "" when it is to be left as it is: XDG_RUNTIME_DIR already names one with
+// a manager's socket at systemd/private, or runtimeBase/<uid> is not this
+// user's own directory with this user's own socket there. The one named is
+// judged by its socket alone, whoever's it is: one this process cannot
+// reach does not stat, and root given a user's, as sudo -E gives it, reaches
+// that user's manager, which has the unit, and not root's own.
 func managerRuntimeDir() string {
-	uid := os.Getuid()
-	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" && ownedBy(d, uid, fs.ModeDir) {
-		return ""
+	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
+		if fi, err := os.Stat(filepath.Join(d, "systemd", "private")); err == nil && fi.Mode().Type() == fs.ModeSocket {
+			return ""
+		}
 	}
+	uid := os.Getuid()
 	dir := filepath.Join(runtimeBase, strconv.Itoa(uid))
 	if !ownedBy(dir, uid, fs.ModeDir) || !ownedBy(filepath.Join(dir, "systemd", "private"), uid, fs.ModeSocket) {
 		return ""
@@ -75,11 +81,16 @@ func managerRuntimeDir() string {
 // ownedBy says whether path is of that kind and uid's.
 func ownedBy(path string, uid int, kind fs.FileMode) bool {
 	fi, err := os.Stat(path)
-	if err != nil || fi.Mode().Type() != kind {
-		return false
+	return err == nil && fi.Mode().Type() == kind && ownerOf(fi) == uid
+}
+
+// ownerOf is the uid that owns what fi describes, or -1. A variable so a
+// test can have something be somebody else's without being root.
+var ownerOf = func(fi fs.FileInfo) int {
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+		return int(st.Uid)
 	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	return ok && int(st.Uid) == uid
+	return -1
 }
 
 // daemonUnderUnit says whether the daemon whose pid this is is the one the
@@ -87,7 +98,10 @@ func ownedBy(path string, uid int, kind fs.FileMode) bool {
 var daemonUnderUnit = underUnit
 
 // underUnit says whether pid's cgroup, on either layout, is the store's
-// unit's, as /proc says. One that cannot be read is not taken for it.
+// unit's, as /proc says. One that cannot be read is not taken for it. A
+// daemon started by hand from inside the unit's cgroup — from a session
+// the unit's daemon held, which stays there after that daemon is gone — is
+// taken for the unit's own: nothing on the outside tells the two apart.
 func underUnit(store string, pid int) bool {
 	raw, err := os.ReadFile(filepath.Join(procDir, strconv.Itoa(pid), "cgroup"))
 	if err != nil {

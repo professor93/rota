@@ -678,6 +678,45 @@ func TestAnUninstallKeepsTheUnitAfterStoppingADaemonNotTheUnits(t *testing.T) {
 	}
 }
 
+// The daemon signalled is not always the one looked at: one may have gone
+// and another come between. Whose the one signalled was is then not known
+// — the cgroup read was the first one's — so it is taken for one started
+// by hand, and the unit is kept while a restart may come, even though the
+// first one was the unit's.
+func TestAnUninstallKeepsTheUnitWhenTheDaemonChangedMeanwhile(t *testing.T) {
+	r := newUnitRig(t)
+	if _, errb, code := call(t, "serve", "install"); code != 0 {
+		t.Fatalf("install: exit %d %q", code, errb)
+	}
+	unreachableSupervisor(t)
+	daemonUnderUnitAs(t, true)
+	const why = "the supervisor may be about to start one again"
+	restartMayComeAs(t, why)
+	release, err := holdwire.ClaimDaemon(r.terminals, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	next := &holdwire.Daemon{PID: os.Getpid() + 1}
+	old := signalTheDaemon
+	signalTheDaemon = func(string) (*holdwire.Daemon, error) {
+		release()
+		return next, nil
+	}
+	t.Cleanup(func() { signalTheDaemon = old })
+	playExit(t, func(time.Duration) bool { return true })
+	out, errb, code := call(t, "serve", "uninstall")
+	want := fmt.Sprintf("error: %s: exit status 1: %s; the rota daemon (pid %d) was stopped as rota serve stop stops one, and 0 sessions keep running, "+
+		"but %s, so %s is kept: %s; %s\n",
+		r.want.uninstall[0], noBus, next.PID, why, r.want.path, keptWhy, againFrom(errors.New(noBus)))
+	if code != 1 || out != "" || errb != want {
+		t.Fatalf("uninstall over a daemon changed meanwhile: exit %d %q\n%q\nwant %q", code, out, errb, want)
+	}
+	if _, err := os.Lstat(r.want.path); err != nil {
+		t.Fatalf("the file was taken away: %v", err)
+	}
+}
+
 // playExit stands in for the wait for the daemon's process to exit, which
 // for a daemon that is this test process would never end: exited is asked
 // instead, once for each look, until it says yes.
