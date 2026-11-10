@@ -9,8 +9,10 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	rota "github.com/professor93/rota/lib"
@@ -130,6 +132,8 @@ func CopyForResume(st *store.Store, target *rota.Account, id string) error {
 	// A target cut short part-way through a record was being extended when
 	// the copy stopped; it is newer only for that, and is finished from
 	// whichever copy extends it.
+	// (A home whose projects is still a stale link into the person's own
+	// folder is appended to there: that folder only gains turns.)
 	cut := handoffCutShort(dst)
 	var fork *rota.Account
 	for _, c := range copies {
@@ -487,9 +491,10 @@ func handoffCreate(src, dst string) error {
 // handoffPut writes src's bytes to dst, a log's to its last complete line,
 // through a temporary file beside dst, so dst is never half written. A new
 // file is linked into place, which never replaces one that has appeared
-// there meanwhile. Only over, for a folder's file that is not a log, replaces
-// what is there. Everything lands 0600/0700: these are homes that hold
-// credentials, and the transcript inherits the same caution.
+// there meanwhile; on a filesystem without hard links it is made by a create
+// that does not replace one either. Only over, for a folder's file that is
+// not a log, replaces what is there. Everything lands 0600/0700: these are
+// homes that hold credentials, and the transcript inherits the same caution.
 func handoffPut(src, dst string, over bool) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -534,10 +539,60 @@ func handoffPut(src, dst string, over bool) error {
 	if over {
 		return os.Rename(tmp.Name(), dst)
 	}
-	if err := os.Link(tmp.Name(), dst); err != nil && !errors.Is(err, fs.ErrExist) {
+	err = handoffLink(tmp.Name(), dst)
+	switch {
+	case err == nil, errors.Is(err, fs.ErrExist):
+		return nil
+	case !handoffNoLinks(err):
 		return err
 	}
-	return nil
+	// A filesystem without hard links: dst is made by a create that fails
+	// on a name already there, so it never replaces one either, and written
+	// directly. A write that fails takes it away again; a crash leaves it a
+	// start of src cut part-way through a record, which the next resume
+	// finishes.
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if _, err := in.Seek(0, io.SeekStart); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	if n, err := handoffCopy(out, io.LimitReader(in, size)); err != nil || n != size {
+		out.Close()
+		os.Remove(dst)
+		if err == nil {
+			err = fmt.Errorf("%s shrank while it was copied", src)
+		}
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	return out.Close()
+}
+
+// handoffLink links a copy into place. Tests stand in for it to be on a
+// filesystem without hard links.
+var handoffLink = os.Link
+
+// handoffNoLinks reports whether a link failed because the filesystem makes
+// no hard links, or none across these folders, rather than over the name.
+func handoffNoLinks(err error) bool {
+	if errors.Is(err, errors.ErrUnsupported) || errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EXDEV) {
+		return true
+	}
+	// Windows: ERROR_INVALID_FUNCTION, which FAT gives, and
+	// ERROR_NOT_SAME_DEVICE. The same numbers are other errors elsewhere.
+	var errno syscall.Errno
+	return runtime.GOOS == "windows" && errors.As(err, &errno) && (errno == 1 || errno == 17)
 }
 
 // handoffComplete is how much of the first size bytes of f is complete

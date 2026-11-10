@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -620,6 +621,119 @@ func TestACopyCutShortIsFinishedByTheNextResume(t *testing.T) {
 	}
 	if got := handoffRead(t, a); got != handoffRead(t, b) {
 		t.Fatalf("the next resume must finish the copy, A holds:\n%s", got)
+	}
+}
+
+// A filesystem that makes no hard links still gets the copy, made by a create
+// that never replaces a file already there. A write cut short takes the file
+// away again and leaves no temporary file, and the next resume makes it
+// whole. A link that fails for another reason is an error.
+func TestAFilesystemWithoutHardLinksStillGetsTheCopy(t *testing.T) {
+	first, second := `{"type":"user","message":{"content":"one"}}`, `{"type":"assistant","message":{"content":"two"}}`
+	noLinks := func(old, new string) error {
+		return &os.LinkError{Op: "link", Old: old, New: new, Err: syscall.ENOTSUP}
+	}
+	setup := func(t *testing.T, id string) (s *store.Store, a, b string) {
+		t.Helper()
+		s, dir := seedStore(t, handoffPair)
+		a, b = handoffClaude(dir, 1, id), handoffClaude(dir, 2, id)
+		writeLines(t, b, first, second)
+		handoffLink = noLinks
+		t.Cleanup(func() { handoffLink, handoffCopy = os.Link, io.Copy })
+		return s, a, b
+	}
+	only := func(t *testing.T, a string) {
+		t.Helper()
+		entries, err := os.ReadDir(filepath.Dir(a))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 1 || entries[0].Name() != filepath.Base(a) {
+			t.Fatalf("A's project holds %v, want only the conversation", entries)
+		}
+	}
+
+	t.Run("a new copy", func(t *testing.T) {
+		s, a, b := setup(t, "01a00000-0000-7000-8000-00000000f1f1")
+		if err := CopyForResume(s, s.Find(1), "01a00000-0000-7000-8000-00000000f1f1"); err != nil {
+			t.Fatal(err)
+		}
+		if got := handoffRead(t, a); got != handoffRead(t, b) {
+			t.Fatalf("A holds:\n%s", got)
+		}
+		only(t, a)
+	})
+	t.Run("never over one that appears", func(t *testing.T) {
+		id := "01a00000-0000-7000-8000-00000000f2f2"
+		s, a, _ := setup(t, id)
+		handoffCopy = func(w io.Writer, r io.Reader) (int64, error) {
+			if _, err := os.Stat(a); os.IsNotExist(err) {
+				writeLines(t, a, first)
+			}
+			return io.Copy(w, r)
+		}
+		if err := CopyForResume(s, s.Find(1), id); err != nil {
+			t.Fatal(err)
+		}
+		if got := handoffRead(t, a); got != first+"\n" {
+			t.Fatalf("a transcript that appeared meanwhile must be kept, holds:\n%s", got)
+		}
+		only(t, a)
+	})
+	t.Run("a write cut short", func(t *testing.T) {
+		id := "01a00000-0000-7000-8000-00000000f3f3"
+		s, a, b := setup(t, id)
+		cut, calls := errors.New("cut short"), 0
+		handoffCopy = func(w io.Writer, r io.Reader) (int64, error) {
+			if calls++; calls == 1 {
+				return io.Copy(w, r) // the temporary file
+			}
+			n, _ := io.CopyN(w, r, 5)
+			return n, cut
+		}
+		if err := CopyForResume(s, s.Find(1), id); !errors.Is(err, cut) {
+			t.Fatalf("a write cut short is an error, got %v", err)
+		}
+		entries, err := os.ReadDir(filepath.Dir(a))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("a write cut short leaves nothing, found %v", entries)
+		}
+		handoffCopy = io.Copy
+		if err := CopyForResume(s, s.Find(1), id); err != nil {
+			t.Fatal(err)
+		}
+		if got := handoffRead(t, a); got != handoffRead(t, b) {
+			t.Fatalf("the next resume must make the copy whole, A holds:\n%s", got)
+		}
+	})
+	t.Run("another failure", func(t *testing.T) {
+		id := "01a00000-0000-7000-8000-00000000f4f4"
+		s, a, _ := setup(t, id)
+		handoffLink = func(old, new string) error { return &os.LinkError{Op: "link", Old: old, New: new, Err: syscall.ENOSPC} }
+		if err := CopyForResume(s, s.Find(1), id); !errors.Is(err, syscall.ENOSPC) {
+			t.Fatalf("a link that fails for want of space is an error, got %v", err)
+		}
+		if _, err := os.Lstat(a); !os.IsNotExist(err) {
+			t.Fatalf("nothing may be made at A's path: %v", err)
+		}
+	})
+}
+
+// handoffNoLinks tells a filesystem without hard links from a refusal of the
+// name or a full disk.
+func TestALinkTheFilesystemCannotMakeIsToldApart(t *testing.T) {
+	for _, err := range []error{syscall.ENOTSUP, syscall.EOPNOTSUPP, syscall.EPERM, syscall.EXDEV} {
+		if !handoffNoLinks(&os.LinkError{Op: "link", Err: err}) {
+			t.Errorf("%v means no hard links here", err)
+		}
+	}
+	for _, err := range []error{syscall.EEXIST, syscall.ENOSPC, syscall.ENOENT} {
+		if handoffNoLinks(&os.LinkError{Op: "link", Err: err}) {
+			t.Errorf("%v is not a filesystem without hard links", err)
+		}
 	}
 }
 
