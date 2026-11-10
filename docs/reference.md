@@ -662,7 +662,7 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/ws` | control | a WebSocket that starts a run on whichever account the rotation picks and carries it both ways |
 | `GET` | `/v1/accounts/{id}/ws` | control | the same, on that account |
 | `GET` | `/v1/runs/{id}/ws` | watch | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
-| `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended`, `interrupted` or `broken`), `attachable`, `reachable`, `pid` (its holder), `name`, `title`, `conversation`, `conversation_cwd`, `resumable`, `ended_at` once it has stopped, `made_by` for a holder this rota cannot attach to (`unknown` when its record does not say), and `status` (`running`, `needs_you`, `quiet` or `stopped`). The daemon also lists the held sessions its store's records describe: the stopped ones, for `keep_stopped`, and the running ones it is not linked to |
+| `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended`, `interrupted` or `broken`), `attachable`, `reachable`, `pid` (its holder), `name`, `title`, `conversation`, `conversation_cwd`, `resumable`, `ended_at` once it has stopped, `made_by` for a holder this rota cannot attach to (`unknown` when its record does not say), `status` (`running`, `needs_you`, `quiet` or `stopped`), and, for one the daemon has taken up, `waiting_for`: what it waits on its person for. The daemon also lists the held sessions its store's records describe: the stopped ones, for `keep_stopped`, and the running ones it is not linked to |
 | `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard, and the same held fields, for a stopped held session too |
 | `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up. Over the control socket alone, `"env":["NAME=value",…]` is the environment a held session starts from in place of the daemon's, which its holder keeps the variables that describe another terminal out of, and `"remote_control":true`, or the session's name, starts an account's CLI with Claude Code's Remote Control on for whichever account is chosen, turning its setting on first and refusing what could not work, by the same rule and in the same words as `rota run --remote-control`. An empty `env` is `400`, since it would start the session with no `PATH`; from anybody else either is `403`: *env is taken only over the control socket*, or *remote_control is taken only over the control socket* |
 | `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended; a running held session the daemon is not linked to is hung up by signal, once however often it is asked, and only while its pid is still the holder its record names: `409` when it is not, or when its record names no process this rota can check |
@@ -2083,7 +2083,11 @@ which outlives the daemon — adds `"held": true`; `state`, which is `live`,
 its spinner, which changes as the CLI works; `conversation`, the CLI's own
 session id when it reports one; `status`, which is `running`, `needs_you`
 while the CLI waits on a permission or a question, `quiet` after 30 seconds
-with no output, or `stopped`; and `name`, the first there is of the label,
+with no output, or `stopped`; `waiting_for`, what the CLI waits on its
+person for as it recorded it, such as `permission` or `question`, and empty
+while it waits for nothing, as a stopped one always does (one listed from
+its record alone leaves it out); and `name`, the
+first there is of the label,
 the CLI's own name for the conversation, and the folder — what its record
 calls it too, so `rota list --sessions` and `rota send` use the same name,
 and the title never changes it. A held session is never
@@ -2132,6 +2136,7 @@ Out:
 | *binary* | output: write it to the terminal emulator as it arrives |
 | `hello{id,kind,cols,rows,offset,holder,you:{name,role,conn},viewers}` | the first frame, always; `repaint:true` on a held session attached without `since`, whose first binary frame is then its current screen, standing for `offset`; a held session's also has `holder_conn` |
 | `keyboard{holder}` | who holds it now, `null` for nobody; a held session's also has `holder_conn`, the `conn` of the connection holding it, since one person may be attached from several devices |
+| `state{status,waiting_for,title,name}` | a held session's `status` (`running`, `needs_you` or `quiet`), what its CLI waits on its person for, its title and its name, as its description says them: sent after `hello` and before any output, and again to everyone attached whenever any of the four changes, `quiet` within ten seconds of its starting. A session that has stopped says so with `exit` instead, and a terminal that is not held sends none |
 | `repaint{offset,cols,rows}` | a held session's viewer that fell behind: the next binary frame is the screen at that size, standing for `offset`, and output goes on from there |
 | `claim_request{by,id}` | somebody is asking the holder for it |
 | `resized{cols,rows}` | the terminal is a different size now; a held session's fit that was dropped is not answered at all (*Only a fit resizes*, above) |
@@ -2210,21 +2215,64 @@ have it at all. It is the same origin and the same sign-in as the playground
 — one cookie, one bearer token in that tab's storage — and each page carries
 a link to the other, shown only where the other one is being served.
 
-Three regions, which stack on a narrow screen.
+Three regions side by side — the list, the terminal, and what is true about
+it — with a dock under the terminal for whoever may type into it. On a
+screen 1040 pixels wide or narrower the page is one column, and it shows the
+list or the open terminal with its information, never both stacked:
+choosing a row opens it, and **← Sessions** at the start of its strip goes
+back.
 
-**The list**, on the left: every terminal this server holds, running ones
-first and ended ones after, each saying what it is, which account is paying
-for it, who holds its keyboard and how many people are watching — or *ended,
-code N*. A control principal also gets **New terminal**: which account (or
-the rotation's choice), a label, arguments, a folder, and a plain shell where
-`terminal.shell` allowed one. Arguments are split the way a shell splits
-them, as far as quoting goes; nothing is expanded. The list is refreshed
-when a terminal is started or killed, when a frame about the open terminal
-arrives, and otherwise every ten seconds while somebody is looking at it.
+**The list**, on the left: every terminal this server holds, in two groups.
+*Live* comes first, newest started first; *Stopped* after, the one that
+stopped last first; two that tie go by id. The order is the page's own,
+never the order the server happened to list them in, and a change of status
+never moves a row, so a poll does not put another row under a finger. Each
+row is four lines: its name, with its status as a chip — *running*, *needs
+you*, *quiet* or *stopped*, and *ended* for a terminal that is not held;
+what it is about, the title its CLI set or else its folder's last element,
+or, for a shared terminal, *shared from a local terminal*; what it runs on,
+the account and the credential it launches on — *login*, *long token* or
+*API key* — or *a plain shell*; and who holds its keyboard and how many are
+watching, or, once it has stopped, how it ended and, where that is known,
+how long ago. The Live heading counts its rows
+and the ones that need you, *Live · 3 · 1 needs you*, and so does the tab's
+title, *(1) rota terminal*, so a session waiting on its person shows in a
+tab that is not in front. *Stopped · N* folds its rows away and back again,
+which this device remembers; a stopped session that is open keeps its group
+unfolded. The list is refreshed when a terminal is started or stopped, when
+a frame about the open terminal arrives, and otherwise every ten seconds
+while somebody is looking at it.
+
+**A link to a session.** The open terminal is in the address, as
+`/terminal#<id>`, so the address is a link to it; choosing another replaces
+the address rather than adding to the browser's history. A link opens its
+terminal as the page starts, after a sign-in where one is needed, and so
+does a `#` changed in a tab already open. A `#` that is not sixteen
+lowercase hex characters, the shape of an id, is opened only if the server
+lists it, after the page has asked for the list once more; otherwise the
+list says *that link names no session here* above everything else, and
+what the link said is never asked for and never shown.
+
+**New terminal**, at the top of the list for a control principal: the
+account, each listed by its id, its name and its provider, or the
+rotation's choice; a **Name**, which is how the session is listed and what
+`rota send <name>` finds it by; arguments, split the way a shell splits
+them, as far as quoting goes, with nothing expanded; a folder, with the note
+that the session starts with the environment of the rota serving the page,
+not the shell of whoever is looking at it; **Worktree**; and a plain shell
+where `terminal.shell` allowed one. A worktree is Claude Code's, so it is
+offered only for a claude account chosen by id and never beside a plain
+shell: it adds `--worktree` to the arguments unless they ask for one already,
+as `-w`, `--worktree` or `--worktree=…`, and its note says that Claude Code
+makes a git worktree for the session, in which the files git ignores, such
+as `.env`, are not. New sends no size, so a terminal starts at 80×24 until
+it is fitted. What is typed into New stays while it is open, through every
+redraw and every poll.
 
 **The terminal**, in the middle, with one strip above it: whether the socket
-is *connecting*, *live*, *reconnecting in Ns* or *ended, code N*; and the
-keyboard, which has exactly three states —
+is *connecting*, *live*, *reconnecting in Ns* or *ended, code N*, or
+*stopped* for a session the page does not attach to; and the keyboard, which
+has exactly three states —
 
 - you hold it, and may **Release** it;
 - nobody holds it, and you may **Take the keyboard**;
@@ -2239,12 +2287,65 @@ connection's own id. A watcher is shown none of this, only a *watching*
 badge — and a key pressed by somebody who is not holding is not sent to be
 refused: it goes nowhere, and the keyboard control flashes once.
 
-The terminal is fitted to its container for whoever holds the keyboard,
-which sends `resize` when the fitted size changes; for everybody else it is
-set to the session's own `cols`×`rows` and scrolls inside the container
-rather than lying about how wide the terminal on the server is. On a held
-session that `resize` is not a fit, so the server leaves the size alone and
-says so once.
+**Its size.** A terminal that is not held is fitted to its container for
+whoever holds the keyboard, which sends `resize` when the fitted size
+changes; for everybody else, and for a shared terminal even for its holder,
+it is set to the session's own `cols`×`rows` and scrolls inside the
+container rather than lying about how wide the terminal on the server is.
+
+A held session is never resized by the page on its own: it is one size for
+everyone, and only drawn to suit each window. Its font is scaled to fit its
+columns to the window's width, from 13 pixels down to 7, and whatever is
+still wider or taller pans inside the screen. The strip shows the size, and
+when the window has less room than that at 13 pixels it says *larger than
+this window: drawn smaller*, or *larger than this window* where it is not
+scaled, and offers **Actual size**, which draws it at 13 pixels and pans,
+and **Scaled** to go back; this device remembers which. **Fit**, for whoever
+may type, makes the session the size of this window at 13 pixels, for
+everyone: it asks first when others are watching (*Make fintech 96×30 for
+the 2 others watching it?*), takes the keyboard for this tab if this tab
+does not hold it, and sends `resize` with `"fit":true`. It is greyed out
+while somebody else holds the keyboard, and a window with no room for a
+terminal says so and sends nothing. The page draws the size the session has
+until `resized` says it has taken the new one, and follows a size anybody
+makes as it is announced.
+
+**The dock**, under the terminal, is for a phone, whose own keyboard has
+neither an Esc nor an arrow. It shows by itself where the pointer is a
+finger (`(hover:none) and (pointer:coarse)`), and **Composer** in the strip
+shows or hides it on any device, which that device remembers. Both are
+offered only to whoever may type into the open terminal. It has two parts:
+
+- **The composer**, a box a whole message is written in with the phone's
+  own keyboard, its autocorrect and its input methods. **Send**, or
+  Ctrl+Enter or ⌘+Enter, posts it to `/v1/terminals/{id}/messages`, so
+  it is typed into the session in one piece once the session is ready, then
+  Enter. Trailing whitespace is trimmed and nothing else is changed, and a
+  message is at most 256 KiB. A send that is answered clears what was sent
+  and keeps anything written after it; a refusal is said in the server's
+  words and keeps the text, and a `409` whose reason is `waiting` — the CLI
+  waits on its person, where Enter may approve something — also offers
+  **Send anyway**, which sends it again with `"force":true`. A send whose
+  answer never came is not sent again by the page: it says *the message may
+  not have been sent; look at the screen before sending it again*, and the
+  person decides. What is written is kept for each session while another
+  one is open, in the tab's memory only, and dropped when somebody else
+  signs in on the tab. The composer types into held sessions; on a terminal
+  that is not held the dock says so and has only the keys.
+- **The keys** a CLI asks for: 1, 2, 3, Esc, Enter, Tab, the four arrows and
+  Ctrl-C. Each is sent as one binary frame of exactly its bytes, so an Esc
+  or a Ctrl-C alone is the single key a waiting send lets through and an
+  arrow is never split into an Esc and the rest, and the arrows follow the
+  cursor-key mode the CLI set. They type under the keyboard of the person
+  at this tab, here or on another of their devices, or a free one they take
+  first, and never under somebody else's: then the keyboard control flashes
+  and the strip says who holds it.
+
+While the session waits on its person — a `state` frame's `waiting_for`, or
+its status *needs you* — the keys come forward, above the composer, under a
+line in the warning's colour: *fintech is waiting for a permission: answer
+with these keys*. Nothing on the page answers for anybody; a key is sent only
+when a person presses it.
 
 **Reconnecting** is the socket's own rules, followed exactly. The page adds
 every binary frame's length to `hello.offset`, so it always knows the offset
@@ -2259,26 +2360,75 @@ then 15 seconds. A `gap` frame is written into the terminal itself as a dim
 line, *… N bytes were not kept …*, because a terminal that looked continuous
 when it was not is worse than a visible hole. An `exit` stops all of it. There is never a
 second socket for one terminal, and leaving the page or choosing another
-terminal closes the one there is with a clean `1000`.
+terminal closes the one there is with a clean `1000`. A held session's
+`state` frames change the list, the strip, the information and the dock as
+they arrive, so a session that starts waiting on its person says so at once
+rather than at the next poll.
 
-**The information**, on the right: the account and its provider, the label,
-the folder, how long ago it started, the size, who holds the keyboard, who
-is watching and as what, whether it is being recorded — and **the login
+**What the page does not attach to.** A held session whose description says
+it cannot be attached to — one that has stopped and is listed from its
+record, with no screen kept, or one made by a rota this one cannot attach to
+— is given no socket, and neither is an id this server does not have,
+however long the page stays open and whatever retries, polls and sign-ins
+happen meanwhile. The strip reads *stopped*, with no keyboard to take, and
+the screen names the session and says why: *this session has stopped:
+interrupted; its screen is not kept*, *made by rota 1.4.0-beta.3, which this
+rota cannot attach to; stop it, or attach with that version*, or *no
+session 9a4c1e77b2d05f31 on this server*. A session the server lists keeps
+its information, from its description.
+
+**The information**, on the right: a held session's name, or another
+terminal's label; its status, with what it waits for while it does (*needs
+you: waiting for a permission*), and the title its CLI set; the account, the
+credential it launches on and the provider; the folder and, where the
+conversation is in a worktree of its own, the worktree's path with
+**Copy**, since a path that long is wanted in another terminal rather than
+read — where the browser will not copy, as over plain `http` from another
+machine, the strip says so; the first eight characters of the conversation's
+id; how long ago it started, and stopped; the size; who holds the keyboard;
+who is watching and as what; whether it is being recorded — and **the login
 inside lapses in …**, from `token_until`, which turns into a warning under
 an hour, because nothing else on the screen shows that the CLI in there will
-stop working at a particular time. A control principal also gets **Kill**,
-behind a confirmation. An ended terminal reads the same way, with *exited,
-code N*, and its scrollback is still replayed for as long as the server
-keeps it.
+stop working at a particular time. Once it has ended it says how; a holder
+made by another rota says which version made it; and a held session whose
+holder the daemon has lost its link to says *not answering; tried again
+shortly*. A control principal also gets **Stop** for a held session, behind
+a confirmation that names it and says that its CLI is sent a hangup and a
+worktree it used is left as it is, and **Kill** for any other terminal,
+behind one of its own; neither once it has ended. An ended terminal the
+server still keeps reads the same way, and its scrollback is replayed for as
+long as it is kept.
+
+**From a phone.** A phone opens the page at the server's own address, as any
+browser does, so the rule in *A terminal on the server* holds there too: off
+the loopback, the terminal group is served over TLS or not at all. Two ways
+in fit that rule. One is a private network that both the phone and the
+server are on, Tailscale or WireGuard, with the server listening on its
+address in that network, so the port is reached only from that network's
+devices, the phone among them, and never from the open internet; the
+certificate is then one for the server's
+name there, such as the one `tailscale cert` makes. The other is a real
+certificate, from an authority the phone already trusts, on the server's own
+address. Either way the phone talks to this server and nothing else: rota
+has no relay of its own and sends nothing through anybody else's.
 
 #### Vendored assets
 
-The emulator is [xterm.js](https://xtermjs.org) — `@xterm/xterm` 5.5.0 and
-`@xterm/addon-fit` 0.10.0, both MIT — carried in the rota binary and served
-from `/assets/xterm/`. Nothing is fetched from another host at run time, by
-this page or any other: rota is usually on a loopback address with no route
-out, and a page that asked a CDN for the code that draws somebody's shell
-would be both broken there and a third party's to change.
+The emulator is [xterm.js](https://xtermjs.org) — `@xterm/xterm` 5.5.0,
+`@xterm/addon-fit` 0.10.0 and `@xterm/addon-unicode11` 0.8.0, all three MIT
+— carried in the rota binary and served from `/assets/xterm/`. Nothing is
+fetched from another host at run time, by this page or any other: rota is
+usually on a loopback address with no route out, and a page that asked a
+CDN for the code that draws somebody's shell would be both broken there and
+a third party's to change.
+
+The Unicode 11 addon is there for the width of a character. A held
+session's screen is kept by its holder, which measures characters by
+Unicode 11; by xterm's own Unicode 6 widths an emoji such as ✅ takes one
+column where the holder gives it two, and every cell after it on that line
+would be drawn one column off. The page turns it on before it draws
+anything, as `scripts/vt/` does when it checks the holder's screens against
+xterm's.
 
 Each file was taken from the npm tarball for that exact version after the
 tarball had answered the `dist.integrity` sha512 in the registry's own
@@ -2289,10 +2439,14 @@ be edited quietly. The files are served with their right types, `nosniff`
 and a year of caching, under a `?v=` query carrying this server's version —
 so an upgraded rota is a different URL rather than a stale script.
 
+The files under `/assets/term/` are not vendored: they are rota's own, the
+terminal page's script and styles in one file for each part of the page,
+loaded in the order `api/terminal.html` names them.
+
 The pages' own Content-Security-Policy admits `'self'` for scripts and
-styles, which is these files, the two shared ones and the terminal page's
-own under `/assets/term/`, and nothing else: no remote host, and no
-`unsafe-eval`, which the emulator does not need. The terminal page admits no
+styles, which is the emulator's files, the two shared ones and those under
+`/assets/term/`, and nothing else: no remote host, and no `unsafe-eval`,
+which the emulator does not need. The terminal page admits no
 inline script either, since all of its script is in those files; the
 playground still runs one of its own. The pages' own files, the two shared
 ones and those under `/assets/term/`, are asked for with `?v=` and a digest
@@ -4579,6 +4733,7 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `api/terminal.go`, `api/terminals.go` | The terminals this server holds: the pseudo-terminal, the scrollback, the keyboard, and the routes over them |
 | `api/share.go`, `internal/share/` | A terminal offered from this machine, and the framing the two ends speak |
 | `api/held*.go`, `api/adopt.go` | A terminal a holder keeps, on a daemon: the claim on the store, starting a holder, the link to it, sending into it, and taking up the holders a daemon finds and forgetting the stopped ones |
+| `api/held_state.go` | The `state` frame: a held session's status, what it waits for, its title and its name, told to a viewer as it attaches and to every viewer when any of them changes |
 | `internal/holdwire/` | What a holder and the daemon say to each other and keep on disk: the protocol, a session's request and record, the paths, the daemon's lock and pid file, the size bound, and stopping a holder from outside |
 | `internal/vtscan/` | Reading a terminal's bytes without being one: the modes a CLI sets, its title, the answers to its queries, and a viewer's own answers taken out of its typing |
 | `internal/ring/` | A terminal's scrollback, by absolute offset: the server's, and a holder's and its daemon's, counted by the same code |
