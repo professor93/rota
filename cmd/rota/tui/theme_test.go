@@ -3,14 +3,18 @@ package tui
 import (
 	"bytes"
 	"image/color"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/key"
+	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/colorprofile"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // themeTokens names every token of th, so a test covers a token added later.
@@ -46,6 +50,30 @@ func TestEveryTierRendersItsOwnColours(t *testing.T) {
 		}
 		if got := themeWritten(colorprofile.ANSI, NewTheme(colorprofile.ANSI, dark).Good); !basic.MatchString(got) || strings.Contains(got, "38;") {
 			t.Errorf("dark=%v ANSI: %q is not one of the 16 colours", dark, got)
+		}
+		// The Writer converts colours itself, so a theme that ignored the
+		// depth would pass the checks above. Rendered without one, each
+		// colour token is already the depth's own colour.
+		for _, tier := range []struct {
+			p    colorprofile.Profile
+			kind color.Color
+			seq  *regexp.Regexp
+		}{
+			{colorprofile.TrueColor, color.RGBA{}, regexp.MustCompile(`38;2;`)},
+			{colorprofile.ANSI256, ansi.IndexedColor(0), regexp.MustCompile(`38;5;`)},
+			{colorprofile.ANSI, ansi.BasicColor(0), regexp.MustCompile(`\x1b\[(?:[0-9]+;)*[39][0-7]m`)},
+		} {
+			for name, s := range themeTokens(NewTheme(tier.p, dark)) {
+				if !themeHasForeground(s) {
+					continue
+				}
+				if got := s.GetForeground(); reflect.TypeOf(got) != reflect.TypeOf(tier.kind) {
+					t.Errorf("dark=%v %v: %s is a %T", dark, tier.p, name, got)
+				}
+				if got := s.Render("x"); !tier.seq.MatchString(got) {
+					t.Errorf("dark=%v %v: %s renders %q", dark, tier.p, name, got)
+				}
+			}
 		}
 		th := NewTheme(colorprofile.Ascii, dark)
 		for name, s := range themeTokens(th) {
@@ -114,8 +142,9 @@ func TestLightAndDarkDiffer(t *testing.T) {
 			t.Errorf("%s has the same foreground on dark and light", name)
 		}
 	}
-	if colours < 8 {
-		t.Errorf("only %d tokens set a foreground", colours)
+	// Every token but Text, Faint and Selected.
+	if colours != 9 {
+		t.Errorf("%d tokens set a foreground, want 9", colours)
 	}
 	if !NewTheme(colorprofile.TrueColor, true).Dark || NewTheme(colorprofile.TrueColor, false).Dark {
 		t.Error("Theme.Dark is not the background it was made for")
@@ -125,7 +154,7 @@ func TestLightAndDarkDiffer(t *testing.T) {
 	}
 }
 
-func TestTheGlobalKeysAreTheDesignedOnes(t *testing.T) {
+func TestThemeGlobalKeysAreTheDesignedOnes(t *testing.T) {
 	k := newGlobalKeys()
 	for b, names := range map[*key.Binding][]string{
 		&k.Quit: {"q", "ctrl+c"}, &k.Help: {"?"}, &k.Mouse: {"M"},
@@ -155,18 +184,27 @@ func themeSame(a, b color.Color) bool {
 }
 
 // The inputs every task uses neither blink, which would keep the driver from
-// going quiet, nor reach the host's clipboard on ctrl+v or ctrl+shift+c.
-func TestInputsNeitherBlinkNorReadTheClipboard(t *testing.T) {
+// going quiet, nor reach the host's clipboard on ctrl+v or ctrl+shift+c. No
+// command an input returns is ever run here: one that reached the clipboard
+// would read or write the real one on this machine.
+func TestThemeInputsNeitherBlinkNorReachTheClipboard(t *testing.T) {
 	th := NewTheme(colorprofile.TrueColor, true)
 	in := newInput(th)
-	if cmd := in.Focus(); cmd != nil {
-		t.Errorf("textinput Focus returns a command (a blinking cursor): %T", cmd())
+	if in.Focus() != nil {
+		t.Error("textinput Focus returns a command: a blinking cursor")
 	}
 	if in.KeyMap.Paste.Enabled() {
 		t.Error("textinput's ctrl+v is bound")
 	}
+	// The same key on Bubbles' own bindings returns the clipboard read, so
+	// the check below can fail.
+	ctl := in
+	ctl.KeyMap = textinput.DefaultKeyMap()
+	if _, cmd := ctl.Update(press("ctrl+v")[0]); cmd == nil {
+		t.Fatal("the control: Bubbles' ctrl+v returns no command")
+	}
 	if _, cmd := in.Update(press("ctrl+v")[0]); cmd != nil {
-		t.Errorf("textinput ctrl+v returns a command: %T", cmd())
+		t.Error("textinput ctrl+v returns a command")
 	}
 	in, _ = in.Update(tea.PasteMsg{Content: "abc"})
 	if in.Value() != "abc" {
@@ -174,19 +212,27 @@ func TestInputsNeitherBlinkNorReadTheClipboard(t *testing.T) {
 	}
 
 	area := newArea(th)
-	if cmd := area.Focus(); cmd != nil {
-		t.Errorf("textarea Focus returns a command (a blinking cursor): %T", cmd())
+	if area.Focus() != nil {
+		t.Error("textarea Focus returns a command: a blinking cursor")
 	}
 	if area.KeyMap.Paste.Enabled() || area.KeyMap.CopySelection.Enabled() {
 		t.Error("textarea's ctrl+v or ctrl+shift+c is bound")
 	}
-	for _, k := range []string{"ctrl+v", "ctrl+shift+c"} {
-		if _, cmd := area.Update(press(k)[0]); cmd != nil {
-			t.Errorf("textarea %s returns a command: %T", k, cmd())
-		}
-	}
+	// A copy needs a selection: without one Bubbles' own ctrl+shift+c
+	// returns nothing either.
 	area, _ = area.Update(tea.PasteMsg{Content: "abc"})
-	if area.Value() != "abc" {
-		t.Errorf("textarea takes a paste as %q", area.Value())
+	area, _ = area.Update(press("ctrl+g")[0])
+	if area.Value() != "abc" || !area.HasSelection() {
+		t.Fatalf("textarea %q, selected %v", area.Value(), area.HasSelection())
+	}
+	for _, k := range []string{"ctrl+v", "ctrl+shift+c"} {
+		ctl := area
+		ctl.KeyMap = textarea.DefaultKeyMap()
+		if _, cmd := ctl.Update(press(k)[0]); cmd == nil {
+			t.Fatalf("the control: Bubbles' %s returns no command", k)
+		}
+		if _, cmd := area.Update(press(k)[0]); cmd != nil {
+			t.Errorf("textarea %s returns a command", k)
+		}
 	}
 }

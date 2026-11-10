@@ -51,7 +51,8 @@ var themePalette = struct {
 	dead:   [2]themeColor{{"5", "125", "#9D174D"}, {"13", "175", "#D68AB0"}},
 	key:    [2]themeColor{{"6", "30", "#0E7490"}, {"14", "117", "#7DCFFF"}},
 	rule:   [2]themeColor{{"7", "251", "#C9CDD4"}, {"8", "239", "#4A5060"}},
-	title:  [2]themeColor{{"5", "55", "#5B21B6"}, {"13", "141", "#BB9AF7"}},
+	// At 16 colours Title shares Accent's blue rather than Dead's magenta.
+	title: [2]themeColor{{"4", "55", "#5B21B6"}, {"12", "141", "#BB9AF7"}},
 }
 
 // NewTheme makes the theme for colour depth p on a dark or a light
