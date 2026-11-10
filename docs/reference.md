@@ -699,7 +699,7 @@ see *Who is asking, and what they may do*.
 | `POST` | `/v1/session` | open | `{"name":"…","password":"…"}` → the same, and the session cookie |
 | `DELETE` | `/v1/session` | open | end this session |
 | `GET` | `/v1/schema` | watch | every provider, its models, efforts, defaults and fields |
-| `GET` | `/v1/accounts` | watch | accounts in rotation order, with usage, status, order, threshold, `long_until`, `login_until`, `no_credit_until`, `remote_control` and when limits were read (`?refresh=1`), and `usage_wait_until` while the provider has asked rota to wait; `default` names the one a bare run would use |
+| `GET` | `/v1/accounts` | watch | accounts in rotation order, with usage, status, order, threshold, `long_until`, `login_until`, `no_credit_until`, `remote_control` and when limits were read, and `usage_wait_until` while the provider has asked rota to wait; `default` names the one a bare run would use. `?refresh=stale` reads first what is stale, as `rota list` does: a reading older than five minutes or taken before a reset it reports, and none younger. `?refresh=1` reads every account again, each at most once a minute |
 | `GET` | `/v1/accounts/{id}/schema` | watch | the models *that* account may actually use |
 | `POST` | `/v1/run` | control | run a prompt on whichever account the rotation picks |
 | `POST` | `/v1/accounts/{id}/run` | control | run a prompt on that account |
@@ -720,8 +720,8 @@ see *Who is asking, and what they may do*.
 | `POST` | `/v1/terminals/{id}/messages` | control | `{"text":"…","force":false}` — type a message into a held session the way a person would, once it is ready for one: the text, then Enter. It is typing, so the keyboard must be free or held by the sender's own person, and until it is typed nobody else types into the session but one Esc or Ctrl-C. `200 {"ok":true}` once typed; `409` with `reason` `waiting` (the CLI waits on its person, where Enter may approve something; `"force":true` types anyway), `keyboard` (with `holder`), `ended`, or `not_held` (a terminal that is not a held session, or one the daemon is not linked to); `504` with `reason` `timeout` when it never became ready in 30 seconds |
 | `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
-| `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, provider, url, kind, createdAt}`, with `long`, `delegated` and `account` when they are set, and never the login's state: the PKCE verifier stays with the parked login. `"long":true` asks for a long-lived token instead. `{"account":1}` begins a login for account 1 that only its approval finishes, as `rota login 1` does for an account whose login rota holds; it takes no `long` or `provider`, an unknown account is `404`, and an API key, or an account its own CLI signs in, is `400`, since rota has no sign-in to start for either. Check `account` in the reply: it is there only when the login is bound, and a misspelled field, or a server from before `account` was read here, begins an unbound login instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"long_until":"...","status":"long"}`, and an API key sent as `token` is refused with `400` by its prefix, without being sent anywhere. Neither comes back or is logged |
-| `POST` | `/v1/login/{id}` | control | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"long_until":"...","status":"long"}`; a login begun for an account, by `{"account":1}` or `rota login <account-id>`, is refused unless that account approved it, and stays parked |
+| `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, provider, url, kind, createdAt}`, with `long`, `delegated` and `account` when they are set, and never the login's state: the PKCE verifier stays with the parked login. `"long":true` asks for a long-lived token instead. `{"account":1}` begins a login for account 1 that only its approval finishes, as `rota login 1` does for an account whose login rota holds; it takes no `long` or `provider`, an unknown account is `404`, and an API key, or an account its own CLI signs in, is `400`, since rota has no sign-in to start for either; the second adds `"reason":"delegated"`, for a client to send the person to that CLI. Check `account` in the reply: it is there only when the login is bound, and a misspelled field, or a server from before `account` was read here, begins an unbound login instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"long_until":"...","status":"long"}`, and an API key sent as `token` is refused with `400` by its prefix, without being sent anywhere. Neither comes back or is logged |
+| `POST` | `/v1/login/{id}` | control | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"long_until":"...","status":"long"}`; a login begun for an account, by `{"account":1}` or `rota login <account-id>`, is refused unless that account approved it, and stays parked. A refusal no approval can put right, the account removed meanwhile or its e-mail approved under another of the provider's ids, is `400` with `"reason":"unfinishable"`. A code the provider does not accept is `400` in the provider's words, and the login stays parked for the right code |
 | `POST` | `/v1/auth` | control | what `POST /v1/login` was called before the API and the command agreed on one word; kept working for anything already calling it |
 | `POST` | `/v1/auth/{id}` | control | likewise for `POST /v1/login/{id}` |
 | `POST` | `/v1/invites` | control | `{"ttl":"10m"}` → `{"url","expires"}` — a single-use link that signs somebody in as a watcher |
@@ -3674,8 +3674,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
     maintenance), `holder` (a held session being launched), `detach` (one
     `rota run --detach` asked for), `list` (`rota list`),
     `choose` (the rotation choosing an account: `rota run` with no id, an API
-    run or terminal with no id), `api` (the server's `?refresh=1`), the name a
-    program gives the store with `store.WithCaller`, or `refresh` when it
+    run or terminal with no id), `api` (the server's `?refresh=1` and
+    `?refresh=stale`), the name a program gives the store with
+    `store.WithCaller`, or `refresh` when it
     gives none; `rescue.blank` and `rescue.stranded` for the two exceptions;
     `token.env` for a claude login rota alone holds, on a token in the
     environment; `adopt` for a change a look found in the home; `seed` and
@@ -4029,10 +4030,10 @@ minute, twice that for each refusal in a row, whatever it says — a shorter
 `Retry-After`, `0` or a date already past among them, gives way to that —
 but never more than an hour. A refusal more than an hour after the last wait
 ran out starts again at a minute. The wait is kept in the store beside the reading,
-so every rota process honours it: `rota list`, `list -r`, `?refresh=1`, a
-bare `rota run` choosing an account, the server's sweep, and `--with quota`
-after a run, which reads the store again first, so a wait recorded while
-the run went on holds it back too. A window that resets during the wait is
+so every rota process honours it: `rota list`, `list -r`, `?refresh=1`,
+`?refresh=stale`, a bare `rota run` choosing an account, the server's sweep,
+and `--with quota` after a run, which reads the store again first, so a wait
+recorded while the run went on holds it back too. A window that resets during the wait is
 read once the wait is over, and the server wakes then rather than at the
 reset. The next reading taken once the wait has run out ends it, and so does
 logging the account in again.

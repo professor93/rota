@@ -82,7 +82,7 @@ func (s *Store) BeginLoginFor(ctx context.Context, id int) (*rota.Login, error) 
 }
 
 func signsItselfIn(a *rota.Account) error {
-	return rota.Invalid("account %d signs in through its own CLI, so rota has no sign-in to start for it", a.ID)
+	return logins.MarkDelegated(rota.Invalid("account %d signs in through its own CLI, so rota has no sign-in to start for it", a.ID))
 }
 
 func (s *Store) park(l *rota.Login, err error) (*rota.Login, error) {

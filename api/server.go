@@ -1145,9 +1145,14 @@ func (s *Server) accountSchema(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("refresh")
 	force := q == "1" || q == "true"
-	if force {
-		// A forced refresh goes to the network, so it takes a run slot —
-		// and takes it before the store, so waiting for one holds nothing.
+	// ?refresh=stale reads what `rota list` would: every reading past the
+	// cache's age or a reset it reports, and nothing younger. It skips no
+	// cache, so it needs no cooldown, and a client may ask for it on opening
+	// and after a login without forcing every account.
+	stale := q == "stale"
+	if force || stale {
+		// A refresh goes to the network, so it takes a run slot — and takes
+		// it before the store, so waiting for one holds nothing.
 		if !s.acquire(r.Context()) {
 			return
 		}
@@ -1170,6 +1175,13 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 			for _, err := range st.Refresh(store.WithCaller(ctx, "api"), true, accounts...) {
 				s.log.Warn("refreshing usage", "err", err)
 			}
+		}
+	}
+	if stale {
+		ctx, cancel := joinContexts(r.Context(), s.ctx)
+		defer cancel()
+		for _, err := range st.Refresh(store.WithCaller(ctx, "api"), false, st.Accounts...) {
+			s.log.Warn("refreshing usage", "err", err)
 		}
 	}
 	// Rotation order is the listing's order, so a client that renders the
@@ -1474,7 +1486,7 @@ func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
 		l, err = st.BeginLogin(r.Context(), body.Provider)
 	}
 	if err != nil {
-		s.report(w, r, err)
+		s.loginRefused(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, logins.ReplyOf(l, body.Account))
@@ -1542,7 +1554,7 @@ func (s *Server) loginFinish(w http.ResponseWriter, r *http.Request) {
 		// Not a failure: the person has not approved it yet.
 		writeJSON(w, http.StatusOK, map[string]any{"id": id, "status": "pending"})
 	case err != nil:
-		s.report(w, r, err)
+		s.loginRefused(w, r, err)
 	case long:
 		s.log.Info("long-lived token stored", "account", a.ID, "provider", a.Provider,
 			"until", a.LongUntil().UTC().Format(time.RFC3339))
@@ -1562,6 +1574,38 @@ func (s *Server) loginFinish(w http.ResponseWriter, r *http.Request) {
 		}
 		s.log.Info("login finished", "account", a.ID, "provider", a.Provider, "status", status)
 		writeJSON(w, http.StatusOK, doc)
+	}
+}
+
+// loginRefused is report for a login's two halves, which add what a client
+// acts on beside the sentence: "reason":"unfinishable" for a refusal no
+// approval can put right, so nobody is sent back to the browser for it, and
+// "reason":"delegated" for an account whose own CLI signs it in, which is
+// where to send the person instead.
+//
+// The provider turning the code down is the caller's mistake, not this
+// server's, so it is a 400 in the provider's own words rather than a 500. The
+// login stays parked, so the next step is the same login again, not a new one.
+func (s *Server) loginRefused(w http.ResponseWriter, r *http.Request, err error) {
+	var oe *rota.OAuthError
+	switch {
+	case logins.Unfinishable(err):
+		writeJSON(w, statusFor(err), map[string]any{"error": err.Error(), "reason": "unfinishable"})
+	case logins.Delegated(err):
+		writeJSON(w, statusFor(err), map[string]any{"error": err.Error(), "reason": "delegated"})
+	case errors.As(err, &oe) && errors.Unwrap(oe) == nil:
+		// One with a verdict beneath it, a dead token say, is that verdict.
+		msg := oe.Error()
+		if oe.Code == "invalid_grant" || oe.Code == "refresh_token_reused" {
+			msg = "authorization code was rejected (expired, already used, or mismatched)"
+			if oe.Description != "" {
+				msg += ": " + oe.Description
+			}
+			msg += "; try the code again, or approve again at the same link"
+		}
+		fail(w, http.StatusBadRequest, msg)
+	default:
+		s.report(w, r, err)
 	}
 }
 
