@@ -39,10 +39,13 @@ const maxLine = 64 << 10
 //	event: <type>
 //	data: <the event as one line of JSON>
 //
-// followed by a blank line. Time is written in UTC. Frame never fails: a
-// byte that is not UTF-8 is written as U+FFFD, a Percent that is not a
-// finite number is left out, and a Time RFC 3339 cannot write (a year
-// outside 0 to 9999) is written as the zero time.
+// followed by a blank line. Time is written in UTC. Frame is always one
+// frame: the type on the event: line goes through Clean, so a line end in
+// it cannot start a frame of its own, and the JSON, which escapes every
+// control byte, carries the type as given. Frame never fails: a byte that
+// is not UTF-8 is written as U+FFFD, a Percent that is not a finite number
+// is left out, and a Time RFC 3339 cannot write (a year outside 0 to 9999)
+// is written as the zero time.
 func Frame(e Event) []byte {
 	e.Time = e.Time.UTC()
 	if y := e.Time.Year(); y < 0 || y > 9999 {
@@ -62,7 +65,7 @@ func Frame(e Event) []byte {
 	b.WriteString("id: ")
 	b.WriteString(strconv.FormatInt(e.ID, 10))
 	b.WriteString("\nevent: ")
-	b.WriteString(e.Type)
+	b.WriteString(Clean(e.Type, 0))
 	b.WriteString("\ndata: ")
 	b.Write(data)
 	b.WriteString("\n\n")
@@ -70,12 +73,21 @@ func Frame(e Event) []byte {
 }
 
 // GapFrame is the note a stream sends, once and before any event, when it
-// was asked for events older than the oldest one the ring still keeps. It
-// carries no id line, so a browser's Last-Event-ID stays what it was. A
-// Reader gives it as Event{Type: Gap} whose Text reads "events before
-// <oldest> were not kept".
+// was asked for events older than oldest, the id of the oldest event the
+// ring still keeps. A Reader gives it as an Event whose Type is Gap, whose
+// Text reads "events before <oldest> were not kept", and whose Time is
+// time.UnixMicro(oldest) in UTC: about when the kept history begins, since
+// ids follow the clock.
+//
+// A gap is not a place in the stream. It has no id: line, so a browser's
+// Last-Event-ID stays what it was, and its ID is 0. A client that keeps the
+// id of the last event it read must not take a gap's.
 func GapFrame(oldest int64) []byte {
-	return frameNoID(Event{Type: Gap, Text: fmt.Sprintf("events before %d were not kept", oldest)})
+	return frameNoID(Event{
+		Type: Gap,
+		Time: time.UnixMicro(oldest).UTC(),
+		Text: fmt.Sprintf("events before %d were not kept", oldest),
+	})
 }
 
 // frameNoID is Frame without its id line.
@@ -99,33 +111,65 @@ func NewReader(r io.Reader) *Reader {
 	return &Reader{sc: sc}
 }
 
-// Next is the stream's next event. A gap note comes back as an Event whose
-// Type is Gap. At the end of the stream Next gives io.EOF, and a frame cut
-// off by the end is dropped, as an EventSource drops it. Any other error is
-// the stream's last: a read that failed, a line too long, or data that is
-// not an event. Every later call gives the same error.
+// Next is the stream's next event.
+//
+// A gap note comes back as an Event whose Type is Gap and whose ID is 0
+// (GapFrame): it says events were lost, and must not move the id a client
+// keeps as the last it read.
+//
+// A frame that is not an event comes back as a *FrameError, which names the
+// frame by its id: line. That error is not the stream's last: the next call
+// goes on to the next frame. A client that keeps a last id moves it to the
+// FrameError's ID when that is above 0, so a reconnect does not ask for the
+// same frame again.
+//
+// At the end of the stream Next gives io.EOF, and a frame cut off by the end
+// is dropped, as an EventSource drops it. Any other error is the stream's
+// last, and every later call gives it again: a read that failed, a line
+// longer than 64 KiB, or an event's data longer than that.
 func (r *Reader) Next() (Event, error) {
 	if r.err != nil {
 		return Event{}, r.err
 	}
 	e, err := r.next()
-	if err != nil {
+	var fe *FrameError
+	if err != nil && !errors.As(err, &fe) {
 		r.err = err
 	}
 	return e, err
 }
 
+// FrameError is a frame of the stream that is not an event: its data is not
+// JSON, does not fit Event (a daemon of another version that changed a
+// field's type, say), or has no type. Reader.Next gives it and goes on.
+type FrameError struct {
+	// ID is the frame's id: line, 0 when it had none or it was not a number.
+	ID int64
+	// Err is what was wrong with it.
+	Err error
+}
+
+func (e *FrameError) Error() string {
+	if e.ID > 0 {
+		return fmt.Sprintf("events: frame %d is not an event: %v", e.ID, e.Err)
+	}
+	return "events: a frame that is not an event: " + e.Err.Error()
+}
+
+// Unwrap is what was wrong with the frame.
+func (e *FrameError) Unwrap() error { return e.Err }
+
 func (r *Reader) next() (Event, error) {
 	var data []byte
-	var kind string
+	var id int64
 	have := false // a data line was seen since the last blank line
 	for r.sc.Scan() {
 		line := r.sc.Bytes()
 		if len(line) == 0 {
 			if have && len(data) > 0 {
-				return decode(data, kind)
+				return decode(data, id)
 			}
-			data, kind, have = data[:0], "", false
+			data, id, have = data[:0], 0, false
 			continue
 		}
 		if line[0] == ':' {
@@ -143,10 +187,11 @@ func (r *Reader) next() (Event, error) {
 			}
 			data = append(data, value...)
 			have = true
-		case "event":
-			kind = string(value)
+		case "id":
+			// The JSON carries the id; this one only names a bad frame.
+			id, _ = strconv.ParseInt(string(value), 10, 64)
 		}
-		// id: is carried in the JSON as well, and retry: is for browsers.
+		// event: is the JSON's type again, and retry: is for browsers.
 	}
 	if err := r.sc.Err(); err != nil {
 		if errors.Is(err, bufio.ErrTooLong) {
@@ -157,15 +202,16 @@ func (r *Reader) next() (Event, error) {
 	return Event{}, io.EOF
 }
 
-// decode reads one event's data. The JSON says its type; the event: line is
-// used only when the JSON leaves it out.
-func decode(data []byte, kind string) (Event, error) {
+// decode reads one event's data, the frame whose id: line said id. The
+// event is the JSON alone, which must name its type: the event: line is the
+// type again for a browser, and is not read.
+func decode(data []byte, id int64) (Event, error) {
 	var e Event
 	if err := jsonv2.Unmarshal(data, &e, rota.LenientOptions()); err != nil {
-		return Event{}, fmt.Errorf("events: a frame that is not an event: %w", err)
+		return Event{}, &FrameError{ID: id, Err: err}
 	}
 	if e.Type == "" {
-		e.Type = kind
+		return Event{}, &FrameError{ID: id, Err: errors.New("it has no type")}
 	}
 	return e, nil
 }

@@ -99,7 +99,8 @@ func TestReaderSkipsWhatIsNotAnEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := (Event{Type: Gap, Text: "events before 7 were not kept"}); got != want {
+	want := Event{Type: Gap, Time: time.UnixMicro(7).UTC(), Text: "events before 7 were not kept"}
+	if got != want {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
 	if _, err := r.Next(); err != io.EOF {
@@ -150,10 +151,46 @@ func TestReaderSkipsEmptyData(t *testing.T) {
 	}
 }
 
-func TestReaderRefusesAFrameThatIsNotJSON(t *testing.T) {
-	r := NewReader(strings.NewReader("data: {nope\n\n"))
-	if _, err := r.Next(); err == nil || err == io.EOF {
-		t.Fatalf("bad JSON gave %v", err)
+func TestABadFrameIsSkippedAndNamed(t *testing.T) {
+	in := "id: 5\ndata: {nope\n\n" +
+		"id: 6\nevent: account.reset\ndata: {\"id\":6,\"type\":\"account.reset\",\"account\":\"three\"}\n\n" +
+		"id: 7\ndata: {}\n\n" +
+		"data: null\n\n" +
+		"id: x\ndata: {\"id\":8,\"text\":\"no type\"}\n\n" +
+		string(Frame(Event{ID: 9, Type: Test}))
+	r := NewReader(strings.NewReader(in))
+	for _, id := range []int64{5, 6, 7, 0, 0} {
+		_, err := r.Next()
+		var fe *FrameError
+		if !errors.As(err, &fe) || fe.ID != id {
+			t.Fatalf("frame %d gave %v, want a FrameError for it", id, err)
+		}
+		if id > 0 && !strings.Contains(err.Error(), fmt.Sprint(id)) {
+			t.Fatalf("the error does not name frame %d: %v", id, err)
+		}
+	}
+	if e, err := r.Next(); err != nil || e.ID != 9 {
+		t.Fatalf("after the bad frames, %+v %v, want event 9", e, err)
+	}
+	if _, err := r.Next(); err != io.EOF {
+		t.Fatalf("at the end, %v, want io.EOF", err)
+	}
+}
+
+func TestAFrameCannotForgeAnother(t *testing.T) {
+	forged := "test\r\ndata: {\"type\":\"daemon.stopped\"}\n\nevent: evil\rid: 99\n"
+	e := Event{ID: 3, Type: forged, Text: "x"}
+	f := Frame(e)
+	if n := bytes.Count(f, []byte("\n")); n != 4 || bytes.ContainsRune(f, '\r') {
+		t.Fatalf("Frame of a type with line ends = %q", f)
+	}
+	r := NewReader(bytes.NewReader(f))
+	got, err := r.Next()
+	if err != nil || got.ID != 3 || got.Type != forged {
+		t.Fatalf("read back %+v %v", got, err)
+	}
+	if _, err := r.Next(); err != io.EOF {
+		t.Fatalf("a second frame came out: %v", err)
 	}
 }
 
@@ -207,7 +244,10 @@ func FuzzReader(f *testing.F) {
 	f.Fuzz(func(t *testing.T, in []byte) {
 		r := NewReader(bytes.NewReader(in))
 		for i := 0; i <= len(in)+1; i++ {
-			if _, err := r.Next(); err != nil {
+			var fe *FrameError
+			if _, err := r.Next(); errors.As(err, &fe) {
+				continue
+			} else if err != nil {
 				return
 			}
 		}
