@@ -49,34 +49,49 @@ func (r Result) Line(o Options) string {
 	return "rota: " + OneLine(r.Err.Error())
 }
 
-// linesHint is the hint row's items after the chord key, in order; the last
-// is the key itself, so it is written in.
-var linesHint = []string{"d leave", "n/p next/prev", "k keyboard", "z fit", "? help"}
+// linesKeep is the order in which a narrow hint row keeps its items, by
+// their place in the row: leaving first, then help, which leads to the
+// rest, then fitting, which a cropped window needs, then the others.
+var linesKeep = []int{0, 4, 3, 1, 2, 5}
 
 // hintRow is the one row drawn when no second key follows the chord key in
 // time:
 //
 //	Ctrl-\  d leave · n/p next/prev · k keyboard · z fit · ? help · Ctrl-\ itself
 //
-// A window narrower than that keeps the items that fit whole, from the
-// left, so none is cut in half; one too narrow for the key alone gets as
-// much of the key as fits. It is never wider than cols.
+// A window narrower than that drops whole items, so none is cut in half.
+// It takes them in this order, each that still fits: d leave, ? help,
+// z fit, n/p next/prev, k keyboard, the key itself. Those kept are written
+// in the row's own order, so a 40-cell window reads
+//
+//	Ctrl-\  d leave · z fit · ? help
+//
+// A window with no room for d leave shows the key alone, and one too
+// narrow for that gets as much of the key as fits. It is never wider than
+// cols.
 func hintRow(key byte, cols int) string {
 	k := KeyName(key)
-	items := append(append([]string{}, linesHint...), k+" itself")
-	row := k
-	if ansi.StringWidth(row) > cols {
-		return ansi.Truncate(row, max(cols, 0), "")
+	items := []string{"d leave", "n/p next/prev", "k keyboard", "z fit", "? help", k + " itself"}
+	if ansi.StringWidth(k) > cols {
+		return ansi.Truncate(k, max(cols, 0), "")
 	}
+	kept := make([]bool, len(items))
+	wide := ansi.StringWidth(k) - 1 // the first item's separator is two cells, not three
+	for n, i := range linesKeep {
+		w := wide + 3 + ansi.StringWidth(items[i])
+		if w <= cols {
+			kept[i], wide = true, w
+		} else if n == 0 {
+			break // with no room to say how to leave, the key is the row
+		}
+	}
+	row := k
+	sep := "  "
 	for i, it := range items {
-		sep := " · "
-		if i == 0 {
-			sep = "  "
+		if kept[i] {
+			row += sep + it
+			sep = " · "
 		}
-		if ansi.StringWidth(row+sep+it) > cols {
-			break
-		}
-		row += sep + it
 	}
 	return row
 }
@@ -105,10 +120,13 @@ func helpCard(key byte, teach bool) []string {
 }
 
 // cropNote is the note a window smaller than its session is shown in its
-// last row: how big each is, and the key that fits the session here.
+// last row: first the key that fits the session here, so a phone's narrow
+// row still says it, then how big each is.
+//
+//	rota: Ctrl-\ z fits; api is 100×30, this window 40×12
 func cropNote(name string, key byte, sessCols, sessRows, winCols, winRows int) string {
-	return fmt.Sprintf("rota: %s is %d×%d, this window %d×%d; %s z fits it here",
-		OneLine(name), sessCols, sessRows, winCols, winRows, KeyName(key))
+	return fmt.Sprintf("rota: %s z fits; %s is %d×%d, this window %d×%d",
+		KeyName(key), OneLine(name), sessCols, sessRows, winCols, winRows)
 }
 
 // drawRow draws text over row, counted from 1, of a window cols wide: the

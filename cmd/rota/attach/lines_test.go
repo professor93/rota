@@ -47,6 +47,16 @@ func TestTheLinesSayWhyAndHowBack(t *testing.T) {
 			"rota: lost api: gone; attach api tries again"},
 		{"refused", Result{Why: Refused, Session: api, Err: errors.New("no such session")}, Options{},
 			"rota: no such session"},
+		{"lost, no error", Result{Why: Lost, Session: api}, Options{},
+			"rota: lost api; rota run --attach api tries again"},
+		{"refused, no error", Result{Why: Refused, Session: api}, Options{},
+			"rota: the attach to api was refused"},
+		{"no why", Result{Session: api}, Options{},
+			"rota: the attach to api was refused"},
+		{"no why, an error", Result{Session: api, Err: errors.New("bad")}, Options{},
+			"rota: bad"},
+		{"detached, a quote", Result{Why: Detached, Session: client.Session{ID: "4f2a9c1e", Name: "bob's api"}}, Options{},
+			`rota: detached from bob's api; rota run --attach 'bob'\''s api' returns to it`},
 	} {
 		if got := c.r.Line(c.o); got != c.want {
 			t.Errorf("%s:\n got %q\nwant %q", c.what, got, c.want)
@@ -102,22 +112,43 @@ func TestTheCopyIsFixed(t *testing.T) {
 	if got := helpCard(0x1c, false); strings.Join(got, "\n") != strings.Join(card[1:], "\n") {
 		t.Errorf("helpCard:\n got %q\nwant %q", got, card[1:])
 	}
-	if got, want := cropNote("api", 0x1c, 100, 30, 40, 12), `rota: api is 100×30, this window 40×12; Ctrl-\ z fits it here`; got != want {
+	if got, want := cropNote("api", 0x1c, 100, 30, 40, 12), `rota: Ctrl-\ z fits; api is 100×30, this window 40×12`; got != want {
 		t.Errorf("cropNote:\n got %q\nwant %q", got, want)
 	}
-	if got, want := cropNote("a\x1bb", 0x1c, 100, 30, 40, 12), `rota: a b is 100×30, this window 40×12; Ctrl-\ z fits it here`; got != want {
+	if got, want := cropNote("a\x1bb", 0x1c, 100, 30, 40, 12), `rota: Ctrl-\ z fits; a b is 100×30, this window 40×12`; got != want {
 		t.Errorf("cropNote of a dirty name:\n got %q\nwant %q", got, want)
+	}
+	// On a 40-cell phone the row it is drawn in still says how to fit, and
+	// the session's size.
+	if got := ansi.Strip(string(drawRow(12, cropNote("api", 0x1c, 100, 30, 40, 12), 40))); !strings.Contains(got, `Ctrl-\ z fits`) || !strings.Contains(got, "100×30") {
+		t.Errorf("a 40-cell crop note lost its instruction or the size: %q", got)
 	}
 }
 
 // TestAHintRowKeepsWholeItems: a narrow window drops the items that do not
-// fit rather than cutting one in half.
+// fit rather than cutting one in half, and keeps leaving, help and fitting
+// the longest, so a phone still learns d, ? and z.
 func TestAHintRowKeepsWholeItems(t *testing.T) {
-	if got, want := hintRow(0x1c, 31), `Ctrl-\  d leave · n/p next/prev`; got != want {
-		t.Errorf("hintRow at 31:\n got %q\nwant %q", got, want)
-	}
-	if got, want := hintRow(0x1c, 30), `Ctrl-\  d leave`; got != want {
-		t.Errorf("hintRow at 30:\n got %q\nwant %q", got, want)
+	for _, c := range []struct {
+		cols int
+		want string
+	}{
+		{40, `Ctrl-\  d leave · z fit · ? help`},
+		{32, `Ctrl-\  d leave · z fit · ? help`},
+		{31, `Ctrl-\  d leave · ? help`},
+		{24, `Ctrl-\  d leave · ? help`},
+		{23, `Ctrl-\  d leave · z fit`},
+		{22, `Ctrl-\  d leave`},
+		{15, `Ctrl-\  d leave`},
+		{14, `Ctrl-\`},
+		{60, `Ctrl-\  d leave · n/p next/prev · z fit · ? help`},
+		{61, `Ctrl-\  d leave · n/p next/prev · k keyboard · z fit · ? help`},
+		{76, `Ctrl-\  d leave · n/p next/prev · k keyboard · z fit · ? help`},
+		{77, `Ctrl-\  d leave · n/p next/prev · k keyboard · z fit · ? help · Ctrl-\ itself`},
+	} {
+		if got := hintRow(0x1c, c.cols); got != c.want {
+			t.Errorf("hintRow at %d:\n got %q\nwant %q", c.cols, got, c.want)
+		}
 	}
 	if got, want := hintRow(0x1c, 4), `Ctrl`; got != want {
 		t.Errorf("hintRow at 4: got %q, want %q", got, want)
