@@ -82,12 +82,15 @@ const foreign = { id: 'h-foreign', kind: 'account', label: '', cwd: '/src', star
   assert(snap() === was, 'a frame the page does not know changes nothing: ' + snap());
 
   // 3. A stopped or foreign session opens no socket, however long the page waits.
-  // Whatever termActions draws is drawn once, in the stopped screen, so no
-  // id it gives a control is ever on the page twice.
+  // Whatever termActions draws is drawn once: in the panel, after Stop, for a
+  // session the page attached to, and in the stopped screen for one it did
+  // not, so no id it gives a control is ever on the page twice.
   tp.termActions = d => tp.el('button', { id: 'term_resume', class: 'btn', text: 'Resume ' + d.id });
   const resumes = () => ['#tscreen', '#tinfo', '#tstrip', '#tlist', '#tdock']
     .map(s => findAll(nodes[s], e => e.attrs && e.attrs.id === 'term_resume').length);
-  assert(resumes().join() === '0,0,0,0,0', 'a session that is attached shows no stopped screen: ' + resumes());
+  tp.renderTerm();
+  assert(resumes().join() === '0,1,0,0,0', 'a session that is attached has its actions in the panel and nowhere else: ' + resumes());
+  assert(!findAll(screen(), e => e.classList && e.classList.contains('empty')).length, 'and shows no stopped screen');
 
   const waitLong = async () => {
     for (let i = 0; i < 3; i++) { page.fire(); page.advance(60000); await page.settle(); }
@@ -148,8 +151,9 @@ const foreign = { id: 'h-foreign', kind: 'account', label: '', cwd: '/src', star
   await tp.termSelect('h-live');
   await page.settle();
   assert(sockets.length === before + 1 && tp.termStatus === 'connecting', 'a live one is attached to again: ' + tp.termStatus);
-  assert(!findAll(screen(), e => e.classList && e.classList.contains('empty')).length && resumes().join() === '0,0,0,0,0',
-    'and the stopped screen is gone: ' + screen().textContent);
+  assert(!findAll(screen(), e => e.classList && e.classList.contains('empty')).length && resumes().join() === '0,1,0,0,0',
+    'and the stopped screen is gone, its actions in the panel alone: ' + screen().textContent + ' ' + resumes());
+  assert(byId(nodes['#tinfo'], 'term_resume').textContent === 'Resume h-live', 'for this session');
 
   kit.ok();
 })().catch(e => { console.error('FAILED:', e.stack); process.exit(1); });
