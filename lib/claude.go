@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/professor93/rota/internal/nofigure"
 )
 
 // Claude (Anthropic) — OAuth2 with PKCE. Constants come from the production
@@ -387,8 +389,8 @@ func (claudeProvider) Identify(ctx context.Context, access string) (*Identity, e
 //
 // A figure is a pointer because Claude Code's own schema for this reply lets
 // utilization be null, and a null decoded into a float64 is 0%: a window
-// reported with no figure is a reading that failed (see Quota), not one with
-// all its room left.
+// reported with no figure is left out (see Quota), not read as one with all
+// its room left.
 type claudeUsage struct {
 	FiveHour *claudeWindow `json:"five_hour"`
 	SevenDay *claudeWindow `json:"seven_day"`
@@ -415,10 +417,10 @@ type claudeWindow struct {
 	ResetsAt    When     `json:"resets_at"`
 }
 
-// noFigure is the reading that failed because the endpoint reported a window
-// and gave it no figure.
-func noFigure(what string) error {
-	return fmt.Errorf("the usage endpoint reported %s with no figure, so no reading was taken", what)
+// noFigure is the reading that failed because the endpoint reported windows
+// and gave none of them a figure; the store backs off on it (nofigure.Err).
+func noFigure(what []string) error {
+	return fmt.Errorf("%w (%s), so no reading was taken", nofigure.Err, strings.Join(what, ", "))
 }
 
 func (claudeProvider) Quota(ctx context.Context, access string) (*Quota, error) {
@@ -433,31 +435,37 @@ func (claudeProvider) Quota(ctx context.Context, access string) (*Quota, error) 
 	}
 	// A window that is null or absent is a limit the account does not have:
 	// an Ultra account has no five-hour window, a Team seat no seven-day one.
-	// A window that is there with no figure is a measurement that failed,
-	// and the whole reading with it, so the account keeps the last one it
-	// had: a reading missing a window that applies must never pass for one
-	// with room in it.
+	// A window that is there with no figure is left out too, as Claude Code
+	// leaves it out, and never read as 0%, which would make a spent window
+	// look unspent: the windows that have a figure are the reading, so a
+	// spent one still counts. A reply that leaves none with a figure is a
+	// reading that failed, and the account keeps the last one it had.
 	q := &Quota{}
+	var without []string
 	for _, w := range []struct {
 		key, name string
 		w         *claudeWindow
 	}{{"five_hour", "5h", u.FiveHour}, {"seven_day", "7d", u.SevenDay}} {
-		if w.w == nil {
-			continue
+		switch {
+		case w.w == nil:
+		case w.w.Utilization == nil:
+			without = append(without, w.key)
+		default:
+			q.Windows = append(q.Windows, Window{Name: w.name, Percent: *w.w.Utilization, ResetsAt: w.w.ResetsAt, Primary: w.name == "5h"})
 		}
-		if w.w.Utilization == nil {
-			return nil, noFigure(w.key)
-		}
-		q.Windows = append(q.Windows, Window{Name: w.name, Percent: *w.w.Utilization, ResetsAt: w.w.ResetsAt, Primary: w.name == "5h"})
 	}
 	for _, l := range u.Limits {
 		if l.Scope == nil || l.Scope.Model == nil || l.Scope.Model.DisplayName == "" {
 			continue // unscoped limits already appear as 5h / 7d
 		}
 		if l.Percent == nil {
-			return nil, noFigure(l.Scope.Model.DisplayName + " window")
+			without = append(without, "the "+l.Scope.Model.DisplayName+" window")
+			continue
 		}
 		q.Windows = append(q.Windows, Window{Name: l.Scope.Model.DisplayName, Percent: *l.Percent, ResetsAt: l.ResetsAt, Scoped: true})
+	}
+	if len(q.Windows) == 0 && len(without) > 0 {
+		return nil, noFigure(without)
 	}
 	if e := u.Extra; e != nil && e.Enabled && e.UsedCredits != nil && e.MonthlyLimit != nil {
 		q.Note = fmt.Sprintf("extra usage %.2f / %.2f %s", *e.UsedCredits/100, *e.MonthlyLimit/100, e.Currency)

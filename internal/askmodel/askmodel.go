@@ -12,12 +12,10 @@ import "context"
 
 type key struct{}
 
-// With is ctx carrying the model a request named. An empty model carries
-// nothing.
+// With is ctx carrying the model a request named. An empty model is stored
+// too, so a request that names none, made inside one that named one, does
+// not inherit the outer request's model.
 func With(ctx context.Context, model string) context.Context {
-	if model == "" {
-		return ctx
-	}
 	return context.WithValue(ctx, key{}, model)
 }
 

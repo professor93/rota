@@ -398,18 +398,25 @@ could never be picked.
 `rota list` marks the account a bare `rota run` would use.
 
 A request that names its model — `rota run --model fable "..."`, or
-`"model"` in `POST /v1/run` — is judged by that model's own window too,
-when the account has one: an Ultra account's separate weekly Fable limit,
-say, or the per-model weekly limit that is the only weekly one a Team seat
-has. An account that has used that window up to its threshold is passed by
-for that request, and for no other; the window's name, the provider's label
-for it, must be a word of the model asked for, in any case, so `fable`,
-`claude-fable-5` and `claude-fable-5[1m]` all count Fable's. A request that
-names no model, an interactive session and a terminal are chosen for as
-before, since nobody knows which model they will use, and an account with no
-such window is chosen for as before whatever the request names. When those
-windows leave nothing, the refusal names the window:
-`… or has used its Fable window up to its threshold; ask for another model, …`.
+`"model"` in `POST /v1/run` or in the first frame of `/v1/session` — is
+judged by that model's own window too, when the account has one: the
+per-model weekly limit that is the only weekly one a Team seat has, say, or
+any limit of one model the usage endpoint reports as a per-model row. An
+account that has used that window up to its threshold is passed by for that
+request, and for no other; the first word of the window's name, the
+provider's label for it, a leading "Claude" set aside, must be a word of the
+model asked for, in any case, so `fable` and `claude-fable-5` both count
+Fable's. A request that names no model, an interactive session and a
+terminal are chosen for as before, since nobody knows which model they will
+use, and an account with no such window is chosen for as before whatever the
+request names. When those windows leave nothing, the refusal names the
+window: `… or has used its Fable window up to its threshold; ask for another
+model, …`.
+
+Such a request also passes by an account whose CLI has no such model — a
+codex account, for `--model fable` — while another account in the queue has
+it. When none has it, the first account is chosen as before, and the run is
+refused there for a model its CLI does not take.
 
 Accounts added before rotation existed are numbered by id the first time they
 are loaded, once; after that, an account left at 0 is a decision and nothing
@@ -3982,24 +3989,27 @@ the rotation still passes it by, `limited` in JSON (see *An account on an API
 key*). Model-scoped windows (a separate weekly Fable budget, say) are shown,
 a line each under USAGE and `"scoped": true` in `--json`, but never make an
 account `limited` or spent, because nobody knows which model a session will
-use — except for a request that names its model, which a spent window of
-that model passes by (*The rotation*).
+use — except for a request that names its model, which passes by an account
+whose window for that model is spent (*The rotation*).
 
 A window is read only with its figure. One the usage endpoint leaves out,
 or sends as `null`, is a limit the account does not have: an Ultra account
 has no five-hour window, a Team seat no seven-day one. One it reports with
 no figure — `{"utilization": null}`, or a model's row with no `percent` —
-is a reading that failed, never 0%: nothing from it is kept, the account
-keeps the reading it had, dated when that was taken (or none, `-` and
-`never`, as before), and the listing says why on stderr, `the usage
-endpoint reported five_hour with no figure, so no reading was taken`.
-Read as 0%, such a reading would make its account look like the one with
-the most room left.
+is left out too, as Claude Code leaves it out, and never read as 0%, which
+would make a spent account look unspent, and the rotation would stop on it.
+The windows that do have a figure are the reading, so a spent one still
+counts. A reply that gives none of its windows a figure is no reading at
+all: the account keeps the reading it had, dated when that was taken (or
+none, `-` and `never`, as before), and the usage endpoint is left alone for
+the backoff below, as after a `429`, with its own reason: `the usage
+endpoint gave no window a figure`.
 
 ### When the provider asks rota to wait
 
-A usage endpoint that turns a reading away — `429`, or a `5xx` failure of
-its own — is left alone until it may be asked again: for at least as long
+A usage endpoint that turns a reading away — `429`, a `5xx` failure of
+its own, or a reply with no figure in any window — is left alone until it
+may be asked again: for at least as long
 as its `Retry-After` says, in seconds or as a date, and for at least a
 minute, twice that for each refusal in a row, whatever it says — a shorter
 `Retry-After`, `0` or a date already past among them, gives way to that —

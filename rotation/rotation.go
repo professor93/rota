@@ -70,9 +70,13 @@ func Spent(a *rota.Account) bool { return a.Percent() >= float64(Cutoff(a)) }
 // Fable window is spent would be refused, however much room the account has
 // otherwise, and a Team seat may have no weekly window but one per model.
 //
-// A window is the model's when its name, the provider's label for it
-// ("Fable"), is a word of the model the request named, whatever the case:
-// "fable", "claude-fable-5" and "claude-fable-5[1m]" all name Fable's.
+// A window is the model's when the first word of its name, the provider's
+// label for it ("Fable", "Opus 4.1"), is a word of the model the request
+// named, whatever the case, a leading "Claude" set aside: "fable",
+// "claude-fable-5" and "claude-fable-5[1m]" all name Fable's.
+//
+// Like Spent, it reads the figure and not when the window resets: a reading
+// held back by a wait keeps a reset window spent until it is read again.
 func spentOn(a *rota.Account, model string) string {
 	if model == "" || a.Quota == nil {
 		return ""
@@ -82,7 +86,11 @@ func spentOn(a *rota.Account, model string) string {
 		if !w.Scoped || w.Percent < float64(Cutoff(a)) {
 			continue
 		}
-		if name := modelWords(w.Name); len(name) > 0 && slices.Contains(words, name[0]) {
+		name := modelWords(w.Name)
+		if len(name) > 1 && name[0] == "claude" {
+			name = name[1:]
+		}
+		if len(name) > 0 && slices.Contains(words, name[0]) {
 			return w.Name
 		}
 	}
@@ -185,8 +193,9 @@ func Next(accounts []*rota.Account) int {
 //
 // A request rota's own program or server makes may carry the model it named
 // in ctx; an account that has used that model's own window up to its
-// threshold is then passed by too (see spentOn). Nothing else carries one,
-// and a choice without one is the one described above.
+// threshold is then passed by too (see spentOn), and so is one whose
+// provider has no such model, while another has it. Nothing else carries
+// one, and a choice without one is the one described above.
 func Choose(ctx context.Context, st *store.Store, id int) (*rota.Account, error) {
 	if id != 0 {
 		a := st.Find(id)
@@ -215,17 +224,32 @@ func Choose(ctx context.Context, st *store.Store, id int) (*rota.Account, error)
 // account.
 //
 // model is the one the request named, or "": an account that has spent that
-// model's window is passed by like a spent one.
+// model's window is passed by like a spent one, and so is one whose
+// provider's catalog has no such model, unless no account has it.
 func pickIdle(st *store.Store, model string) (*rota.Account, error) {
 	queue := Queue(st.Accounts)
 	if len(queue) == 0 {
 		return nil, fmt.Errorf("%w: no account is in the rotation; give one an order", ErrNone)
 	}
 	busy := 0
-	var windows []string
+	var (
+		windows []string
+		// refused is the first account whose provider has no such model: the
+		// answer when no account has it, whose own run then says so, as it
+		// did before a request's model counted here at all.
+		refused *rota.Account
+	)
 	for _, a := range queue {
 		if !Available(a) {
 			continue
+		}
+		if model != "" {
+			if _, err := rota.ResolveModel(a.Provider, model); err != nil {
+				if refused == nil && !st.Busy(a) {
+					refused = a
+				}
+				continue
+			}
 		}
 		if w := spentOn(a, model); w != "" {
 			if !slices.Contains(windows, w) {
@@ -247,6 +271,9 @@ func pickIdle(st *store.Store, model string) (*rota.Account, error) {
 		return nil, fmt.Errorf("%w: every account in the rotation is spent or needs re-auth, or is an API key out of credit, "+
 			"or has used its %s window up to its threshold; ask for another model, run one by id, raise its threshold, or add an account",
 			ErrNone, strings.Join(windows, " or "))
+	}
+	if refused != nil {
+		return refused, nil
 	}
 	return nil, errExhausted
 }

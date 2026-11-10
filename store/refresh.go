@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/professor93/rota/internal/nofigure"
 	rota "github.com/professor93/rota/lib"
 )
 
@@ -620,9 +621,16 @@ const quotaBackoff = time.Minute
 // turnedAway reports whether err is the usage endpoint turning a reading away
 // for now — rate-limited, or failing on its side — and, when it is, records
 // on a when it may be asked again: after the backoff, or later if it said so.
+//
+// A reply that gave none of its windows a figure (nofigure.Err) is backed off
+// on the same way, recorded with the 200 it came with: asking again at once
+// would most likely get the same reply, at one request per look.
 func turnedAway(a *rota.Account, err error) bool {
 	var he *rota.HTTPError
-	if !errors.As(err, &he) || he.Status != http.StatusTooManyRequests && he.Status < 500 {
+	switch {
+	case errors.Is(err, nofigure.Err):
+		he = &rota.HTTPError{Status: http.StatusOK}
+	case !errors.As(err, &he) || he.Status != http.StatusTooManyRequests && he.Status < 500:
 		return false
 	}
 	now := rota.Now()
@@ -658,7 +666,11 @@ func lapsed(w rota.QuotaWait, now time.Time) bool {
 func waitNote(a *rota.Account, cause error) error {
 	w := a.QuotaWait
 	why := fmt.Sprintf("the provider asked rota to wait (http %d)", w.Status)
-	if w.Status != http.StatusTooManyRequests {
+	switch w.Status {
+	case http.StatusTooManyRequests:
+	case http.StatusOK:
+		why = "the usage endpoint gave no window a figure"
+	default:
 		why = fmt.Sprintf("the provider is failing (http %d)", w.Status)
 	}
 	kept := "there is no reading yet"

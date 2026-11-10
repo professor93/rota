@@ -62,12 +62,13 @@ type Quota struct {
 }
 
 // QuotaWait is a usage endpoint turning a reading away for now — rate-limited,
-// or failing on its side — and when it may be asked again.
+// failing on its side, or answering with no figure in any window — and when
+// it may be asked again.
 type QuotaWait struct {
 	// Until is unix ms: nothing asks before then.
 	Until int64 `json:"until"`
-	// Status is the reply that set it: 429, or the 5xx the endpoint failed
-	// with.
+	// Status is the reply that set it: 429, the 5xx the endpoint failed
+	// with, or 200 for a reply that gave none of its windows a figure.
 	Status int `json:"status,omitzero"`
 	// Count is how many times in a row the endpoint has turned a reading
 	// away, for a caller that backs off longer each time, whether or not it
