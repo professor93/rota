@@ -175,12 +175,11 @@ func judge(terminals, id string) (r Record) {
 }
 
 // StoppedAt is when a session whose holder has gone stopped, by its record:
-// the ending it records, or with none the last time meta.json was touched —
-// by the daemon that saw the holder go, by the holder's witness with no
-// daemon there, or else by the holder itself, which touches it every
-// minute while it runs. A daemon describing a session it held reads it
-// here too, so the moment is the same before and after the daemon stops
-// keeping it.
+// the ending it records, which always wins, or with none the last time
+// meta.json was touched — by the daemon that saw the holder go, or with no
+// daemon there by the holder itself, which touches it every minute while
+// it runs. A daemon describing a session it held reads it here too, so the
+// moment is the same before and after the daemon stops keeping it.
 func StoppedAt(dir string, m *Meta) time.Time {
 	if m != nil && m.Exit != nil && !m.Ended.IsZero() {
 		return m.Ended

@@ -26,8 +26,9 @@ var (
 	// registryEvery is how often the CLI's own registry is read.
 	registryEvery = 2 * time.Second
 	// touchEvery is how often meta.json is touched, so that a session whose
-	// holder vanished with its witness — a reboot, the power — is dated
-	// from the last time it was known alive, at most this long before.
+	// holder went without recording an ending — killed outright, a reboot,
+	// the power — and with no daemon there to see it go is dated from the
+	// last time it was known alive: at most this long before it went.
 	touchEvery = time.Minute
 )
 
@@ -56,10 +57,15 @@ func (r *metaFile) update(change func(*holdwire.Meta)) error {
 	return holdwire.WriteMeta(r.dir, &r.m)
 }
 
-// touch moves meta.json's time to now without changing a byte of it.
+// touch moves meta.json's time to now without changing a byte of it, while
+// no ending is recorded: once one is, the record's time is never moved past
+// it, and the ending is what says when the session stopped.
 func (r *metaFile) touch() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.m.Exit != nil {
+		return nil
+	}
 	now := time.Now()
 	return os.Chtimes(holdwire.MetaPath(r.dir), now, now)
 }

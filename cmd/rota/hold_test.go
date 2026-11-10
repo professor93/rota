@@ -557,11 +557,13 @@ func TestATermToTheHolderHangsUpTheCLI(t *testing.T) {
 	}
 }
 
-// A holder killed outright, with no daemon to see it go, is dated by its
-// witness: the session reads interrupted from the moment it was killed —
-// not from the last time the holder touched its record — in its record and
-// in `rota list --sessions --json` alike.
-func TestAHolderKilledWithNoDaemonStoppedWhenItWasKilled(t *testing.T) {
+// A holder killed outright, with no daemon to see it go, records no
+// ending: the session reads interrupted, stopped within a minute — the
+// holder's touch — before it was killed, in its record and in `rota list
+// --sessions --json` alike. The hold package's
+// TestAHolderKilledOutrightIsDatedWithinATouch holds the bound with a
+// shorter touch.
+func TestAHolderKilledWithNoDaemonStoppedWithinAMinute(t *testing.T) {
 	_, terminals := holdStoreAlone(t)
 	bin := holdFake(t, "claude", fakecli.Spec{})
 	req := holdRequest(t)
@@ -570,9 +572,7 @@ func TestAHolderKilledWithNoDaemonStoppedWhenItWasKilled(t *testing.T) {
 		t.Fatalf("%+v", h.ready)
 	}
 	started := h.meta().Started
-	// Long enough that the start and the kill are different seconds, and
-	// short of the first time the fake's registry is read.
-	time.Sleep(1200 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 	killed := time.Now()
 	if err := h.cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
@@ -581,15 +581,15 @@ func TestAHolderKilledWithNoDaemonStoppedWhenItWasKilled(t *testing.T) {
 	var r holdwire.Record
 	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		r = holdwire.Judge(terminals, req.ID)
-		if r.State == holdwire.StateInterrupted && !r.Stopped.Before(killed) {
+		if r.State == holdwire.StateInterrupted {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the session reads %s, stopped at %v; it started at %v and was killed at %v", r.State, r.Stopped, started, killed)
+			t.Fatalf("the session reads %s", r.State)
 		}
 	}
-	if r.Stopped.After(time.Now()) {
-		t.Fatalf("the session stopped at %v, after now", r.Stopped)
+	if r.Stopped.After(killed) || killed.Sub(r.Stopped) > time.Minute {
+		t.Fatalf("the session stopped at %v; it started at %v and was killed at %v", r.Stopped, started, killed)
 	}
 	out, errb, code := call(t, "--json", "list", "--short", "--sessions")
 	var doc struct {
