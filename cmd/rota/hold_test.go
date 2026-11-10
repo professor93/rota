@@ -556,3 +556,50 @@ func TestATermToTheHolderHangsUpTheCLI(t *testing.T) {
 		t.Fatalf("the ending is recorded: %+v", m)
 	}
 }
+
+// A holder killed outright, with no daemon to see it go, is dated by its
+// witness: the session reads interrupted from the moment it was killed —
+// not from the last time the holder touched its record — in its record and
+// in `rota list --sessions --json` alike.
+func TestAHolderKilledWithNoDaemonStoppedWhenItWasKilled(t *testing.T) {
+	_, terminals := holdStoreAlone(t)
+	bin := holdFake(t, "claude", fakecli.Spec{})
+	req := holdRequest(t)
+	h := startHolderProc(t, terminals, bin, req)
+	if !h.ready.OK {
+		t.Fatalf("%+v", h.ready)
+	}
+	started := h.meta().Started
+	// Long enough that the start and the kill are different seconds, and
+	// short of the first time the fake's registry is read.
+	time.Sleep(1200 * time.Millisecond)
+	killed := time.Now()
+	if err := h.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	h.code()
+	var r holdwire.Record
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		r = holdwire.Judge(terminals, req.ID)
+		if r.State == holdwire.StateInterrupted && !r.Stopped.Before(killed) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the session reads %s, stopped at %v; it started at %v and was killed at %v", r.State, r.Stopped, started, killed)
+		}
+	}
+	if r.Stopped.After(time.Now()) {
+		t.Fatalf("the session stopped at %v, after now", r.Stopped)
+	}
+	out, errb, code := call(t, "--json", "list", "--short", "--sessions")
+	var doc struct {
+		Held []map[string]any `json:"held"`
+	}
+	if code != 0 || json.Unmarshal([]byte(out), &doc) != nil || len(doc.Held) != 1 {
+		t.Fatalf("list --sessions --json: exit %d %q\n%s", code, errb, out)
+	}
+	got := doc.Held[0]
+	if got["state"] != "interrupted" || got["exit"] != float64(-1) || got["ended_at"] != r.Stopped.Format(time.RFC3339) {
+		t.Fatalf("the session is listed as %v; it stopped at %s", got, r.Stopped.Format(time.RFC3339))
+	}
+}

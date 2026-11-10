@@ -53,15 +53,24 @@ const maxScrollback = 64 << 20
 
 // Main is `rota serve hold`: 2 when a person started it, 1 when the session
 // could not start — said on out as a Ready line first — and 0 once the CLI
-// has ended and its ending is recorded.
+// has ended and its ending is recorded. A request that names a session's
+// directory as its witness is a holder's witness instead (witness.go).
 func Main(in io.Reader, out io.Writer, open func() (*store.Store, error)) int {
 	keepOnBrokenPipe()
 	if atTerminal(in) || !leadsSession() {
 		fmt.Fprintln(out, ByHand)
 		return 2
 	}
-	h := &holder{out: out}
-	if err := h.start(in, open); err != nil {
+	h := &holder{out: out, env: os.Environ()}
+	if err := h.read(in); err != nil {
+		h.fail(err)
+		return 1
+	}
+	if h.req.Witness != "" {
+		witness(in, h.req.ID, h.req.Witness)
+		return 0
+	}
+	if err := h.start(open); err != nil {
 		h.fail(err)
 		return 1
 	}
@@ -88,6 +97,9 @@ func keepOnBrokenPipe() {
 type holder struct {
 	out io.Writer
 	req holdwire.Request
+	env []string // this process's own environment, before the request's
+
+	witness *os.File // the pipe the witness waits on, kept until the holder exits
 
 	terminals, dir string
 	made           bool   // dir is this holder's: it made it
@@ -119,12 +131,9 @@ type plan struct {
 	account   *rota.Account
 }
 
-// start is every step up to the Ready line. The first error ends it, and
-// fail undoes whatever had been made by then.
-func (h *holder) start(in io.Reader, open func() (*store.Store, error)) error {
-	if err := h.read(in); err != nil {
-		return err
-	}
+// start is every step after the request up to the Ready line. The first
+// error ends it, and fail undoes whatever had been made by then.
+func (h *holder) start(open func() (*store.Store, error)) error {
 	st, err := open()
 	if err != nil {
 		return err
@@ -133,6 +142,9 @@ func (h *holder) start(in io.Reader, open func() (*store.Store, error)) error {
 	if err := h.claimDir(st); err != nil {
 		return err
 	}
+	// Before the account's claim is taken, which a CLI may be given across
+	// its exec: the witness is to hold nothing of the session's.
+	h.witnessed(h.env)
 	p, err := h.plan(st)
 	if err != nil {
 		return err
@@ -218,13 +230,20 @@ func (h *holder) start(in io.Reader, open func() (*store.Store, error)) error {
 	return nil
 }
 
-// read takes the one request, and the environment it carries.
+// read takes the one request, and the environment it carries. A witness's
+// request is the session's id and its directory, and nothing else is read.
 func (h *holder) read(in io.Reader) error {
 	if err := json.NewDecoder(io.LimitReader(in, maxRequest)).Decode(&h.req); err != nil {
 		return fmt.Errorf("reading the request: %w", err)
 	}
 	if !holdwire.IsID(h.req.ID) {
 		return fmt.Errorf("the request names no session: %q", h.req.ID)
+	}
+	if w := h.req.Witness; w != "" {
+		if !filepath.IsAbs(w) || filepath.Base(w) != h.req.ID {
+			return fmt.Errorf("a witness is asked for a session's own directory, not %q", w)
+		}
+		return nil
 	}
 	if h.req.Kind != holdwire.KindAccount && h.req.Kind != holdwire.KindShell {
 		return fmt.Errorf("a holder runs an account or a shell, not %q", h.req.Kind)
@@ -443,6 +462,9 @@ func (h *holder) hold() int {
 	h.log("the holder is done")
 	h.unlock()
 	h.logs.close()
+	if h.witness != nil {
+		_ = h.witness.Close() // the ending is recorded: nothing for the witness to do
+	}
 	return 0
 }
 

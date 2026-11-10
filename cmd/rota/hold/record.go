@@ -26,8 +26,9 @@ var (
 	// registryEvery is how often the CLI's own registry is read.
 	registryEvery = 2 * time.Second
 	// touchEvery is how often meta.json is touched, so that a session whose
-	// holder vanished is aged from the last time it was known alive.
-	touchEvery = time.Hour
+	// holder vanished with its witness — a reboot, the power — is dated
+	// from the last time it was known alive, at most this long before.
+	touchEvery = time.Minute
 )
 
 // logCap is how large holder.log grows before it is moved to holder.log.1,

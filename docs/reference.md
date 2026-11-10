@@ -360,7 +360,7 @@ Held sessions run on Linux and macOS:
 | `rota serve status` | whether a daemon runs, its pid, version, control socket and port, and how many sessions are running and stopped; `--json` for the same as a document. Exits `0` when a daemon runs and `3` when none does |
 | `rota serve install` | make the daemon a systemd user unit on Linux or a launchd agent on macOS, which starts it at login and keeps its sessions through a restart, and start it; refused while a daemon started by hand runs and no unit of this store's is installed. Run again, it stops any daemon running, as `serve stop` does, then rewrites the unit and restarts it. Refused inside a held session. A supervisor does not pass `ROTA_TOKEN`, so a daemon's TCP port wants `auth.token_file` or `[[users]]` — see *Under a supervisor* in *[The daemon](#the-daemon)* |
 | `rota serve uninstall` | stop the daemon the unit runs and take the unit away; every session goes on running. Refused inside a held session, as `serve stop` and `serve install` are |
-| `rota serve hold` | internal: one held session's process, started by the daemon with its request on standard input; refuses a terminal |
+| `rota serve hold` | internal: one held session's process, started by the daemon with its request on standard input, and the witness each holder starts beside itself; refuses a terminal |
 
 The whole `[routes]` and `[terminal]` groups — the terminal page among them —
 have no flag at all and are set in the file only.
@@ -2108,9 +2108,14 @@ stays are over: from its record, for
 `interrupted` (exit `-1`) for a holder that went without recording one, a
 reboot or a kill, or `broken` for a record that cannot be read. Nothing
 restarts by itself. An interrupted session's age, and its `ended_at`, are
-measured from the moment the daemon saw its holder go, which is written into
-its record, or with no daemon there from the last time its holder touched
-it; `ended_at` reads the same before and after the daemon stops keeping it. Once `keep_stopped` has passed, the
+measured from the moment its holder went, which is written into its record:
+by the daemon, which sees the holder go, or with no daemon there by the
+holder's witness (see *[Held sessions and the
+daemon](#held-sessions-and-the-daemon)*). What takes the holder and its
+witness at once — a reboot, the power, a kill of both — leaves the last
+time the holder touched its record, which it does every minute, so
+`ended_at` is then up to a minute early. `ended_at` reads the same before
+and after the daemon stops keeping it. Once `keep_stopped` has passed, the
 session's directory under `<store>/terminals/` is deleted, and nothing else:
 never a worktree, and never a directory whose lock is held. `max_sessions`
 counts every running holder on the store, these ones included.
@@ -2457,6 +2462,15 @@ argument list is `rota serve hold` and nothing more; what it is to run,
 which may hold a prompt, comes on its standard input. A person who types
 `rota serve hold` is told *rota serve hold is started by the rota daemon
 (rota serve start), never by hand*, and it exits `2`.
+
+A holder records how its CLI ended before it goes, whether the CLI exited,
+was stopped, or was hung up on a SIGTERM or SIGHUP to the holder. For a
+holder killed outright, which records nothing, each holder starts a
+witness: a second `rota serve hold`, in a session of its own, holding
+nothing of the session's (not its lock, its claim or its terminal), that
+waits for the holder to go. When the holder went without recording an
+ending and no daemon is running, the witness writes that moment into the
+session's record and exits; otherwise it just exits.
 
 Every terminal a daemon starts is a held session: `rota run --detach`
 starts one, and so does `POST /v1/terminals` on a daemon. `rota list
@@ -4592,5 +4606,5 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `cmd/rota/client/` | A client of the control socket: listing the sessions, finding one by name, starting one, sending into one, stopping one |
 | `cmd/rota/detach.go` | `rota run --detach` |
 | `cmd/rota/held.go`, `cmd/rota/held_list.go` | `rota serve hold`, and the held sessions as read from their records alone, for `rota list --sessions`, a `rota send` with no daemon, and a busy account's error |
-| `cmd/rota/hold/` | The holder: the pseudo-terminal, the screen it keeps with x/vt, the answers to the CLI's queries, Claude Code's record of the session, the link to the daemon and sending |
+| `cmd/rota/hold/` | The holder: the pseudo-terminal, the screen it keeps with x/vt, the answers to the CLI's queries, Claude Code's record of the session, the link to the daemon, sending, and the witness that dates a holder killed outright |
 | `scripts/vt/` | How the screens x/vt keeps are checked against xterm's: the captures' goldens and the script that makes them |

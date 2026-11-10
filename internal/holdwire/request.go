@@ -36,6 +36,11 @@ type Request struct {
 	// Caller, when set, is who asked for the session, by the name the refresh
 	// journal knows it by: CallerDetach, or nothing for "holder".
 	Caller string `json:"caller,omitempty"`
+	// Witness, when set, is what a holder asks the witness it starts beside
+	// itself: session ID's directory, whose record the witness stamps with
+	// the moment the holder went if it went without recording an ending.
+	// The daemon never sets it.
+	Witness string `json:"witness,omitempty"`
 }
 
 // CallerHeader is the request header a client names itself in when it asks a

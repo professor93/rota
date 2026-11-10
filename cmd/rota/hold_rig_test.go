@@ -33,8 +33,21 @@ import (
 const holdToken = "tok-held-5e1f0c9a3b-never-written"
 
 // holdStore is shortHome with a claude account and a codex account whose
-// tokens are holdToken, and says where the store and its terminals are.
+// tokens are holdToken, this test process its daemon, and says where the
+// store and its terminals are.
 func holdStore(t *testing.T) (home, terminals string) {
+	t.Helper()
+	home, terminals = holdStoreAlone(t)
+	release, err := holdwire.ClaimDaemon(terminals, wire.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	return home, terminals
+}
+
+// holdStoreAlone is holdStore with no daemon: nobody holds its claim.
+func holdStoreAlone(t *testing.T) (home, terminals string) {
 	t.Helper()
 	shortHome(t)
 	home = os.Getenv("ROTA_HOME")
@@ -53,11 +66,6 @@ func holdStore(t *testing.T) (home, terminals string) {
 	if err := holdwire.SockFits(holdwire.SockPath(holdwire.Dir(terminals, "0123456789abcdef"))); err != nil {
 		t.Skipf("no held session fits here: %v", err)
 	}
-	release, err := holdwire.ClaimDaemon(terminals, wire.Version)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(release)
 	return home, terminals
 }
 
