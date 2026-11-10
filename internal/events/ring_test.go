@@ -175,6 +175,62 @@ func TestAClosedRingTakesNothing(t *testing.T) {
 	}
 }
 
+// follow is the reader loop Since documents: read, and when there is
+// nothing, wait for the wake or for Close; once closed, read once more, and
+// end when that gives nothing. between runs after each read that gave
+// nothing and before the wait, which is where a publish and a close can
+// land together.
+func follow(t *testing.T, r *Ring, between func()) []Event {
+	var got []Event
+	var last int64
+	closed := false
+	for {
+		evs, _, wake := r.Since(last)
+		for _, e := range evs {
+			if e.ID <= last {
+				t.Errorf("id %d after %d", e.ID, last)
+				return got
+			}
+			last = e.ID
+		}
+		got = append(got, evs...)
+		if len(evs) > 0 {
+			continue
+		}
+		if closed {
+			return got
+		}
+		if between != nil {
+			between()
+		}
+		select {
+		case <-r.Closed():
+			closed = true
+		case <-wake:
+		}
+	}
+}
+
+func TestTheLastEventBeforeCloseIsRead(t *testing.T) {
+	// A publish and a close both landing while the reader is between its
+	// read and its wait make both channels ready, and select picks either.
+	// Without the read after Close, about half of these runs lose the event.
+	for i := range 200 {
+		r := NewRing(4, nil)
+		once := false
+		got := follow(t, r, func() {
+			if !once {
+				once = true
+				r.Publish(Event{Type: DaemonStopped})
+				r.Close()
+			}
+		})
+		if len(got) != 1 || got[0].Type != DaemonStopped {
+			t.Fatalf("run %d: the reader got %v, want daemon.stopped", i, got)
+		}
+	}
+}
+
 func TestPublishAndSinceRace(t *testing.T) {
 	r := NewRing(16, nil)
 	var writers, reader sync.WaitGroup
@@ -185,31 +241,31 @@ func TestPublishAndSinceRace(t *testing.T) {
 			}
 		})
 	}
-	reader.Go(func() {
-		var last int64
-		for {
-			evs, _, wake := r.Since(last)
-			for _, e := range evs {
-				if e.ID <= last {
-					t.Errorf("id %d after %d", e.ID, last)
-					return
-				}
-				last = e.ID
-			}
-			if len(evs) > 0 {
-				continue
-			}
-			select {
-			case <-r.Closed():
-				if last != r.Last() {
-					t.Errorf("the reader ended at %d, the ring at %d", last, r.Last())
-				}
-				return
-			case <-wake:
-			}
-		}
-	})
+	var got []Event
+	reader.Go(func() { got = follow(t, r, nil) })
 	writers.Wait()
 	r.Close()
 	reader.Wait()
+	if len(got) == 0 || got[len(got)-1].ID != r.Last() {
+		t.Fatalf("the reader ended short of the ring's last id %d", r.Last())
+	}
+}
+
+func TestNoOneSharesAPointer(t *testing.T) {
+	r := NewRing(4, nil)
+	exit, pct := 0, 10.0
+	r.Publish(Event{Type: SessionEnded, Exit: &exit, Percent: &pct})
+	exit, pct = 1, 99
+	a, _, _ := r.Since(0)
+	if *a[0].Exit != 0 || *a[0].Percent != 10 {
+		t.Fatalf("the publisher's change reached the ring: exit %d, percent %v", *a[0].Exit, *a[0].Percent)
+	}
+	*a[0].Exit, *a[0].Percent = 7, 70
+	b, _, _ := r.Since(0)
+	if *b[0].Exit != 0 || *b[0].Percent != 10 {
+		t.Fatalf("one reader's change reached another: exit %d, percent %v", *b[0].Exit, *b[0].Percent)
+	}
+	if e, _ := r.Publish(Event{Type: Test}); e.Exit != nil || e.Percent != nil {
+		t.Fatalf("an event without them gained them: %+v", e)
+	}
 }

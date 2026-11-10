@@ -52,8 +52,9 @@ func NewRing(keep int, now func() time.Time) *Ring {
 }
 
 // Publish gives e its id, keeps it and wakes every reader. It changes
-// nothing else about e: its Time is what the caller gave. It returns the
-// event as kept, and true; once the ring is closed it keeps nothing and
+// nothing else about e: its Time is what the caller gave. Exit and Percent
+// are copied, so the caller may change what it pointed them at. It returns
+// the event as kept, and true; once the ring is closed it keeps nothing and
 // returns e as given, and false.
 func (r *Ring) Publish(e Event) (Event, bool) {
 	r.mu.Lock()
@@ -61,6 +62,7 @@ func (r *Ring) Publish(e Event) (Event, bool) {
 	if r.done {
 		return e, false
 	}
+	e = own(e)
 	e.ID = max(r.now().UnixMicro(), r.last+1)
 	r.last = e.ID
 	if len(r.buf) < r.keep {
@@ -72,18 +74,53 @@ func (r *Ring) Publish(e Event) (Event, bool) {
 	}
 	close(r.wake)
 	r.wake = make(chan struct{})
-	return e, true
+	return own(e), true
 }
 
-// Since is every kept event whose id is after id, oldest first, in a slice
-// of the caller's own. gap is true when events after id were pushed out
-// before they could be read: the caller says so (GapFrame) before the rest.
-// An id below 0 is taken as 0, which asks for everything kept.
+// own is e with Exit and Percent pointing at values of its own, so no two
+// holders of an event share either.
+func own(e Event) Event {
+	if e.Exit != nil {
+		v := *e.Exit
+		e.Exit = &v
+	}
+	if e.Percent != nil {
+		v := *e.Percent
+		e.Percent = &v
+	}
+	return e
+}
+
+// Since is every kept event whose id is after id, oldest first. The slice
+// and the events in it are the caller's own, Exit and Percent included.
+// gap is true when events after id were pushed out before they could be
+// read: the caller says so (GapFrame) before the rest. An id below 0 is
+// taken as 0, which asks for everything kept.
 //
 // wake is closed by the next Publish, or by Close, so a reader that has
-// everything waits on it and then asks again. Once the ring is closed, wake
-// is already closed; a reader is done when Since gives nothing and Closed()
-// is closed.
+// everything waits on it and then asks again. A Publish and a Close can
+// land together while a reader is between Since and its wait, and then
+// both wake and Closed() are ready. So a reader that sees Closed() closed
+// calls Since once more, and is done only when that call gives nothing:
+//
+//	closed := false
+//	for {
+//		evs, gap, wake := r.Since(last)
+//		// say the gap, send evs, and move last to the newest
+//		if len(evs) > 0 {
+//			continue
+//		}
+//		if closed {
+//			return // every event the ring took has been read
+//		}
+//		select {
+//		case <-r.Closed():
+//			closed = true
+//		case <-wake:
+//		}
+//	}
+//
+// Once the ring is closed, wake is already closed.
 func (r *Ring) Since(id int64) (evs []Event, gap bool, wake <-chan struct{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -94,7 +131,7 @@ func (r *Ring) Since(id int64) (evs []Event, gap bool, wake <-chan struct{}) {
 	if first < n {
 		evs = make([]Event, 0, n-first)
 		for i := first; i < n; i++ {
-			evs = append(evs, at(i))
+			evs = append(evs, own(at(i)))
 		}
 	}
 	return evs, id < r.dropped, r.wake
