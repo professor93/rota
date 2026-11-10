@@ -14,29 +14,63 @@ package store
 // the account as a refusal of the refresh a due launch makes leaves it.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/professor93/rota/internal/fakecli"
 	rota "github.com/professor93/rota/lib"
 )
 
 // leadWorld is the lineage world with A0 left to go before it expires: the
-// account and its home in sync on R0, nothing alive there.
+// account and its home in sync on R0, nothing alive there. PATH names an empty
+// directory, so no CLI can be found from here, let alone started.
 func leadWorld(t *testing.T, keychain bool, left time.Duration) *lineageWorld {
 	t.Helper()
+	t.Setenv("PATH", t.TempDir())
 	w := newLineageWorld(t, keychain)
 	w.clock.pass(8*time.Hour - left)
 	return w
+}
+
+// fakesOnly puts a fake of each named CLI in a directory of its own and makes
+// that directory the whole PATH.
+func fakesOnly(t *testing.T, names ...string) {
+	t.Helper()
+	bin := t.TempDir()
+	for _, name := range names {
+		fakecli.Install(t, bin, name, fakecli.Spec{})
+	}
+	t.Setenv("PATH", bin)
+}
+
+// underTheLeadsLock runs do once, the first time a look holds Claude Code's
+// refresh lock and has not yet read the home under it: in these worlds, the
+// lead's.
+func underTheLeadsLock(t *testing.T, do func()) (ran *bool) {
+	t.Helper()
+	ran = new(bool)
+	lockTaken = func(string) {
+		if !*ran {
+			*ran = true
+			do()
+		}
+	}
+	t.Cleanup(func() { lockTaken = nil })
+	return ran
 }
 
 // leadOutcome is the last line on path in the journal with an outcome that
@@ -315,39 +349,76 @@ func TestClaudeCodeStartingDuringALeadWaitsForTheLock(t *testing.T) {
 	}
 }
 
-// The home is asked again once the lead holds the lock: a Claude Code that
-// started there after the launch's first look and before the lock was taken has
-// the login, and nothing is presented; the launch goes on and joins it.
+// The home is asked again once the lead holds the lock, in both modes: a Claude
+// Code that started there after the launch's first look and before the lock was
+// taken has the login, and nothing is presented; the launch goes on and joins it.
 func TestAClaudeCodeThatStartedBeforeTheLeadTookTheLockIsLeftTheLogin(t *testing.T) {
-	w := leadWorld(t, true, 20*time.Minute)
-	started := false
-	w.k.onFind = func(string) {
-		if _, err := os.Stat(lockPath(w)); err == nil && !started {
-			started = true
-			w.cc.start()
-		}
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := leadWorld(t, m.keychain, 20*time.Minute)
+			started := underTheLeadsLock(t, w.cc.start)
+			if _, err := launchEnv(t, w.s, w.a); err != nil {
+				t.Fatal(err)
+			}
+			if !*started {
+				t.Fatal("the lead reads the home under the lock")
+			}
+			if mine := w.p.byRota(); len(mine) != 0 {
+				t.Fatalf("nothing presented once Claude Code runs there: %+v", mine)
+			}
+			if w.a.Dead || w.a.Token.Refresh != "R0" {
+				t.Fatalf("as it was: %v %s", w.a.Dead, w.a.Token.Refresh)
+			}
+			lockGone(t, w)
+			noPresenting(t, w.s)
+		})
 	}
-	if _, err := launchEnv(t, w.s, w.a); err != nil {
-		t.Fatal(err)
+}
+
+// A rotation Claude Code finished between the launch's first look and the
+// lead's lock, before exiting, is read under the lock and taken: R1 is the
+// login, it has its whole life ahead, and nothing is presented, in both modes.
+func TestARotationFinishedJustBeforeTheLeadTookTheLockIsTaken(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := leadWorld(t, m.keychain, 20*time.Minute)
+			rotated := underTheLeadsLock(t, func() {
+				_, body := w.p.present("claude-code, finished just before", "R0")
+				next := body.(map[string]any)
+				w.cc.write(storeLogin(next["access_token"].(string), next["refresh_token"].(string),
+					rota.Now().Add(8*time.Hour).UnixMilli(), lineageUntil))
+			})
+			if _, err := launchEnv(t, w.s, w.a); err != nil {
+				t.Fatal(err)
+			}
+			w.p.dump(t)
+			if !*rotated {
+				t.Fatal("the lead reads the home under the lock")
+			}
+			if mine := w.p.byRota(); len(mine) != 0 {
+				t.Fatalf("nothing presented after Claude Code rotated: %+v", mine)
+			}
+			if bad := w.p.rotaSpent(); len(bad) != 0 || w.p.revoked != "" {
+				t.Fatalf("no reuse: %+v %q", bad, w.p.revoked)
+			}
+			if w.a.Dead || w.a.Token.Refresh != "R1" {
+				t.Fatalf("rota takes R1: dead=%v holds %s", w.a.Dead, w.a.Token.Refresh)
+			}
+			lockGone(t, w)
+		})
 	}
-	if !started {
-		t.Fatal("the lead reads the home under the lock")
-	}
-	if mine := w.p.byRota(); len(mine) != 0 {
-		t.Fatalf("nothing presented once Claude Code runs there: %+v", mine)
-	}
-	if w.a.Dead || w.a.Token.Refresh != "R0" {
-		t.Fatalf("as it was: %v %s", w.a.Dead, w.a.Token.Refresh)
-	}
-	lockGone(t, w)
-	noPresenting(t, w.s)
 }
 
 // A lead that does not get through — the provider failing, an unknown code, a
 // reply that never comes, or Claude Code holding its refresh lock — stops no
 // launch: it goes on on the login as it was, the real expiry kept on the
-// account and on disk, and says nothing beyond the journal. The next launch
-// leads again, and presents R0 once: the provider never saw it.
+// account and on disk, and says nothing beyond the journal.
+//
+// One whose token went out and got nothing back is not made again on that
+// token: the account keeps R0's fingerprint as lead_missed, the next launch
+// inside the lead presents nothing, and R0 is refreshed when it falls due, as
+// before, after which the record goes. A lock somebody held cost nothing and
+// sent nothing, so the next launch leads, once.
 func TestALeadThatDoesNotGetThroughStopsNoLaunch(t *testing.T) {
 	failures := []struct {
 		what    string
@@ -397,27 +468,136 @@ func TestALeadThatDoesNotGetThroughStopsNoLaunch(t *testing.T) {
 				if len(*warned) != 0 {
 					t.Fatalf("nothing said: %q", *warned)
 				}
-				if failing != nil {
-					if got := failing.presented(); len(got) != 1 || got[0] != "R0" {
-						t.Fatalf("R0 presented once: %q", got)
+				missed := onDisk(t, storeDir(w.s)).Extra[leadMissedKey]
+				if failing == nil {
+					if missed != "" {
+						t.Fatalf("a lock somebody held sent nothing to remember: %q", missed)
 					}
-					failing.stop()
-					lockGone(t, w)
-				} else {
 					if _, err := os.Stat(lockPath(w)); err != nil {
 						t.Fatalf("the lock is not rota's to touch: %v", err)
 					}
 					_ = os.Remove(lockPath(w))
+					if _, err := launchEnv(t, w.s, w.a); err != nil {
+						t.Fatal(err)
+					}
+					if mine := w.p.byRota(); len(mine) != 1 || mine[0].rt != "R0" || mine[0].wasSpent || w.a.Token.Refresh != "R1" {
+						t.Fatalf("the next launch leads, once: %+v, holds %s", mine, w.a.Token.Refresh)
+					}
+					return
 				}
+				if got := failing.presented(); len(got) != 1 || got[0] != "R0" {
+					t.Fatalf("R0 presented once: %q", got)
+				}
+				if missed != fingerprint("R0") {
+					t.Fatalf("R0's fingerprint is kept, never R0: %q", missed)
+				}
+				failing.stop()
+				lockGone(t, w)
+				w.clock.pass(5 * time.Minute)
+				if _, err := launchEnv(t, w.s, w.a); err != nil {
+					t.Fatal(err)
+				}
+				if got := failing.presented(); len(got) != 1 || len(w.p.byRota()) != 0 || w.a.Token.Refresh != "R0" {
+					t.Fatalf("no lead again on R0: %q %+v", got, w.p.byRota())
+				}
+				w.clock.pass(11 * time.Minute) // four minutes left: due
 				if _, err := launchEnv(t, w.s, w.a); err != nil {
 					t.Fatal(err)
 				}
 				w.p.dump(t)
 				if mine := w.p.byRota(); len(mine) != 1 || mine[0].rt != "R0" || mine[0].wasSpent || w.a.Token.Refresh != "R1" {
-					t.Fatalf("the next launch leads, once: %+v, holds %s", mine, w.a.Token.Refresh)
+					t.Fatalf("R0 is refreshed when due, as before: %+v, holds %s", mine, w.a.Token.Refresh)
+				}
+				if got := journalLine(journalOf(t, w.s), "launch.renew", "rotated"); got == nil {
+					t.Fatal("by the launch's renew")
+				}
+				if _, ok := w.a.Extra[leadMissedKey]; ok {
+					t.Fatalf("the record goes with the token it was about: %v", w.a.Extra)
 				}
 			})
 		}
+	}
+}
+
+// A provider that takes the lead's request and does not answer before the HTTP
+// client gives up holds up the launch that sent it, and that launch alone: the
+// next launch inside the lead, on the same token, sends nothing and waits for
+// nothing. A token Claude Code rotated since is another token, and a launch on
+// it leads as usual. One whose answer is only slow waits for it, and the launch
+// after it finds the new token. The client's ceiling is cut short here so the
+// test need not wait thirty seconds for it.
+func TestALeadTheProviderDoesNotAnswerHoldsUpOneLaunch(t *testing.T) {
+	const ceiling = 300 * time.Millisecond
+	short := func(t *testing.T) {
+		was := rota.HTTPClient
+		c := *was
+		c.Timeout = ceiling
+		rota.HTTPClient = &c
+		t.Cleanup(func() { rota.HTTPClient = was })
+	}
+	for _, m := range lineageModes() {
+		t.Run(m.name+"/never answers", func(t *testing.T) {
+			w := leadWorld(t, m.keychain, 20*time.Minute)
+			short(t)
+			release := make(chan struct{})
+			failing := failRota(t, w, func(http.ResponseWriter) { <-release })
+			t.Cleanup(func() { close(release) }) // before failRota's server closes
+			start := time.Now()
+			if _, err := launchEnv(t, w.s, w.a); err != nil {
+				t.Fatalf("a lead nobody answered stops no launch: %v", err)
+			}
+			if took := time.Since(start); took < ceiling {
+				t.Fatalf("the first launch waited for the answer, up to the ceiling: %v", took)
+			}
+			if got := leadOutcome(t, w.s, "launch.lead", "transient:"); got != "transient:timeout" {
+				t.Fatalf("the journal says it timed out: %q", got)
+			}
+			w.clock.pass(time.Minute)
+			if _, err := launchEnv(t, w.s, w.a); err != nil {
+				t.Fatal(err)
+			}
+			if got := failing.presented(); len(got) != 1 {
+				t.Fatalf("the second launch sends nothing: %q", got)
+			}
+			if w.a.Dead || w.a.Token.Refresh != "R0" {
+				t.Fatalf("on R0 as it was: %v %s", w.a.Dead, w.a.Token.Refresh)
+			}
+			// Claude Code rotated meanwhile, onto a token with little left: another
+			// token, which the next launch leads on as usual.
+			failing.stop()
+			_, body := w.p.present("claude-code", "R0")
+			next := body.(map[string]any)
+			w.cc.write(storeLogin(next["access_token"].(string), next["refresh_token"].(string),
+				rota.Now().Add(25*time.Minute).UnixMilli(), lineageUntil))
+			if _, err := launchEnv(t, w.s, w.a); err != nil {
+				t.Fatal(err)
+			}
+			w.p.dump(t)
+			if mine := w.p.byRota(); len(mine) != 1 || mine[0].rt != "R1" || mine[0].wasSpent || w.a.Token.Refresh != "R2" {
+				t.Fatalf("a launch on another token leads: %+v, holds %s", mine, w.a.Token.Refresh)
+			}
+			if _, ok := w.a.Extra[leadMissedKey]; ok {
+				t.Fatalf("the record about R0 is gone: %v", w.a.Extra)
+			}
+		})
+		t.Run(m.name+"/answers late", func(t *testing.T) {
+			w := leadWorld(t, m.keychain, 20*time.Minute)
+			short(t)
+			w.p.onRota = func(string) { time.Sleep(ceiling / 3) }
+			if _, err := launchEnv(t, w.s, w.a); err != nil {
+				t.Fatal(err)
+			}
+			w.p.onRota = nil
+			if w.a.Token.Refresh != "R1" || refreshOf(w.cc.store()) != "R1" {
+				t.Fatalf("a slow answer is waited for and kept: rota %s, home %s", w.a.Token.Refresh, refreshOf(w.cc.store()))
+			}
+			if _, err := launchEnv(t, w.s, w.a); err != nil {
+				t.Fatal(err)
+			}
+			if mine := w.p.byRota(); len(mine) != 1 || mine[0].wasSpent {
+				t.Fatalf("one lead: %+v", mine)
+			}
+		})
 	}
 }
 
@@ -635,8 +815,8 @@ func TestALeadIsJournalledUnderItsCallersName(t *testing.T) {
 		{"detach", "detach.lead"},
 	} {
 		t.Run(c.path, func(t *testing.T) {
-			onPath(t, "claude")
 			w := leadWorld(t, false, 20*time.Minute)
+			fakesOnly(t, "claude")
 			ctx := context.Background()
 			if c.name != "" {
 				ctx = WithCaller(ctx, c.name)
@@ -698,4 +878,177 @@ func TestLaunchesWithALeadNeverForkTheLineage(t *testing.T) {
 			}
 		})
 	}
+}
+
+// replacing stands in front of the lineage world's provider and does what the
+// real one does on a refresh: the access token that went with the refresh token
+// it spent stops working at once. It notes every request made with an access
+// token it has revoked.
+type replacing struct {
+	mu      sync.Mutex
+	revoked map[string]bool
+	used    []string
+}
+
+func (r *replacing) usedRevoked() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.used)
+}
+
+func revokesReplaced(t *testing.T, w *lineageWorld) *replacing {
+	t.Helper()
+	r := &replacing{revoked: map[string]bool{}}
+	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if auth := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer "); auth != "" {
+			r.mu.Lock()
+			if r.revoked[auth] {
+				r.used = append(r.used, req.URL.Path+" with "+auth)
+			}
+			r.mu.Unlock()
+		}
+		body, _ := io.ReadAll(req.Body)
+		var tok struct {
+			Refresh string `json:"refresh_token"`
+		}
+		_ = json.Unmarshal(body, &tok)
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		w.p.serve(rec, req)
+		if req.URL.Path == "/token" && rec.Code == http.StatusOK && strings.HasPrefix(tok.Refresh, "R") {
+			access := "A" + strings.TrimPrefix(tok.Refresh, "R")
+			w.p.mu.Lock()
+			delete(w.p.issued, access)
+			w.p.mu.Unlock()
+			r.mu.Lock()
+			r.revoked[access] = true
+			r.mu.Unlock()
+		}
+		for k, v := range rec.Header() {
+			rw.Header()[k] = v
+		}
+		rw.WriteHeader(rec.Code)
+		_, _ = rw.Write(rec.Body.Bytes())
+	}))
+	t.Cleanup(srv.Close)
+	for _, e := range []struct {
+		p    *string
+		path string
+	}{{&rota.ClaudeEndpoints.Token, "/token"}, {&rota.ClaudeEndpoints.Profile, "/profile"}, {&rota.ClaudeEndpoints.Usage, "/usage"}} {
+		old := *e.p
+		*e.p = srv.URL + e.path
+		t.Cleanup(func() { *e.p = old })
+	}
+	w.cc.url = srv.URL
+	return r
+}
+
+// Against a provider that revokes the access token a refresh replaces, as the
+// real one does: after a lead, A0 is used by nothing — not the home, which holds
+// A1 before the lock goes, not a listing's reading, not a later launch — and day
+// after day of leads and Claude Code's own refreshes neither forks the lineage
+// nor touches a revoked token.
+func TestAfterALeadTheAccessTokenItReplacedIsUsedByNothing(t *testing.T) {
+	for _, m := range lineageModes() {
+		t.Run(m.name, func(t *testing.T) {
+			w := leadWorld(t, m.keychain, 20*time.Minute)
+			r := revokesReplaced(t, w)
+			if _, err := launchEnv(t, w.s, w.a); err != nil {
+				t.Fatal(err)
+			}
+			home, ok := storedLogin([]byte(w.cc.store()))
+			if !ok || home.Refresh != "R1" {
+				t.Fatalf("the home holds R1: %+v", home)
+			}
+			var doc struct {
+				Login struct {
+					Access string `json:"accessToken"`
+				} `json:"claudeAiOauth"`
+			}
+			if err := json.Unmarshal([]byte(w.cc.store()), &doc); err != nil || doc.Login.Access != "A1" {
+				t.Fatalf("the home holds A1, not the revoked A0: %v %q", err, doc.Login.Access)
+			}
+			for day := 0; day < 2; day++ {
+				for _, look := range lineageLooks() {
+					look.do(t, w)
+				}
+				w.cc.start()
+				w.clock.pass(7*time.Hour + 56*time.Minute)
+				if got := w.cc.refresh("claude-code, in its own window"); !strings.HasPrefix(got, "rotated to") {
+					t.Fatalf("day %d: Claude Code's refresh: %q", day, got)
+				}
+				for _, look := range lineageLooks() {
+					look.do(t, w)
+				}
+				w.cc.stop()
+				w.clock.pass(7*time.Hour + 40*time.Minute)
+				if _, err := launchEnv(t, w.s, w.a); err != nil {
+					t.Fatalf("day %d: %v", day, err)
+				}
+			}
+			w.p.dump(t)
+			if used := r.usedRevoked(); len(used) != 0 {
+				t.Fatalf("a revoked access token was used: %q", used)
+			}
+			if bad := w.p.rotaSpent(); len(bad) != 0 || w.p.revoked != "" {
+				t.Fatalf("no reuse: %+v %q", bad, w.p.revoked)
+			}
+			if w.a.Dead || w.a.Token.Refresh != w.p.current || len(w.p.byRota()) != 3 {
+				t.Fatalf("rota holds the newest, one lead a day: dead=%v %s, provider %s, %d leads",
+					w.a.Dead, w.a.Token.Refresh, w.p.current, len(w.p.byRota()))
+			}
+		})
+	}
+}
+
+// After a refusal the home is read again with the token's real expiry, not the
+// past a lead or a rescue put on it to present it. An older copy of the account's
+// own login written into the home meanwhile — one that expires after that forced
+// past and before the token truly does — is then passed over as the spent copy
+// it is, and the account is dead with the refusal's own reason, rather than held
+// on that copy while the provider is asked whose it is.
+func TestTheHomeIsReadAgainAfterARefusalWithTheTokensRealExpiry(t *testing.T) {
+	older := func(w *lineageWorld, left time.Duration) func(string) {
+		done := false
+		return func(string) {
+			if !done {
+				done = true
+				writeFile(t, filepath.Join(w.cc.home, claudeCredentials),
+					storeLogin("A-older", "R-older", rota.Now().Add(left).UnixMilli(), lineageUntil))
+			}
+		}
+	}
+	for _, m := range lineageModes() {
+		t.Run(m.name+"/lead", func(t *testing.T) {
+			w := leadWorld(t, m.keychain, 20*time.Minute)
+			w.p.revoke("signed out elsewhere")
+			w.p.onRota = older(w, 10*time.Minute)
+			_, err := launchEnv(t, w.s, w.a)
+			w.p.onRota = nil
+			if !errors.Is(err, rota.ErrReauth) {
+				t.Fatalf("the launch is refused as re-auth needed: %v", err)
+			}
+			if !w.a.Dead || !strings.HasPrefix(w.a.DeadReason, "invalid_grant") {
+				t.Fatalf("dead with the refusal's reason: %v %q", w.a.Dead, w.a.DeadReason)
+			}
+		})
+	}
+	t.Run("file/blanked rescue", func(t *testing.T) {
+		w := newLineageWorld(t, false)
+		lineageLooks()[1].do(t, w) // a look in sync
+		w.cc.start()
+		w.cc.write(clearedLogin)
+		w.p.revoke("signed out elsewhere")
+		w.p.onRota = older(w, time.Hour)
+		lineageLooks()[1].do(t, w)
+		w.p.onRota = nil
+		w.p.dump(t)
+		if n := len(w.p.byRota()); n != 1 {
+			t.Fatalf("setup: the rescue presents R0 once: %d", n)
+		}
+		const want = "Claude Code cleared the login in its home, and the provider refused rota's own refresh token too"
+		if !w.a.Dead || !strings.HasPrefix(w.a.DeadReason, want) {
+			t.Fatalf("dead with the rescue's own reason: %v %q", w.a.Dead, w.a.DeadReason)
+		}
+	})
 }

@@ -152,6 +152,13 @@ const (
 	refusedGrantKey = "refused_grant"
 )
 
+// leadMissedKey is where an account keeps the fingerprint of the refresh token a
+// lead presented and got nothing back for — no answer, or an error instead of a
+// token (see lead) — so that no later launch leads on that token again. It
+// belongs to the token, not the home, and means nothing once the token is
+// another.
+const leadMissedKey = "lead_missed"
+
 // syncedAgain is how old the record of the last look in sync may grow before a
 // look in sync writes it again: so the store is not saved at every look, at the
 // cost of counting from up to this long before.
@@ -200,6 +207,11 @@ var (
 	// which is all a lead can give up of one.
 	launchLead = 30 * time.Minute
 )
+
+// lockTaken, when a test sets it, runs once lockAndRead holds Claude Code's
+// refresh lock and before it reads the home under it: whatever Claude Code may do
+// in that moment, in a home on the file as much as on the keychain. nil otherwise.
+var lockTaken func(home string)
 
 // errKeychain marks a keychain that could not be read, which is not the
 // same as one that holds no item.
@@ -704,6 +716,9 @@ func (h *claudeHome) lockAndRead(ctx context.Context, path string) (*refreshLock
 			lock.release()
 		}
 	}()
+	if lockTaken != nil {
+		lockTaken(h.home)
+	}
 	before := snapshot(h.a)
 	if err := h.adopt(ctx); err != nil {
 		return nil, false, err
@@ -1793,13 +1808,22 @@ func (h *claudeHome) renewHeld(ctx context.Context, refresh func(context.Context
 // new login in the home before the lock goes. The journal names it <caller>.lead.
 //
 // A lead that leaves the account as it was — a lock somebody holds, a lock that
-// cannot be made, a store that cannot be saved before, a provider that fails or
-// does not answer — is the lead's alone, and the launch goes on as it would have,
-// on the login the home holds; the next launch inside the lead tries again. Only
-// whoever asked going away, and what a refresh that answered leaves — a refusal,
-// a login the store or the home could not keep — are the launch's, exactly as for
-// a renew.
+// cannot be made, a store that could not be saved for a moment (the launch's own
+// save after it refuses the launch, as ever), a provider that fails or does not
+// answer — is the lead's alone, and the launch goes on as it would have, on the
+// login the home holds. One whose token went out and got nothing back is not made
+// again on that token (leadMissedKey): a provider that takes the request and
+// never answers costs one launch the HTTP client's whole ceiling, not every launch
+// inside the lead, and the refresh comes when it falls due, as before. The
+// refresh itself is never cut short once sent: its answer would be the only copy
+// of the new token. Only whoever asked going away, and what a refresh that
+// answered leaves — a refusal, a login the store or the home could not keep — are
+// the launch's, exactly as for a renew.
 func (h *claudeHome) lead(ctx context.Context) error {
+	a := h.a
+	if missed := a.Extra[leadMissedKey]; missed != "" && missed != fingerprint(a.Token.Refresh) {
+		delete(a.Extra, leadMissedKey) // about a token the account has moved past
+	}
 	if !h.leading() {
 		return nil
 	}
@@ -1830,10 +1854,14 @@ func (h *claudeHome) lead(ctx context.Context) error {
 // also end, when its end is known, after the token does: a lead presents only a
 // token a refresh due in the last minutes of its access token would present, so
 // none past the login's end (rota.Refresh says so too) and none of a login that
-// ends first, which no refresh renews before its end.
+// ends first, which no refresh renews before its end. Nor does a launch lead on a
+// token a lead already presented and got nothing back for (leadMissedKey).
 func (h *claudeHome) leading() bool {
 	a := h.a
 	if launchLead <= 0 || a.Dead || a.Expired() || a.Token.ExpiresAt == 0 || !rota.StoresLogin(a, h.home) {
+		return false
+	}
+	if missed := a.Extra[leadMissedKey]; missed != "" && missed == fingerprint(a.Token.Refresh) {
 		return false
 	}
 	expires := time.UnixMilli(a.Token.ExpiresAt)
@@ -1850,9 +1878,16 @@ func (h *claudeHome) leading() bool {
 // presents only once it is: its expiry is put in the past for the length of the
 // one refresh, as a rescue's is, and put back when the refresh did not replace
 // it. Meanwhile what judges a file in the home, and the journal, go by when it
-// truly expires (copyExpires).
-func (h *claudeHome) refreshEarly(ctx context.Context) (bool, error) {
+// truly expires (copyExpires). A token that went out and got nothing back — no
+// answer, or an error in place of a token, but neither a refusal nor a caller who
+// left first — is recorded as missed (leadMissedKey), by its fingerprint alone.
+func (h *claudeHome) refreshEarly(ctx context.Context) (changed bool, err error) {
 	a := h.a
+	defer func() {
+		if err != nil && !changed && !a.Dead && !Left(err) {
+			setExtra(a, leadMissedKey, fingerprint(a.Token.Refresh))
+		}
+	}()
 	if a.Expired() {
 		return h.refresh(ctx)
 	}
@@ -1860,7 +1895,7 @@ func (h *claudeHome) refreshEarly(ctx context.Context) (bool, error) {
 	a.Token.ExpiresAt = rota.NowMS() - 1
 	forced := a.Token.ExpiresAt
 	h.copyExpires = expires
-	changed, err := h.refresh(ctx)
+	changed, err = h.refresh(ctx)
 	h.copyExpires = 0
 	if a.Token.ExpiresAt == forced {
 		a.Token.ExpiresAt = expires
@@ -2133,6 +2168,12 @@ func (h *claudeHome) refresh(ctx context.Context) (changed bool, err error) {
 		return changed, err
 	}
 	refused := a.DeadReason
+	// The home is read again with the token's real expiry, not the past a rescue
+	// or a lead put on it to present it: an older copy of the account's own login
+	// there is told by that expiry, and is passed over as spent (lib's AdoptFS).
+	if h.copyExpires != 0 && a.Token.ExpiresAt < h.copyExpires {
+		a.Token.ExpiresAt = h.copyExpires
+	}
 	if aerr := h.adopt(ctx); aerr != nil {
 		return true, err
 	}
