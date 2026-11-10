@@ -13,9 +13,51 @@ import (
 	"time"
 )
 
+// testHome and testClaudeDir are the home and the Claude Code directory
+// every test here runs in, made by TestMain.
+var testHome, testClaudeDir string
+
+// TestMain plays a fake when this process is one. As itself it runs with
+// every directory holding a real vendor CLI left out of PATH, and in a home
+// and a Claude Code directory of its own: a fake asked for its registry
+// writes where Claude Code keeps its sessions, which must never be the
+// person's who runs the tests.
 func TestMain(m *testing.M) {
 	Maybe()
-	os.Exit(m.Run())
+	var err error
+	if testHome, err = os.MkdirTemp("", "rota-person"); err != nil {
+		panic(err)
+	}
+	if testClaudeDir, err = os.MkdirTemp("", "rota-claude"); err != nil {
+		panic(err)
+	}
+	os.Unsetenv("ROTA_CLAUDE_HOME")
+	os.Unsetenv("ROTA_ACCOUNT_ID")
+	os.Unsetenv("ANTHROPIC_CONFIG_DIR")
+	os.Unsetenv("XDG_CONFIG_HOME")
+	os.Setenv("HOME", testHome)
+	os.Setenv("USERPROFILE", testHome)
+	os.Setenv("CLAUDE_CONFIG_DIR", testClaudeDir)
+	code := m.Run()
+	os.RemoveAll(testHome)
+	os.RemoveAll(testClaudeDir)
+	os.Exit(code)
+}
+
+// The home every test here sees is TestMain's temporary one, and so is the
+// Claude Code directory: never the person's who runs them.
+func TestTheHomeIsATemporaryOne(t *testing.T) {
+	if home, err := os.UserHomeDir(); err != nil || home != testHome {
+		t.Errorf("the home is %q (%v), want TestMain's %q", home, err, testHome)
+	}
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != testClaudeDir {
+		t.Errorf("CLAUDE_CONFIG_DIR is %q, want TestMain's %q", dir, testClaudeDir)
+	}
+	for _, name := range []string{"ROTA_CLAUDE_HOME", "ROTA_ACCOUNT_ID", "ANTHROPIC_CONFIG_DIR", "XDG_CONFIG_HOME"} {
+		if v, set := os.LookupEnv(name); set {
+			t.Errorf("%s is set, to %q", name, v)
+		}
+	}
 }
 
 // A fake asked to warm up exits at once and does nothing it was installed

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -17,14 +16,11 @@ func TestKimiAcceptsWhatRotaBuilds(t *testing.T) {
 	if os.Getenv("ROTA_CONTRACT") == "" {
 		t.Skip("runs the real vendor binary; set ROTA_CONTRACT=1 to opt in")
 	}
+	// Only on PATH, where TestMain leaves no real one: never in the home of
+	// whoever runs the tests, where the CLI installs itself.
 	bin, err := exec.LookPath("kimi")
 	if err != nil {
-		// The CLI installs outside the default PATH; look where it lands.
-		home, _ := os.UserHomeDir()
-		bin = filepath.Join(home, ".kimi-code", "bin", "kimi")
-		if _, err := os.Stat(bin); err != nil {
-			t.Skip("kimi is not installed")
-		}
+		t.Skip("no kimi on PATH: TestMain leaves every real one out of it, and no test runs the real kimi")
 	}
 	for _, spec := range []Spec{
 		{Prompt: "hi"},
@@ -68,7 +64,7 @@ func TestGrokAcceptsWhatRotaBuilds(t *testing.T) {
 		t.Skip("runs the real vendor binary; set ROTA_CONTRACT=1 to opt in")
 	}
 	if _, err := exec.LookPath("grok"); err != nil {
-		t.Skip("grok is not installed")
+		t.Skip("no grok on PATH: TestMain leaves every real one out of it, and no test runs the real grok")
 	}
 	cases := []struct {
 		name string
