@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"syscall"
 
-	"github.com/professor93/rota/internal/signals"
+	"github.com/professor93/rota/cmd/rota/internal/signals"
 	"github.com/professor93/rota/store"
 )
 

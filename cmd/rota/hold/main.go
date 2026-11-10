@@ -18,10 +18,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/professor93/rota/cmd/rota/internal/signals"
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/lend"
 	"github.com/professor93/rota/internal/proc"
-	"github.com/professor93/rota/internal/signals"
 	"github.com/professor93/rota/internal/termenv"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/store"
