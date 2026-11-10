@@ -3488,14 +3488,23 @@ Code blanked: see *Stranded* and *Blanked*, below.
   busy. A lead presents nothing a refresh in the last minutes would not: no
   login past its end, nor one that ends before its access token runs out. One
   that does not get through — Claude Code holding its refresh lock, a lock that
-  cannot be made, a store that cannot be saved first, a provider that fails or
-  does not answer — changes nothing and says nothing beyond the journal: the
-  launch goes ahead on the login the home holds, and the next launch within the
-  thirty minutes tries again. A refusal is a refusal, as for a token that ran
-  out: the home is read again, and otherwise the account is dead and the
-  launch is refused, unless the account holds a long-lived token, which it then
-  runs on. Of each token's eight hours a lead gives up at most the half hour it
-  comes ahead.
+  cannot be made, a provider that fails or does not answer — changes nothing and
+  says nothing beyond the journal: the launch goes ahead on the login the home
+  holds. A store that cannot be saved first presents nothing either, and the
+  launch's own save after it then refuses the launch, as it always has. A lead
+  whose token went out and got nothing back — no answer, or an error in place
+  of a token — is not made again on that token: the account keeps the token's
+  fingerprint, never the token, as `lead_missed`, and the refresh then comes
+  when it falls due, as before. A provider that takes the request and never
+  answers holds up one launch for the HTTP client's thirty seconds, then, not
+  every launch in the half hour; the refresh is never cut short once sent,
+  because its answer would be the only copy of the new token. A refusal is a
+  refusal, as for a token that ran out: the home is read again, and otherwise
+  the account is dead and the launch is refused, unless the account holds a
+  long-lived token, which it then runs on. That stops the account up to the
+  half hour its access token had left, because a Claude Code started there
+  would present the refused token again at its own refresh. Of each token's
+  eight hours a lead gives up at most the half hour it comes ahead.
 - **Stranded.** Claude Code's daemon refreshes the login itself, and now and
   then the refresh fails, on a plain `~/.claude` as much as in a home of
   rota's. When the access token has run out by then, the daemon writes
@@ -3691,7 +3700,8 @@ Code blanked: see *Stranded* and *Blanked*, below.
     it stopped: `seed` and `uncover` for the writes a look owed the home;
   - `exp_before` and `exp_after`, when the access token expires; a rescue or
     a lead, which presents its copy as expired whatever it says, still writes
-    in `exp_before` when the copy truly expires;
+    in `exp_before` when the copy truly expires, and when it did not get
+    through, `exp_after` is the moment it was presented as;
   - `presented_at`, on a refresh's two lines, when the token went out.
 
   It is rota's own record: nothing is written into a home for it, and nothing
