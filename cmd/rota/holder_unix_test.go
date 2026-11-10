@@ -462,7 +462,8 @@ func TestAClaudeRunKeepsItsClaimAcrossTheExec(t *testing.T) {
 }
 
 // What a holder answers is read for its pid, for a holder that cannot be
-// had here, which is no failure, or for why it failed.
+// had here, which is no failure, or for why it failed, said as the claim
+// helper's, which is what the manual calls it.
 func TestTheHoldersAnswerIsRead(t *testing.T) {
 	for _, c := range []struct {
 		said string
@@ -472,11 +473,11 @@ func TestTheHoldersAnswerIsRead(t *testing.T) {
 	}{
 		{said: "ready 4242\n", pid: 4242},
 		{said: "none\n", none: true},
-		{said: "fail kqueue: too many open files\n", why: "kqueue: too many open files"},
-		{said: "ready\n", why: `the holder said "ready"`},
-		{said: "ready -1\n", why: `the holder said "ready -1"`},
-		{said: "fail\n", why: `the holder said "fail"`},
-		{said: "what\n", why: `the holder said "what"`},
+		{said: "fail kqueue: too many open files\n", why: "the claim helper could not watch for the CLI's exit: kqueue: too many open files"},
+		{said: "ready\n", why: `the claim helper's answer was not understood: "ready"`},
+		{said: "ready -1\n", why: `the claim helper's answer was not understood: "ready -1"`},
+		{said: "fail\n", why: `the claim helper's answer was not understood: "fail"`},
+		{said: "what\n", why: `the claim helper's answer was not understood: "what"`},
 	} {
 		pid, err := heard(c.said)
 		switch {
@@ -486,4 +487,43 @@ func TestTheHoldersAnswerIsRead(t *testing.T) {
 			t.Errorf("%q: %d %v", c.said, pid, err)
 		}
 	}
+}
+
+// A claim helper that never answers is said to have taken too long, or to have
+// ended, rather than as the pipe's own error.
+func TestAClaimHelperThatNeverAnswersIsSaidSo(t *testing.T) {
+	pipe := func(t *testing.T) (r, w *os.File) {
+		t.Helper()
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			_ = r.Close()
+			_ = w.Close()
+		})
+		return r, w
+	}
+	t.Run("silent", func(t *testing.T) {
+		r, _ := pipe(t)
+		_, err := hearFrom(r, time.Now().Add(50*time.Millisecond))
+		if want := "the claim helper did not say it was ready within " + holderWait.String(); err == nil || err.Error() != want {
+			t.Fatalf("%v, not %q", err, want)
+		}
+	})
+	t.Run("gone", func(t *testing.T) {
+		r, w := pipe(t)
+		_ = w.Close()
+		_, err := hearFrom(r, time.Now().Add(10*time.Second))
+		if want := "the claim helper ended without saying it was ready"; err == nil || err.Error() != want {
+			t.Fatalf("%v, not %q", err, want)
+		}
+	})
+	t.Run("ready", func(t *testing.T) {
+		r, w := pipe(t)
+		_, _ = w.WriteString("ready 4242\n")
+		if pid, err := hearFrom(r, time.Now().Add(10*time.Second)); err != nil || pid != 4242 {
+			t.Fatalf("%d %v", pid, err)
+		}
+	})
 }

@@ -84,21 +84,33 @@ func holdInBackground(files []*os.File) (claimHolder, error) {
 		h.close()
 		return nil, fmt.Errorf("serve claim: %w", err)
 	}
-	_ = answerR.SetReadDeadline(deadline)
-	line, err := bufio.NewReaderSize(answerR, 512).ReadSlice('\n')
-	if err != nil {
-		h.close()
-		return nil, fmt.Errorf("the holder never said it was ready: %w", err)
-	}
-	if h.pid, err = heard(string(line)); err != nil {
+	if h.pid, err = hearFrom(answerR, deadline); err != nil {
 		h.close()
 		return nil, err
 	}
 	return h, nil
 }
 
+// hearFrom reads the holder's one line of answer by deadline, and what it says
+// (heard). The holder is the claim helper to whoever reads the error, as in the
+// manual.
+func hearFrom(answer *os.File, deadline time.Time) (pid int, err error) {
+	_ = answer.SetReadDeadline(deadline)
+	line, err := bufio.NewReaderSize(answer, 512).ReadSlice('\n')
+	switch {
+	case err == nil:
+		return heard(string(line))
+	case errors.Is(err, os.ErrDeadlineExceeded):
+		return 0, fmt.Errorf("the claim helper did not say it was ready within %s", holderWait)
+	case errors.Is(err, io.EOF):
+		return 0, errors.New("the claim helper ended without saying it was ready")
+	}
+	return 0, fmt.Errorf("the claim helper's answer could not be read: %w", err)
+}
+
 // heard reads the holder's answer: its pid when it is ready, errNoHolder when
-// nothing here can watch the run, or what went wrong.
+// nothing here can watch the run, or what went wrong, which is only ever that
+// it could not watch for the run's exit, the CLI's once the exec is done.
 func heard(line string) (pid int, err error) {
 	said := strings.TrimSuffix(line, "\n")
 	word, rest, _ := strings.Cut(said, " ")
@@ -110,9 +122,9 @@ func heard(line string) (pid int, err error) {
 	case said == "none":
 		return 0, errNoHolder
 	case word == "fail" && rest != "":
-		return 0, errors.New(rest)
+		return 0, fmt.Errorf("the claim helper could not watch for the CLI's exit: %s", rest)
 	}
-	return 0, fmt.Errorf("the holder said %q", said)
+	return 0, fmt.Errorf("the claim helper's answer was not understood: %q", said)
 }
 
 // holder is the run's side of a holder that is ready.
