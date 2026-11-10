@@ -20,7 +20,8 @@ import (
 //
 // So the record also says when its writer started, in `procStart`, and
 // Claude Code tells its own records from leftovers by it. Each of its builds
-// writes the start its own system keeps (seen in 2.1.317 to 2.1.322):
+// writes the start its own system keeps (the Linux layout as seen in
+// 2.1.319, the one Linux build read; the macOS one in 2.1.317 to 2.1.322):
 //
 //   - Linux: field 22 of /proc/<pid>/stat, the start in clock ticks since
 //     boot, as digits, such as "48273615". The kernel fixes it for the
@@ -37,10 +38,18 @@ import (
 //     started hours after its record, and rota would refresh under it.
 //
 // Either is believed only of a record that says it was written in this
-// machine's pid space, `pidDomain`: a pid from another host or container
-// sharing the home names nothing here, and a record that names no pid space
-// at all, from a build older than the field, is judged by its pid alone, as
-// before rota read procStart.
+// machine's pid space, `pidDomain`: a pid from another Linux host or
+// container sharing the home names nothing here (every Mac's space is
+// "darwin", so on macOS the field tells no host from another). A record
+// that names no pid space is judged by its pid alone, as before rota read
+// procStart: a session record from a build older than the field, and every
+// `daemon.lock`, which Claude Code writes with a procStart but no pidDomain
+// (2.1.319 on Linux, 2.1.322 on macOS).
+//
+// A known limit, with no guard: on Linux, /proc/<pid>/stat's start is shown
+// shifted by the reader's time namespace, so a Claude Code in another time
+// namespace that shares rota's pid namespace and machine id would read as
+// started at another tick.
 //
 // Every doubt is read as alive, as everywhere else in this file: a record
 // with no procStart or no pidDomain, one in the shape another system
@@ -121,13 +130,23 @@ func lstartRecycled(r record) bool {
 // as /proc/self/ns/pid links it, such as "pid:[4026531836]", each part
 // empty when it cannot be read, as Claude Code leaves it. Elsewhere rota
 // does not know it, and a record naming any domain is a doubt.
-func thisPidDomain() string {
-	switch runtime.GOOS {
+func thisPidDomain() string { return pidDomainOn(runtime.GOOS, os.ReadFile, os.Readlink) }
+
+// pidDomainOn is thisPidDomain for the system goos, reading files with read
+// and links with link.
+func pidDomainOn(goos string, read func(string) ([]byte, error), link func(string) (string, error)) string {
+	switch goos {
 	case "darwin":
 		return "darwin"
 	case "linux":
-		id, _ := os.ReadFile("/etc/machine-id")
-		ns, _ := os.Readlink("/proc/self/ns/pid")
+		id, err := read("/etc/machine-id")
+		if err != nil {
+			id = nil
+		}
+		ns, err := link("/proc/self/ns/pid")
+		if err != nil {
+			ns = ""
+		}
 		return "linux:" + strings.TrimSpace(string(id)) + ":" + ns
 	}
 	return ""

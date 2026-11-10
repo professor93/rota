@@ -3279,8 +3279,8 @@ there and launches on what it finds, and does not write the store, refresh
 the login, or rewrite the home's `.claude.json`. Alive means a rota run
 holding the account, a `daemon.lock` naming a live process, or a
 `sessions/<pid>.json` naming one — and a record nobody can read counts as
-alive. A record whose pid has since gone to another process, as after a
-crash or a reboot, does not: each record carries its writer's start,
+alive. A session record whose pid has since gone to another process, as
+after a crash or a reboot, does not: it carries its writer's start,
 `procStart`, in the form Claude Code's build for the system writes it.
 
 - On Linux it is the start in clock ticks since boot, field 22 of
@@ -3293,12 +3293,19 @@ crash or a reboot, does not: each record carries its writer's start,
 
 Either is believed only of a record whose `pidDomain` is this machine's pid
 space — `darwin` on macOS, `linux:<machine-id>:<pid namespace>` on Linux — so
-a record written on another host or in another container that shares the
-home is judged by its pid alone. So is a record with no `pidDomain`, from a
-Claude Code older than that field, one with no `procStart`, one with a start
-in another system's form, and every record on Windows. When nothing
-is alive, rota may refresh, and a refresh is followed at once — after the
-store is saved — by writing the new login into the home.
+on Linux a record written on another host or in another container that
+shares the home is judged by its pid alone; every Mac's pid space is
+`darwin`, so on macOS the field tells no host from another. A record that
+names no pid space is judged by its pid alone too, as before: `daemon.lock`,
+which Claude Code writes with a start but no `pidDomain`, and a session
+record from a Claude Code that does not write the field. So are a record
+with no `procStart`, one with a start in another system's form, and every
+record on Windows. A known limit: on Linux the start is read through the
+reader's time namespace, so a Claude Code in another time namespace that
+shares rota's pid namespace would look like a leftover; nothing guards
+against that. When nothing is alive, rota may refresh, and a refresh is
+followed at once — after the store is saved — by writing the new login into
+the home.
 Before rota refreshes — for a launch, a listing, usage read over HTTP or a
 server's maintenance — the store is saved, and when that save fails nothing is
 refreshed. A home holding no usable login, or the one rota wrote there and has

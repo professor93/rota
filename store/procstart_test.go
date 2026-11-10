@@ -124,14 +124,14 @@ func aliveIn(t *testing.T, rec claudeRecord, name string) bool {
 // is the writer exactly when it started at the same tick, and a leftover
 // whose pid went to another process — after a crash, or any process after a
 // reboot — started at another. Every record that leaves a doubt is alive:
-// one from another pid space or naming none, one with a start in the shape macOS writes,
-// none, or a number that is no tick, and one whose process's start cannot
-// be read.
+// one from another pid space or naming none, one with a start in the shape
+// macOS writes, none, or a number that is no tick, and one whose process's
+// start cannot be read.
 func TestOnLinuxARecordIsItsWritersByTheTickItStarted(t *testing.T) {
 	pid := os.Getpid()
 	onLinux(t, map[int]int64{pid: 48273615})
 	same := linuxWrittenBy(pid, 48273615)
-	for _, name := range []string{"sessions/41.json", claudeDaemonLock} {
+	for _, name := range []string{"sessions/41.json"} {
 		for _, c := range []struct {
 			what  string
 			rec   claudeRecord
@@ -141,9 +141,9 @@ func TestOnLinuxARecordIsItsWritersByTheTickItStarted(t *testing.T) {
 			{"a writer that started a tick earlier", linuxWrittenBy(pid, 48273614), false},
 			{"a writer from before a reboot", linuxWrittenBy(pid, 912), false},
 			{"a writer that started later", linuxWrittenBy(pid, 48273715), false},
-			// A record from a build older than pidDomain is judged by its
-			// pid alone, as before rota read procStart: alive while the pid
-			// is, gone once it is not.
+			// A session record from a build older than pidDomain is judged
+			// by its pid alone, as before rota read procStart: alive while
+			// the pid is, gone once it is not.
 			{"no pidDomain, another tick", same.with(func(r *claudeRecord) { r.pidDomain, r.procStart = "", "912" }), true},
 			{"no pidDomain, a pid that is gone", same.with(func(r *claudeRecord) { r.pid, r.pidDomain = deadPID, "" }), false},
 			{"another machine", same.with(func(r *claudeRecord) { r.pidDomain, r.procStart = "linux:another:pid:[4026531836]", "912" }), true},
@@ -178,7 +178,7 @@ func TestOnMacARecordIsItsWritersByTheTimeItStarted(t *testing.T) {
 	onMac(t)
 	me := os.Getpid()
 	before := macWrittenBy(me, started.Add(-time.Hour))
-	for _, name := range []string{"sessions/41.json", claudeDaemonLock} {
+	for _, name := range []string{"sessions/41.json"} {
 		for _, c := range []struct {
 			what  string
 			rec   claudeRecord
@@ -208,13 +208,13 @@ func TestOnMacARecordIsItsWritersByTheTimeItStarted(t *testing.T) {
 
 // A procStart, a startedAt or a pidDomain that is not what Claude Code
 // writes there is missing, and the record is read as well as it ever was:
-// a daemon, not an unreadable lock.
+// a session, not an unreadable record.
 func TestAFieldOfTheWrongKindIsMissing(t *testing.T) {
 	me := os.Getpid()
 	for _, body := range []string{`"procStart":1793942047`, `"startedAt":"soon"`, `"pidDomain":7`} {
 		home := t.TempDir()
-		writeFile(t, filepath.Join(home, claudeDaemonLock), `{"pid":`+itoa(me)+`,`+body+`}`)
-		if live := claudeLive(home); len(live) != 1 || live[0] != "daemon "+itoa(me) {
+		writeFile(t, filepath.Join(home, "sessions", "41.json"), `{"pid":`+itoa(me)+`,`+body+`}`)
+		if live := claudeLive(home); len(live) != 1 || live[0] != "session "+itoa(me) {
 			t.Fatalf("%s: %v", body, live)
 		}
 	}
@@ -292,13 +292,126 @@ func TestThisMachinesPidSpaceIsNamedAsClaudeCodeNamesIt(t *testing.T) {
 			t.Fatalf("macOS: %q", got)
 		}
 	case "linux":
-		ns, _ := os.Readlink("/proc/self/ns/pid")
-		if !strings.HasPrefix(got, "linux:") || !strings.HasSuffix(got, ":"+ns) {
-			t.Fatalf("linux: %q", got)
+		id, err := os.ReadFile("/etc/machine-id")
+		if err != nil {
+			id = nil
+		}
+		ns, err := os.Readlink("/proc/self/ns/pid")
+		if err != nil {
+			ns = ""
+		}
+		if want := "linux:" + strings.TrimSpace(string(id)) + ":" + ns; got != want {
+			t.Fatalf("linux: %q, want %q", got, want)
 		}
 	default:
 		if got != "" {
 			t.Fatalf("%s: %q", runtime.GOOS, got)
 		}
+	}
+}
+
+// On Linux the pid space is "linux:", the machine id with its newline
+// trimmed, ":", and the link /proc/self/ns/pid makes, each part empty when
+// it cannot be read, exactly as Claude Code's Linux build (2.1.319) makes
+// it. On macOS it is "darwin" whatever the files say; elsewhere it is
+// unknown.
+func TestThePidSpaceIsMadeAsClaudeCodeMakesIt(t *testing.T) {
+	files := map[string]string{"/etc/machine-id": "5f0c2a1e7b3d4e8a9c612d4f8a0b3e17\n"}
+	links := map[string]string{"/proc/self/ns/pid": "pid:[4026531836]"}
+	read := func(name string) ([]byte, error) {
+		if body, ok := files[name]; ok {
+			return []byte(body), nil
+		}
+		return nil, os.ErrNotExist
+	}
+	link := func(name string) (string, error) {
+		if to, ok := links[name]; ok {
+			return to, nil
+		}
+		return "", os.ErrPermission
+	}
+	if got := pidDomainOn("linux", read, link); got != linuxDomain {
+		t.Fatalf("linux: %q, want %q", got, linuxDomain)
+	}
+	delete(files, "/etc/machine-id")
+	if got := pidDomainOn("linux", read, link); got != "linux::pid:[4026531836]" {
+		t.Fatalf("linux with no machine id: %q", got)
+	}
+	delete(links, "/proc/self/ns/pid")
+	if got := pidDomainOn("linux", read, link); got != "linux::" {
+		t.Fatalf("linux with nothing to read: %q", got)
+	}
+	if got := pidDomainOn("darwin", read, link); got != "darwin" {
+		t.Fatalf("macOS: %q", got)
+	}
+	if got := pidDomainOn("windows", read, link); got != "" {
+		t.Fatalf("windows: %q", got)
+	}
+}
+
+// Claude Code writes daemon.lock with a procStart but no pidDomain, so it
+// is judged by its pid alone, as before rota read procStart, on Linux and
+// on macOS: alive while its pid is, whatever start it gives, and gone once
+// its pid is.
+func TestADaemonLockIsJudgedByItsPidAlone(t *testing.T) {
+	me := os.Getpid()
+	// lock is daemon.lock as Claude Code writes it, every key it has.
+	lock := func(pid int, procStart string, startedAt time.Time) string {
+		return `{
+  "pid": ` + itoa(pid) + `,
+  "version": "2.1.322",
+  "jsonPath": "/home/me/.claude/daemon/status.json",
+  "logPath": "/home/me/.claude/daemon.log",
+  "startedAt": ` + strconv.FormatInt(startedAt.UnixMilli(), 10) + `,
+  "origin": "transient",
+  "spawnedBy": "cli",
+  "procStart": ` + strconv.Quote(procStart) + `,
+  "launchTarget": "/home/me/.local/share/claude/versions/2.1.322",
+  "processWrapper": null
+}`
+	}
+	started, err := proc.StartTime(me)
+	if err != nil {
+		t.Skipf("no start time here: %v", err)
+	}
+	// Each start is given with a startedAt that bears it out, so that only
+	// the missing pidDomain keeps the lock from being judged by it.
+	type start struct {
+		procStart string
+		startedAt time.Time
+	}
+	for _, sys := range []struct {
+		name     string
+		on       func(*testing.T)
+		own, off start
+	}{
+		{"linux", func(t *testing.T) { onLinux(t, map[int]int64{me: 48273615}) },
+			start{"48273615", started}, start{"912", started.Add(-72 * time.Hour)}},
+		{"macOS", onMac,
+			start{lstart(started), started.Add(3 * time.Second)}, start{lstart(started.Add(-72 * time.Hour)), started.Add(-72 * time.Hour)}},
+	} {
+		t.Run(sys.name, func(t *testing.T) {
+			sys.on(t)
+			for _, c := range []struct {
+				what  string
+				pid   int
+				start start
+				alive bool
+			}{
+				{"its own start", me, sys.own, true},
+				{"another's start at a live pid", me, sys.off, true},
+				{"a pid that is gone", deadPID, sys.own, false},
+			} {
+				home := t.TempDir()
+				writeFile(t, filepath.Join(home, claudeDaemonLock), lock(c.pid, c.start.procStart, c.start.startedAt))
+				live := claudeLive(home)
+				if got := len(live) > 0; got != c.alive {
+					t.Fatalf("%s: alive=%v %v", c.what, got, live)
+				}
+				if c.alive && live[0] != "daemon "+itoa(me) {
+					t.Fatalf("%s: %v", c.what, live)
+				}
+			}
+		})
 	}
 }
