@@ -392,11 +392,29 @@ func (m *Model) broadcast(msg tea.Msg) tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-// open puts o on top of the stack. A login flow opened while one is put
-// aside brings that one back and is dropped: one flow at a time (R17).
+// modelAbout is an overlay that says what it is about: its kind and the
+// account it acts on. One that does not say is never taken for another.
+type modelAbout interface {
+	About() (kind string, account int)
+}
+
+// open puts o on top of the stack, unless the overlay on top is about the
+// same: a key pressed twice before its overlay arrived (a double d) opens
+// one. A login flow opened while one is put aside brings that one back and
+// is dropped: one flow at a time (R17).
 func (m *Model) open(o overlay) {
 	if o == nil || o.Closed() {
 		return
+	}
+	if n := len(m.stack); n > 0 {
+		t, ok1 := m.stack[n-1].(modelAbout)
+		u, ok2 := o.(modelAbout)
+		if ok1 && ok2 {
+			tk, ta := t.About()
+			if uk, ua := u.About(); tk == uk && ta == ua {
+				return
+			}
+		}
 	}
 	if _, ok := o.(asider); ok {
 		if m.aside != nil {
