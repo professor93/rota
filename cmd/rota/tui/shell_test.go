@@ -1,0 +1,818 @@
+package tui
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"os/exec"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"charm.land/bubbles/v2/key"
+	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/colorprofile"
+	"github.com/professor93/rota/internal/fakecli"
+	"github.com/professor93/rota/message"
+	"github.com/professor93/rota/wire"
+)
+
+// fakeBackend is the Backend every TUI test drives: each call is recorded,
+// and answered by its Fn field when the test set one. Unset, Who answers a
+// control principal, Accounts an empty listing, and every other call an
+// error saying it is not set. Later tests configure it and never edit it.
+type fakeBackend struct {
+	mu  sync.Mutex
+	log []fakeBackendCall
+
+	WhoFn          func(ctx context.Context) (Principal, error)
+	AccountsFn     func(ctx context.Context, how Refresh) (Listing, error)
+	ChangeFn       func(ctx context.Context, id int, c Change) (wire.Account, error)
+	RemoveFn       func(ctx context.Context, id int) error
+	BeginLoginFn   func(ctx context.Context, b LoginBegin) (backendLogin, error)
+	FinishLoginFn  func(ctx context.Context, id, code string) (LoginEnd, error)
+	PasteKeyFn     func(ctx context.Context, key, label string) (LoginEnd, error)
+	PasteTokenFn   func(ctx context.Context, account int, token string) (LoginEnd, error)
+	AskFn          func(ctx context.Context, q Question, each func(message.Event)) (wire.End, error)
+	SendRunFn      func(ctx context.Context, run, text string) error
+	InterruptRunFn func(ctx context.Context, run string) error
+	CloseRunFn     func(ctx context.Context, run string) error
+}
+
+// fakeBackendCall is one call a fakeBackend took: the method and its
+// arguments after the context.
+type fakeBackendCall struct {
+	Method string
+	Args   []any
+}
+
+// String is the call as Method(arg, …), a Refresh by its name.
+func (c fakeBackendCall) String() string {
+	args := make([]string, len(c.Args))
+	for i, a := range c.Args {
+		switch a := a.(type) {
+		case Refresh:
+			args[i] = [...]string{"none", "stale", "force"}[a]
+		default:
+			args[i] = fmt.Sprint(a)
+		}
+	}
+	return c.Method + "(" + strings.Join(args, ", ") + ")"
+}
+
+func (b *fakeBackend) took(method string, args ...any) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.log = append(b.log, fakeBackendCall{Method: method, Args: args})
+}
+
+// calls is every call so far, as strings, in the order taken.
+func (b *fakeBackend) calls() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, len(b.log))
+	for i, c := range b.log {
+		out[i] = c.String()
+	}
+	return out
+}
+
+// count is how many calls there have been.
+func (b *fakeBackend) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.log)
+}
+
+// named is every call of one method, with its arguments.
+func (b *fakeBackend) named(method string) []fakeBackendCall {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var out []fakeBackendCall
+	for _, c := range b.log {
+		if c.Method == method {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func fakeBackendUnset(method string) error {
+	return errors.New("fakeBackend: " + method + " is not set")
+}
+
+func (b *fakeBackend) Who(ctx context.Context) (Principal, error) {
+	b.took("Who")
+	if b.WhoFn != nil {
+		return b.WhoFn(ctx)
+	}
+	return Principal{Name: "tester", Role: "control", Via: "local"}, nil
+}
+
+func (b *fakeBackend) Accounts(ctx context.Context, how Refresh) (Listing, error) {
+	b.took("Accounts", how)
+	if b.AccountsFn != nil {
+		return b.AccountsFn(ctx, how)
+	}
+	return Listing{}, nil
+}
+
+func (b *fakeBackend) Change(ctx context.Context, id int, c Change) (wire.Account, error) {
+	b.took("Change", id, c)
+	if b.ChangeFn != nil {
+		return b.ChangeFn(ctx, id, c)
+	}
+	return wire.Account{}, fakeBackendUnset("Change")
+}
+
+func (b *fakeBackend) Remove(ctx context.Context, id int) error {
+	b.took("Remove", id)
+	if b.RemoveFn != nil {
+		return b.RemoveFn(ctx, id)
+	}
+	return fakeBackendUnset("Remove")
+}
+
+func (b *fakeBackend) BeginLogin(ctx context.Context, lb LoginBegin) (backendLogin, error) {
+	b.took("BeginLogin", lb)
+	if b.BeginLoginFn != nil {
+		return b.BeginLoginFn(ctx, lb)
+	}
+	return backendLogin{}, fakeBackendUnset("BeginLogin")
+}
+
+func (b *fakeBackend) FinishLogin(ctx context.Context, id, code string) (LoginEnd, error) {
+	b.took("FinishLogin", id, code)
+	if b.FinishLoginFn != nil {
+		return b.FinishLoginFn(ctx, id, code)
+	}
+	return LoginEnd{}, fakeBackendUnset("FinishLogin")
+}
+
+func (b *fakeBackend) PasteKey(ctx context.Context, k, label string) (LoginEnd, error) {
+	b.took("PasteKey", k, label)
+	if b.PasteKeyFn != nil {
+		return b.PasteKeyFn(ctx, k, label)
+	}
+	return LoginEnd{}, fakeBackendUnset("PasteKey")
+}
+
+func (b *fakeBackend) PasteToken(ctx context.Context, account int, token string) (LoginEnd, error) {
+	b.took("PasteToken", account, token)
+	if b.PasteTokenFn != nil {
+		return b.PasteTokenFn(ctx, account, token)
+	}
+	return LoginEnd{}, fakeBackendUnset("PasteToken")
+}
+
+func (b *fakeBackend) Ask(ctx context.Context, q Question, each func(message.Event)) (wire.End, error) {
+	b.took("Ask", q)
+	if b.AskFn != nil {
+		return b.AskFn(ctx, q, each)
+	}
+	return wire.End{}, fakeBackendUnset("Ask")
+}
+
+func (b *fakeBackend) SendRun(ctx context.Context, run, text string) error {
+	b.took("SendRun", run, text)
+	if b.SendRunFn != nil {
+		return b.SendRunFn(ctx, run, text)
+	}
+	return fakeBackendUnset("SendRun")
+}
+
+func (b *fakeBackend) InterruptRun(ctx context.Context, run string) error {
+	b.took("InterruptRun", run)
+	if b.InterruptRunFn != nil {
+		return b.InterruptRunFn(ctx, run)
+	}
+	return fakeBackendUnset("InterruptRun")
+}
+
+func (b *fakeBackend) CloseRun(ctx context.Context, run string) error {
+	b.took("CloseRun", run)
+	if b.CloseRunFn != nil {
+		return b.CloseRunFn(ctx, run)
+	}
+	return fakeBackendUnset("CloseRun")
+}
+
+// assertNoIO fails the test if b takes any call while f runs: Update does
+// no I/O, and only the commands it returns may call the Backend.
+func assertNoIO(t *testing.T, b *fakeBackend, f func()) {
+	t.Helper()
+	before := b.count()
+	f()
+	if got := b.calls(); len(got) != before {
+		t.Errorf("the Backend was called while Update ran: %q", got[before:])
+	}
+}
+
+// shellRegistry gives the test a tab registry of its own, empty, and puts
+// the package's back when the test ends.
+func shellRegistry(t *testing.T) {
+	t.Helper()
+	saved := tabsRegistry
+	tabsRegistry = nil
+	t.Cleanup(func() { tabsRegistry = saved })
+}
+
+// shellModel is a model over b, on the fake clock, drawing without colour.
+func shellModel(t *testing.T, b Backend, ticks *fakeTicks, with ...func(*Options)) *Model {
+	t.Helper()
+	p := colorprofile.Ascii
+	o := Options{Backend: b, Tick: ticks.tick, Now: ticks.now, Loc: time.UTC, Profile: &p, Env: []string{}}
+	for _, f := range with {
+		f(&o)
+	}
+	return New(o)
+}
+
+// shellStart runs the model's Init and a first resize to 80×24.
+func shellStart(t *testing.T, m *Model) []tea.Msg {
+	t.Helper()
+	_, seen := run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
+	return seen
+}
+
+// shellPing is a message no part of the shell knows.
+type shellPing string
+
+// shellTab is a tab that records what reaches it.
+type shellTab struct {
+	title  string
+	keys   []string
+	got    []string
+	mice   []string // each mouse message, as "click 3,2"
+	typing bool
+	busy   string
+	e      *env
+	sizes  chan<- [2]int        // each resize, when set
+	held   chan<- struct{}      // told when b holds Update, when set
+	hold   <-chan struct{}      // b holds Update until it closes, as tea.Exec holds the program
+	left   chan<- time.Duration // the time Leave was given, when set
+}
+
+func (s *shellTab) Title() string { return s.title }
+
+func (s *shellTab) Update(msg tea.Msg) (tab, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		s.keys = append(s.keys, msg.String())
+		if s.hold != nil && msg.String() == "b" {
+			s.held <- struct{}{}
+			<-s.hold
+		}
+	case tea.WindowSizeMsg:
+		if s.sizes != nil {
+			select {
+			case s.sizes <- [2]int{msg.Width, msg.Height}:
+			default:
+			}
+		}
+	case tea.MouseClickMsg:
+		s.mice = append(s.mice, fmt.Sprintf("click %d,%d", msg.X, msg.Y))
+	case tea.MouseWheelMsg:
+		s.mice = append(s.mice, fmt.Sprintf("wheel %d,%d", msg.X, msg.Y))
+	case shellPing:
+		s.got = append(s.got, string(msg))
+	}
+	return s, nil
+}
+
+func (s *shellTab) View(width, height int) string {
+	return "tab " + s.title + " keys:" + strings.Join(s.keys, ",")
+}
+
+func (s *shellTab) Keys() []key.Binding {
+	return []key.Binding{key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "do"))}
+}
+
+func (s *shellTab) Typing() bool { return s.typing }
+func (s *shellTab) Busy() string { return s.busy }
+
+func (s *shellTab) Leave(ctx context.Context) {
+	if s.left != nil {
+		d := time.Duration(-1)
+		if dl, ok := ctx.Deadline(); ok {
+			d = time.Until(dl)
+		}
+		s.left <- d
+	}
+}
+
+// shellTabs registers a tab at each place and returns them, by place.
+func shellTabs(t *testing.T, places ...int) map[int]*shellTab {
+	t.Helper()
+	shellRegistry(t)
+	tabs := map[int]*shellTab{}
+	names := map[int]string{10: "Ten", 20: "Twenty", 30: "Thirty", 40: "Forty"}
+	for _, p := range places {
+		tb := &shellTab{title: names[p]}
+		tabs[p] = tb
+		register(p, func(e *env) tab { tb.e = e; return tb })
+	}
+	return tabs
+}
+
+// shellOverlay is an overlay that records what reaches it, and closes on
+// esc. As an asider it goes aside on esc instead, and back on Return.
+type shellOverlay struct {
+	keys, got []string
+	mice      []string
+	closed    bool
+	asider    bool
+	aside     bool
+	pending   *backendLogin
+}
+
+func (o *shellOverlay) Update(msg tea.Msg) (overlay, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyPressMsg:
+		o.keys = append(o.keys, msg.String())
+		if msg.String() == "esc" {
+			if o.asider {
+				o.aside = true
+			} else {
+				o.closed = true
+			}
+		}
+	case tea.MouseClickMsg:
+		o.mice = append(o.mice, fmt.Sprintf("click %d,%d", msg.X, msg.Y))
+	case shellPing:
+		o.got = append(o.got, string(msg))
+	}
+	return o, nil
+}
+
+func (o *shellOverlay) View(width, height int) string {
+	return "overlay keys:" + strings.Join(o.keys, ",")
+}
+func (o *shellOverlay) Keys() []key.Binding { return nil }
+func (o *shellOverlay) Typing() bool        { return false }
+func (o *shellOverlay) Closed() bool        { return o.closed }
+
+// shellAsider is shellOverlay as the login flow is: it can be put aside.
+type shellAsider struct{ *shellOverlay }
+
+func (a shellAsider) Update(msg tea.Msg) (overlay, tea.Cmd) {
+	a.shellOverlay.Update(msg)
+	return a, nil
+}
+func (a shellAsider) Aside() bool                { return a.aside }
+func (a shellAsider) Badge(now time.Time) string { return "login abc123 · aside" }
+func (a shellAsider) Return()                    { a.aside = false }
+func (a shellAsider) Pending() *backendLogin     { return a.pending }
+
+func TestTabsRegisterInPlace(t *testing.T) {
+	shellRegistry(t)
+	register(30, func(e *env) tab { return &shellTab{title: "Thirty"} })
+	register(10, func(e *env) tab { return &shellTab{title: "Ten"} })
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	shellStart(t, m)
+	header, _, _ := strings.Cut(plain(m), "\n")
+	ten, thirty := strings.Index(header, "Ten"), strings.Index(header, "Thirty")
+	if ten < 0 || thirty < 0 || ten > thirty {
+		t.Errorf("the header is %q, want Ten before Thirty", header)
+	}
+	if !strings.Contains(plain(m), "tab Ten") {
+		t.Errorf("the first place is not the tab shown:\n%s", plain(m))
+	}
+	defer func() {
+		if recover() == nil {
+			t.Error("a second tab at place 10 was taken")
+		}
+	}()
+	register(10, func(e *env) tab { return &shellTab{title: "Again"} })
+}
+
+func TestKeysGoToTheFocusAndEverythingElseToAll(t *testing.T) {
+	tabs := shellTabs(t, 10, 30)
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	shellStart(t, m)
+	ten, thirty := tabs[10], tabs[30]
+
+	run(t, m, press("x")[0], shellPing("one"))
+	if !slices.Equal(ten.keys, []string{"x"}) || len(thirty.keys) != 0 {
+		t.Errorf("the key reached %q and %q, want only the active tab", ten.keys, thirty.keys)
+	}
+	if !slices.Equal(ten.got, []string{"one"}) || !slices.Equal(thirty.got, []string{"one"}) {
+		t.Errorf("the message reached %q and %q, want both", ten.got, thirty.got)
+	}
+
+	o := &shellOverlay{}
+	run(t, m, openMsg{O: o}, press("y")[0], shellPing("two"))
+	if !slices.Equal(o.keys, []string{"y"}) || !slices.Equal(ten.keys, []string{"x"}) {
+		t.Errorf("with an overlay open the key reached %q and the tab %q", o.keys, ten.keys)
+	}
+	if !slices.Equal(o.got, []string{"two"}) || len(ten.got) != 2 || len(thirty.got) != 2 {
+		t.Errorf("the message reached the overlay %q and the tabs %q %q", o.got, ten.got, thirty.got)
+	}
+	// An overlay over another: the top one has the keys, and both see the
+	// rest. When the top one closes, the one under it has them again.
+	top := &shellOverlay{}
+	run(t, m, openMsg{O: top}, press("k")[0], shellPing("three"))
+	if !slices.Equal(top.keys, []string{"k"}) || len(o.keys) != 1 || !slices.Equal(o.got, []string{"two", "three"}) {
+		t.Errorf("stacked: top %q, under %q %q", top.keys, o.keys, o.got)
+	}
+	run(t, m, press("esc", "z")...)
+	if !top.closed || !slices.Equal(o.keys, []string{"y", "z"}) {
+		t.Errorf("after the top closed: under %q", o.keys)
+	}
+	run(t, m, press("esc", "w")...)
+	if !o.closed || !slices.Equal(ten.keys, []string{"x", "w"}) {
+		t.Errorf("after the overlay closed the key reached %q", ten.keys)
+	}
+
+	// A login flow put aside keeps hearing everything but keys.
+	a := shellAsider{&shellOverlay{asider: true, pending: &backendLogin{ID: "abc123def"}}}
+	run(t, m, openMsg{O: a}, press("1")[0])
+	if !slices.Equal(a.keys, []string{"1"}) {
+		t.Fatalf("the flow took %q", a.keys)
+	}
+	run(t, m, append(press("esc", "v"), shellPing("four"))...)
+	if !slices.Equal(ten.keys, []string{"x", "w", "v"}) || !slices.Equal(a.got, []string{"four"}) {
+		t.Errorf("aside: tab keys %q, the flow heard %q", ten.keys, a.got)
+	}
+	if !strings.Contains(plain(m), "login abc123") {
+		t.Errorf("the badge is not shown:\n%s", plain(m))
+	}
+	if got := m.result().Pending; got == nil || got.ID != "abc123def" {
+		t.Errorf("the result is %+v, want the parked login", got)
+	}
+	// Another flow while one is aside brings that one back (R17).
+	other := shellAsider{&shellOverlay{asider: true}}
+	run(t, m, openMsg{O: other}, press("u")[0])
+	if a.aside || !slices.Equal(a.keys, []string{"1", "esc", "u"}) || len(other.keys) != 0 {
+		t.Errorf("a second flow: the first took %q (aside %v), the second %q", a.keys, a.aside, other.keys)
+	}
+}
+
+func TestTabsSwitchByNumberAndBracketUnlessTyping(t *testing.T) {
+	tabs := shellTabs(t, 10, 30)
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	shellStart(t, m)
+	shown := func() string {
+		for _, name := range []string{"Ten", "Thirty"} {
+			if strings.Contains(plain(m), "tab "+name) {
+				return name
+			}
+		}
+		return "none"
+	}
+	for _, step := range []struct{ key, want string }{
+		{"3", "Thirty"}, {"1", "Ten"}, {"2", "Ten"}, {"4", "Ten"},
+		{"]", "Thirty"}, {"]", "Ten"}, {"[", "Thirty"}, {"[", "Ten"},
+	} {
+		run(t, m, press(step.key)...)
+		if got := shown(); got != step.want {
+			t.Errorf("after %q the tab shown is %s, want %s", step.key, got, step.want)
+		}
+	}
+	if len(tabs[10].keys)+len(tabs[30].keys) != 0 {
+		t.Errorf("switching keys reached a tab: %q %q", tabs[10].keys, tabs[30].keys)
+	}
+
+	tabs[10].typing = true
+	_, seen := run(t, m, press("3", "]", "[", "q", "M")...)
+	if got := shown(); got != "Ten" || !slices.Equal(tabs[10].keys, []string{"3", "]", "[", "q", "M"}) {
+		t.Errorf("typing: the tab shown is %s and took %q", got, tabs[10].keys)
+	}
+	if slices.Contains(seen, tea.Msg(tea.QuitMsg{})) || m.mouse {
+		t.Error("typing q or M acted as a global key")
+	}
+	// ctrl+c is no text, so it quits even from a field.
+	if _, seen := run(t, m, press("ctrl+c")...); !slices.Contains(seen, tea.Msg(tea.QuitMsg{})) {
+		t.Errorf("ctrl+c from a field: saw %v", seen)
+	}
+
+	tabs[10].typing = false
+	if _, seen := run(t, m, press("q")...); !slices.Contains(seen, tea.Msg(tea.QuitMsg{})) {
+		t.Errorf("q saw %v, want a quit", seen)
+	}
+}
+
+// A click or the wheel in the body reaches the view with focus, in the
+// body's own coordinates; the rows of the chrome are the chrome's (F18).
+func TestMouseReachesTheBodyInItsOwnCoordinates(t *testing.T) {
+	tabs := shellTabs(t, 10, 30)
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	shellStart(t, m)
+	top, height := m.body()
+	if top != 1 || height != 24-2 {
+		t.Fatalf("the body is %d rows from row %d", height, top)
+	}
+	run(t, m, tea.MouseClickMsg{X: 3, Y: top + 2}, tea.MouseWheelMsg{X: 4, Y: top, Button: tea.MouseWheelDown},
+		tea.MouseClickMsg{X: 3, Y: 0}, tea.MouseClickMsg{X: 3, Y: 23})
+	if want := []string{"click 3,2", "wheel 4,0"}; !slices.Equal(tabs[10].mice, want) || len(tabs[30].mice) != 0 {
+		t.Errorf("the mouse reached %q and %q, want %q on the tab shown", tabs[10].mice, tabs[30].mice, want)
+	}
+	o := &shellOverlay{}
+	run(t, m, openMsg{O: o}, tea.MouseClickMsg{X: 5, Y: top + 1})
+	if !slices.Equal(o.mice, []string{"click 5,1"}) || len(tabs[10].mice) != 2 {
+		t.Errorf("with an overlay open the mouse reached %q and the tab %q", o.mice, tabs[10].mice)
+	}
+}
+
+func TestTooSmallSaysSoAndForgetsNothing(t *testing.T) {
+	tabs := shellTabs(t, 10)
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	shellStart(t, m)
+	run(t, m, press("a", "b")...)
+	a := shellAsider{&shellOverlay{asider: true}}
+	run(t, m, openMsg{O: a}, press("esc")[0])
+	before := plain(m)
+	for _, s := range [][2]int{{59, 14}, {60, 13}, {0, 0}, {1, 1}} {
+		run(t, m, size(s[0], s[1]))
+		want := fmt.Sprintf("rota needs a terminal of at least 60×14; this one is %d×%d", s[0], s[1])
+		if got := plain(m); got != want {
+			t.Errorf("at %d×%d the view is %q, want %q", s[0], s[1], got, want)
+		}
+		run(t, m, press("c")...)
+		run(t, m, tea.MouseClickMsg{X: 0, Y: 2})
+	}
+	run(t, m, size(80, 24))
+	if got := plain(m); got != before {
+		t.Errorf("back at 80×24 the view is\n%s\nwant\n%s", got, before)
+	}
+	if !slices.Equal(tabs[10].keys, []string{"a", "b"}) || a.Closed() || !a.Aside() {
+		t.Errorf("after being small the tab holds %q and the flow closed=%v aside=%v", tabs[10].keys, a.Closed(), a.Aside())
+	}
+}
+
+func TestTheListingIsReadOnOpenAndKeptFresh(t *testing.T) {
+	shellTabs(t, 10)
+	ticks := &fakeTicks{}
+	listing := Listing{Accounts: []wire.Account{{ID: 1, Provider: "claude"}}, Default: 1}
+	b := &fakeBackend{AccountsFn: func(context.Context, Refresh) (Listing, error) { return listing, nil }}
+	m := shellModel(t, b, ticks)
+	seen := shellStart(t, m)
+	got := b.calls()
+	slices.Sort(got)
+	if want := []string{"Accounts(stale)", "Who()"}; !slices.Equal(got, want) {
+		t.Fatalf("on open the Backend took %q, want %q", got, want)
+	}
+	if !slices.ContainsFunc(seen, func(msg tea.Msg) bool { l, ok := msg.(listingMsg); return ok && l.How == RefreshStale }) {
+		t.Errorf("no listingMsg among %v", seen)
+	}
+	if m.e.list.Default != 1 || len(m.e.list.Accounts) != 1 || m.e.who.Name != "tester" {
+		t.Errorf("the env holds %+v and %+v", m.e.list, m.e.who)
+	}
+
+	n := b.count()
+	run(t, m, ticks.advance(15*time.Second)...)
+	if got := b.calls()[n:]; !slices.Equal(got, []string{"Accounts(none)"}) {
+		t.Errorf("after 15 s the Backend took %q, want the cached listing", got)
+	}
+	n = b.count()
+	run(t, m, ticks.advance(2*time.Minute-15*time.Second)...)
+	if got := b.calls()[n:]; !slices.Contains(got, "Accounts(stale)") {
+		t.Errorf("after 2 min the Backend took %q, want a stale read", got)
+	}
+	// Each timer is set again when it fires.
+	n = b.count()
+	run(t, m, ticks.advance(15*time.Second)...)
+	if got := b.calls()[n:]; !slices.Equal(got, []string{"Accounts(none)"}) {
+		t.Errorf("15 s later the Backend took %q, want the cached listing again", got)
+	}
+	n = b.count()
+	run(t, m, ticks.advance(2*time.Minute)...)
+	if got := b.calls()[n:]; !slices.Contains(got, "Accounts(stale)") {
+		t.Errorf("2 min later the Backend took %q, want a stale read again", got)
+	}
+	n = b.count()
+	run(t, m, refreshMsg{How: RefreshForce})
+	if got := b.calls()[n:]; !slices.Equal(got, []string{"Accounts(force)"}) {
+		t.Errorf("a forced refresh took %q", got)
+	}
+}
+
+func TestABackendFailureIsAToastNotACrash(t *testing.T) {
+	tabs := shellTabs(t, 10)
+	ticks := &fakeTicks{}
+	b := &fakeBackend{
+		AccountsFn: func(context.Context, Refresh) (Listing, error) { return Listing{}, errors.New("the daemon went away") },
+		WhoFn:      func(context.Context) (Principal, error) { return Principal{}, errors.New("no answer") },
+	}
+	m := shellModel(t, b, ticks)
+	seen := shellStart(t, m)
+	var toasts []string
+	for _, msg := range seen {
+		if tm, ok := msg.(toastMsg); ok && tm.Level == levelErr {
+			toasts = append(toasts, tm.Text)
+		}
+	}
+	if !slices.ContainsFunc(toasts, func(s string) bool { return strings.Contains(s, "the daemon went away") }) ||
+		!slices.ContainsFunc(toasts, func(s string) bool { return strings.Contains(s, "no answer") }) {
+		t.Errorf("the errors were not toasted: %q", toasts)
+	}
+	if !strings.Contains(plain(m), "the daemon went away") && !strings.Contains(plain(m), "no answer") {
+		t.Errorf("no toast is drawn:\n%s", plain(m))
+	}
+	n := len(b.named("Accounts"))
+	run(t, m, ticks.advance(15*time.Second)...)
+	if len(b.named("Accounts")) != n+1 || len(b.named("Who")) != 2 {
+		t.Errorf("the next tick did not try again: %q", b.calls())
+	}
+	run(t, m, press("x")...)
+	if !slices.Equal(tabs[10].keys, []string{"x"}) {
+		t.Errorf("keys stopped working: %q", tabs[10].keys)
+	}
+}
+
+func TestTheDaemonIsPolled(t *testing.T) {
+	shellTabs(t, 10)
+	ticks := &fakeTicks{}
+	var mu sync.Mutex
+	asked := 0
+	daemon := func(ctx context.Context) Daemon {
+		mu.Lock()
+		defer mu.Unlock()
+		asked++
+		if _, ok := ctx.Deadline(); !ok {
+			return Daemon{Err: "no deadline"}
+		}
+		return Daemon{Running: asked == 1, PID: 42}
+	}
+	m := shellModel(t, &fakeBackend{}, ticks, func(o *Options) { o.Daemon = daemon })
+	seen := shellStart(t, m)
+	_, more := run(t, m, ticks.advance(5*time.Second)...)
+	var got []Daemon
+	for _, msg := range append(seen, more...) {
+		if d, ok := msg.(daemonMsg); ok {
+			got = append(got, d.Daemon)
+		}
+	}
+	if len(got) != 2 || !got[0].Running || got[1].Running || got[1].Err != "" {
+		t.Errorf("the daemon messages are %+v, want running and then not", got)
+	}
+	if m.e.daemon.Running {
+		t.Errorf("the env still says the daemon runs")
+	}
+}
+
+func TestEffectsBecomeTerminalCommands(t *testing.T) {
+	shellTabs(t, 10)
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	shellStart(t, m)
+	before := plain(m)
+	c := execTail(exec.Command("nothing"))
+	done := func(error) tea.Msg { return nil }
+	if got, ok := handOff(c, done)().(handOffMsg); !ok || got.Cmd != c || got.Done == nil {
+		t.Errorf("handOff gave %+v", got)
+	}
+	if got := copyText("abc")(); got != (clipboardMsg{Text: "abc"}) {
+		t.Errorf("copyText gave %+v", got)
+	}
+	for _, msg := range []tea.Msg{handOffMsg{Cmd: c, Done: done}, clipboardMsg{Text: "abc"}, bellMsg{}} {
+		_, cmd := m.Update(msg)
+		if cmd == nil {
+			t.Errorf("%T gave no command", msg)
+			continue
+		}
+		if got := fmt.Sprintf("%T", cmd()); !strings.HasPrefix(got, "tea.") {
+			t.Errorf("%T became %s, not one of Bubble Tea's own", msg, got)
+		}
+		if plain(m) != before {
+			t.Errorf("%T changed the view", msg)
+		}
+	}
+}
+
+func TestOpenURLUsesTheBrowserOrSaysThereIsNone(t *testing.T) {
+	shellTabs(t, 10)
+	var opened []string
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{}, func(o *Options) {
+		o.OpenURL = func(u string) error {
+			opened = append(opened, u)
+			if u == "bad" {
+				return errors.New("no display")
+			}
+			return nil
+		}
+	})
+	if got := openURL(m.e, "https://x")(); got != nil || !slices.Equal(opened, []string{"https://x"}) {
+		t.Errorf("open gave %v, opened %q", got, opened)
+	}
+	if got, ok := openURL(m.e, "bad")().(toastMsg); !ok || !strings.Contains(got.Text, "no display") {
+		t.Errorf("a failed open gave %v", got)
+	}
+	m = shellModel(t, &fakeBackend{}, &fakeTicks{})
+	if got, ok := openURL(m.e, "https://x")().(toastMsg); !ok || got.Level != levelWarn {
+		t.Errorf("with no browser: %v", got)
+	}
+}
+
+func TestExecTailKeepsTheLastWords(t *testing.T) {
+	path := fakecli.Install(t, t.TempDir(), "tailer", fakecli.Spec{
+		Stderr: []string{strings.Repeat("x", 6<<10), "boom"},
+		Exit:   3,
+	})
+	tl := execTail(exec.Command(path))
+	var errOut bytes.Buffer
+	tl.SetStdin(strings.NewReader(""))
+	tl.SetStdout(io.Discard)
+	tl.SetStderr(&errOut)
+	var exit *exec.ExitError
+	if err := tl.Run(); !errors.As(err, &exit) || exit.ExitCode() != 3 {
+		t.Fatalf("the run ended %v, want exit 3", err)
+	}
+	if got := tl.Last(); got != "boom" {
+		t.Errorf("Last is %q", got)
+	}
+	if want := strings.Repeat("x", 6<<10) + "\nboom\n"; strings.ReplaceAll(errOut.String(), "\r\n", "\n") != want {
+		t.Errorf("the program's writer got %d bytes, want %d", errOut.Len(), len(want))
+	}
+	if n := tl.tail.len(); n > 4<<10 {
+		t.Errorf("the tail holds %d bytes", n)
+	}
+	// With no writer set, the tail still keeps what was said.
+	tl = execTail(exec.Command(path))
+	tl.Run()
+	if got := tl.Last(); got != "boom" {
+		t.Errorf("unset stderr: Last is %q", got)
+	}
+}
+
+func TestWatchGatesControlKeys(t *testing.T) {
+	for _, role := range []string{"watch", "control"} {
+		t.Run(role, func(t *testing.T) {
+			shellTabs(t, 10)
+			b := &fakeBackend{WhoFn: func(context.Context) (Principal, error) {
+				return Principal{Name: "p", Role: role, Via: "ssh"}, nil
+			}}
+			m := shellModel(t, b, &fakeTicks{})
+			gated := func() bool {
+				k := key.NewBinding(key.WithKeys("n"))
+				m.e.gate(&k)
+				return !k.Enabled()
+			}
+			if !gated() {
+				t.Error("before Who answers a control key is enabled")
+			}
+			shellStart(t, m)
+			if got := gated(); got != (role == "watch") {
+				t.Errorf("gated is %v", got)
+			}
+		})
+	}
+}
+
+func TestUpdateDoesNoIO(t *testing.T) {
+	shellTabs(t, 10, 30)
+	ticks := &fakeTicks{}
+	var mu sync.Mutex
+	daemonAsked := 0
+	b := &fakeBackend{}
+	m := shellModel(t, b, ticks, func(o *Options) {
+		o.Daemon = func(context.Context) Daemon { mu.Lock(); daemonAsked++; mu.Unlock(); return Daemon{} }
+		o.OpenURL = func(string) error { t.Error("a browser was opened by Update"); return nil }
+	})
+	c := execTail(exec.Command("nothing"))
+	msgs := []tea.Msg{
+		size(80, 24), press("x")[0], press("3")[0], press("]")[0], press("M")[0],
+		refreshMsg{How: RefreshForce}, listingMsg{How: RefreshNone}, listingMsg{Err: errors.New("x")},
+		daemonMsg{Daemon: Daemon{Running: true}}, selectMsg{Account: 1}, toastMsg{Text: "t"},
+		openMsg{O: &shellOverlay{}}, press("y")[0], press("esc")[0],
+		handOffMsg{Cmd: c, Done: func(error) tea.Msg { return nil }}, clipboardMsg{Text: "c"}, bellMsg{},
+		modelPollMsg{Poll: modelPollList}, modelPollMsg{Poll: modelPollStale}, modelPollMsg{Poll: modelPollDaemon},
+		modelWhoMsg{Who: Principal{Role: "control"}}, tea.BackgroundColorMsg{}, tea.MouseClickMsg{X: 1, Y: 3},
+		tea.MouseWheelMsg{X: 1, Y: 3, Button: tea.MouseWheelDown}, size(30, 10), press("q")[0],
+	}
+	assertNoIO(t, b, func() {
+		m.Init()
+		for _, msg := range msgs {
+			m.Update(msg)
+			m.View()
+		}
+	})
+	if daemonAsked != 0 {
+		t.Errorf("the daemon was asked %d times by Update", daemonAsked)
+	}
+	run(t, m, size(80, 24), refreshMsg{How: RefreshForce})
+	if b.count() == 0 {
+		t.Error("the commands Update returned called nothing")
+	}
+}
+
+// What a stub returns until its task fills it in is safe to hand the
+// shell: a closed overlay is never opened, and a placeholder step draws
+// and takes messages (F14).
+func TestStubsAreSafeToOpen(t *testing.T) {
+	tabs := shellTabs(t, 10)
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	shellStart(t, m)
+	run(t, m, openMsg{O: overlayClosed()}, openMsg{O: nil}, press("x")[0])
+	if len(m.stack) != 0 || !slices.Equal(tabs[10].keys, []string{"x"}) {
+		t.Errorf("a stub's overlay was opened: stack %d, tab keys %q", len(m.stack), tabs[10].keys)
+	}
+	s := overlayNotYet()
+	s, cmd := s.Update(press("enter")[0])
+	if s == nil || cmd != nil || s.View(80) != "not yet" || s.Typing() || len(s.Keys()) != 0 {
+		t.Errorf("the placeholder step is %#v", s)
+	}
+}
