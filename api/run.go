@@ -11,10 +11,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/professor93/rota/internal/holdwire"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
 	"github.com/professor93/rota/rotation"
@@ -135,6 +135,21 @@ type prepared struct {
 	streaming bool
 }
 
+// runArgs is what a run hands Claude Code that could ask for Remote Control:
+// its raw args, then the --settings the spec's settings become, a path when
+// it is a JSON string and the document inline otherwise, as lib builds it.
+func runArgs(spec *rota.Spec) []string {
+	args := slices.Clone(spec.Extra)
+	if len(spec.Settings) > 0 {
+		var path string
+		if rota.UnmarshalLenient(spec.Settings, &path) == nil {
+			return append(args, "--settings", path)
+		}
+		args = append(args, "--settings", string(spec.Settings))
+	}
+	return args
+}
+
 // errGone is a caller that stopped waiting while its run was queued. Nothing
 // is answered: there is nobody left to answer.
 var errGone = errors.New("the caller went away")
@@ -150,13 +165,6 @@ var errGone = errors.New("the caller went away")
 func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, error) {
 	if req.TimeoutSeconds < 0 {
 		return nil, refuse(http.StatusBadRequest, "timeout_seconds must not be negative")
-	}
-	// Raw arguments that ask for Remote Control are held to a terminal's
-	// rule: refused from anybody but this machine's own user, before
-	// anything is spent, and readied below for that user.
-	remote := holdwire.AsksRemoteControl(req.Extra)
-	if remote && !viaSocket(r) {
-		return nil, refuse(http.StatusForbidden, remoteArgsLocal)
 	}
 	// A reading nobody knows is refused before anything is spent. The
 	// readings that ask the CLI for more become request fields here; the
@@ -269,8 +277,14 @@ func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, 
 	if err := req.CheckFor(a, st.Home(a), lim); err != nil {
 		return nil, err
 	}
-	// Only once the request is known to be allowed, args included: a
-	// refused one leaves the account's setting as it was.
+	// A claude account's raw args, and the --settings its settings become,
+	// are held to a terminal's rule (remoteArgs). That happens only once the
+	// request is known to be allowed, so a refused one leaves the account's
+	// setting as it was.
+	remote, err := remoteArgs(r, a, runArgs(&req.Spec), req.Cwd)
+	if err != nil {
+		return nil, err
+	}
 	if remote {
 		if err := s.readyRemoteControl(r, st, a); err != nil {
 			return nil, err

@@ -16,4 +16,8 @@ func (c *cli) runDaemon(bool, string) error { return holdwire.ErrPlatform }
 
 func (c *cli) stopDaemon(bool, bool) error { return holdwire.ErrPlatform }
 
+// refusedInsideHeldSession refuses nothing here: there are no held sessions
+// to be inside.
+func refusedInsideHeldSession(string, string) error { return nil }
+
 func (c *cli) daemonStatus() error { return holdwire.ErrPlatform }

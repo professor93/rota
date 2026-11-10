@@ -2,18 +2,16 @@ package store
 
 import (
 	"bytes"
-	"encoding/binary"
 	"encoding/json/jsontext"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
-	"unicode/utf16"
 
+	"github.com/professor93/rota/internal/claudeset"
 	rota "github.com/professor93/rota/lib"
 )
 
@@ -43,10 +41,8 @@ const (
 	sourceLocal   = "local"
 )
 
-// maxSettingsFile bounds what is read of one settings file: 2 MiB, the most
-// Claude Code reads of one — it refuses a larger file whole — so what rota
-// passes over is what Claude Code does not apply.
-const maxSettingsFile = 2 << 20
+// maxSettingsFile bounds what is read of one settings file (claudeset.MaxFile).
+const maxSettingsFile = claudeset.MaxFile
 
 // managedSettingsDir is the directory Claude Code reads the machine's managed
 // settings from: managed-settings.json, and the drop-ins in
@@ -175,9 +171,90 @@ func (s *Store) sayRiskySettings(a *rota.Account, env []string, cwd string, sour
 		said = append(said, "Claude Code will use the proxy or the certificates its settings name, which rota otherwise "+
 			"keeps out of an account's environment; nothing is wrong if they are your network's: "+strings.Join(routes, "; "))
 	}
+	if !a.RemoteControl {
+		var user, config string
+		if dir := configDirOf(env); dir != "" {
+			config = filepath.Join(dir, ".claude.json")
+			if reads(sourceUser) && !hermetic {
+				user = filepath.Join(dir, "settings.json")
+			}
+		}
+		var repo []string
+		for _, sf := range files {
+			if !sf.own {
+				repo = append(repo, sf.path)
+			}
+		}
+		if from := atStartupFrom(managedSettingsFiles(), user, repo, config); from != "" {
+			said = append(said, fmt.Sprintf("Claude Code connects its interactive sessions to Remote Control as they start "+
+				"(remoteControlAtStartup in %s), and this account's remote control setting is off, so Remote Control would "+
+				"act as whoever the shared .claude.json names; `rota set %d --remote-control on` gives it a .claude.json of its own",
+				from, a.ID))
+		}
+	}
 	if len(said) > 0 {
 		s.Warn(fmt.Sprintf("%s: %s", a, strings.Join(said, ". ")))
 	}
+}
+
+// maxConfigFile bounds what is read of a .claude.json for its
+// remoteControlAtStartup: far more than any settings file, since the file
+// keeps every project Claude Code has opened.
+const maxConfigFile = 64 << 20
+
+// atStartupFrom is the file whose remoteControlAtStartup true connects a
+// launch's interactive sessions to Remote Control as they start, links
+// resolved, or "" when none does. It decides as Claude Code 2.1.322 does.
+// A false in a project's or a local settings file (repo) turns it off. A
+// true there is ignored. Otherwise the managed settings decide, the last
+// file that names the key winning, then the person's own (user). Only when
+// none of them names it does the key in .claude.json (config) decide.
+// --settings and the organisation's default are not seen here: rota reads a
+// launch's arguments for Remote Control on their own
+// (holdwire.AsksRemoteControl), and the default is Claude Code's to know.
+func atStartupFrom(managed []string, user string, repo []string, config string) string {
+	read := func(path string, limit int64) (on, set bool, at string) {
+		if path == "" {
+			return false, false, ""
+		}
+		f, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			return false, false, ""
+		}
+		raw, ok := readSmallFile(f, limit)
+		if !ok {
+			return false, false, ""
+		}
+		on, set, _ = claudeset.AtStartup(settingsText(raw))
+		return on, set, f
+	}
+	for _, p := range repo {
+		if on, set, _ := read(p, maxSettingsFile); set && !on {
+			return ""
+		}
+	}
+	decided, from := false, ""
+	for _, m := range managed {
+		if on, set, at := read(m, maxSettingsFile); set {
+			decided, from = true, ""
+			if on {
+				from = at
+			}
+		}
+	}
+	if decided {
+		return from
+	}
+	if on, set, at := read(user, maxSettingsFile); set {
+		if on {
+			return at
+		}
+		return ""
+	}
+	if on, _, at := read(config, maxConfigFile); on {
+		return at
+	}
+	return ""
 }
 
 // configDirOf is the configuration directory a child with this environment
@@ -245,22 +322,8 @@ func riskyKeys(path string) []string {
 }
 
 // settingsText is a settings file's bytes as the JSON text Claude Code
-// parses: a file that starts FF FE is UTF-16 little-endian, any other is
-// UTF-8, and one byte-order mark at the start of the text is dropped
-// (Claude Code 2.1.319 decodes a file so, and strips U+FEFF before
-// JSON.parse). A big-endian file is not decoded, as Claude Code does not
-// decode one; a last odd byte of a little-endian one is dropped, as Node's
-// decoder drops it.
-func settingsText(raw []byte) []byte {
-	if len(raw) >= 2 && raw[0] == 0xFF && raw[1] == 0xFE {
-		units := make([]uint16, len(raw)/2)
-		for i := range units {
-			units[i] = binary.LittleEndian.Uint16(raw[2*i:])
-		}
-		raw = []byte(string(utf16.Decode(units)))
-	}
-	return bytes.TrimPrefix(raw, []byte("\uFEFF"))
-}
+// parses (claudeset.Text).
+func settingsText(raw []byte) []byte { return claudeset.Text(raw) }
 
 // setting reports whether a settings value sets anything. "" is how a
 // settings file cancels an inherited variable, and null is no value.
@@ -320,37 +383,9 @@ func resolveFrom(dir, path string) string {
 }
 
 // readSmallFile reads a regular file of at most limit bytes, and nothing
-// else: a FIFO would block the launch on its open, and a device or a huge
-// file is not a settings file. The shape is looked at before the open, so
-// that nothing else is opened at all, and checked again on what was opened
-// (openSmallFile).
-func readSmallFile(path string, limit int64) ([]byte, bool) {
-	if fi, err := os.Stat(path); err != nil || !smallFile(fi, limit) {
-		return nil, false
-	}
-	return openSmallFile(path, limit)
-}
+// else (claudeset.ReadSmall).
+func readSmallFile(path string, limit int64) ([]byte, bool) { return claudeset.ReadSmall(path, limit) }
 
 // openSmallFile is readSmallFile on whatever is at path by the time it is
-// opened, which may no longer be what was looked at. The open does not wait
-// (noWait): a FIFO put there since opens at once, rather than when somebody
-// writes to it, and is refused like anything else that is not a regular file.
-// A regular file ignores the flag, and is read as it always was.
-func openSmallFile(path string, limit int64) ([]byte, bool) {
-	f, err := os.OpenFile(path, os.O_RDONLY|noWait, 0)
-	if err != nil {
-		return nil, false
-	}
-	defer f.Close()
-	if fi, err := f.Stat(); err != nil || !smallFile(fi, limit) {
-		return nil, false
-	}
-	raw, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil || int64(len(raw)) > limit {
-		return nil, false
-	}
-	return raw, true
-}
-
-// smallFile reports whether fi is a regular file of at most limit bytes.
-func smallFile(fi os.FileInfo, limit int64) bool { return fi.Mode().IsRegular() && fi.Size() <= limit }
+// opened (claudeset.OpenSmall).
+func openSmallFile(path string, limit int64) ([]byte, bool) { return claudeset.OpenSmall(path, limit) }

@@ -378,7 +378,7 @@ func TestDetachWithRemoteControl(t *testing.T) {
 		{[]string{"run", "--detach", "--remote-control"}, 1, "claude/a@x", []string{"--remote-control"}},
 		{[]string{"run", "2", "--detach", "--remote-control=laptop", "--", "--model", "opus"}, 2, "claude/b@x",
 			[]string{"--model", "opus", "--remote-control", "laptop"}},
-		{[]string{"run", "3", "--detach", "--", "--remote-control=desk"}, 3, "claude/c@x", []string{"--remote-control=desk"}},
+		{[]string{"run", "3", "--detach", "--", "--rc=desk"}, 3, "claude/c@x", []string{"--rc=desk"}},
 	} {
 		id, _, errb := r.detach(r.cmd(c.args...))
 		on := fmt.Sprintf("rota: remote control is on for %s from now on; `rota set %d --remote-control off` turns it off\n", c.who, c.account)

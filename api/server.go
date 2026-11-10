@@ -1238,12 +1238,6 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	// The identity an account's Remote Control acts as is this machine's own
-	// user's to change, on or off, as a terminal's remote_control is.
-	if body.RemoteControl != nil && !viaSocket(r) {
-		fail(w, http.StatusForbidden, remoteLocal)
-		return
-	}
 	if body.Order == nil && body.Threshold == nil && body.Cwd == nil && body.ConfigDir == nil && body.Sessions == nil &&
 		body.Long == nil && body.RemoteControl == nil {
 		fail(w, http.StatusBadRequest, "nothing to change: send order, threshold, cwd, config_dir, sessions, remote_control or long")
@@ -1285,6 +1279,15 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 	defer st.Close()
 	a, ok := s.account(w, r, st)
 	if !ok {
+		return
+	}
+	// The identity an account's Remote Control acts as is this machine's own
+	// user's to change, on or off, as a terminal's remote_control is. A
+	// remote_control that is what the setting already is changes nothing,
+	// so it is taken from anybody: a client that sends back what it read is
+	// not refused for it.
+	if body.RemoteControl != nil && *body.RemoteControl != a.RemoteControl && !localPrincipal(r) {
+		fail(w, http.StatusForbidden, remoteLocal)
 		return
 	}
 	// The account is edited on a copy first: a config directory that would

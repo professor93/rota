@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/professor93/rota/internal/holdwire"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/store"
 )
@@ -45,6 +46,30 @@ func takeRemoteControl(args []string) ([]string, remoteAsk, error) {
 		out = append(out, a)
 	}
 	return out, ask, nil
+}
+
+// asksRemoteControl is holdwire.AsksRemoteControl for the CLI's own
+// arguments on this machine, where --settings rota cannot read asks for
+// nothing: Claude Code says what is wrong with it itself.
+func asksRemoteControl(args []string, cwd string) bool {
+	asks, _ := holdwire.AsksRemoteControl(args, cwd)
+	return asks
+}
+
+// remoteInsideHeld is the one exception to the CLI's own arguments being the
+// person's: Remote Control asked for in them from inside a held session,
+// where it is most likely the agent in one, which may have been started from
+// another device. That is refused, the way rota serve stop is, and rota's
+// own --remote-control, which readies the account, still works there.
+func remoteInsideHeld(s *store.Store) error {
+	terminals, err := s.TerminalDir()
+	if err == nil {
+		err = refusedInsideHeldSession("Remote Control in the CLI's own arguments", terminals)
+	}
+	if err != nil {
+		return fmt.Errorf("%w, or ask for it with rota's own --remote-control, before --", err)
+	}
+	return nil
 }
 
 // remoteControl readies an account for a session with Remote Control on, by

@@ -1,6 +1,6 @@
 //go:build unix
 
-package store
+package claudeset
 
 import "syscall"
 

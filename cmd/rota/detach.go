@@ -82,7 +82,7 @@ func (c *cli) detach(id int, rest []string, ask shareAsk, remote remoteAsk) erro
 	case remote.on:
 		req.RemoteControl, req.RemoteControlName = true, remote.name
 		off = c.remoteControlOff()
-	case holdwire.AsksRemoteControl(req.Args):
+	case asksRemoteControl(req.Args, req.Cwd):
 		// Claude Code's own flag or subcommand among the CLI's arguments,
 		// which the daemon readies as it readies the option.
 		off = c.remoteControlOff()

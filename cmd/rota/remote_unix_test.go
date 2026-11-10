@@ -1,0 +1,48 @@
+//go:build linux || darwin
+
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+)
+
+// In a person's own terminal the CLI's own arguments are handed over
+// untouched, Remote Control among them. From inside a held session they are
+// not: that is most likely the agent in one, which may have been started
+// from another device, so Remote Control asked for in the CLI's own
+// arguments is refused there in one line, the way rota serve stop is, and
+// nothing is handed over. Asking for nothing more is handed over as before,
+// and once the session is over the same arguments are the person's again.
+func TestRemoteControlInTheCLIsOwnArgsIsRefusedInsideAHeldSession(t *testing.T) {
+	rotaHome, _ := seedLiving(t, "")
+	handedTo := handover(t)
+	const id = "00000000000000f1"
+	release := heldRecord(t, filepath.Join(rotaHome, "terminals"), id, os.Getpid())
+	want := "Remote Control in the CLI's own arguments is refused inside held session " + id +
+		"; run it from outside the session, or ask for it with rota's own --remote-control, before --"
+	for _, args := range [][]string{
+		{"run", "1", "--", "--rc"},
+		{"run", "1", "-i", "remote-control"},
+		{"run", "1", "--", "--settings", `{"remoteControlAtStartup":true}`},
+	} {
+		_, errOut, code := call(t, args...)
+		if code == 0 || !strings.Contains(errOut, want) || len(*handedTo) != 0 {
+			t.Fatalf("rota %s inside a held session: exit %d %q, handed %v; want it refused with %q", strings.Join(args, " "), code, errOut, *handedTo, want)
+		}
+	}
+	if _, errOut, code := call(t, "run", "1", "--", "--model", "opus"); code != 0 || !slices.Contains(*handedTo, "opus") {
+		t.Fatalf("arguments that ask for nothing inside a held session: exit %d %q, handed %v", code, errOut, *handedTo)
+	}
+	release()
+	*handedTo = nil
+	if _, errOut, code := call(t, "run", "1", "--", "--rc"); code != 0 || len(*handedTo) == 0 || (*handedTo)[len(*handedTo)-1] != "--rc" {
+		t.Fatalf("outside every held session: exit %d %q, handed %v; want --rc handed over untouched", code, errOut, *handedTo)
+	}
+	if storedAccount(t, rotaHome)["remoteControl"] == true {
+		t.Fatal("the person's own --rc turned the account's setting on")
+	}
+}

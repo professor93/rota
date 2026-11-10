@@ -45,7 +45,10 @@ type Principal struct {
 	Role Role   `json:"role"`
 	// Via is "token" for a bearer token, "user" for a page sign-in,
 	// "invite" for a watcher who followed a link, and "local" for this
-	// machine's own user on the control socket (LocalHandler).
+	// machine's own user on the control socket (LocalHandler). "local" is
+	// reserved for that user and is never given to a key or a sign-in: only
+	// that principal may hand a held session its env, or decide whose
+	// identity an account's Remote Control acts as (localPrincipal).
 	Via string `json:"via"`
 	// Expires is when a session dies. A bearer token has none and leaves it
 	// zero: it lasts as long as the file that names it.

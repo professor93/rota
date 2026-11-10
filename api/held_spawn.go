@@ -78,7 +78,7 @@ func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd s
 	}
 	var label, provider string
 	if a != nil {
-		hreq.Args, err = s.argsFor(r, st, a, req)
+		hreq.Args, err = s.argsFor(r, st, a, req, cwd)
 		// The store is let go of before a holder opens it.
 		st.Close()
 		if err != nil {

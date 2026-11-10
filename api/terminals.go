@@ -58,9 +58,10 @@ type termRequest struct {
 	// Control on, for whichever account is chosen, as `rota run
 	// --remote-control` does: the account's setting turned on first, and
 	// Claude Code's flag added last. It changes the account, so it too is
-	// taken only on the control socket — as are Args that ask for Remote
-	// Control themselves (holdwire.AsksRemoteControl), which are readied the
-	// same way, and an account's remote_control setting (patchAccount).
+	// taken only on the control socket — as are a claude account's Args that
+	// ask for Remote Control themselves (remoteArgs), which are readied the
+	// same way, and a change to an account's remote_control setting
+	// (patchAccount).
 	RemoteControl remoteControl `json:"remote_control"`
 }
 
@@ -103,17 +104,45 @@ const (
 	envEmpty     = "env is empty, which would start the session with no PATH; leave it out for the daemon's own"
 	remoteLocal  = "remote_control is taken only over the control socket"
 	remoteShell  = "remote_control is Claude Code's, and a shell runs no account"
-	// remoteArgsLocal is for arguments that ask for Remote Control
-	// themselves, a terminal's or a run's.
+	// remoteArgsLocal and settingsLocal are for a claude account's
+	// arguments, a terminal's or a run's: ones that ask for Remote Control
+	// themselves, and a --settings rota cannot read, which might.
 	remoteArgsLocal = "--remote-control and the remote-control subcommand are taken only over the control socket, as remote_control is"
+	settingsLocal   = "--settings that rota cannot read is taken only over the control socket, since it could turn Remote Control on"
 )
 
-// viaSocket reports whether a request came over the control socket, from
-// this machine's own user, the only caller who may decide whose identity an
-// account's Remote Control acts as.
-func viaSocket(r *http.Request) bool {
+// localPrincipal reports whether a request is this machine's own user's:
+// the principal LocalHandler serves, "via":"local", which the control socket
+// mounts and nothing a request carries can claim. That user is the only
+// caller who may decide whose identity an account's Remote Control acts as.
+// Via "local" is reserved for this machine's own user (see Principal.Via),
+// never for a key or a sign-in.
+func localPrincipal(r *http.Request) bool {
 	p := who(r)
 	return p != nil && p.Via == "local"
+}
+
+// remoteArgs reads a claude account's CLI arguments for Remote Control
+// (holdwire.AsksRemoteControl), for a terminal and a run alike. Another
+// provider's are not read, since none has a Remote Control to start. From
+// anybody but this machine's own user, arguments that ask for it are
+// refused, and so is --settings rota cannot read, since rota cannot tell
+// what Claude Code would make of it. Over the control socket, such
+// --settings is Claude Code's to refuse, and counts as asking for nothing.
+func remoteArgs(r *http.Request, a *rota.Account, args []string, cwd string) (bool, error) {
+	if rota.Flavor(a.Provider) != "claude" {
+		return false, nil
+	}
+	asks, err := holdwire.AsksRemoteControl(args, cwd)
+	switch {
+	case localPrincipal(r):
+		return asks, nil
+	case asks:
+		return false, refuse(http.StatusForbidden, remoteArgsLocal)
+	case err != nil:
+		return false, refuse(http.StatusForbidden, settingsLocal)
+	}
+	return false, nil
 }
 
 /* --------------------------------------------------------- the endpoints --- */
@@ -167,17 +196,13 @@ func (s *Server) createTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	// What only this machine's own user hands a daemon, refused from
 	// anybody else before anything is chosen or started.
-	if !viaSocket(r) {
+	if !localPrincipal(r) {
 		switch {
 		case req.Env != nil:
 			fail(w, http.StatusForbidden, envLocal)
 			return
 		case req.RemoteControl.on:
 			fail(w, http.StatusForbidden, remoteLocal)
-			return
-		// A shell's arguments are the shell's, not Claude Code's.
-		case req.Kind != termKindShell && holdwire.AsksRemoteControl(req.Args):
-			fail(w, http.StatusForbidden, remoteArgsLocal)
 			return
 		}
 	}
@@ -512,7 +537,7 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest, cw
 		return s.planShell(req)
 	}
 	defer st.Close()
-	args, err := s.argsFor(r, st, a, req)
+	args, err := s.argsFor(r, st, a, req, cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -587,13 +612,20 @@ func (s *Server) chooseTerminal(r *http.Request, kind string, id int) (*store.St
 
 // argsFor is what the account's CLI is handed: the request's arguments, and
 // where it asked for Remote Control, Claude Code's flag last, so nothing
-// before it is read as its name. Arguments that ask for Remote Control
-// themselves are handed over as they are, once readied as remote_control
-// is (readyRemoteControl).
-func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req *termRequest) ([]string, error) {
+// before it is read as its name. A claude account's arguments that ask for
+// Remote Control themselves (remoteArgs) are refused from anybody but this
+// machine's own user, and from that user handed over as they are, once the
+// account is readied as remote_control readies it (readyRemoteControl). cwd
+// is the directory the CLI starts in, which a relative --settings is read
+// from.
+func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req *termRequest, cwd string) ([]string, error) {
 	args := slices.Clone(req.Args)
 	rc := req.RemoteControl
-	if !rc.on && !holdwire.AsksRemoteControl(args) {
+	asks, err := remoteArgs(r, a, args, cwd)
+	if err != nil {
+		return nil, err
+	}
+	if !rc.on && !asks {
 		return args, nil
 	}
 	if err := s.readyRemoteControl(r, st, a); err != nil {

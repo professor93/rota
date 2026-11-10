@@ -10,31 +10,49 @@ import (
 	"testing"
 )
 
-// These are about Remote Control asked for by a CLI's arguments rather than
-// by remote_control: Claude Code's flag, bare or with a name, and its
-// remote-control subcommand. Whatever carries Remote Control is held to the
-// option's rule — taken only over the control socket, and there readied by
-// the store's one rule for it — and so is an account's remote_control
-// setting.
+// These are about Remote Control asked for by a claude account's CLI
+// arguments rather than by remote_control: every spelling Claude Code takes
+// (holdwire.AsksRemoteControl). Whatever carries Remote Control is held to
+// the option's rule — taken only over the control socket, and there readied
+// by the store's one rule for it — and so is a change to an account's
+// remote_control setting.
 
-// remoteArgs is every way a CLI's arguments ask for Remote Control: the
-// flag, the flag with a name, the subcommand, either after other flags, and
-// the subcommand after "--", which is still the first operand.
-var remoteArgs = [][]string{
+// The sentences the two refusals are made in.
+const (
+	wantArgsLocal     = "--remote-control and the remote-control subcommand are taken only over the control socket, as remote_control is"
+	wantSettingsLocal = "--settings that rota cannot read is taken only over the control socket, since it could turn Remote Control on"
+)
+
+// remoteSpellings is a sample of the spellings that ask for Remote Control, the
+// security review's probe of 2035e75 first: each of its rows was started
+// from a token without the account being readied. The matcher's own test
+// has the whole table.
+var remoteSpellings = [][]string{
 	{"--remote-control"},
+	{"--rc"},
+	{"--rc=laptop"},
+	{"--rc", "laptop"},
+	{"rc"},
+	{"remote"},
+	{"sync"},
+	{"bridge"},
+	{"--settings", `{"remoteControlAtStartup":true}`},
+	{`--settings={"remoteControlAtStartup":true}`},
 	{"--remote-control=laptop"},
 	{"remote-control"},
-	{"--model", "opus", "remote-control"},
-	{"--resume", "abc", "--remote-control"},
+	{"--model", "opus", "rc"},
 	{"--", "remote-control"},
 }
 
-// plainArgs carry no Remote Control, however close they come.
+// plainArgs carry no Remote Control, however close they come: a flag's
+// value is a value.
 var plainArgs = [][]string{
 	{"--model", "opus"},
 	{"--remote-controlled"},
-	{"remote"},
-	{"--name", "remote control"},
+	{"--name", "sync"},
+	{"-w", "remote-control"},
+	{"--remote-control-session-name-prefix=x"},
+	{"--settings", `{"model":"x"}`},
 }
 
 // socket is the same harness reached through LocalHandler as local, on a
@@ -73,67 +91,51 @@ func (h *harness) storedRemoteControl(id int) bool {
 	return false
 }
 
-// A terminal whose arguments ask for Remote Control is refused from a
-// bearer token, and from a user even through LocalHandler, before anything
-// is chosen or started, in one sentence that names the control socket.
-// Arguments that do not ask for it, and a shell's, which are not Claude
-// Code's, are not refused for it.
-func TestRemoteControlInArgsIsTakenOnlyOverTheControlSocket(t *testing.T) {
-	s, err := New(Options{Token: "x", Dir: t.TempDir(), RefreshEvery: -1, Routes: &Routes{API: true, WebSocket: true, Terminal: true}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(s.Stop)
-	user := s.LocalHandler(&Principal{Name: "alice", Role: RoleControl, Via: "user"})
-	const want = "--remote-control and the remote-control subcommand are taken only over the control socket, as remote_control is"
-	body := func(kind string, args []string) string {
-		raw, _ := json.Marshal(map[string]any{"account": 1, "kind": kind, "args": args})
-		return string(raw)
-	}
-	for name, h := range map[string]http.Handler{"a token": s.Handler(), "a user": user} {
-		for _, args := range remoteArgs {
-			if code, answer := ask(h, "POST", "/v1/terminals", body("", args), "Authorization", "Bearer x"); code != http.StatusForbidden || errorOf(answer) != want {
-				t.Errorf("%s sending args %q answers %d %s, want 403 %q", name, args, code, answer, want)
-			}
-		}
-		for _, args := range plainArgs {
-			if code, answer := ask(h, "POST", "/v1/terminals", body("", args), "Authorization", "Bearer x"); code == http.StatusForbidden {
-				t.Errorf("%s sending args %q is refused: %d %s", name, args, code, answer)
-			}
-		}
-		raw, _ := json.Marshal(map[string]any{"kind": "shell", "args": []string{"--remote-control"}})
-		if _, answer := ask(h, "POST", "/v1/terminals", string(raw), "Authorization", "Bearer x"); errorOf(answer) == want {
-			t.Errorf("%s: a shell's own arguments are refused as Claude Code's: %s", name, answer)
-		}
+// remoteOff turns account id's setting off again over the socket, so the
+// next request starts from it off.
+func (h *harness) remoteOff(id int) {
+	h.t.Helper()
+	if resp, raw := h.socket().do("PATCH", "/v1/accounts/"+itoa(id), map[string]any{"remote_control": false}); resp.StatusCode != http.StatusOK {
+		h.t.Fatalf("turning remote control off: %d %s", resp.StatusCode, raw)
 	}
 }
 
-// An account's remote_control setting is the control socket's to change,
-// like a terminal's remote_control: a bearer token is refused it, on or off,
-// and changes nothing; the socket turns it on and off; and the token still
-// changes everything else.
+func itoa(n int) string { raw, _ := json.Marshal(n); return string(raw) }
+
+// A change to an account's remote_control setting is the control socket's
+// to make, like a terminal's remote_control: a bearer token is refused one,
+// whatever else it sends, and changes nothing. A remote_control that is what
+// the setting already is changes nothing, so it is taken from anybody,
+// beside whatever else the request changes. The socket turns it on and off.
 func TestPatchRemoteControlIsTakenOnlyOverTheControlSocket(t *testing.T) {
 	h := newHarness(t, Options{})
 	const want = "remote_control is taken only over the control socket"
-	for _, on := range []bool{true, false} {
-		resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"remote_control": on})
+	for _, body := range []map[string]any{
+		{"remote_control": true},
+		{"remote_control": true, "threshold": 70},
+	} {
+		resp, raw := h.do("PATCH", "/v1/accounts/1", body)
 		if resp.StatusCode != http.StatusForbidden || errorOf(string(raw)) != want {
-			t.Errorf("a token sending remote_control %v answers %d %s, want 403 %q", on, resp.StatusCode, raw, want)
+			t.Errorf("a token sending %v answers %d %s, want 403 %q", body, resp.StatusCode, raw, want)
 		}
-	}
-	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"remote_control": true, "threshold": 70}); resp.StatusCode != http.StatusForbidden {
-		t.Errorf("remote_control beside another field from a token answers %d %s, want 403", resp.StatusCode, raw)
 	}
 	if h.storedRemoteControl(1) {
 		t.Fatal("a refused PATCH turned remote control on")
 	}
-	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"threshold": 70}); resp.StatusCode != http.StatusOK {
-		t.Fatalf("a token changing the threshold answers %d %s", resp.StatusCode, raw)
+	resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"remote_control": false, "threshold": 70})
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(raw), `"threshold":70`) {
+		t.Fatalf("a token sending the setting as it is, beside a threshold: %d %s", resp.StatusCode, raw)
 	}
 	local := h.socket()
 	if resp, raw := local.do("PATCH", "/v1/accounts/1", map[string]any{"remote_control": true}); resp.StatusCode != http.StatusOK ||
 		!strings.Contains(string(raw), `"remote_control":true`) || !h.storedRemoteControl(1) {
 		t.Fatalf("on over the socket: %d %s", resp.StatusCode, raw)
+	}
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"remote_control": true, "threshold": 60}); resp.StatusCode != http.StatusOK {
+		t.Fatalf("a token sending on, which it already is: %d %s", resp.StatusCode, raw)
+	}
+	if resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"remote_control": false}); resp.StatusCode != http.StatusForbidden || !h.storedRemoteControl(1) {
+		t.Fatalf("a token turning it off answers %d %s, want 403 and the setting kept", resp.StatusCode, raw)
 	}
 	if resp, raw := local.do("PATCH", "/v1/accounts/1", map[string]any{"remote_control": false}); resp.StatusCode != http.StatusOK || h.storedRemoteControl(1) {
 		t.Fatalf("off over the socket: %d %s", resp.StatusCode, raw)
@@ -141,31 +143,76 @@ func TestPatchRemoteControlIsTakenOnlyOverTheControlSocket(t *testing.T) {
 }
 
 // A run's raw arguments, where the server allows them at all, are held to
-// the same rule: Remote Control in them is refused from a bearer token in
-// the terminals' sentence, and over the socket the account is readied by
-// the store's rule — refused when it is not Claude Code's, and its setting
-// turned on when it is.
+// the same rule. From a bearer token, a claude account's are refused in the
+// terminals' sentence, and so is --settings rota cannot read; another
+// provider's are not read, having no Remote Control to start. Over the
+// socket each spelling readies the account, turning its setting on, but
+// only once the run is known to be allowed: a run refused for anything else
+// leaves the setting as it was. --settings that cannot be read is Claude
+// Code's to refuse there.
 func TestARunsArgsCarryingRemoteControl(t *testing.T) {
 	h := newHarness(t, Options{AllowRawFlags: true})
-	const want = "--remote-control and the remote-control subcommand are taken only over the control socket, as remote_control is"
-	for _, args := range remoteArgs {
-		resp, raw := h.do("POST", "/v1/accounts/2/run", map[string]any{"prompt": "hi", "args": args})
-		if resp.StatusCode != http.StatusForbidden || errorOf(string(raw)) != want {
-			t.Errorf("a token running with args %q answers %d %s, want 403 %q", args, resp.StatusCode, raw, want)
+	run := func(h *harness, id int, body map[string]any) (int, string) {
+		body["prompt"] = "hi"
+		resp, raw := h.do("POST", "/v1/accounts/"+itoa(id)+"/run", body)
+		return resp.StatusCode, string(raw)
+	}
+	for _, args := range remoteSpellings {
+		if code, raw := run(h, 1, map[string]any{"args": args}); code != http.StatusForbidden || errorOf(raw) != wantArgsLocal {
+			t.Errorf("a token running with args %q answers %d %s, want 403 %q", args, code, raw, wantArgsLocal)
 		}
 	}
-	if resp, raw := h.do("POST", "/v1/accounts/2/run", map[string]any{"prompt": "hi", "args": []string{"--remote-controlled"}}); resp.StatusCode == http.StatusForbidden {
-		t.Errorf("args without Remote Control are refused: %d %s", resp.StatusCode, raw)
+	missing := filepath.Join(t.TempDir(), "missing.json")
+	if code, raw := run(h, 1, map[string]any{"args": []string{"--settings", missing}}); code != http.StatusForbidden || errorOf(raw) != wantSettingsLocal {
+		t.Errorf("a token running with unreadable --settings answers %d %s, want 403 %q", code, raw, wantSettingsLocal)
 	}
+	for _, args := range plainArgs {
+		if code, raw := run(h, 1, map[string]any{"args": args}); code == http.StatusForbidden {
+			t.Errorf("a token running with args %q is refused: %d %s", args, code, raw)
+		}
+	}
+	if code, raw := run(h, 2, map[string]any{"args": []string{"--rc"}}); code == http.StatusForbidden {
+		t.Errorf("codex's args are read for Claude Code's Remote Control: %d %s", code, raw)
+	}
+	if h.storedRemoteControl(1) {
+		t.Fatal("a token's run turned remote control on")
+	}
+
 	local := h.socket()
-	for _, args := range remoteArgs {
-		resp, raw := local.do("POST", "/v1/accounts/2/run", map[string]any{"prompt": "hi", "args": args})
-		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(string(raw), "Remote Control is Claude Code's") {
-			t.Errorf("local running codex with args %q answers %d %s, want 400 saying Remote Control is Claude Code's", args, resp.StatusCode, raw)
+	for _, args := range remoteSpellings {
+		run(local, 1, map[string]any{"args": args})
+		if !h.storedRemoteControl(1) {
+			t.Errorf("a run over the socket with args %q did not ready the account", args)
+		}
+		h.remoteOff(1)
+	}
+	if code, raw := run(local, 1, map[string]any{"args": []string{"--rc"}, "effort": "nope"}); code != http.StatusBadRequest || h.storedRemoteControl(1) {
+		t.Fatalf("a refused run over the socket answers %d %s and left the setting %v, want 400 and off", code, raw, h.storedRemoteControl(1))
+	}
+	for _, args := range plainArgs {
+		run(local, 1, map[string]any{"args": args})
+		if h.storedRemoteControl(1) {
+			t.Fatalf("a run over the socket with args %q turned the setting on", args)
 		}
 	}
-	local.do("POST", "/v1/accounts/1/run", map[string]any{"prompt": "hi", "args": []string{"remote-control"}})
-	if !h.storedRemoteControl(1) {
-		t.Fatal("a run asking for Remote Control over the socket did not turn the account's setting on")
+	if code, raw := run(local, 1, map[string]any{"args": []string{"--settings", missing}}); code == http.StatusForbidden {
+		t.Errorf("local running with unreadable --settings is refused for it: %d %s", code, raw)
+	}
+}
+
+// The run WebSocket's first frame carries args as a run's body does, and is
+// held to the same rule.
+func TestARunSocketsArgsCarryingRemoteControl(t *testing.T) {
+	h := newHarness(t, Options{AllowRawFlags: true})
+	echoClaude(t)
+	c := dialRun(t, h, "/v1/accounts/1/ws")
+	c.say(map[string]any{"type": "start", "prompt": "one", "args": []string{"--rc"}})
+	e := c.waitType("error")
+	if msg, _ := e["error"].(string); msg != wantArgsLocal {
+		t.Fatalf("a token's socket starting with --rc is told %v, want %q", e, wantArgsLocal)
+	}
+	c.expectClose(wsPolicy)
+	if h.storedRemoteControl(1) {
+		t.Fatal("a refused socket turned remote control on")
 	}
 }
