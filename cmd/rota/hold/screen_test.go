@@ -21,21 +21,69 @@ import (
 	"github.com/professor93/rota/internal/claudecode"
 	"github.com/professor93/rota/internal/fakecli"
 	"github.com/professor93/rota/internal/vtscan"
+	rota "github.com/professor93/rota/lib"
 )
+
+// testHome and testClaudeDir are the home and the Claude Code directory
+// every test here runs in, made by TestMain.
+var testHome, testClaudeDir string
 
 // TestMain lets this test binary stand in for the fake CLI the capture
 // harness records. As itself it runs with every directory holding a real
 // vendor CLI left out of PATH, so a test that forgets its fake finds none,
 // never the real one.
+//
+// A holder opens the store and plans its CLI's launch, which can refresh a
+// token, and looks for Claude Code's record of the session where Claude
+// Code keeps it. So no provider call a test did not stand in for reaches the
+// real one, and the home and the Claude Code directory are temporary ones:
+// never the person's who runs the tests.
 func TestMain(m *testing.M) {
 	fakecli.Maybe()
 	claudecode.StandIn() // no test here may reach a real keychain
-	os.Exit(m.Run())
+	const u = claudecode.Unreachable
+	rota.ClaudeEndpoints.Authorize, rota.ClaudeEndpoints.Token, rota.ClaudeEndpoints.Profile, rota.ClaudeEndpoints.Usage = u, u, u, u
+	rota.ClaudeModelsEndpoint = u
+	rota.CodexEndpoints.Authorize, rota.CodexEndpoints.Token = u, u
+	var err error
+	if testHome, err = os.MkdirTemp("", "rota-person"); err != nil {
+		panic(err)
+	}
+	if testClaudeDir, err = os.MkdirTemp("", "rota-claude"); err != nil {
+		panic(err)
+	}
+	os.Unsetenv("ROTA_CLAUDE_HOME")
+	os.Unsetenv("ROTA_ACCOUNT_ID")
+	os.Unsetenv("ANTHROPIC_CONFIG_DIR")
+	os.Unsetenv("XDG_CONFIG_HOME")
+	os.Setenv("HOME", testHome)
+	os.Setenv("USERPROFILE", testHome)
+	os.Setenv("CLAUDE_CONFIG_DIR", testClaudeDir)
+	code := m.Run()
+	os.RemoveAll(testHome)
+	os.RemoveAll(testClaudeDir)
+	os.Exit(code)
 }
 
 // No test here can start a real vendor CLI: TestMain left every directory
 // holding one out of PATH.
 func TestNoVendorCLIIsOnPath(t *testing.T) { fakecli.NoneOnPath(t) }
+
+// The home every test here sees is TestMain's temporary one, and so is the
+// Claude Code directory: never the person's who runs them.
+func TestTheHomeIsATemporaryOne(t *testing.T) {
+	if home, err := os.UserHomeDir(); err != nil || home != testHome {
+		t.Errorf("the home is %q (%v), want TestMain's %q", home, err, testHome)
+	}
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != testClaudeDir {
+		t.Errorf("CLAUDE_CONFIG_DIR is %q, want TestMain's %q", dir, testClaudeDir)
+	}
+	for _, name := range []string{"ROTA_CLAUDE_HOME", "ROTA_ACCOUNT_ID", "ANTHROPIC_CONFIG_DIR", "XDG_CONFIG_HOME"} {
+		if v, set := os.LookupEnv(name); set {
+			t.Errorf("%s is set, to %q", name, v)
+		}
+	}
+}
 
 // The captures TestCaptureVT recorded, each with xterm's view of it beside it
 // as <name>.xterm.json, made by scripts/vt/golden.mjs.
