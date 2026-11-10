@@ -181,6 +181,25 @@ type heldTerm struct {
 	// sends are the sends waiting for the holder's answer, by sequence.
 	sendSeq uint64
 	sends   map[uint64]*sending
+
+	// attn is whether the session wants its person (attention.go), from
+	// what the holder last said and from these: bells is how many bells it
+	// has rung, and stated is the holder having said its state once; keyAt
+	// is the last keystroke typed into it and typedAt the last a viewer
+	// typed; fitAt is the last resize it took, linkedAt when its output
+	// began here, and activeAt the last output that was activity. adopted is
+	// a session this server took up rather than started, whose output below
+	// replayTo is what its holder replayed.
+	attn     attention
+	bells    uint64
+	stated   bool
+	keyAt    time.Time
+	typedAt  time.Time
+	fitAt    time.Time
+	linkedAt time.Time
+	activeAt time.Time
+	adopted  bool
+	replayTo int64
 }
 
 func (h *heldTerm) link() *share.Conn {
@@ -209,6 +228,12 @@ func (h *heldTerm) typeFrom(tc *termConn, p []byte) error {
 	h.seq++
 	seq := h.seq
 	h.typed[seq%heldTyped] = typist{seq: seq, tc: tc}
+	// A keystroke's echo is not activity, and a viewer typing is somebody
+	// there, whom nothing is said to for a while (attention.go).
+	h.keyAt = h.s.now()
+	if tc != nil {
+		h.typedAt = h.keyAt
+	}
 	h.mu.Unlock()
 	if err := conn.Send(holdwire.Input, holdwire.PutInput(seq, p)); err != nil {
 		return errHeldAway
@@ -394,13 +419,18 @@ func (h *heldTerm) read(conn *share.Conn) (code int, ended bool) {
 		case holdwire.Output:
 			if off, p, err := holdwire.OutputOf(payload); err == nil && len(p) > 0 {
 				h.mu.Lock()
-				h.lastOut = h.s.now()
+				now := h.s.now()
+				h.lastOut = now
+				h.noteOutput(off, now)
 				h.mu.Unlock()
 				h.ts.outputAt(off, p)
 			}
 		case holdwire.Resized:
 			var msg holdwire.SizeMsg
 			if share.Unmarshal(payload, &msg) == nil {
+				h.mu.Lock()
+				h.fitAt = h.s.now() // what the CLI prints next is its redraw
+				h.mu.Unlock()
 				h.ts.resizedBy(msg.Cols, msg.Rows)
 			}
 		case holdwire.Exit:
@@ -528,6 +558,7 @@ func (h *heldTerm) noteState(msg *holdwire.StateMsg) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.title = msg.Title
+	h.bells, h.stated = msg.Bells, true
 	if msg.Registry != nil {
 		h.reg = *msg.Registry
 		if msg.Registry.SessionID != "" {

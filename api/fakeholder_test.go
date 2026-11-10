@@ -73,6 +73,11 @@ import (
 // The conversation and its folder are written into meta.json as well, as a
 // real holder keeps them there for a session that has stopped.
 //
+// Three typed lines each report one State, the last one reported with one
+// thing changed, as a CLI's own signals would change it: "title <text>"
+// sets the title, "status <s> [waiting]" the registry's status and what it
+// waits for, and "bell" rings the bell once more.
+//
 // Typed lines are its commands: "exit N" ends it with code N, "count N"
 // prints N numbered lines, "flood N" prints N lines of a kilobyte as fast as
 // it can and then "flood done", and anything else is answered "got:<line>". A send is
@@ -192,6 +197,9 @@ type fake struct {
 	unlinked   bool
 	refused    int
 	line       []byte
+	// attnState is the State the typed title, status and bell lines last
+	// reported, nil before the first.
+	attnState *holdwire.StateMsg
 }
 
 // major is the protocol this fake speaks: this rota's, or the one its
@@ -542,6 +550,8 @@ func (f *fake) command(line string) {
 			}
 			f.print([]byte("flood done\r\n"))
 		}()
+	case "title", "status", "bell":
+		f.attnSay(word, arg)
 	default:
 		f.print([]byte("got:" + line + "\r\n"))
 	}
@@ -574,6 +584,35 @@ func (f *fake) count(n int) {
 			f.mu.Unlock()
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// attnSay reports the State a typed title, status or bell line asks for:
+// the one reported last, or the environment's at first, with that one
+// thing changed. A registry is made for a status if there was none.
+func (f *fake) attnSay(word, arg string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.attnState == nil {
+		st := f.state()
+		f.attnState = &st
+	}
+	st := f.attnState
+	switch word {
+	case "title":
+		st.Title = arg
+	case "status":
+		var reg holdwire.Registry
+		if st.Registry != nil {
+			reg = *st.Registry
+		}
+		reg.Status, reg.WaitingFor, _ = strings.Cut(arg, " ")
+		st.Registry = &reg
+	case "bell":
+		st.Bells++
+	}
+	if f.link != nil {
+		_ = f.link.SendJSON(holdwire.State, *st)
 	}
 }
 
