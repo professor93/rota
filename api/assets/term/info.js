@@ -11,24 +11,43 @@ function renderTermInfo() {
     return;
   }
   const d = termInfo || {};
+  // A row's value is text, or a node that says it; either way nothing in it
+  // is markup.
   const row = (label, value, cls) => el("div", { class: "irow" }, [
-    el("dt", { text: label }), el("dd", { class: cls || null, text: value })]);
+    el("dt", { text: label }),
+    typeof value === "string"
+      ? el("dd", { class: cls || null, text: value })
+      : el("dd", { class: cls || null }, [value])]);
+  // A held session that has stopped says so in its description, whether or
+  // not this page saw it end; any other terminal has ended once its exit came.
+  const ended = termEnded !== null || (!!d.held && !!d.ended);
+  const st = termStatusOf(Object.assign({}, d, { ended }));
+  const waiting = !ended && d.waiting_for ? ": waiting for " + termWaitingWord(d.waiting_for) : "";
+  const credential = termCredential(d, accounts);
   const kids = [el("dl", {}, [
+    d.held ? row("Name", termName(d)) : row("Label", d.label || "—"),
+    row("Status", el("span", { class: "st " + st.tone, text: st.word + waiting })),
+    d.title ? row("Title", d.title) : null,
     row("Account", d.account ? `#${d.account.id} ${d.account.label || ""}`.trim() : "a plain shell"),
+    credential ? row("Credential", credential) : null,
     d.account ? row("Provider", d.account.provider || "—") : null,
-    row("Label", d.label || "—"),
     row("Folder", d.cwd || "—"),
+    d.conversation_cwd && d.conversation_cwd !== d.cwd
+      ? row("Worktree", termWorktree(d.conversation_cwd), "wt") : null,
+    d.conversation ? row("Conversation", String(d.conversation).slice(0, 8)) : null,
     row("Started", termAgo(d.started)),
+    ended && d.ended_at ? row("Stopped", termAgo(d.ended_at)) : null,
     row("Size", termCols + "×" + termRows),
-    row("Keyboard", termEnded !== null ? "nobody"
+    row("Keyboard", ended ? "nobody"
       : (d.kind === "shared" && d.mode === "watch" ? "shared to be watched only" : (termHolder || "free"))),
     d.kind === "shared" ? row("Shared", termSharedNote(d)) : null,
     d.kind === "shared" && d.pid ? row("Its process", String(d.pid)) : null,
     row("Recording", d.recording ? "on" : "off"),
     termLapse(d.token_until, row),
-    termEnded !== null
-      ? row("Ended", d.lost ? (d.ending || "the sharing process went away") : "exited, code " + termEnded)
-      : null,
+    ended ? row("Ended", d.held ? termEnding(d)
+      : d.lost ? (d.ending || "the sharing process went away") : "exited, code " + termEnded) : null,
+    d.made_by ? row("Made by", "rota " + d.made_by) : null,
+    d.reachable === false && !ended ? row("Link", "not answering; tried again shortly", "warn") : null,
   ])];
   kids.push(el("h4", { text: "Watching" }));
   if (!termViewers.length) kids.push(el("p", { class: "help", text: "nobody else" }));
@@ -36,19 +55,44 @@ function renderTermInfo() {
     kids.push(el("div", { class: "viewer" }, [
       el("span", { text: v.name }), el("span", { class: "role", text: v.role })]));
   }
-  if (!watching() && termEnded === null) {
-    kids.push(el("div", { style: "margin-top:14px" }, [
-      el("button", { class: "btn", id: "term_kill", text: "Kill",
-        title: "a hangup, and then the signal nothing survives",
-        onclick: async () => {
-          if (!confirm("End this terminal? Whatever is running in it is sent a hangup.")) return;
-          const r = await api("DELETE", "/v1/terminals/" + encodeURIComponent(termId));
-          if (!r.ok) termSay((r.doc && r.doc.error) || "that terminal could not be ended");
-          refreshTerminals();
-        } }),
-    ]));
-  }
+  const acts = [];
+  if (!watching() && !ended) acts.push(termStopButton(d));
+  // A session this page did not attach to has its actions on the screen
+  // instead (core's stopped block), so no id is ever on the page twice.
+  if (termStatus !== "stopped") acts.push(termActions(d));
+  if (acts.some(Boolean)) kids.push(el("div", { style: "margin-top:14px" }, acts));
   host.replaceChildren(...kids);
+}
+
+// termStopButton ends the session: a held one is stopped, in its own words,
+// and any other terminal is killed as it always was. Both are #term_kill.
+function termStopButton(d) {
+  const held = !!d.held;
+  return el("button", { class: "btn", id: "term_kill", text: held ? "Stop" : "Kill",
+    title: "a hangup, and then the signal nothing survives",
+    onclick: async () => {
+      const ask = held
+        ? `Stop ${termName(d)}? Its CLI is sent a hangup. A worktree it used is left as it is.`
+        : "End this terminal? Whatever is running in it is sent a hangup.";
+      if (!confirm(ask)) return;
+      const r = await api("DELETE", "/v1/terminals/" + encodeURIComponent(termId));
+      if (!r.ok) termSay((r.doc && r.doc.error) || "that terminal could not be ended");
+      refreshTerminals();
+    } });
+}
+
+// termWorktree is a worktree's path with a way to copy it: it is long, and a
+// person wants it in another terminal rather than read. A page served over
+// plain http to another machine has no clipboard, which is said.
+function termWorktree(path) {
+  return el("span", {}, [
+    el("span", { class: "path", text: path }),
+    el("button", { class: "btn copy", id: "term_copy_wt", text: "Copy", title: "copy this path",
+      onclick: async () => {
+        try { await navigator.clipboard.writeText(path); }
+        catch { termSay("this browser would not copy the path here"); }
+      } }),
+  ]);
 }
 
 // termLapse is the one thing about a terminal nobody can see by looking at
