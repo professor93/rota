@@ -14,6 +14,28 @@ import (
 // space, and the percent in four.
 const barsFrame = 7
 
+// barsGlyphs are what a bar is drawn with: its two ends, a filled cell, an
+// empty one and the tick.
+type barsGlyphs struct{ left, full, empty, tick, right string }
+
+// barsBlocks are the glyphs of R33, each one column where ambiguous
+// characters are drawn narrow; barsASCII are the ones drawn instead where
+// they are not (RUNEWIDTH_EASTASIAN=1), so a bar keeps its width.
+var (
+	barsBlocks = barsGlyphs{"▕", "█", "░", "│", "▏"}
+	barsASCII  = barsGlyphs{"[", "#", "-", "|", "]"}
+)
+
+// barsDrawn is the glyphs this terminal draws a bar with: the blocks while
+// every one of them is one column to the measure, ASCII otherwise.
+func barsDrawn() barsGlyphs {
+	g := barsBlocks
+	if textWidth(g.left+g.full+g.empty+g.tick+g.right) != 5 {
+		return barsASCII
+	}
+	return g
+}
+
 // barsStale is how old a reading may be before it is drawn faint (R10):
 // five of the daemon's sweeps.
 const barsStale = 10 * time.Minute
@@ -69,14 +91,17 @@ func barsStyle(th Theme, lv int) lipgloss.Style {
 
 // bar draws pct in cells cells, with the account's threshold as a tick, and
 // the percent after it: ▕██████████░░│░░░▏  62% (R8, R33). It takes
-// cells+barsFrame columns.
+// cells+barsFrame columns, whatever the terminal: where ambiguous
+// characters are drawn wide it draws [######--|---]  62% (barsDrawn).
 //
 // round(pct/100*cells) cells are filled with █ and the rest are ░, Faint.
 // The tick │ sits at round(threshold/100*cells), kept inside the bar, and is
 // left out at threshold 100, where the end of the bar is the limit. The
 // filled cells and the percent take the level's style, and so does the tick
 // once the reading has reached it, even where rounding left it just past
-// the fill. A tick not reached is Muted.
+// the fill. A tick not reached is Muted. The percent is rounded down, as
+// the level is judged on the reading itself: 74.6 against 75 reads 74%, not
+// the threshold the colour says it is below.
 func bar(th Theme, pct float64, threshold, cells int) string {
 	cells = max(cells, 0)
 	p := barsPercent(pct)
@@ -88,8 +113,9 @@ func bar(th Theme, pct float64, threshold, cells int) string {
 	if t < 100 && cells > 0 {
 		tick = min(max(int(math.Round(float64(t)/100*float64(cells))), 0), cells-1)
 	}
+	g := barsDrawn()
 	var b strings.Builder
-	b.WriteString("▕")
+	b.WriteString(g.left)
 	run := func(s lipgloss.Style, text string, n int) {
 		if n > 0 {
 			b.WriteString(s.Render(strings.Repeat(text, n)))
@@ -102,26 +128,26 @@ func bar(th Theme, pct float64, threshold, cells int) string {
 			if at < filled || reached {
 				s = style
 			}
-			run(s, "│", 1)
+			run(s, g.tick, 1)
 			at++
 		case at < filled:
 			end := filled
 			if tick > at && tick < end {
 				end = tick
 			}
-			run(style, "█", end-at)
+			run(style, g.full, end-at)
 			at = end
 		default:
 			end := cells
 			if tick > at {
 				end = tick
 			}
-			run(th.Faint, "░", end-at)
+			run(th.Faint, g.empty, end-at)
 			at = end
 		}
 	}
-	b.WriteString("▏ ")
-	b.WriteString(style.Render(fmt.Sprintf("%3.0f%%", p)))
+	b.WriteString(g.right + " ")
+	b.WriteString(style.Render(fmt.Sprintf("%3.0f%%", math.Floor(p))))
 	return b.String()
 }
 
@@ -129,8 +155,10 @@ func bar(th Theme, pct float64, threshold, cells int) string {
 // loc, "1h 3m (21:20)", from a day on with the weekday, "2d 1h (Thu
 // 21:20)", and under a minute "<1m (21:20)" (R9). short gives the countdown
 // alone, "1h 3m", at most 8 columns. A time passed is "now", and the zero
-// time "". Every separator is ASCII: a character of ambiguous East Asian
-// width would be two columns on some terminals and push the row out.
+// time "". A window resets within a week, so the longest is "6d 23h (Tue
+// 19:16)", 18 columns, the reset column's width; anything longer is cut by
+// fit. The TUI takes ambiguous characters as narrow (R33); the separator
+// is not "·" by the Group A ruling.
 func resetText(at, now time.Time, loc *time.Location, short bool) string {
 	if at.IsZero() {
 		return ""

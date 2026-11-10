@@ -3,6 +3,7 @@ package tui
 import (
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -24,9 +25,17 @@ import (
 //     terminal may reorder a row by, the zero width space, the soft hyphen,
 //     the byte order mark. Only the joiners, ZWJ and ZWNJ, stay; they are
 //     part of what they join.
+//   - Hangul spelled out letter by letter, as macOS writes Korean file
+//     names, is put back together into its syllables (textHangul), which
+//     loses nothing.
 //   - Each character is then made as wide to Bubble Tea's renderer as to a
 //     terminal that counts graphemes, and to rota's own tables, and a mark
-//     with nothing to sit on is dropped (see textSame).
+//     with nothing to sit on is dropped (see textSame). Where they disagree,
+//     a character keeps its first letter or becomes "?": an emoji its first
+//     picture, and a syllable of an Indic script (Devanagari, Bengali,
+//     Tamil, Malayalam) its first consonant, its vowel signs and conjuncts
+//     dropped, as F9 rules. No other way keeps such a word one width to
+//     both the renderer and a terminal counting graphemes.
 //   - Whatever is shaped like an Anthropic key is taken out (wire.Unsecret).
 //
 // clean of what clean gave is the same text.
@@ -53,7 +62,7 @@ func clean(s string) string {
 			b.WriteRune(r)
 		}
 	}
-	return wire.Unsecret(textSame(b.String()))
+	return wire.Unsecret(textSame(textHangul(b.String())))
 }
 
 // textSame is s with every character the measures disagree on replaced by
@@ -76,14 +85,27 @@ func clean(s string) string {
 //
 // A mark with nothing to sit on, at the start or after a character that
 // takes none, is dropped: drawn, it would sit on whatever is left of the
-// cell. What a replacement leaves can join what follows it into a new
-// grapheme, so the passes repeat until nothing changes; each one that
-// changes something leaves fewer runes, or only ones that need no second.
+// cell. A first letter that would join what follows it into a new grapheme
+// (a Prepend letter, a Hangul initial) is "?" instead, which joins nothing,
+// so one pass leaves text a second pass does not change, and the work is
+// linear in s. The second pass is the proof, and a guard.
 func textSame(s string) string {
-	for {
+	s, _ = textSamePasses(s)
+	return s
+}
+
+// textScanned counts the bytes textSame hands the grapheme segmenter to
+// decide where a joined letter would go (textAlone): the work a test holds
+// to linear in the text, which a clock under load could not.
+var textScanned atomic.Int64
+
+// textSamePasses is textSame and how many passes it took: 1 when s was
+// already clean, 2 when it was not.
+func textSamePasses(s string) (string, int) {
+	for n := 1; ; n++ {
 		t := textPass(s)
 		if t == s {
-			return s
+			return s, n
 		}
 		s = t
 	}
@@ -98,19 +120,77 @@ func textPass(s string) string {
 		rest = rest[len(c):]
 		// A ZWJ that ends its cluster joins nothing: width.go would join
 		// what follows it to what came before.
+		whole := len(c)
 		c = strings.TrimRight(c, "\u200d")
 		r, _ := utf8.DecodeRuneInString(c)
 		switch one := string(r); {
 		case c == "" || unicode.Is(unicode.M, r):
-		case textAgreed(c):
+		case textAgreed(c) && (len(c) == whole || textAlone(c, rest)):
 			b.WriteString(c)
-		case textAgreed(one):
+		case textAgreed(one) && textAlone(one, rest):
 			b.WriteString(one)
 		default:
 			b.WriteByte('?')
 		}
 	}
 	return b.String()
+}
+
+// textAlone is whether c, written where a longer grapheme stood, stays a
+// grapheme of its own before rest rather than joining its start. Only
+// rest's first grapheme is looked at, so the check costs what that one
+// does.
+func textAlone(c, rest string) bool {
+	if rest == "" {
+		return true
+	}
+	next, _ := ansi.FirstGraphemeCluster(rest, ansi.GraphemeWidth)
+	look := c + next
+	textScanned.Add(int64(len(look)))
+	joined, _ := ansi.FirstGraphemeCluster(look, ansi.GraphemeWidth)
+	return joined == c
+}
+
+// textHangul is s with each Hangul syllable spelled out in conjoining
+// letters, an initial, a vowel and maybe a final, written as the one
+// precomposed syllable they spell, and a precomposed syllable without a
+// final followed by a final letter given it. Unicode defines the mapping by
+// arithmetic, so nothing is lost and nothing is needed but this. A vowel
+// or final left over is still unsure (textUnsure).
+func textHangul(s string) string {
+	jamo := false
+	for _, r := range s {
+		if r >= 0x1100 && r <= 0x11ff {
+			jamo = true
+			break
+		}
+	}
+	if !jamo {
+		return s
+	}
+	const sBase, lBase, vBase, tBase = 0xac00, 0x1100, 0x1161, 0x11a7
+	in := []rune(s)
+	out := make([]rune, 0, len(in))
+	for i := 0; i < len(in); i++ {
+		r := in[i]
+		final := func() bool { return i+1 < len(in) && in[i+1] > tBase && in[i+1] <= 0x11c2 }
+		switch {
+		case r >= lBase && r <= 0x1112 && i+1 < len(in) && in[i+1] >= vBase && in[i+1] <= 0x1175:
+			syl := sBase + ((r-lBase)*21+(in[i+1]-vBase))*28
+			i++
+			if final() {
+				syl += in[i+1] - tBase
+				i++
+			}
+			out = append(out, syl)
+		case r >= sBase && r <= 0xd7a3 && (r-sBase)%28 == 0 && final():
+			out = append(out, r+in[i+1]-tBase)
+			i++
+		default:
+			out = append(out, r)
+		}
+	}
+	return string(out)
 }
 
 // textAgreed is whether every measure counts c, one grapheme, the same.
@@ -127,8 +207,8 @@ func textAgreed(c string) bool {
 // Unicode has not assigned, which a terminal draws as whatever box it has;
 // one whose width Unicode 16 changed from one column to two, the trigrams
 // and digrams of the Yijing and the Tai Xuan Jing symbols; Tangut's
-// newest components; and a Hangul vowel or final standing alone, which
-// some count as nothing and others as a column.
+// newest components; and a Hangul vowel or final that textHangul left
+// standing alone, which some count as nothing and others as a column.
 func textUnsure(r rune) bool {
 	switch {
 	case r >= 0x1160 && r <= 0x11ff, r >= 0xd7b0 && r <= 0xd7ff:
@@ -150,7 +230,10 @@ func textWidth(s string) int { return ansi.StringWidthWc(s) }
 
 // fit is s, plain text that clean gave, in exactly w columns: cut with "…"
 // when it is wider, a wide character the edge would halve left out whole,
-// then padded with spaces. A character is never split.
+// then padded with spaces. A character is never split. "…" is measured as
+// everything else is: with RUNEWIDTH_EASTASIAN=1, for a terminal that draws
+// ambiguous characters wide, it is two columns, and where two do not fit
+// the cut text is padded with spaces alone.
 func fit(s string, w int) string {
 	if w <= 0 {
 		return ""
@@ -159,25 +242,31 @@ func fit(s string, w int) string {
 	if n <= w {
 		return s + strings.Repeat(" ", w-n)
 	}
+	tail := "…"
+	if textWidth(tail) > w {
+		tail = ""
+	}
+	room := w - textWidth(tail)
 	var b strings.Builder
 	used := 0
 	for rest := s; rest != ""; {
 		c, cw := ansi.FirstGraphemeCluster(rest, ansi.WcWidth)
-		if used+cw > w-1 {
+		if used+cw > room {
 			break
 		}
 		b.WriteString(c)
 		used += cw
 		rest = rest[len(c):]
 	}
-	b.WriteString("…")
-	return b.String() + strings.Repeat(" ", w-1-used)
+	b.WriteString(tail)
+	return b.String() + strings.Repeat(" ", room-used)
 }
 
 // wrap is s, plain text that clean gave, broken into lines of at most w
 // columns: at spaces where it can, inside a word too long for a line of its
-// own, never inside a character. A newline in s ends a line. The lines are
-// not padded. Nothing to wrap, or no width to wrap into, is no lines.
+// own, never inside a character. A character wider than w takes a line of
+// its own, wider than w. A newline in s ends a line. The lines are not
+// padded. Nothing to wrap, or no width to wrap into, is no lines.
 func wrap(s string, w int) []string {
 	if w <= 0 {
 		return nil

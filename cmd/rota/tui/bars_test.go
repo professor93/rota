@@ -10,6 +10,15 @@ import (
 	"github.com/professor93/rota/wire"
 )
 
+// barsAs is a bar drawn in blocks as this binary draws it: the same, or in
+// ASCII where ambiguous characters are measured wide (barsDrawn).
+func barsAs(s string) string {
+	if barsDrawn() == barsBlocks {
+		return s
+	}
+	return strings.NewReplacer("▕", "[", "█", "#", "░", "-", "│", "|", "▏", "]").Replace(s)
+}
+
 // barsNow is the clock every test here reads: Tuesday 2026-11-10 20:17 UTC.
 var barsNow = time.Date(2026, 11, 10, 20, 17, 0, 0, time.UTC)
 
@@ -35,11 +44,14 @@ func TestTheBarTicksAtTheThreshold(t *testing.T) {
 		{-3, 100, 4, "▕░░░░▏   0%"},
 		// No threshold the store set means none.
 		{50, 0, 4, "▕██░░▏  50%"},
-		{99.6, 100, 4, "▕████▏ 100%"},
+		// The percent is rounded down: 99.6 is not full, and 74.6 is below
+		// the 75 its colour says it is below.
+		{99.6, 100, 4, "▕████▏  99%"},
+		{74.6, 75, 4, "▕███│▏  74%"},
 	} {
 		s := bar(th, c.pct, c.threshold, c.cells)
-		if got := ansi.Strip(s); got != c.want {
-			t.Errorf("bar(%v, %d, %d) = %q, want %q", c.pct, c.threshold, c.cells, got, c.want)
+		if got, want := ansi.Strip(s), barsAs(c.want); got != want {
+			t.Errorf("bar(%v, %d, %d) = %q, want %q", c.pct, c.threshold, c.cells, got, want)
 		}
 		if w := textWidth(s); w != c.cells+barsFrame {
 			t.Errorf("bar(%v, %d, %d) is %d wide, want %d", c.pct, c.threshold, c.cells, w, c.cells+barsFrame)
@@ -47,20 +59,28 @@ func TestTheBarTicksAtTheThreshold(t *testing.T) {
 	}
 	// The colour is the level's: over at the threshold, in the Over style.
 	over := bar(th, 80, 75, 8)
-	if !strings.Contains(over, th.Over.Render("██████")) {
+	if !strings.Contains(over, th.Over.Render(barsAs("██████"))) {
 		t.Errorf("a bar over its threshold is not drawn in Over: %q", over)
 	}
 	good := bar(th, 10, 75, 8)
-	if !strings.Contains(good, th.Good.Render("█")) {
+	if !strings.Contains(good, th.Good.Render(barsAs("█"))) {
 		t.Errorf("a bar well under its threshold is not drawn in Good: %q", good)
 	}
 	// A tick the reading has reached is in the level's style, even where
 	// rounding left it just past the fill; one it has not reached is Muted.
-	if !strings.Contains(over, th.Over.Render("│")) {
+	if !strings.Contains(over, th.Over.Render(barsAs("│"))) {
 		t.Errorf("a reached tick is not drawn in Over: %q", over)
 	}
-	if !strings.Contains(good, th.Muted.Render("│")) {
+	if !strings.Contains(good, th.Muted.Render(barsAs("│"))) {
 		t.Errorf("a tick not reached is not drawn Muted: %q", good)
+	}
+	// The empty cells are Faint, and the percent is the level's colour.
+	warn := bar(th, 62, 75, 16)
+	if !strings.Contains(warn, th.Faint.Render(barsAs("░░"))) {
+		t.Errorf("the empty cells are not Faint: %q", warn)
+	}
+	if !strings.Contains(warn, th.Warn.Render(" 62%")) {
+		t.Errorf("the percent is not in the level's colour: %q", warn)
 	}
 }
 
@@ -109,8 +129,8 @@ func TestResetReadsAsCountdownAndClock(t *testing.T) {
 		if got != c.want {
 			t.Errorf("resetText(now%+v, short %v) = %q, want %q", c.at.Sub(barsNow), c.short, got, c.want)
 		}
-		// Every reading fits its column: 17 wide, and 8 when short.
-		limit := 17
+		// Every reading fits its column: 18 wide, and 8 when short.
+		limit := 18
 		if c.short {
 			limit = 8
 		}
@@ -123,9 +143,30 @@ func TestResetReadsAsCountdownAndClock(t *testing.T) {
 	if got := resetText(barsNow.Add(time.Hour+3*time.Minute), barsNow, tokyo, false); got != "1h 3m (06:20)" {
 		t.Errorf("in Tokyo the reset reads %q", got)
 	}
-	// Ninety-nine days and more still fit when short.
-	if got := resetText(barsNow.Add(2400*time.Hour), barsNow, time.UTC, true); textWidth(got) > 8 {
-		t.Errorf("a far reset reads %q, wider than 8", got)
+	// Each form at its widest. A window resets within a week, so the long
+	// form fits the column's 18 for every minute of one; past that it is
+	// longer, and fit cuts it. The short form fits its 8 however far.
+	for _, c := range []struct {
+		in          time.Duration
+		long, short string
+	}{
+		{23*time.Hour + 59*time.Minute, "23h 59m (20:16)", "23h 59m"},
+		{6*24*time.Hour + 23*time.Hour + 59*time.Minute, "6d 23h (Tue 20:16)", "6d 23h"},
+		{9*24*time.Hour + 23*time.Hour, "9d 23h (Fri 19:17)", "9d 23h"},
+		{99*24*time.Hour + 23*time.Hour, "99d 23h (Thu 19:17)", "99d 23h"},
+		{100 * 24 * time.Hour, ">99d (Thu 20:17)", ">99d"},
+	} {
+		if got := resetText(barsNow.Add(c.in), barsNow, time.UTC, false); got != c.long {
+			t.Errorf("resetText(now+%v) = %q, want %q", c.in, got, c.long)
+		}
+		if got := resetText(barsNow.Add(c.in), barsNow, time.UTC, true); got != c.short || textWidth(got) > 8 {
+			t.Errorf("resetText(now+%v, short) = %q, want %q", c.in, got, c.short)
+		}
+	}
+	for d := time.Minute; d < 7*24*time.Hour; d += 7 * time.Minute {
+		if got := resetText(barsNow.Add(d), barsNow, time.UTC, false); textWidth(got) > 18 {
+			t.Fatalf("resetText(now+%v) = %q is wider than 18", d, got)
+		}
 	}
 }
 

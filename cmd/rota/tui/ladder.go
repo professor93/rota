@@ -37,7 +37,7 @@ func ladderAccounts() []col {
 		{"provider", 6, true},
 		{"5h", 16 + barsFrame, true},
 		{"7d", 16 + barsFrame, true},
-		{"reset", 17, true},
+		{"reset", 18, true},
 		{"state", 16, true},
 	}
 }
@@ -49,7 +49,7 @@ var ladderSteps = []struct {
 	keys []string
 	w    int
 }{
-	{[]string{"account"}, 16},
+	{[]string{"account"}, 15},
 	{[]string{"id"}, 0},
 	{[]string{"provider"}, 0},
 	{[]string{"5h", "7d"}, 10 + barsFrame},
