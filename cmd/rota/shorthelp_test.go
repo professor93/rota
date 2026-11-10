@@ -71,7 +71,7 @@ func TestRunFlagsHaveShortForms(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("exit %d: %s", code, errb)
 	}
-	for _, want := range []string{"--model claude-sonnet-5", "--effort low", "--no-session-persistence"} {
+	for _, want := range []string{"--model claude-sonnet-5-5", "--effort low", "--no-session-persistence"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in: %s", want, out)
 		}

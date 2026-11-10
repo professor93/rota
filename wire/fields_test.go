@@ -49,7 +49,7 @@ func TestFieldsFollowTheProvider(t *testing.T) {
 
 	cl := Fields("claude")
 	m := byName(cl, "model")
-	if m == nil || m.Kind != "enum" || !slices.Contains(m.Enum, "claude-opus-5") || m.Default != "claude-opus-5" {
+	if m == nil || m.Kind != "enum" || !slices.Contains(m.Enum, "claude-opus-5-5") || m.Default != "claude-opus-5-5" {
 		t.Fatalf("claude model field: %+v", m)
 	}
 	if e := byName(cl, "effort"); e == nil || e.Default != "high" || len(e.Enum) != 5 {

@@ -489,11 +489,22 @@ func (claudeProvider) Models() []Model { return copyModels(claudeModels) }
 // claudeModels is built once. Models is called several times per run — by the
 // command line, by the request check, by the form description — and
 // rebuilding the table each time is pure waste; callers get a copy.
+//
+// The ids, labels and aliases are Claude Code 2.1.322's own, from the model
+// catalog baked into it: each alias sits on the model that catalog resolves
+// it to for a first-party login, and each line is listed newest first. The
+// older ids stay because this list is strict, so a run that names one is
+// still let through; Haiku 4.5 is among them because the table carried it.
 var claudeModels = []Model{
-	{ID: "claude-opus-5", Aliases: []string{"opus"}, Label: "Opus 5"},
-	{ID: "claude-fable-5", Aliases: []string{"fable"}, Label: "Fable 5"},
-	{ID: "claude-sonnet-5", Aliases: []string{"sonnet"}, Label: "Sonnet 5"},
-	{ID: "claude-haiku-4-5-20251001", Aliases: []string{"haiku"}, Label: "Haiku 4.5"},
+	{ID: "claude-opus-5-5", Aliases: []string{"opus"}, Label: "Opus 5.5"},
+	{ID: "claude-opus-5", Label: "Opus 5"},
+	{ID: "claude-fable-5-2", Aliases: []string{"fable"}, Label: "Fable 5.2"},
+	{ID: "claude-fable-5-1", Label: "Fable 5.1"},
+	{ID: "claude-fable-5", Label: "Fable 5"},
+	{ID: "claude-sonnet-5-5", Aliases: []string{"sonnet"}, Label: "Sonnet 5.5"},
+	{ID: "claude-sonnet-5", Label: "Sonnet 5"},
+	{ID: "claude-haiku-5-5", Aliases: []string{"haiku"}, Label: "Haiku 5.5"},
+	{ID: "claude-haiku-4-5-20251001", Label: "Haiku 4.5"},
 }
 
 // Efforts are Claude Code's --effort levels.
@@ -503,4 +514,4 @@ func (claudeProvider) Efforts() []string {
 
 // Defaults are deliberately mid-range: capable enough for real work,
 // predictable in cost, and unaffected by the CLI changing its own default.
-func (claudeProvider) Defaults() (string, string) { return "claude-opus-5", "high" }
+func (claudeProvider) Defaults() (string, string) { return "claude-opus-5-5", "high" }

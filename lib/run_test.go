@@ -36,7 +36,7 @@ func TestSpecBuildsClaudeArgv(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := strings.Join(argv, " ")
-	for _, want := range []string{"-p --output-format json", "--setting-sources  ", "--model claude-opus-5", "--effort high",
+	for _, want := range []string{"-p --output-format json", "--setting-sources  ", "--model claude-opus-5-5", "--effort high",
 		`--json-schema {"type":"object"}`, "--session-id sid", "--fork-session", "--system-prompt sys",
 		"--permission-mode plan", "--allowedTools Bash(git *),Edit", "--tools  ", "--plugin-dir " + pluginDir,
 		"--mcp-config " + mcp, "--restricted", "--worktree wt", "--debug api", "--x 1"} {

@@ -372,8 +372,8 @@ func TestResultReportsTheModelAndEffortThatActuallyRan(t *testing.T) {
 	if code != 200 {
 		t.Fatalf("%d %s", code, raw)
 	}
-	if out.Model != "claude-opus-5" {
-		t.Errorf("model: got %q, want the resolved id claude-opus-5", out.Model)
+	if out.Model != "claude-opus-5-5" {
+		t.Errorf("model: got %q, want the resolved id claude-opus-5-5", out.Model)
 	}
 	if out.Effort != "high" {
 		t.Errorf("effort: got %q, want high", out.Effort)
@@ -583,7 +583,7 @@ func TestRunClaudeMapsEveryFieldAndFeedsPromptOnStdin(t *testing.T) {
 		t.Fatalf("%d %s", code, raw)
 	}
 	for _, want := range []string{"PROMPT=hello there", "TOKEN=tok-1", "CWD=" + realSub,
-		"-p --output-format json", "--model claude-opus-5", "--effort high", "--fallback-model sonnet", `--json-schema {"type":"object"}`,
+		"-p --output-format json", "--model claude-opus-5-5", "--effort high", "--fallback-model sonnet", `--json-schema {"type":"object"}`,
 		"--max-budget-usd 1.5", "--session-id 11111111-1111-1111-1111-111111111111", "--fork-session", "--no-session-persistence", "--name n1",
 		"--system-prompt sys", "--append-system-prompt app", `--settings {"a":1}`, `--agents {"r":{"description":"d","prompt":"p"}}`, "--agent r",
 		"--strict-mcp-config", "--plugin-url https://x/p.zip", "--autocompact 200000", "--exclude-dynamic-system-prompt-sections",
@@ -637,7 +637,7 @@ func TestRunStreamsServerSentEvents(t *testing.T) {
 	// is answering and on what, and every later event is named by what
 	// happened rather than by which vendor said it.
 	for _, want := range []string{
-		"event: init\ndata: {", `"provider":"claude"`, `"model":"claude-opus-5"`, `"seq":1`,
+		"event: init\ndata: {", `"provider":"claude"`, `"model":"claude-opus-5-5"`, `"seq":1`,
 		"event: text\n", "event: done\n", `"exit_code":0`,
 		"--output-format stream-json --verbose", "--include-partial-messages"} {
 		if !strings.Contains(body, want) {

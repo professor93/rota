@@ -111,8 +111,53 @@ func TestSpecUsesTheProviderCatalog(t *testing.T) {
 		t.Fatal("an invented model must be refused")
 	}
 	argv, err = specArgv(t, Spec{Prompt: "p", Model: "opus"}, "claude", nil)
-	if err != nil || !strings.Contains(strings.Join(argv, " "), "--model claude-opus-5") {
+	if err != nil || !strings.Contains(strings.Join(argv, " "), "--model claude-opus-5-5") {
 		t.Fatalf("an alias must reach the CLI as a full id: %v %v", argv, err)
+	}
+}
+
+// The aliases are Claude Code's own: what 2.1.322's baked model catalog
+// resolves each to for a first-party login (aliases.<name>.default there).
+// The older ids of the Claude 5 family stay accepted, and so does the one
+// Haiku the table carried before, because the claude catalog is strict and
+// dropping an id would refuse a run that names it.
+func TestClaudeAliasesResolveAsClaudeCodeDoes(t *testing.T) {
+	for alias, want := range map[string]string{
+		"opus":   "claude-opus-5-5",
+		"sonnet": "claude-sonnet-5-5",
+		"haiku":  "claude-haiku-5-5",
+		"fable":  "claude-fable-5-2",
+		"OPUS":   "claude-opus-5-5",
+	} {
+		if got, err := ResolveModel("claude", alias); err != nil || got != want {
+			t.Errorf("%s: got %q %v, want %q", alias, got, err, want)
+		}
+	}
+	for _, id := range []string{
+		"claude-opus-5-5", "claude-opus-5",
+		"claude-fable-5-2", "claude-fable-5-1", "claude-fable-5",
+		"claude-sonnet-5-5", "claude-sonnet-5",
+		"claude-haiku-5-5", "claude-haiku-4-5-20251001",
+	} {
+		if got, err := ResolveModel("claude", id); err != nil || got != id {
+			t.Errorf("%s: got %q %v", id, got, err)
+		}
+	}
+	if m, e := Defaults("claude"); m != "claude-opus-5-5" || e != "high" {
+		t.Errorf("defaults: %q %q, want the opus alias's model at high", m, e)
+	}
+	if got := Models("claude"); len(got) == 0 || got[0].ID != "claude-opus-5-5" || got[0].Label != "Opus 5.5" {
+		t.Errorf("best first: %+v", got)
+	}
+	// Each alias names exactly one model.
+	seen := map[string]string{}
+	for _, m := range Models("claude") {
+		for _, a := range m.Aliases {
+			if prev, dup := seen[a]; dup {
+				t.Errorf("alias %q on both %s and %s", a, prev, m.ID)
+			}
+			seen[a] = m.ID
+		}
 	}
 }
 
@@ -177,7 +222,7 @@ func TestModelsCanDependOnTheAccount(t *testing.T) {
 		t.Fatalf("%+v", got)
 	}
 	// A provider with only a static catalog is unaffected.
-	if got := ModelsFor(&Account{Provider: "claude"}, "h"); len(got) == 0 || got[0].ID != "claude-opus-5" {
+	if got := ModelsFor(&Account{Provider: "claude"}, "h"); len(got) == 0 || got[0].ID != "claude-opus-5-5" {
 		t.Fatalf("%+v", got)
 	}
 }
