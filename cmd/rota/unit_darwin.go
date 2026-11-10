@@ -99,5 +99,11 @@ const (
 	keptFrom = "a login in the Mac's GUI session"
 )
 
+// restartMayCome is "" here: launchd reads a plist only to load the agent,
+// and one it starts again goes on as it was loaded, AbandonProcessGroup and
+// all, so deleting the file never costs a session. A variable, as on Linux,
+// so a test can say otherwise.
+var restartMayCome = func() string { return "" }
+
 // lingerHint is nothing here: a launchd agent starts at login on its own.
 func lingerHint() string { return "" }

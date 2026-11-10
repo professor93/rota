@@ -118,26 +118,100 @@ func TestWriteAndRemoveUnitRunTheSupervisor(t *testing.T) {
 	}
 }
 
+// restartMayComeAs has restartMayCome say why, until the test ends: why the
+// supervisor may yet start the unit's daemon again, or "" for none will.
+func restartMayComeAs(t *testing.T, why string) {
+	t.Helper()
+	old := restartMayCome
+	restartMayCome = func() string { return why }
+	t.Cleanup(func() { restartMayCome = old })
+}
+
 // A unit the supervisor will not take away — with no bus to reach it, say
-// — still has its file deleted, and what the supervisor said is the error.
-func TestRemovingAUnitDeletesItWhateverTheSupervisorSays(t *testing.T) {
-	home := unitHome(t, true)
-	store := filepath.Join(home, ".rota")
-	recordUnits(t, nil)
-	path, err := writeUnit("/u/rota", store, []string{"PATH=/p"}, false)
-	if err != nil {
-		t.Fatal(err)
+// — and with no daemon running has its file deleted only when no
+// supervisor can start the daemon again; it asks for no reload, which
+// nobody would hear. When one may, the file and its link are kept, and the
+// error says why. Either way what the supervisor said is the error.
+func TestRemovingAUnitTheSupervisorRefuses(t *testing.T) {
+	for _, why := range []string{"", "the supervisor may start it again"} {
+		t.Run(fmt.Sprintf("restart=%q", why), func(t *testing.T) {
+			home := unitHome(t, true)
+			store := filepath.Join(home, ".rota")
+			recordUnits(t, nil)
+			path, err := writeUnit("/u/rota", store, []string{"PATH=/p"}, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			link := wantsLink(t, path)
+			restartMayComeAs(t, why)
+			calls := recordUnits(t, func(string) error { return errors.New("No such process") })
+			fate, err := removeUnit(store, filepath.Join(store, "terminals"))
+			if fate != nil || err == nil || !strings.Contains(err.Error(), "No such process") {
+				t.Fatalf("removeUnit: %+v %v", fate, err)
+			}
+			var kept unitKept
+			if errors.As(err, &kept) != (why != "") || kept.restart != why || kept.daemon != nil {
+				t.Fatalf("removeUnit: %#v, want kept for %q", err, why)
+			}
+			for _, p := range []string{path, link} {
+				if _, err := os.Lstat(p); p != "" && os.IsNotExist(err) != (why == "") {
+					t.Fatalf("%s: %v, want it gone only when no restart may come", p, err)
+				}
+			}
+			if want := expectedCalls(t, store).uninstall[:1]; !slices.Equal(*calls, want) {
+				t.Fatalf("asked %q, want %q", *calls, want)
+			}
+		})
 	}
-	calls := recordUnits(t, func(string) error { return errors.New("No such process") })
-	_, err = removeUnit(store, filepath.Join(store, "terminals"))
-	if err == nil || !strings.Contains(err.Error(), "No such process") {
-		t.Fatalf("removeUnit: %v", err)
-	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatalf("unit still there: %v", err)
-	}
-	if want := expectedCalls(t, store).uninstall; !slices.Equal(*calls, want) {
-		t.Fatalf("asked %q, want %q", *calls, want)
+}
+
+// With no daemon running, an uninstall the supervisor refuses keeps the
+// unit while the supervisor may be about to start the daemon again — after
+// a crash, systemd waits 5 seconds — since a daemon it starts from a unit
+// whose file is gone would take the unit's sessions with it as it stops.
+// It says so in one line, and never that the unit is removed. So does one
+// whose daemon went on its own between the look and the signal: whether it
+// crashed cannot be told.
+func TestAnUninstallKeepsTheUnitWhileARestartMayCome(t *testing.T) {
+	for _, gone := range []bool{false, true} {
+		t.Run(fmt.Sprintf("went=%v", gone), func(t *testing.T) {
+			r := newUnitRig(t)
+			if _, errb, code := call(t, "serve", "install"); code != 0 {
+				t.Fatalf("install: exit %d %q", code, errb)
+			}
+			link := wantsLink(t, r.want.path)
+			unreachableSupervisor(t)
+			const why = "the supervisor may be about to start one again"
+			restartMayComeAs(t, why)
+			who := "no rota daemon is running"
+			if gone {
+				release, err := holdwire.ClaimDaemon(r.terminals, "test")
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(release)
+				old := signalTheDaemon
+				signalTheDaemon = func(terminals string) (*holdwire.Daemon, error) {
+					release()
+					return signalDaemon(terminals)
+				}
+				t.Cleanup(func() { signalTheDaemon = old })
+				playExit(t, func(time.Duration) bool { return true })
+				who = fmt.Sprintf("the rota daemon (pid %d) is no longer running", os.Getpid())
+			}
+			out, errb, code := call(t, "serve", "uninstall")
+			want := fmt.Sprintf("error: %s: exit status 1: Failed to connect to user scope bus via local transport: "+
+				"$DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined; %s, but %s, so %s is kept: %s; run rota serve uninstall again from %s\n",
+				r.want.uninstall[0], who, why, r.want.path, keptWhy, keptFrom)
+			if code != 1 || out != "" || errb != want {
+				t.Fatalf("uninstall while a restart may come: exit %d %q\n%q\nwant %q", code, out, errb, want)
+			}
+			for _, p := range []string{r.want.path, link} {
+				if _, err := os.Lstat(p); p != "" && err != nil {
+					t.Fatalf("%s was taken away: %v", p, err)
+				}
+			}
+		})
 	}
 }
 
@@ -325,12 +399,14 @@ func TestServeSaysADirtyStorePathCleaned(t *testing.T) {
 }
 
 // Uninstall deletes the file even when the supervisor will not stop the
-// unit, and says both. With no daemon running it says nothing of one.
+// unit, as long as no supervisor can start its daemon again, and says both.
+// With no daemon running it says nothing of one.
 func TestUninstallSaysWhatTheSupervisorSaid(t *testing.T) {
 	r := newUnitRig(t)
 	if _, errb, code := call(t, "serve", "install"); code != 0 {
 		t.Fatalf("install: exit %d %q", code, errb)
 	}
+	restartMayComeAs(t, "")
 	first := r.want.uninstall[0]
 	recordUnits(t, func(call string) error {
 		if call == first {
@@ -662,13 +738,15 @@ func TestAnUninstallThatCannotDeleteTheFileSaysTheDaemonStopped(t *testing.T) {
 
 // A daemon that went on its own between uninstall's look and its signal was
 // not stopped by uninstall, and is said to be no longer running; the unit's
-// file goes, since nothing runs under it.
+// file goes, since nothing runs under it and no supervisor can start it
+// again.
 func TestAnUninstallSaysADaemonThatWentOnItsOwnIsNoLongerRunning(t *testing.T) {
 	r := newUnitRig(t)
 	if _, errb, code := call(t, "serve", "install"); code != 0 {
 		t.Fatalf("install: exit %d %q", code, errb)
 	}
 	unreachableSupervisor(t)
+	restartMayComeAs(t, "")
 	release, err := holdwire.ClaimDaemon(r.terminals, "test")
 	if err != nil {
 		t.Fatal(err)

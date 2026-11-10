@@ -161,3 +161,79 @@ func TestAnotherStoreGetsAnotherUnit(t *testing.T) {
 		t.Fatalf("relative default store: %s", s2)
 	}
 }
+
+// Without the bus, a systemd user manager for this user is looked for in
+// /proc — a process of this user's whose argv is systemd --user — and in
+// the cgroup tree, where user@UID.service is its cgroup on either layout.
+// Only when neither shows one is it taken to be gone; a /proc that cannot
+// be read could be hiding one.
+func TestAUserManagerIsLookedForWithoutTheBus(t *testing.T) {
+	const uid = 1000
+	proc := func(t *testing.T, root string, pid, uid int, argv ...string) {
+		t.Helper()
+		dir := filepath.Join(root, fmt.Sprint(pid))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		status := fmt.Sprintf("Name:\tx\nUmask:\t0022\nState:\tS (sleeping)\nUid:\t%d\t%d\t%d\t%d\nGid:\t1\t1\t1\t1\n", uid, uid, uid, uid)
+		if err := os.WriteFile(filepath.Join(dir, "status"), []byte(status), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "cmdline"), []byte(strings.Join(argv, "\x00")+"\x00"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	slice := fmt.Sprintf("user.slice/user-%d.slice/user@%d.service", uid, uid)
+	for _, c := range []struct {
+		name string
+		set  func(t *testing.T, proc0, cg string)
+		runs bool
+	}{
+		{"nothing", func(*testing.T, string, string) {}, false},
+		{"this user's manager", func(t *testing.T, p, _ string) {
+			proc(t, p, 1, 0, "/sbin/init")
+			proc(t, p, 812, uid, "/usr/lib/systemd/systemd", "--user")
+		}, true},
+		{"another user's manager", func(t *testing.T, p, _ string) { proc(t, p, 812, uid+1, "/usr/lib/systemd/systemd", "--user") }, false},
+		{"this user's other programs", func(t *testing.T, p, _ string) {
+			proc(t, p, 900, uid, "/usr/lib/systemd/systemd-logind")
+			proc(t, p, 901, uid, "/usr/bin/sleep", "--user")
+			proc(t, p, 902, uid, "systemd")
+			if err := os.MkdirAll(filepath.Join(p, "self"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(filepath.Join(p, "903"), 0o755); err != nil { // gone meanwhile
+				t.Fatal(err)
+			}
+		}, false},
+		{"its cgroup", func(t *testing.T, _, cg string) {
+			if err := os.MkdirAll(filepath.Join(cg, slice), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"its cgroup on the v1 layout", func(t *testing.T, _, cg string) {
+			if err := os.MkdirAll(filepath.Join(cg, "systemd", slice), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+		{"no /proc to read", func(t *testing.T, p, _ string) {
+			if err := os.Remove(p); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			root := t.TempDir()
+			p, cg := filepath.Join(root, "proc"), filepath.Join(root, "cgroup")
+			for _, d := range []string{p, cg} {
+				if err := os.Mkdir(d, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c.set(t, p, cg)
+			if got := userManagerRuns(p, cg, uid); got != c.runs {
+				t.Fatalf("userManagerRuns = %v, want %v", got, c.runs)
+			}
+		})
+	}
+}

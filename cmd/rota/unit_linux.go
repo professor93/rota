@@ -108,6 +108,32 @@ const (
 	keptFrom = "a login that has a user bus"
 )
 
+// Where a user manager shows itself without the bus. Variables so a test
+// can point them elsewhere.
+var (
+	procDir   = "/proc"
+	cgroupDir = "/sys/fs/cgroup"
+)
+
+// restartUnknown is why, with the bus not to be reached, a unit whose
+// daemon is not running keeps its file: after a daemon fails, systemd waits
+// RestartSec, 5 seconds, and starts the unit again from what it loaded, and
+// whether it is waiting so is known to systemd alone: the timer is in its
+// memory, not in a file under /run or the cgroup tree, where a unit that
+// stopped for good looks the same. A daemon started then, under a unit
+// whose file is gone, is the one the next reload strips of KillMode=process.
+const restartUnknown = "systemd may be about to start one again, as it does 5 seconds after one fails, which only systemd can tell"
+
+// restartMayCome says why systemd may yet start the unit's daemon again
+// when uninstall could not reach it, or "" when no user manager runs to do
+// it. A variable so a test can say either.
+var restartMayCome = func() string {
+	if userManagerRuns(procDir, cgroupDir, os.Getuid()) {
+		return restartUnknown
+	}
+	return ""
+}
+
 // lingerDir is where systemd records the users whose units start at boot
 // and outlive their logins. A variable so a test can point it elsewhere.
 var lingerDir = "/var/lib/systemd/linger"

@@ -4,11 +4,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/xml"
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/professor93/rota/store"
@@ -140,6 +143,45 @@ func systemdUnit(exe, store string, env []string) string {
 	// administrator's to change.
 	b.WriteString("KillMode=process\nTimeoutStopSec=60\nRestart=on-failure\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n")
 	return b.String()
+}
+
+// userManagerRuns says whether a systemd user manager may be running for
+// uid, as can be told without the bus, which is the only way to ask it what
+// its units are doing: it is the process of uid's whose argv is systemd
+// --user, under procDir, and its cgroup is user@uid.service, under
+// cgroupDir on the unified layout or in its systemd tree on the legacy one.
+// Only when neither shows one is it taken to be gone; a procDir that cannot
+// be read may be hiding one.
+func userManagerRuns(procDir, cgroupDir string, uid int) bool {
+	slice := fmt.Sprintf("user.slice/user-%d.slice/user@%d.service", uid, uid)
+	for _, p := range []string{filepath.Join(cgroupDir, slice), filepath.Join(cgroupDir, "systemd", slice)} {
+		if _, err := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) {
+			return true
+		}
+	}
+	entries, err := os.ReadDir(procDir)
+	if err != nil {
+		return true
+	}
+	owner := fmt.Sprintf("Uid:\t%d\t", uid)
+	for _, e := range entries {
+		if strings.Trim(e.Name(), "0123456789") != "" {
+			continue
+		}
+		status, err := os.ReadFile(filepath.Join(procDir, e.Name(), "status"))
+		if err != nil || !strings.Contains(string(status), "\n"+owner) {
+			continue // gone meanwhile, or somebody else's
+		}
+		raw, err := os.ReadFile(filepath.Join(procDir, e.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		argv := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+		if filepath.Base(argv[0]) == "systemd" && slices.Contains(argv[1:], "--user") {
+			return true
+		}
+	}
+	return false
 }
 
 func xmlEsc(s string) string {
