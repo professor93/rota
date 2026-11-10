@@ -558,12 +558,11 @@ func TestATermToTheHolderHangsUpTheCLI(t *testing.T) {
 }
 
 // A holder killed outright, with no daemon to see it go, records no
-// ending: the session reads interrupted, stopped within a minute — the
-// holder's touch — before it was killed, in its record and in `rota list
-// --sessions --json` alike. The hold package's
-// TestAHolderKilledOutrightIsDatedWithinATouch holds the bound with a
-// shorter touch.
-func TestAHolderKilledWithNoDaemonStoppedWithinAMinute(t *testing.T) {
+// ending, and its record and `rota list --sessions --json` agree: the
+// session is listed interrupted, exit -1, with the record's ended_at. How
+// close that is to the kill is the hold package's
+// TestAHolderKilledOutrightIsDatedWithinATouch.
+func TestAHolderKilledWithNoDaemonIsListedAsItsRecordSays(t *testing.T) {
 	_, terminals := holdStoreAlone(t)
 	bin := holdFake(t, "claude", fakecli.Spec{})
 	req := holdRequest(t)
@@ -571,9 +570,6 @@ func TestAHolderKilledWithNoDaemonStoppedWithinAMinute(t *testing.T) {
 	if !h.ready.OK {
 		t.Fatalf("%+v", h.ready)
 	}
-	started := h.meta().Started
-	time.Sleep(200 * time.Millisecond)
-	killed := time.Now()
 	if err := h.cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
@@ -588,8 +584,8 @@ func TestAHolderKilledWithNoDaemonStoppedWithinAMinute(t *testing.T) {
 			t.Fatalf("the session reads %s", r.State)
 		}
 	}
-	if r.Stopped.After(killed) || killed.Sub(r.Stopped) > time.Minute {
-		t.Fatalf("the session stopped at %v; it started at %v and was killed at %v", r.Stopped, started, killed)
+	if r.Stopped.IsZero() {
+		t.Fatal("the record says no time it stopped")
 	}
 	out, errb, code := call(t, "--json", "list", "--short", "--sessions")
 	var doc struct {

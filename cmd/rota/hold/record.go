@@ -58,8 +58,8 @@ func (r *metaFile) update(change func(*holdwire.Meta)) error {
 }
 
 // touch moves meta.json's time to now without changing a byte of it, while
-// no ending is recorded: once one is, the record's time is never moved past
-// it, and the ending is what says when the session stopped.
+// no ending is recorded: once one is, a touch never moves it, and the
+// ending is what says when the session stopped.
 func (r *metaFile) touch() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

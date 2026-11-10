@@ -173,13 +173,15 @@ func TestAHolderKilledOutrightIsDatedWithinATouch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Several touches, so that the start is long past when it is killed.
-	time.Sleep(6 * every)
-	killed := time.Now()
+	// Several touches, so that the start is long past when it is killed, and
+	// halfway between two of them, so that the kill never lands on one.
+	time.Sleep(6*every + every/2)
+	before := time.Now()
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
 	<-exited
+	after := time.Now() // no touch can follow this
 	for deadline := time.Now().Add(5 * time.Second); holdwire.Locked(holdwire.LockPath(dir)); time.Sleep(5 * time.Millisecond) {
 		if time.Now().After(deadline) {
 			t.Fatal("the lock outlived the holder")
@@ -190,8 +192,8 @@ func TestAHolderKilledOutrightIsDatedWithinATouch(t *testing.T) {
 		t.Fatalf("the session reads %s", r.State)
 	}
 	// One touch, and room for a tick a loaded machine is late with.
-	const slack = 300 * time.Millisecond
-	if r.Stopped.After(killed) || killed.Sub(r.Stopped) > every+slack {
-		t.Fatalf("the session stopped at %v; it started at %v and was killed at %v, touched every %v", r.Stopped, m.Started, killed, every)
+	slack := slow * 300 * time.Millisecond
+	if r.Stopped.After(after) || before.Sub(r.Stopped) > every+slack {
+		t.Fatalf("the session stopped at %v; it started at %v and was killed between %v and %v, touched every %v", r.Stopped, m.Started, before, after, every)
 	}
 }
