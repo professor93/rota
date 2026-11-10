@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -186,6 +187,7 @@ func TestTextRealWordsComeBack(t *testing.T) {
 		{"a Hangul initial before each of 32,000 syllables", strings.Repeat("\u1100가", 32000), 32000},
 		{"64,000 pictures joined by ZWJ, one grapheme", strings.Repeat("👨\u200d", 64000), 2},
 		{"an SGR, then 32,000 key prefixes glued to a letter", "\x1b[0m" + strings.Repeat("xsk-ant-", 32000), 32000},
+		{"100,000 SGRs back to back between two letters", "x" + strings.Repeat("\x1b[1m", 100000) + "y", 3},
 	} {
 		got, passes, looked := textClean(c.s)
 		if passes > 2 {
@@ -213,6 +215,11 @@ func TestTextRealWordsComeBack(t *testing.T) {
 	if p, h := best(plain), best(hostile); h > 50*p+200*time.Millisecond {
 		t.Errorf("64,000 hostile characters took %v to clean, 64,000 ASCII %v", h, p)
 	}
+	// 200,000 sequences back to back share one seam, whose taken characters
+	// are joined once, not once a sequence.
+	if p, h := best(plain), best("x"+strings.Repeat("\x1b[1m", 200000)+"y"); h > 50*p+200*time.Millisecond {
+		t.Errorf("200,000 SGRs took %v to clean, 64,000 ASCII %v", h, p)
+	}
 }
 
 // textBody is 32 key characters no label holds by chance.
@@ -238,6 +245,12 @@ func TestTextKeysInEveryArrangement(t *testing.T) {
 	b1, b2 := key[:21], key[21:]
 	for _, c := range []struct{ name, in string }{
 		{"whole", "x " + key},
+		// A sequence that leaves no space still stands between words, so a
+		// key right after it starts there, and one sequence inside the
+		// prefix after it is read through.
+		{"an SGR at the start, ESC inside the prefix", "\x1b[1msk-\x1bant-api03-" + textBody + "\x1b[1m"},
+		{"an SGR after a space, raw CSI inside the prefix", " \x1b[1msk-an\x9bt-api03-" + textBody},
+		{"an OSC at the start, CSI intermediate in the prefix", "\x1b]8;;u\x07sk-ant\x1b[-api03-" + textBody},
 		// Beside a blank or at an end a sequence leaves no space, only its
 		// seam.
 		{"ESC takes the s after a space", "x \x1b" + key},
@@ -273,6 +286,66 @@ func TestTextKeysInEveryArrangement(t *testing.T) {
 			t.Errorf("%s: clean(%q) = %q shows the key", c.name, c.in, out)
 		}
 	}
+}
+
+// TestTextKeyFuzzLeaksNothingNew: of 20,000 random arrangements of a key
+// (textKeyFuzz, a fixed seed), none shows its body that clean at da8b9bb
+// took out. testdata/text-key-fuzz-da8b9bb.txt lists the ones that showed
+// there: a key glued to a letter, which wire.Unsecret leaves by design, a
+// key split before a control after enough of it to be taken out by
+// itself, and the residue clean's comment names.
+func TestTextKeyFuzzLeaksNothingNew(t *testing.T) {
+	data, err := os.ReadFile("testdata/text-key-fuzz-da8b9bb.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := map[string]bool{}
+	for _, f := range strings.Fields(string(data)) {
+		before[f] = true
+	}
+	for i, in := range textKeyFuzz(20000) {
+		out := clean(in)
+		if textLeaks(out) && !before[strconv.Itoa(i)] {
+			t.Errorf("arrangement %d, %q, shows the key: %q", i, in, out)
+		}
+		if again := clean(out); again != out {
+			t.Errorf("arrangement %d: clean(%q) = %q, and clean of that is %q", i, in, out, again)
+		}
+	}
+}
+
+// textKeyFuzz is n random arrangements of a key, from a fixed seed: up to
+// three pieces of junk (sequences, cut-short sequences, controls, ZWSP,
+// VS16) inside the key, outside its "sk-ant-" when there is more than one,
+// with context before and after.
+func textKeyFuzz(n int) []string {
+	key := "sk-ant-api03-" + textBody
+	junk := []string{"\x1b[0m", "\x1b[1;31m", "\x1b", "\x07", "\x1b]8;;u\x07", "\x1b]8;;u\x1b\\", "\u009b2K", "\x9b", "\x1b(B", "\u200b", "\ufe0f", "\x1b[", "\x1b]"}
+	ctx := []string{"", " ", "x", "x ", "\x1b[1m", " \x1b[1m", "x\x1b[1m", "\x1b", "\x1b]8;;u\x07", "\x07"}
+	r := rand.New(rand.NewPCG(11, 13))
+	out := make([]string, 0, n)
+	for range n {
+		var b strings.Builder
+		b.WriteString(ctx[r.IntN(len(ctx))])
+		pos := map[int]string{}
+		pieces := r.IntN(4)
+		for range pieces {
+			p := r.IntN(len(key) + 1)
+			if pieces > 1 && p < 8 {
+				p = 8 + r.IntN(len(key)-7)
+			}
+			pos[p] += junk[r.IntN(len(junk))]
+		}
+		for p := 0; p <= len(key); p++ {
+			b.WriteString(pos[p])
+			if p < len(key) {
+				b.WriteByte(key[p])
+			}
+		}
+		b.WriteString(ctx[r.IntN(len(ctx))])
+		out = append(out, b.String())
+	}
+	return out
 }
 
 // TestTextKeyResidue pins what clean's comment says it does not stop: two

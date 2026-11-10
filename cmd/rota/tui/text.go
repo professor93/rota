@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -26,8 +25,10 @@ import (
 //     whole, and a key whose characters a sequence took is read with them
 //     put back (textRedact); each is taken out. What is not: a key with two
 //     sequences inside its "sk-ant-", one taking a character of it and the
-//     other putting characters of its own in (x ESC s ESC [0m k-ant-…):
-//     whoever can place those can as well print a key with no prefix.
+//     other putting characters of its own in, as x ESC s ESC [0m k-ant-….
+//     Whoever can place those can as well print the key without its
+//     prefix, which no redaction by shape stops; redaction is for a key
+//     echoed by accident, and no accident puts sequences inside a prefix.
 //   - Every C0 control, DEL and every C1 control left is dropped. A
 //     newline, a tab and the other line breaks become a space. A byte that
 //     is not UTF-8 becomes "?".
@@ -35,15 +36,20 @@ import (
 //     terminal may reorder a row by, the zero width space, the soft hyphen,
 //     the byte order mark. Only the joiners, ZWJ and ZWNJ, stay; they are
 //     part of what they join.
-//   - VS15 and VS16 are dropped: an emoji keeps its default presentation.
-//   - Hangul spelled out in letters, as macOS writes Korean file names, is
-//     put back into its syllables (textHangul), losing nothing.
+//   - The variation selectors VS15 and VS16 are dropped: every emoji takes
+//     the presentation it has by default, so it is as wide to rota's
+//     tables as to x/ansi whatever follows it.
+//   - Hangul spelled out letter by letter, as macOS writes Korean file
+//     names, is put back together into its syllables (textHangul), which
+//     loses nothing.
 //   - Each character is then made as wide to Bubble Tea's renderer as to a
 //     terminal that counts graphemes, and to rota's own tables, and a mark
 //     with nothing to sit on is dropped (textSamePasses). Where they disagree,
 //     a character keeps its first letter or becomes "?": an emoji its first
-//     picture, an Indic syllable its first consonant, as F9 rules, since
-//     nothing else keeps it one width to both.
+//     picture, and a syllable of an Indic script (Devanagari, Bengali,
+//     Tamil, Malayalam) its first consonant, its vowel signs and conjuncts
+//     dropped, as F9 rules. No other way keeps such a word one width to
+//     both the renderer and a terminal counting graphemes.
 //   - Whatever is shaped like an Anthropic key is taken out (wire.Unsecret).
 //
 // clean of what clean gave is the same text.
@@ -93,113 +99,9 @@ func textClean(s string) (out string, passes, scanned int) {
 	return wire.Unsecret(out), passes, scanned + looked
 }
 
-// textKey is the start of an Anthropic credential: wire.Unsecret's shape,
-// which takes "sk-ant-" and at least 16 more of these characters as a key
-// when it stands as a word of its own.
-const textKey = "sk-ant-"
-
 // textKeyByte is a character a key is made of after its prefix.
 func textKeyByte(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
-}
-
-// textRedact is s, in which each seam marks where an escape sequence stood
-// (on the space that stands for it, or between two bytes where none does)
-// and holds the key characters the sequence took, with every key taken out
-// that either of two readings finds: the sequences gone, so a key a
-// sequence split shows as neither half, and each sequence's key characters
-// put back, so a key whose "s" or "-a" a sequence took is found too. A key starts where s starts, after a
-// character that is not a letter or digit, after a seam or inside one, as
-// wire.Unsecret has it, so a key a sequence was glued to is taken out too.
-// Its replacement is wire.Unsecret's. The second result is how many bytes
-// of key bodies it read: each once, as a body is read only where a key
-// starts.
-func textRedact(s string, seams []textSeam) (string, int) {
-	if len(seams) == 0 {
-		return s, 0
-	}
-	looked := 0
-	ateAt := make(map[int]string, len(seams)) // what the seams at a place took
-	space := make(map[int]bool, len(seams))   // a seam's own space
-	for _, sm := range seams {
-		ateAt[sm.at] += sm.ate
-		if sm.space {
-			space[sm.at] = true
-		}
-	}
-	type span struct{ from, to int } // in s
-	var spans []span
-	// Two readings: the sequences gone, and each sequence's key bytes kept.
-	for _, keep := range []bool{false, true} {
-		var j strings.Builder
-		at := make([]int, 0, len(s))
-		var eaten []bool
-		for i := 0; i <= len(s); i++ {
-			if k := ateAt[i]; keep {
-				for x := 0; x < len(k); x++ {
-					j.WriteByte(k[x])
-					at = append(at, i)
-					eaten = append(eaten, true)
-				}
-			}
-			if i == len(s) || space[i] {
-				continue
-			}
-			j.WriteByte(s[i])
-			at = append(at, i)
-			eaten = append(eaten, false)
-		}
-		js := j.String()
-		for k := 0; k < len(js); {
-			off := strings.Index(js[k:], textKey)
-			if off < 0 {
-				break
-			}
-			start := k + off
-			word := start == 0 || eaten[start] || space[at[start]-1] || !(textKeyByte(js[start-1]) && js[start-1] != '_' && js[start-1] != '-')
-			if !word {
-				k = start + 1
-				continue
-			}
-			end := start + len(textKey)
-			for end < len(js) && textKeyByte(js[end]) {
-				end++
-			}
-			looked += end - start
-			if end-start-len(textKey) >= 16 {
-				// A key ending on what a sequence took ends at the seam,
-				// past its space if it has one.
-				to := at[end-1] + 1
-				if eaten[end-1] && !space[at[end-1]] {
-					to--
-				}
-				spans = append(spans, span{at[start], to})
-				k = end
-				continue
-			}
-			k = start + 1
-		}
-	}
-	if len(spans) == 0 {
-		return s, looked
-	}
-	sort.Slice(spans, func(x, y int) bool { return spans[x].from < spans[y].from })
-	var b strings.Builder
-	done := 0
-	for _, sp := range spans {
-		if sp.to <= done {
-			continue
-		}
-		if sp.from < done {
-			sp.from = done
-		} else {
-			b.WriteString(s[done:sp.from])
-		}
-		b.WriteString(textKey + "[not repeated]")
-		done = sp.to
-	}
-	b.WriteString(s[done:])
-	return b.String(), looked
 }
 
 // textSeam is where an escape sequence stood in what textEscapes gives: at
