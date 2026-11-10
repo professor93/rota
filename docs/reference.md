@@ -178,7 +178,7 @@ rota login codex              # ...for another provider
 rota login --long             # a year-long token for an account already here
 rota login --key              # an account on a Claude Console API key, pasted, not shown
 rota login 2 --token          # paste a `claude setup-token` token as account 2's long-lived one
-rota login <login-id> <code>  # off a terminal, or after --json: finish it with the code
+rota login <login-id> <code>  # finish a login later, or one begun off a terminal or with --json
 rota login <login-id>         # finish a delegated login, which takes no code (grok)
 rota login 2                  # sign account 2 in again: only account 2's approval finishes it
 rota list                     # every account, in rotation order, with usage
@@ -487,21 +487,25 @@ with `-i` or `--`, stdout belongs to the CLI. Either way the CLI's exit
 status becomes rota's.
 
 Login is one command and never opens a browser. `rota login` prints a URL and
-a short id; open the URL yourself and approve. On a terminal, on Linux and
-macOS, the same command then waits for what finishes the login: the code from
-the page, read as it is typed, since it is good once and for nothing without
-what stays on this machine; a key, with the echo off; and for a device login
-nothing at all, since rota asks the provider by itself until it is approved.
-The prompt says how much of its 15 minutes the login has left. A rejected code,
-and an approval by the wrong account, are said and asked for again on the same
-login; where approving again cannot help, because the account was removed
-meanwhile or its e-mail approved under another of the provider's ids, the wait
-stops with that error. An empty line asks again. `^D` ends the wait and not the
-login, exiting 1, and `^C` does the same with 130: the login stays open, and the
-line that finishes it later is printed. A login that runs out says so and exits
-1. A delegated login is still the vendor CLI's to finish. In a pipe, a script or
-CI, and always with `--json`, a login is two steps: pass the code back with
-`rota login <login-id> <code>`.
+a short id; open the URL yourself and approve. When both its input and the
+output the URL goes to are a terminal, on Linux and macOS, the same command
+then waits for what finishes the login: the code from the page, read as it is
+typed, since it is good once and for nothing without what stays on this
+machine; a key, with the echo off; and for a device login nothing at all, since
+rota asks the provider by itself until it is approved, or until the provider
+refuses it. The prompt says how much of its 15 minutes the login has left. A
+code that is not accepted, and an approval by the wrong account, are said and
+asked for again on the same login; where approving again cannot help, because
+the account was removed meanwhile or its e-mail approved under another of the
+provider's ids, the wait stops with that error. An empty line asks again. `^D`
+ends the wait and not the login, exiting 1, and `^C` does the same with 130:
+the login stays open, and the line that finishes it later is printed. A login
+another rota finishes meanwhile, following that line in a second shell, ends
+the wait as a success and says so; one that runs out says so and exits 1. A
+delegated login is still the vendor CLI's to finish, and grok's, which can also
+be finished without a key, is not waited for either. In a pipe, a script or CI,
+with the output in a file, and always with `--json`, a login is two steps: pass
+the code back with `rota login <login-id> <code>`.
 
 One command, because the difference between the two it used to be — whether
 rota holds the credential or the vendor CLI keeps its own — is rota's business
@@ -713,7 +717,7 @@ see *Who is asking, and what they may do*.
 | `POST` | `/v1/terminals/{id}/messages` | control | `{"text":"…","force":false}` — type a message into a held session the way a person would, once it is ready for one: the text, then Enter. It is typing, so the keyboard must be free or held by the sender's own person, and until it is typed nobody else types into the session but one Esc or Ctrl-C. `200 {"ok":true}` once typed; `409` with `reason` `waiting` (the CLI waits on its person, where Enter may approve something; `"force":true` types anyway), `keyboard` (with `holder`), `ended`, or `not_held` (a terminal that is not a held session, or one the daemon is not linked to); `504` with `reason` `timeout` when it never became ready in 30 seconds |
 | `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
-| `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, provider, url, kind, createdAt}`, with `long`, `delegated` and `account` when they are set, and never the login's state: the PKCE verifier stays with the parked login. `"long":true` asks for a long-lived token instead. `{"account":1}` begins the login `rota login 1` begins, which only that account's approval finishes; it takes no `long` or `provider`, an unknown account is `404`, and one with no sign-in to start, an API key say, is `400`. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"long_until":"...","status":"long"}`, and an API key sent as `token` is refused with `400` by its prefix, without being sent anywhere. Neither comes back or is logged |
+| `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, provider, url, kind, createdAt}`, with `long`, `delegated` and `account` when they are set, and never the login's state: the PKCE verifier stays with the parked login. `"long":true` asks for a long-lived token instead. `{"account":1}` begins a login for account 1 that only its approval finishes, as `rota login 1` does for an account whose login rota holds; it takes no `long` or `provider`, an unknown account is `404`, and an API key, or an account its own CLI signs in, is `400`, since rota has no sign-in to start for either. Check `account` in the reply: it is there only when the login is bound, and a misspelled field, or a server from before `account` was read here, begins an unbound login instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"long_until":"...","status":"long"}`, and an API key sent as `token` is refused with `400` by its prefix, without being sent anywhere. Neither comes back or is logged |
 | `POST` | `/v1/login/{id}` | control | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"long_until":"...","status":"long"}`; a login begun for an account, by `{"account":1}` or `rota login <account-id>`, is refused unless that account approved it, and stays parked |
 | `POST` | `/v1/auth` | control | what `POST /v1/login` was called before the API and the command agreed on one word; kept working for anything already calling it |
 | `POST` | `/v1/auth/{id}` | control | likewise for `POST /v1/login/{id}` |
@@ -4126,9 +4130,9 @@ long run. For those, there is a second credential for the same account, good
 for a year:
 
 ```sh
-rota login --long             # prints a login id and a URL
-                              # approve in the browser AS THAT ACCOUNT
-rota login <login-id> <code>  # finish it
+rota login --long             # prints a URL: approve in the browser AS THAT ACCOUNT,
+                              # then paste the code it waits for
+rota login <login-id> <code>  # ...or finish it later, or off a terminal
 ```
 
 ```

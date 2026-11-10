@@ -38,9 +38,9 @@ While 1.4.0 is in beta, `@latest` gives the newest beta: the program became a mo
 ## Use
 
 ```sh
-rota login                     # sign a Claude account in (prints a URL)
+rota login                     # sign a Claude account in: prints a URL, then waits for the code
 rota login codex               # ...or another provider: codex, grok
-rota login <login-id> <code>   # finish with the code from the browser
+rota login <login-id> <code>   # finish one later, or one begun off a terminal
 rota login --long              # ...a token for an account here that lasts a year
 rota login --key               # an account on a Claude Console API key, pasted hidden; run by id
 rota list                      # every account, in rotation order, with usage
