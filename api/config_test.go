@@ -87,6 +87,11 @@ record = true
 record_max_bytes = 1024
 share = false
 
+[ssh]
+enabled = true
+listen = "0.0.0.0:2200"
+host_key = "/etc/rota/host"
+
 [runs]
 timeout = "30s"
 max_concurrent = 2
@@ -105,6 +110,7 @@ dir = "/srv/rota"
 name = "inoyat"
 role = "control"
 password = "pbkdf2-sha256$600000$c2FsdHNhbHRzYWx0c2FsdA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+ssh_keys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f inoyat@laptop"]
 
 [[tokens]]
 name = "ci-watch"
@@ -129,9 +135,11 @@ sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 			IdleTimeout: 90 * time.Minute, KeepStopped: 36 * time.Hour,
 			Record: true, RecordMaxBytes: 1024, Share: false,
 		},
+		SSH:   SSHSection{Enabled: true, Listen: "0.0.0.0:2200", HostKey: "/etc/rota/host"},
 		Store: StoreSection{Dir: "/srv/rota"},
 		Users: []UserEntry{{Name: "inoyat", Role: "control",
-			Password: "pbkdf2-sha256$600000$c2FsdHNhbHRzYWx0c2FsdA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}},
+			Password: "pbkdf2-sha256$600000$c2FsdHNhbHRzYWx0c2FsdA==$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+			SSHKeys:  []string{"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f inoyat@laptop"}}},
 		Tokens: []TokenEntry{{Name: "ci-watch", Role: "watch",
 			SHA256: "0000000000000000000000000000000000000000000000000000000000000000"}},
 	}
