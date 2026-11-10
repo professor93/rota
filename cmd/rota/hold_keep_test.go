@@ -74,3 +74,31 @@ func TestAHeldSessionsGuardIsAPrivateFileForTheCLIsLife(t *testing.T) {
 		t.Fatalf("the guard's file outlives the CLI: %v", err)
 	}
 }
+
+// A holder whose start fails after it wrote the guard takes the guard away,
+// even from a session directory that was there before it, which it leaves
+// otherwise as it found it.
+func TestAFailedHolderLeavesNoGuard(t *testing.T) {
+	_, terminals := holdStore(t)
+	bin := holdFake(t, "claude", fakecli.Spec{})
+	req := holdRequest(t)
+	req.Account = 9 // no such account: the start fails past the guard
+	req.Guard = `{"disableRemoteControl":true}`
+	dir := holdwire.Dir(terminals, req.ID)
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h := startHolderProc(t, terminals, bin, req)
+	if h.ready.OK {
+		t.Fatalf("the holder started: %+v", h.ready)
+	}
+	if code := h.code(); code != 1 {
+		t.Fatalf("the holder exits %d, want 1", code)
+	}
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("the session directory that was there is gone: %v", err)
+	}
+	if _, err := os.Stat(holdwire.GuardFile(dir)); !os.IsNotExist(err) {
+		t.Fatalf("a failed holder left its guard: %v", err)
+	}
+}

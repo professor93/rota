@@ -558,9 +558,10 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest, cw
 	}
 	defer st.Close()
 	// A private place for the guard against Remote Control, should the
-	// account get one; it goes with the terminal's CLI.
+	// account get one; it goes with the terminal's CLI. An account whose
+	// setting is on already gets none, so has no place made for it.
 	guardPath, unguard := "", func() {}
-	if rota.Flavor(a.Provider) == "claude" {
+	if rota.Flavor(a.Provider) == "claude" && !a.RemoteControl {
 		if guardPath, unguard, err = guardPlace(st); err != nil {
 			return nil, err
 		}
@@ -575,10 +576,12 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest, cw
 	if err != nil {
 		return nil, err
 	}
-	if guard != nil {
-		if err := holdwire.WriteGuard(guardPath, guard); err != nil {
-			return nil, err
-		}
+	if guard == nil {
+		// Readied, so Remote Control is the account's own: no guard.
+		unguard()
+		unguard = func() {}
+	} else if err := holdwire.WriteGuard(guardPath, guard); err != nil {
+		return nil, err
 	}
 	// Prepared for the directory the terminal starts in, whose project
 	// settings its Claude Code reads, rather than for the server's own.

@@ -6,13 +6,17 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/professor93/rota/internal/fakecli"
 	"github.com/professor93/rota/internal/holdwire"
+	"github.com/professor93/rota/internal/proc"
 )
 
 // A terminal whose claude account's arguments ask for Remote Control, in any
@@ -231,4 +235,111 @@ func TestAServerRunTerminalsGuardIsAPrivateFileForItsLife(t *testing.T) {
 			t.Fatal("the guard outlives its terminal")
 		}
 	}
+}
+
+// guardDirs is the guard directories under a store's terminals.
+func guardDirs(t *testing.T, dir string) []string {
+	t.Helper()
+	found, _ := filepath.Glob(filepath.Join(dir, "terminals", "guards", "*"))
+	return found
+}
+
+// The sweep takes away only what a process that has ended left: the guard
+// directory of another process that is alive, here a CLI fake left
+// sleeping, is left exactly as it is.
+func TestTheGuardSweepLeavesALiveProcesssGuard(t *testing.T) {
+	h := newHarness(t, Options{})
+	bin := t.TempDir()
+	fakecli.Install(t, bin, "sleeper", fakecli.Spec{Sleep: "60s"})
+	other := exec.Command(filepath.Join(bin, fakecli.Exe("sleeper")))
+	if err := other.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = other.Process.Kill(); _ = other.Wait() })
+	if other.Process.Pid == os.Getpid() || !proc.Alive(other.Process.Pid) {
+		t.Fatal("the other process is not one")
+	}
+	theirs := filepath.Join(h.dir, "terminals", "guards", strconv.Itoa(other.Process.Pid)+"-theirs")
+	if err := os.MkdirAll(theirs, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(theirs, "guard.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := h.api.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	_, remove, err := guardPlace(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remove()
+	if _, err := os.Stat(filepath.Join(theirs, "guard.json")); err != nil {
+		t.Fatalf("a live process's guard was swept: %v", err)
+	}
+}
+
+// The daemon's sweep takes away a guard a holder that is gone left behind,
+// and never one a live session's holder keeps for its CLI.
+func TestTheRecordSweepLeavesALiveSessionsGuard(t *testing.T) {
+	p := withHeld(t, nil)
+	id, _ := p.start(nil)["id"].(string)
+	live := holdwire.GuardFile(holdwire.Dir(p.terminals(), id))
+	if err := os.WriteFile(live, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gone := holdwire.Dir(p.terminals(), "00000000000000aa")
+	if err := os.MkdirAll(gone, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(holdwire.GuardFile(gone), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if !holdwire.Locked(holdwire.LockPath(holdwire.Dir(p.terminals(), id))) {
+		t.Fatal("the session is not locked, so this test would prove nothing")
+	}
+	p.api.sweepRecords()
+	if _, err := os.Stat(live); err != nil {
+		t.Fatalf("a live session's guard was swept: %v", err)
+	}
+	if _, err := os.Stat(holdwire.GuardFile(gone)); !os.IsNotExist(err) {
+		t.Fatalf("a gone holder's guard was left: %v", err)
+	}
+}
+
+// A server-run start that is refused, or fails, after its guard's place
+// was made leaves no guard directory behind; and an account whose Remote
+// Control is on already has no place made for a guard at all.
+func TestAServerRunStartLeavesNoGuardBehind(t *testing.T) {
+	p := withTerminals(t)
+	local := p.door(&localControl)
+	for _, args := range [][]string{
+		{"--settings", "missing.json"},
+		{"--managed-settings", `{"disableRemoteControl":false}`},
+	} {
+		if resp, raw := local.do("POST", "/v1/terminals", map[string]any{"account": 1, "args": args}); resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("%q: %d %s, want 400", args, resp.StatusCode, raw)
+		}
+		if left := guardDirs(t, p.dir); len(left) != 0 {
+			t.Fatalf("%q left %q", args, left)
+		}
+	}
+	// A failure past the guard's writing: the account's CLI is not there.
+	t.Setenv("PATH", t.TempDir())
+	if resp, raw := local.do("POST", "/v1/terminals", map[string]any{"account": 1}); resp.StatusCode < 400 {
+		t.Fatalf("a start with no CLI to run answers %d %s", resp.StatusCode, raw)
+	}
+	if left := guardDirs(t, p.dir); len(left) != 0 {
+		t.Fatalf("a failed start left %q", left)
+	}
+	// Remote Control on: no place made.
+	ttyClaude(t)
+	p.turnOn(3)
+	id, _ := p.start(map[string]any{"account": 3})["id"].(string)
+	if left := guardDirs(t, p.dir); len(left) != 0 {
+		t.Fatalf("an account with Remote Control on had %q made for it", left)
+	}
+	p.do("DELETE", "/v1/terminals/"+id, nil)
 }
