@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/professor93/rota/store"
 )
 
 // A conversation follows the rotation: when the account asked to resume a
@@ -144,8 +146,9 @@ func handoffUntouched(t *testing.T, path string, before os.FileInfo, body string
 }
 
 // A chat moved from A to B and back again resumes on A with what was said
-// on B. A's own copy is older than B's, and is replaced by it, at its own
-// path, leaving nothing else behind. Moved back with nothing said on B,
+// on B. B's copy is newer than A's and extends it, A's bytes followed by
+// what was said on B, so it replaces A's at A's own path, leaving nothing
+// else behind. Moved back with nothing said on B,
 // though, A's copy is left alone: a copy keeps its source's time, so a copy
 // made later is never taken for newer work.
 func TestAChatMovedBackKeepsWhatWasSaidElsewhere(t *testing.T) {
@@ -265,42 +268,187 @@ func TestTheNewestSiblingCopyIsTheOneBroughtIn(t *testing.T) {
 	}
 }
 
-// A grok conversation is a directory, measured by its newest file. A newer
-// one replaces the target's whole: its files are the sibling's, and a file
-// only the older copy had is gone.
-func TestANewerGrokCopyReplacesTheDirectory(t *testing.T) {
+// A conversation taken on separately on two accounts has forked: each copy
+// holds turns the other lacks. The target's is kept exactly as it was, so
+// nothing said on it is lost, however new the other copy is.
+func TestAForkedConversationIsLeftAsItWas(t *testing.T) {
+	s, dir := seedStore(t, handoffPair)
+	id := "01a00000-0000-7000-8000-00000000f0f0"
+	a, b := handoffClaude(dir, 1, id), handoffClaude(dir, 2, id)
+	first := `{"type":"user","message":{"content":"on A"}}`
+	writeLines(t, a, first)
+	now := time.Now()
+	handoffAt(t, a, now.Add(-2*time.Hour))
+	if err := CopyForResume(s, s.Find(2), id); err != nil {
+		t.Fatal(err)
+	}
+	writeLines(t, a, first, `{"type":"user","message":{"content":"then on A"}}`)
+	writeLines(t, b, first, `{"type":"user","message":{"content":"then, differently and at more length, on B"}}`)
+	handoffAt(t, a, now.Add(-time.Hour))
+	handoffAt(t, b, now)
+
+	before, body := handoffStat(t, a), handoffRead(t, a)
+	if err := CopyForResume(s, s.Find(1), id); err != nil {
+		t.Fatalf("a fork is not a failed copy: %v", err)
+	}
+	handoffUntouched(t, a, before, body)
+}
+
+// Of the copies newer than the target's, one that extends it is taken over
+// a newer one that has forked from it: the target gains turns and loses none.
+func TestACopyThatExtendsTheTargetsWinsOverANewerFork(t *testing.T) {
+	s, dir := seedStore(t, `{"accounts":[
+		{"id":1,"provider":"claude","uuid":"a1","order":1,"sessions":"own"},
+		{"id":2,"provider":"claude","uuid":"a2","order":2,"sessions":"own"},
+		{"id":3,"provider":"claude","uuid":"a3","order":3,"sessions":"own"}],"nextId":4,"ordered":true}`)
+	id := "01a00000-0000-7000-8000-00000000e7e7"
+	a, b, c := handoffClaude(dir, 1, id), handoffClaude(dir, 2, id), handoffClaude(dir, 3, id)
+	base := `{"type":"user","message":{"content":"base"}}`
+	writeLines(t, a, base, `{"type":"user","message":{"content":"on A"}}`)
+	writeLines(t, b, base, `{"type":"user","message":{"content":"on A"}}`, `{"type":"user","message":{"content":"then on B"}}`)
+	writeLines(t, c, base, `{"type":"user","message":{"content":"on C instead"}}`)
+	now := time.Now()
+	handoffAt(t, a, now.Add(-2*time.Hour))
+	handoffAt(t, b, now.Add(-time.Hour))
+	handoffAt(t, c, now)
+
+	if err := CopyForResume(s, s.Find(1), id); err != nil {
+		t.Fatal(err)
+	}
+	if got := handoffRead(t, a); got != handoffRead(t, b) {
+		t.Fatalf("A must take B's copy, which extends its own; holds:\n%s", got)
+	}
+}
+
+// handoffGrokPair is two grok accounts, and the folder one conversation is
+// in, in the home of each: the target's (account 9) and the sibling's (8).
+func handoffGrokPair(t *testing.T, id string) (s *store.Store, target, sibling string) {
+	t.Helper()
 	s, dir := seedStore(t, `{"accounts":[
 		{"id":8,"provider":"grok","uuid":"g1","order":1},
 		{"id":9,"provider":"grok","uuid":"g2","order":2}],"nextId":10,"ordered":true}`)
-	id := "01a00000-0000-7000-8000-0000000009fe"
 	rel := filepath.Join("sessions", "%2Ftmp%2Fx", id)
-	older, newer := filepath.Join(dir, "homes", "grok-9", rel), filepath.Join(dir, "homes", "grok-8", rel)
-	writeLines(t, filepath.Join(older, "summary.json"), `{"info":{"id":"`+id+`","cwd":"/tmp/x"}}`)
-	writeLines(t, filepath.Join(older, "chat_history.jsonl"), `{"role":"user"}`)
-	writeLines(t, filepath.Join(older, "stale.json"), `{}`)
-	writeLines(t, filepath.Join(newer, "summary.json"), `{"info":{"id":"`+id+`","cwd":"/tmp/x"}}`)
-	writeLines(t, filepath.Join(newer, "chat_history.jsonl"), `{"role":"user"}`, `{"role":"assistant"}`)
-	now := time.Now()
-	for _, f := range []string{"summary.json", "chat_history.jsonl", "stale.json"} {
-		handoffAt(t, filepath.Join(older, f), now.Add(-time.Hour))
+	return s, filepath.Join(dir, "homes", "grok-9", rel), filepath.Join(dir, "homes", "grok-8", rel)
+}
+
+// handoffGrokWrite writes a grok conversation's files, every one last
+// written at the given time.
+func handoffGrokWrite(t *testing.T, folder string, at time.Time, files map[string][]string) {
+	t.Helper()
+	for name, lines := range files {
+		writeLines(t, filepath.Join(folder, name), lines...)
+		handoffAt(t, filepath.Join(folder, name), at)
 	}
-	handoffAt(t, filepath.Join(newer, "summary.json"), now.Add(-time.Hour))
-	handoffAt(t, filepath.Join(newer, "chat_history.jsonl"), now)
+}
+
+// A grok conversation is a folder, measured by its newest file. A newer one
+// that extends the target's, every file the target has being the start of
+// the same file there, replaces it: the target ends holding the newer one's
+// files, a file only the newer one has included.
+func TestANewerGrokCopyReplacesTheDirectory(t *testing.T) {
+	id := "01a00000-0000-7000-8000-0000000009fe"
+	s, target, sibling := handoffGrokPair(t, id)
+	summary := `{"info":{"id":"` + id + `","cwd":"/tmp/x"}}`
+	now := time.Now()
+	handoffGrokWrite(t, target, now.Add(-time.Hour), map[string][]string{
+		"summary.json":       {summary},
+		"chat_history.jsonl": {`{"role":"user"}`},
+	})
+	handoffGrokWrite(t, sibling, now, map[string][]string{
+		"summary.json":       {summary},
+		"chat_history.jsonl": {`{"role":"user"}`, `{"role":"assistant"}`},
+		"plan.md":            {"# plan"},
+	})
 
 	if err := CopyForResume(s, s.Find(9), id); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := handoffRead(t, filepath.Join(older, "chat_history.jsonl")), handoffRead(t, filepath.Join(newer, "chat_history.jsonl")); got != want {
-		t.Fatalf("the newer history must replace the older:\n%s", got)
+	for _, f := range []string{"summary.json", "chat_history.jsonl", "plan.md"} {
+		if got, want := handoffRead(t, filepath.Join(target, f)), handoffRead(t, filepath.Join(sibling, f)); got != want {
+			t.Fatalf("%s must be the newer copy's:\n%s", f, got)
+		}
 	}
-	if _, err := os.Stat(filepath.Join(older, "stale.json")); !os.IsNotExist(err) {
-		t.Fatalf("a file only the older copy had must go: %v", err)
-	}
-	entries, err := os.ReadDir(older)
+	entries, err := os.ReadDir(target)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("the replaced directory holds %d entries, want the sibling's two: %v", len(entries), entries)
+	if len(entries) != 3 {
+		t.Fatalf("the replaced folder holds %d entries, want the newer copy's three: %v", len(entries), entries)
+	}
+}
+
+// A grok folder has forked when a file the target has is missing from the
+// newer copy, or is not the start of the newer copy's: the target's folder
+// is then kept exactly as it was.
+func TestAForkedGrokCopyIsLeftAsItWas(t *testing.T) {
+	summary := func(id string) string { return `{"info":{"id":"` + id + `","cwd":"/tmp/x"}}` }
+	for name, c := range map[string]struct {
+		target, sibling map[string][]string
+	}{
+		"a file only the target has": {
+			target:  map[string][]string{"chat_history.jsonl": {`{"role":"user"}`}, "notes.md": {"mine"}},
+			sibling: map[string][]string{"chat_history.jsonl": {`{"role":"user"}`, `{"role":"assistant","content":"a long answer"}`}},
+		},
+		"a history that went its own way": {
+			target:  map[string][]string{"chat_history.jsonl": {`{"role":"user"}`, `{"role":"user","content":"here"}`}},
+			sibling: map[string][]string{"chat_history.jsonl": {`{"role":"user"}`, `{"role":"user","content":"there, and at more length"}`}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			id := "01a00000-0000-7000-8000-0000000009ff"
+			s, target, sibling := handoffGrokPair(t, id)
+			c.target["summary.json"], c.sibling["summary.json"] = []string{summary(id)}, []string{summary(id)}
+			now := time.Now()
+			handoffGrokWrite(t, target, now.Add(-time.Hour), c.target)
+			handoffGrokWrite(t, sibling, now, c.sibling)
+			before := map[string]os.FileInfo{}
+			bodies := map[string]string{}
+			for f := range c.target {
+				before[f], bodies[f] = handoffStat(t, filepath.Join(target, f)), handoffRead(t, filepath.Join(target, f))
+			}
+
+			if err := CopyForResume(s, s.Find(9), id); err != nil {
+				t.Fatalf("a fork is not a failed copy: %v", err)
+			}
+			for f := range c.target {
+				handoffUntouched(t, filepath.Join(target, f), before[f], bodies[f])
+			}
+			entries, err := os.ReadDir(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != len(c.target) {
+				t.Fatalf("the kept folder holds %d entries, want its own %d: %v", len(entries), len(c.target), entries)
+			}
+		})
+	}
+}
+
+// Transcripts run to megabytes, and the comparison reads them in pieces: a
+// difference far past the first piece still counts, and so does an older
+// copy that runs on past the newer one's end.
+func TestALongTranscriptIsComparedToItsEnd(t *testing.T) {
+	dir := t.TempDir()
+	long := strings.Repeat(`{"type":"assistant","message":{"content":"a long answer"}}`+"\n", 5000)
+	older, newer := filepath.Join(dir, "older.jsonl"), filepath.Join(dir, "newer.jsonl")
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(older, long)
+	write(newer, long+`{"type":"user"}`+"\n")
+	if !handoffExtends(newer, older) {
+		t.Fatal("a copy that goes on from the older one's last byte extends it")
+	}
+	write(older, long[:len(long)-10]+"0123456789")
+	if handoffExtends(newer, older) {
+		t.Fatal("a difference in the last bytes of a long copy is a fork")
+	}
+	write(older, long+`{"type":"user"}`+"\n"+`{"type":"assistant"}`+"\n")
+	if handoffExtends(newer, older) {
+		t.Fatal("an older copy that runs on past the newer one's end is not extended by it")
 	}
 }
