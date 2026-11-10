@@ -647,6 +647,27 @@ func TestARepaintDrawsLittleOfTheBacklogItself(t *testing.T) {
 	}
 }
 
+// A repaint counts the size the screen has yet to take: 4 KiB of line feeds
+// after a fit to 500×400 took a repaint 1.4 s, and 16 KiB took 7 s, drawn at
+// 80×24's allowance. It answers with no repaint and draws none of them.
+func TestARepaintDrawsLittleAtASizeItHasYetToTake(t *testing.T) {
+	s := newSession(Config{ID: testID}, newFakeChild()) // no emulator running
+	defer s.screen.Close()
+	if _, ok := s.resize(holdwire.SizeMsg{Cols: 500, Rows: 400}); !ok {
+		t.Fatal("the resize was not done")
+	}
+	s.took([]byte(strings.Repeat("\r\n", 2<<10)))
+	began := time.Now()
+	h, _, err := holdwire.ScreenOf(s.repaint(1))
+	took := time.Since(began)
+	s.em.lock.lock()
+	off := s.em.off
+	s.em.lock.unlock()
+	if err != nil || h.OK || off != 0 || h.Cols != 500 || h.Rows != 400 {
+		t.Fatalf("a repaint before a fit to 500x400 answered %+v in %v and drew to %d (%v)", h, took, off, err)
+	}
+}
+
 // workers waits until n links' screen workers are running in this process.
 func workers(t *testing.T, n int) {
 	t.Helper()

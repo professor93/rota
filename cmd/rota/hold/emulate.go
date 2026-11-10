@@ -56,7 +56,7 @@ func (s *Session) emulate() {
 		s.safely("the screen", func() {
 			s.em.lock.lock()
 			defer s.em.lock.unlock()
-			s.catchUp()
+			s.catchUp(false)
 		})
 	}
 }
@@ -66,12 +66,19 @@ func (s *Session) emulate() {
 // size the terminal took to take it there. The pieces are one batch, and
 // share one budget of repeats. The caller holds s.em.lock.
 //
+// A limited catch-up is a repaint's: it draws nothing, and says false, when
+// there is more to draw than drawLimit allows at the largest size the
+// screen takes on the way.
+//
 // A screen the ring has overtaken cannot know what it missed, so it is
 // retired for the session's life, said once, and the cursor is the corner
 // from then on, as it is for a screen whose emulator panicked.
-func (s *Session) catchUp() {
+func (s *Session) catchUp(limited bool) bool {
 	defer s.noticeLoss()
-	b := s.batch()
+	b, ok := s.batch(limited)
+	if !ok {
+		return false
+	}
 	// Registered once s.mu is let go, so that a panic anywhere in catchUp
 	// unwinds through it without waiting on a lock it holds itself.
 	defer s.drew(len(b.dues))
@@ -116,6 +123,7 @@ func (s *Session) catchUp() {
 	if target > s.em.off {
 		s.em.off, s.em.modes = target, modes
 	}
+	return true
 }
 
 // catchBatch is what one catch-up has to do: draw the ring up to target,
@@ -131,9 +139,12 @@ type catchBatch struct {
 }
 
 // batch takes what the screen owes up to the last ground point, under s.mu,
-// and counts its dues as owed, last, once nothing more can go wrong. The
-// caller holds s.em.lock.
-func (s *Session) batch() (b catchBatch) {
+// and counts its dues as owed, last, once nothing more can go wrong. A
+// limited batch takes nothing, and says false, when it has more to draw than
+// drawLimit allows at the largest size it takes: it is counted under the same
+// hold as it is read, so a read of output landing meanwhile is counted too.
+// The caller holds s.em.lock.
+func (s *Session) batch(limited bool) (b catchBatch, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b.target, b.modes = s.ground, s.gmodes
@@ -141,22 +152,31 @@ func (s *Session) batch() (b catchBatch) {
 	for n < len(s.dues) && s.dues[n].end <= b.target {
 		n++
 	}
-	b.dues = make([]due, n)
-	copy(b.dues, s.dues)
 	k := 0
 	for k < len(s.sizes) && s.sizes[k].end <= b.target {
 		k++
 	}
+	b.live = !s.em.retired && s.screen.OK()
+	if limited && b.live {
+		cells := int64(s.em.cols) * int64(s.em.rows)
+		for _, z := range s.sizes[:k] {
+			cells = max(cells, int64(z.cols)*int64(z.rows))
+		}
+		if b.target-s.em.off > drawLimit(cells) {
+			return catchBatch{}, false
+		}
+	}
+	b.dues = make([]due, n)
+	copy(b.dues, s.dues)
 	b.sizes = make([]sized, k)
 	copy(b.sizes, s.sizes)
-	b.live = !s.em.retired && s.screen.OK()
 	if b.live && b.target > s.em.off {
 		b.data, b.from = s.ring.Read(s.em.off)
 	}
 	s.dues = append(s.dues[:0], s.dues[n:]...)
 	s.sizes = append(s.sizes[:0], s.sizes[k:]...)
 	s.owed += n
-	return b
+	return b, true
 }
 
 // drew is the end of a catch-up: the n dues it took are answered, and how
@@ -230,9 +250,9 @@ func (s *Session) behind(limit int64) bool {
 // emulator draws in about a third of a second at its slowest, a line feed
 // at the bottom of the screen for each byte, which costs it about five
 // nanoseconds a cell. That is one read of output at 80×24, and less on a
-// larger screen. The caller holds s.em.lock.
-func (s *Session) drawLimit() int64 {
-	cells := max(int64(s.em.cols)*int64(s.em.rows), 1)
+// larger screen.
+func drawLimit(cells int64) int64 {
+	cells = max(cells, 1)
 	return min(maxBehind, maxBehind*80*24/cells)
 }
 
@@ -245,16 +265,16 @@ func (s *Session) drawLimit() int64 {
 // A repaint never waits long: a flood at a large size can hold the emulator
 // for minutes. A screen far behind is answered at once; one a little behind
 // is waited for repaintWait at most; and a repaint draws no more of the
-// backlog itself than drawLimit.
+// backlog itself than drawLimit allows at the largest size it takes on the
+// way.
 func (s *Session) repaint(seq uint64) []byte {
 	if !s.em.lock.tryLock() && (s.behind(maxBehind) || !s.em.lock.lockWithin(s.wait)) {
 		return s.unpainted(seq)
 	}
 	defer s.em.lock.unlock()
-	if s.behind(s.drawLimit()) {
+	if !s.catchUp(true) {
 		return s.unpainted(seq)
 	}
-	s.catchUp()
 	h := holdwire.ScreenHead{Seq: seq, Offset: s.em.off, Cols: s.em.cols, Rows: s.em.rows, Modes: s.em.modes}
 	var out []byte
 	if !s.em.retired {
