@@ -87,7 +87,7 @@ func spentOn(a *rota.Account, model string) string {
 			continue
 		}
 		name := modelWords(w.Name)
-		if len(name) > 1 && name[0] == "claude" {
+		if len(name) > 0 && name[0] == "claude" { // "Claude" alone names no model
 			name = name[1:]
 		}
 		if len(name) > 0 && slices.Contains(words, name[0]) {
@@ -193,9 +193,9 @@ func Next(accounts []*rota.Account) int {
 //
 // A request rota's own program or server makes may carry the model it named
 // in ctx; an account that has used that model's own window up to its
-// threshold is then passed by too (see spentOn), and so is one whose
-// provider has no such model, while another has it. Nothing else carries
-// one, and a choice without one is the one described above.
+// threshold is then passed by too (see spentOn), and so is one whose own
+// catalog does not list the model, while another's does. Nothing else
+// carries one, and a choice without one is the one described above.
 func Choose(ctx context.Context, st *store.Store, id int) (*rota.Account, error) {
 	if id != 0 {
 		a := st.Find(id)
@@ -224,32 +224,23 @@ func Choose(ctx context.Context, st *store.Store, id int) (*rota.Account, error)
 // account.
 //
 // model is the one the request named, or "": an account that has spent that
-// model's window is passed by like a spent one, and so is one whose
-// provider's catalog has no such model, unless no account has it.
+// model's window is passed by like a spent one. And while any account that
+// could be picked lists the model in its own catalog (lists), only those are
+// considered; when none does, the choice is the one it always was, and the
+// run's own check of the model answers for it.
 func pickIdle(st *store.Store, model string) (*rota.Account, error) {
 	queue := Queue(st.Accounts)
 	if len(queue) == 0 {
 		return nil, fmt.Errorf("%w: no account is in the rotation; give one an order", ErrNone)
 	}
+	only := model != "" && slices.ContainsFunc(queue, func(a *rota.Account) bool {
+		return Available(a) && lists(st, a, model)
+	})
 	busy := 0
-	var (
-		windows []string
-		// refused is the first account whose provider has no such model: the
-		// answer when no account has it, whose own run then says so, as it
-		// did before a request's model counted here at all.
-		refused *rota.Account
-	)
+	var windows []string
 	for _, a := range queue {
-		if !Available(a) {
+		if !Available(a) || only && !lists(st, a, model) {
 			continue
-		}
-		if model != "" {
-			if _, err := rota.ResolveModel(a.Provider, model); err != nil {
-				if refused == nil && !st.Busy(a) {
-					refused = a
-				}
-				continue
-			}
 		}
 		if w := spentOn(a, model); w != "" {
 			if !slices.Contains(windows, w) {
@@ -272,10 +263,20 @@ func pickIdle(st *store.Store, model string) (*rota.Account, error) {
 			"or has used its %s window up to its threshold; ask for another model, run one by id, raise its threshold, or add an account",
 			ErrNone, strings.Join(windows, " or "))
 	}
-	if refused != nil {
-		return refused, nil
-	}
 	return nil, errExhausted
+}
+
+// lists reports whether the account's own catalog — the one its run is
+// checked against — names model as one of its ids or aliases. A provider
+// that takes ids beyond its list lists only its list, so an id nobody lists
+// is left to the run to judge.
+func lists(st *store.Store, a *rota.Account, model string) bool {
+	for _, m := range rota.ModelsFor(a, st.Home(a)) {
+		if strings.EqualFold(m.ID, model) || slices.ContainsFunc(m.Aliases, func(s string) bool { return strings.EqualFold(s, model) }) {
+			return true
+		}
+	}
+	return false
 }
 
 // Backfill puts every account of a store written before rotation existed

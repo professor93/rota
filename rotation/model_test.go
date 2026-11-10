@@ -3,6 +3,8 @@ package rotation
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -65,6 +67,8 @@ func TestAModelsWindowCountsForARequestThatNamesIt(t *testing.T) {
 		{"Opus 4.1", "claude-opus-5", true},
 		{"Opus 4.1", "fable", false},
 		{"Opus 4.1", "claude-fable-5", false},
+		{"Claude", "claude-opus-5", false}, // a label of no model matches none
+		{"Claude", "claude-fable-5", false},
 	} {
 		a := withFable(1, 1, 10, 0)
 		a.Quota.Windows[1].Name, a.Quota.Windows[1].Percent = c.label, 100
@@ -103,37 +107,59 @@ func TestARefusalNamesTheModelsWindow(t *testing.T) {
 	}
 }
 
-// A request that names a model passes by an account whose provider has no
-// such model, for one that has it. When none has it, the first account is the
-// answer still, and its own catalog refuses the run, as it always did; when
-// the only accounts with the model have spent its window, that window is what
-// the refusal names.
-func TestARequestForAModelPassesByAProviderWithout(t *testing.T) {
-	codex := func(id, order int) *rota.Account {
-		return &rota.Account{ID: id, Provider: "codex", Order: order}
+// A request that names a model passes by an account whose own catalog — the
+// one its run is checked against — does not list that model, as an id or an
+// alias, for a later account whose catalog does. A provider that takes ids
+// beyond its list (grok) lists only its list. When no account lists the
+// model, the choice is the one it always was, and the run's own check
+// answers; when the only accounts that list it have spent its window, that
+// window is what the refusal names.
+func TestARequestForAModelGoesToAnAccountThatListsIt(t *testing.T) {
+	s := openTemp(t)
+	codex := func(id, order int, models ...string) *rota.Account {
+		a := &rota.Account{ID: id, Provider: "codex", Order: order}
+		if len(models) > 0 {
+			var rows []string
+			for _, m := range models {
+				rows = append(rows, `{"slug":"`+m+`","display_name":"`+m+`","visibility":"list"}`)
+			}
+			home := s.Home(a)
+			if err := os.MkdirAll(home, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, "models_cache.json"),
+				[]byte(`{"models":[`+strings.Join(rows, ",")+`]}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return a
 	}
 	claude := func(id, order int, fable float64) *rota.Account {
 		return &rota.Account{ID: id, Provider: "claude", Order: order, Quota: &rota.Quota{Windows: []rota.Window{
 			{Name: "5h", Percent: 10, Primary: true}, {Name: "Fable", Percent: fable, Scoped: true}}}}
 	}
-	s := openTemp(t)
+	grok := func(id, order int) *rota.Account { return &rota.Account{ID: id, Provider: "grok", Order: order} }
 	choose := func(model string) (*rota.Account, error) {
 		return Choose(askmodel.With(context.Background(), model), s, 0)
 	}
-
-	s.Accounts = []*rota.Account{codex(1, 1), claude(2, 2, 0)}
-	for model, want := range map[string]int{"fable": 2, "opus": 2, "claude-fable-5": 2, "": 1} {
-		if got, err := choose(model); err != nil || got.ID != want {
-			t.Errorf("model %q: %v %v, want account %d", model, got, err, want)
+	for _, c := range []struct {
+		what     string
+		accounts []*rota.Account
+		model    string
+		want     int
+	}{
+		{"claude lists fable, codex does not", []*rota.Account{codex(1, 1), claude(2, 2, 0)}, "fable", 2},
+		{"claude lists its own id", []*rota.Account{codex(1, 1), claude(2, 2, 0)}, "claude-fable-5", 2},
+		{"no model, the queue's order", []*rota.Account{codex(1, 1), claude(2, 2, 0)}, "", 1},
+		{"nobody lists it: the first, as before", []*rota.Account{codex(1, 1)}, "fable", 1},
+		{"a Claude id nobody lists stays on claude, not grok", []*rota.Account{claude(1, 1, 0), grok(2, 2)}, "claude-opus-5-5", 1},
+		{"codex's own catalog lists it: not passed by for grok", []*rota.Account{codex(11, 1, "gpt-5.7"), grok(2, 2)}, "gpt-5.7", 11},
+		{"one codex lacks it, the next lists it", []*rota.Account{codex(21, 1, "gpt-5.6-sol"), codex(22, 2, "gpt-5.5")}, "gpt-5.5", 22},
+	} {
+		s.Accounts = c.accounts
+		if got, err := choose(c.model); err != nil || got.ID != c.want {
+			t.Errorf("%s: %v %v, want account %d", c.what, got, err, c.want)
 		}
-	}
-
-	s.Accounts = []*rota.Account{codex(1, 1)}
-	if got, err := choose("fable"); err != nil || got.ID != 1 {
-		t.Fatalf("no account has the model: the first is the answer, %v %v", got, err)
-	}
-	if _, err := rota.ResolveModel("codex", "fable"); err == nil {
-		t.Fatal("codex's catalog takes fable, so this test proves nothing")
 	}
 
 	s.Accounts = []*rota.Account{claude(1, 1, 100), codex(2, 2)}

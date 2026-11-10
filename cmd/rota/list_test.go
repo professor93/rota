@@ -169,6 +169,7 @@ func TestListSaysInTheStatusCellWhenALoginEnds(t *testing.T) {
 func TestListNotesALoginInItsLastWeek(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("ROTA_HOME", home)
+	t.Setenv("PATH", t.TempDir()) // a listing starts no CLI, and could reach none
 	now := time.Now()
 	end := now.Add(5*24*time.Hour + 12*time.Hour + 30*time.Minute)
 	writeStore(t, home, fmt.Sprintf(`{"ordered":true,"nextId":3,"accounts":[

@@ -94,3 +94,21 @@ func TestAModelsWindowIsShownInTheListing(t *testing.T) {
 		t.Fatalf("the second account's windows: %+v", w)
 	}
 }
+
+// A Claude id rota's catalog does not list stays on the claude account in
+// front, whose own check answers for it as it always did, rather than going
+// to a grok account behind it, whose CLI takes ids beyond its list.
+func TestAModelNobodyListsIsJudgedWhereItAlwaysWas(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	now := time.Now().UnixMilli()
+	writeStore(t, home, fmt.Sprintf(`{"ordered":true,"nextId":3,"accounts":[
+		{"id":1,"provider":"claude","email":"first@x","order":1,"quotaAt":%d,"token":{"accessToken":"t"},
+		 "quota":{"windows":[{"name":"5h","percent":10,"primary":true}]}},
+		{"id":2,"provider":"grok","email":"g@x","order":2,"token":{"accessToken":"g1"}}]}`, now))
+	answering(t, "claude", "grok")
+	_, errOut, code := call(t, "run", "-v", "--model", "claude-opus-5-5", "a question")
+	if code == 0 || !strings.Contains(errOut, `claude has no model "claude-opus-5-5"`) || strings.Contains(errOut, "grok/") {
+		t.Fatalf("%d %q", code, errOut)
+	}
+}

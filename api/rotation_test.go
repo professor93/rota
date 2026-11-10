@@ -268,6 +268,9 @@ func TestRunWithNoAccountSaysWhenTheRotationIsEmpty(t *testing.T) {
 // model's window leaves nothing, the refusal says which window.
 func TestARunForAModelPassesByAnAccountThatSpentItsWindow(t *testing.T) {
 	h := newHarness(t, Options{})
+	// The harness puts its fakes in front of PATH; nothing but them is left
+	// on it, so no run here can reach a real CLI.
+	t.Setenv("PATH", strings.SplitN(os.Getenv("PATH"), string(os.PathListSeparator), 2)[0])
 	now := time.Now().UnixMilli()
 	blob := `{"ordered":true,"nextId":3,"accounts":[
 	 {"id":1,"provider":"claude","email":"a@x","order":1,"quotaAt":%[1]d,"token":{"accessToken":"tok-1"},

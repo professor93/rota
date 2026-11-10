@@ -439,9 +439,12 @@ func (claudeProvider) Quota(ctx context.Context, access string) (*Quota, error) 
 	// leaves it out, and never read as 0%, which would make a spent window
 	// look unspent: the windows that have a figure are the reading, so a
 	// spent one still counts. A reply that leaves none with a figure is a
-	// reading that failed, and the account keeps the last one it had.
+	// reading that failed, and the account keeps the last one it had; so is
+	// one that reported the account's own windows and gave none of them a
+	// figure, since a model's row alone reads the account as 0%.
 	q := &Quota{}
 	var without []string
+	own, ownWithout := 0, 0
 	for _, w := range []struct {
 		key, name string
 		w         *claudeWindow
@@ -450,8 +453,10 @@ func (claudeProvider) Quota(ctx context.Context, access string) (*Quota, error) 
 		case w.w == nil:
 		case w.w.Utilization == nil:
 			without = append(without, w.key)
+			ownWithout++
 		default:
 			q.Windows = append(q.Windows, Window{Name: w.name, Percent: *w.w.Utilization, ResetsAt: w.w.ResetsAt, Primary: w.name == "5h"})
+			own++
 		}
 	}
 	for _, l := range u.Limits {
@@ -464,7 +469,7 @@ func (claudeProvider) Quota(ctx context.Context, access string) (*Quota, error) 
 		}
 		q.Windows = append(q.Windows, Window{Name: l.Scope.Model.DisplayName, Percent: *l.Percent, ResetsAt: l.ResetsAt, Scoped: true})
 	}
-	if len(q.Windows) == 0 && len(without) > 0 {
+	if len(q.Windows) == 0 && len(without) > 0 || own == 0 && ownWithout > 0 {
 		return nil, noFigure(without)
 	}
 	if e := u.Extra; e != nil && e.Enabled && e.UsedCredits != nil && e.MonthlyLimit != nil {

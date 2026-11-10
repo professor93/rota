@@ -131,6 +131,16 @@ func TestTheWindowsWithAFigureAreTheReading(t *testing.T) {
 			  "quota":{"windows":[{"name":"5h","percent":100,"primary":true,"resetsAt":"%[2]s"}]}}]}`, now.Add(-6*time.Hour).UnixMilli(), reset),
 			"first@x",
 		},
+		{
+			"kept spent, the reply has a figure only in a model's row",
+			`{"five_hour":{"utilization":null},"seven_day":{"utilization":null},"limits":[{"kind":"weekly_scoped","percent":7,"resets_at":"2099-01-05T00:00:00Z","scope":{"model":{"display_name":"Fable"}}}]}`,
+			healthy,
+			fmt.Sprintf(`{"ordered":true,"nextId":3,"accounts":[
+			 {"id":1,"provider":"claude","email":"first@x","order":1,"token":{"accessToken":"t1"},"quotaAt":%d,
+			  "quota":{"windows":[{"name":"5h","percent":100,"primary":true,"resetsAt":"2099-01-01T00:00:00Z"}]}},
+			 {"id":2,"provider":"claude","email":"second@x","order":2,"token":{"accessToken":"t2"}}]}`, now.Add(-time.Hour).UnixMilli()),
+			"second@x",
+		},
 	} {
 		t.Run(c.what, func(t *testing.T) {
 			usageBy(t, map[string]string{"t1": c.first, "t2": c.second})

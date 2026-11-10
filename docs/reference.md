@@ -413,10 +413,12 @@ request names. When those windows leave nothing, the refusal names the
 window: `… or has used its Fable window up to its threshold; ask for another
 model, …`.
 
-Such a request also passes by an account whose CLI has no such model — a
-codex account, for `--model fable` — while another account in the queue has
-it. When none has it, the first account is chosen as before, and the run is
-refused there for a model its CLI does not take.
+Such a request also passes by an account whose own list of models — the one
+its run is checked against, for codex the plan's own — does not list it, as
+an id or an alias, while another account in the queue lists it: a codex
+account, for `--model fable`. A CLI that takes ids beyond its list, as grok
+does, lists only its list. When no account lists the model, the account is
+chosen as before, and its run says whether it takes the model.
 
 Accounts added before rotation existed are numbered by id the first time they
 are loaded, once; after that, an account left at 0 is a decision and nothing
@@ -3999,8 +4001,10 @@ no figure — `{"utilization": null}`, or a model's row with no `percent` —
 is left out too, as Claude Code leaves it out, and never read as 0%, which
 would make a spent account look unspent, and the rotation would stop on it.
 The windows that do have a figure are the reading, so a spent one still
-counts. A reply that gives none of its windows a figure is no reading at
-all: the account keeps the reading it had, dated when that was taken (or
+counts. A reply that gives none of its windows a figure, or none of the
+account's own (`five_hour`, `seven_day`) when it reports them, is no
+reading at all — a model's row alone would read the account as 0% — so
+the account keeps the reading it had, dated when that was taken (or
 none, `-` and `never`, as before), and the usage endpoint is left alone for
 the backoff below, as after a `429`, with its own reason: `the usage
 endpoint gave no window a figure`.
