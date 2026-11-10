@@ -124,9 +124,20 @@ func (v *view) output(p []byte) {
 		v.write(p)
 		return
 	}
-	if v.screen != nil {
+	// With no screen there is nothing to draw but the note, and the
+	// session's modes, which its keys need.
+	if v.screen != nil || !v.moded || v.cropModes() != v.modes {
 		v.dirty = true
 	}
+}
+
+// cropModes are the session's modes as a crop gives them to the window:
+// less the mouse, whose places would point at the wrong cells, and less the
+// alternate screen, which Set leaves alone.
+func (v *view) cropModes() vtscan.Modes {
+	m := v.scan.Modes()
+	m.Mouse, m.MouseEncoding, m.AltScreen = 0, 0, false
+	return m
 }
 
 // resized follows the session to a new size: its screen with it, or none
@@ -189,7 +200,10 @@ func (v *view) choose() bool {
 	case !crop && v.crop:
 		v.crop = false
 		v.drawn = nil
-		v.write([]byte("\x1b[?1049l"))
+		// What the crop set on the alternate screen is cleared there, the
+		// kitty flags among it, which are each screen's own; the repaint
+		// then sets the session's modes on the screen it is on.
+		v.write(append(vtscan.ResetModes(), "\x1b[?1049l"...))
 		if !v.repaint() {
 			// No screen to show: the session's modes at least, so its
 			// keys still work.
@@ -246,10 +260,11 @@ func (v *view) flush() bool {
 		return false
 	}
 	var b bytes.Buffer
-	// The session's modes less the mouse, whose places would point at the
-	// wrong cells, and less the alternate screen, which Set leaves alone.
-	m := v.scan.Modes()
-	m.Mouse, m.MouseEncoding, m.AltScreen = 0, 0, false
+	// Autowrap is off while the crop draws, so that a character the
+	// person's terminal counts wider than the screen does cannot wrap a row
+	// and scroll the window, and back on before the write ends.
+	b.WriteString("\x1b[?7l")
+	m := v.cropModes()
 	if !v.moded || m != v.modes {
 		b.Write(vtscan.ResetModes())
 		b.Write(m.Set())
@@ -287,6 +302,7 @@ func (v *view) flush() bool {
 	b.WriteString("\x1b[" + strconv.Itoa(v.winRows) + ";1H\x1b[7m")
 	text := viewNoteText(v.note(v.sessCols, v.sessRows, v.winCols, v.winRows), v.winCols)
 	viewLine(&b, 0, []byte(text), v.winCols)
+	b.WriteString("\x1b[?7h")
 	if drew && w.CursorIn && !m.CursorHidden {
 		b.WriteString("\x1b[" + strconv.Itoa(w.Row+1) + ";" + strconv.Itoa(w.Col+1) + "H\x1b[?25h")
 	} else {

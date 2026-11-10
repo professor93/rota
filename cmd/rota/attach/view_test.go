@@ -15,11 +15,11 @@ import (
 
 // viewNote is a note that says all four sizes and is 60 characters long.
 func viewNote(sc, sr, wc, wr int) string {
-	s := fmt.Sprintf("%d×%d session in a %d×%d window ", sc, sr, wc, wr)
+	s := fmt.Sprintf("%dx%d session in a %dx%d window ", sc, sr, wc, wr)
 	return s + strings.Repeat("-", 60-utf8.RuneCountInString(s))
 }
 
-func testView(t *testing.T, sc, sr, wc, wr int) (*view, *bytes.Buffer) {
+func viewTest(t *testing.T, sc, sr, wc, wr int) (*view, *bytes.Buffer) {
 	t.Helper()
 	var out bytes.Buffer
 	v := newView(&out, sc, sr, wc, wr, viewNote)
@@ -27,20 +27,20 @@ func testView(t *testing.T, sc, sr, wc, wr int) (*view, *bytes.Buffer) {
 	return v, &out
 }
 
-// xLines fills a session of cols by rows with x, one line at a time.
-func xLines(v *view, cols, rows int) {
+// viewXLines fills a session of cols by rows with x, one line at a time.
+func viewXLines(v *view, cols, rows int) {
 	for r := range rows {
 		v.output([]byte(fmt.Sprintf("\x1b[%d;1H%s", r+1, strings.Repeat("x", cols))))
 	}
 }
 
-// rowAt is where the view starts drawing a row.
-var rowAt = regexp.MustCompile(`\x1b\[(\d+);1H`)
+// viewRowAt is where the view starts drawing a row.
+var viewRowAt = regexp.MustCompile(`\x1b\[(\d+);1H`)
 
-// drawnRows splits what the view wrote at each row it drew, by row number.
-func drawnRows(out []byte) map[string][]string {
+// viewRows splits what the view wrote at each row it drew, by row number.
+func viewRows(out []byte) map[string][]string {
 	rows := map[string][]string{}
-	idx := rowAt.FindAllSubmatchIndex(out, -1)
+	idx := viewRowAt.FindAllSubmatchIndex(out, -1)
 	for i, m := range idx {
 		end := len(out)
 		if i+1 < len(idx) {
@@ -75,7 +75,7 @@ func TestViewportFollowsTheCursor(t *testing.T) {
 }
 
 func TestPassThroughWritesTheBytesAsTheyCame(t *testing.T) {
-	v, out := testView(t, 80, 24, 80, 24)
+	v, out := viewTest(t, 80, 24, 80, 24)
 	if out.Len() != 0 || v.cropped() {
 		t.Fatalf("a view that fits wrote %q, cropped %v", out, v.cropped())
 	}
@@ -92,16 +92,16 @@ func TestPassThroughWritesTheBytesAsTheyCame(t *testing.T) {
 		t.Errorf("redraw wrote %q, want a repaint with hi", out)
 	}
 	if !v.screenOK() {
-		t.Error("an 80×24 session has no screen")
+		t.Error("an 80x24 session has no screen")
 	}
 }
 
 func TestACropNeverWritesPastTheWindow(t *testing.T) {
-	v, out := testView(t, 100, 30, 40, 12)
+	v, out := viewTest(t, 100, 30, 40, 12)
 	if !v.cropped() {
-		t.Fatal("a 100×30 session in a 40×12 window is not cropped")
+		t.Fatal("a 100x30 session in a 40x12 window is not cropped")
 	}
-	xLines(v, 100, 30)
+	viewXLines(v, 100, 30)
 	if !v.flush() {
 		t.Fatal("flush drew nothing")
 	}
@@ -109,7 +109,7 @@ func TestACropNeverWritesPastTheWindow(t *testing.T) {
 	if bytes.Contains(all, []byte(strings.Repeat("x", 41))) || bytes.ContainsAny(all, "\r\n") {
 		t.Fatal("the session's output reached the window raw")
 	}
-	rows := drawnRows(all)
+	rows := viewRows(all)
 	for r, segs := range rows {
 		for _, s := range segs {
 			if w := ansi.StringWidth(s); w > 40 {
@@ -127,16 +127,32 @@ func TestACropNeverWritesPastTheWindow(t *testing.T) {
 	if len(notes) == 0 {
 		t.Fatalf("no note on the last row in %q", all)
 	}
+	// Nothing drawn can wrap and scroll the crop, on a terminal that counts
+	// a character wider than the view does, and autowrap is never left off.
+	at := viewRowAt.FindAllIndex(all, -1)
+	for _, m := range at {
+		if bytes.HasPrefix(all[m[1]:], []byte("\x1b[?25h")) {
+			continue // the cursor put back in the first column
+		}
+		off := bytes.LastIndex(all[:m[0]], []byte("\x1b[?7l"))
+		on := bytes.LastIndex(all[:m[0]], []byte("\x1b[?7h"))
+		if off < 0 || on > off {
+			t.Fatalf("a row is drawn with autowrap on: %q", all)
+		}
+	}
+	if tail := all[at[len(at)-1][1]:]; !bytes.Contains(tail, []byte("\x1b[?7h")) {
+		t.Errorf("autowrap is not back on after the note: %q", tail)
+	}
 	note := notes[len(notes)-1]
 	want := ansi.Truncate(viewNote(100, 30, 40, 12), 40, "")
-	if !strings.HasPrefix(note, "\x1b[7m") || ansi.Strip(note) != want || !strings.HasPrefix(want, "100×30") {
+	if !strings.HasPrefix(note, "\x1b[7m") || ansi.Strip(note) != want || !strings.HasPrefix(want, "100x30") {
 		t.Errorf("the note row is %q, want %q in reverse", note, want)
 	}
 }
 
 func TestACropDrawsOnlyWhatChanged(t *testing.T) {
-	v, out := testView(t, 100, 30, 40, 12)
-	xLines(v, 100, 30)
+	v, out := viewTest(t, 100, 30, 40, 12)
+	viewXLines(v, 100, 30)
 	v.output([]byte("\x1b[30;1H"))
 	v.flush()
 	out.Reset()
@@ -150,7 +166,7 @@ func TestACropDrawsOnlyWhatChanged(t *testing.T) {
 	if !v.flush() {
 		t.Fatal("flush drew nothing")
 	}
-	rows := drawnRows(out.Bytes())
+	rows := viewRows(out.Bytes())
 	if len(rows) != 2 || len(rows["11"]) != 1 || len(rows["12"]) != 1 {
 		t.Fatalf("flush drew rows %q, want row 11 and the note", rows)
 	}
@@ -163,7 +179,7 @@ func TestACropDrawsOnlyWhatChanged(t *testing.T) {
 	// A redraw draws it all again on a cleared window.
 	out.Reset()
 	v.redraw()
-	if rows := drawnRows(out.Bytes()); len(rows) != 12 || !strings.Contains(out.String(), "\x1b[2J") {
+	if rows := viewRows(out.Bytes()); len(rows) != 12 || !strings.Contains(out.String(), "\x1b[2J") {
 		t.Errorf("redraw drew %d rows: %q", len(rows), out)
 	}
 	// The cursor hidden, or out of the crop, is hidden.
@@ -176,11 +192,11 @@ func TestACropDrawsOnlyWhatChanged(t *testing.T) {
 }
 
 func TestACropTurnsTheMouseOffAndKeepsTheKeys(t *testing.T) {
-	v, out := testView(t, 100, 30, 40, 12)
-	v.output([]byte("\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1h"))
+	v, out := viewTest(t, 100, 30, 40, 12)
+	v.output([]byte("\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[?1h\x1b[=1;1u"))
 	v.flush()
 	got := out.String()
-	for _, want := range []string{"\x1b[?2004h", "\x1b[?1h"} {
+	for _, want := range []string{"\x1b[?2004h", "\x1b[?1h", "\x1b[=1;1u"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the crop never wrote %q: %q", want, got)
 		}
@@ -196,10 +212,16 @@ func TestACropTurnsTheMouseOffAndKeepsTheKeys(t *testing.T) {
 	if !strings.Contains(out.String(), "\x1b[?1002h") {
 		t.Errorf("leaving the crop wrote %q, with no mouse", out)
 	}
+	// What the crop set on the alternate screen is cleared there, before it
+	// is left: kitty keeps a stack of flags for each screen.
+	before, _, ok := strings.Cut(out.String(), "\x1b[?1049l")
+	if !ok || !strings.Contains(before, "\x1b[=0;1u") {
+		t.Errorf("leaving the crop wrote %q before ESC[?1049l, with no kitty reset", before)
+	}
 }
 
 func TestTheWindowGrowingLeavesTheCrop(t *testing.T) {
-	v, out := testView(t, 100, 30, 40, 12)
+	v, out := viewTest(t, 100, 30, 40, 12)
 	if !strings.HasPrefix(out.String(), "\x1b[?1049h") {
 		t.Errorf("entering the crop wrote %q, not the alternate screen first", out)
 	}
@@ -210,9 +232,9 @@ func TestTheWindowGrowingLeavesTheCrop(t *testing.T) {
 	if v.cropped() {
 		t.Fatal("a window as large as the session is still cropped")
 	}
-	rest, ok := bytes.CutPrefix(out.Bytes(), []byte("\x1b[?1049l"))
+	rest, ok := bytes.CutPrefix(out.Bytes(), append(vtscan.ResetModes(), "\x1b[?1049l"...))
 	if !ok || !bytes.HasPrefix(rest, vtscan.ResetModes()) || !bytes.Contains(rest, []byte("hello")) {
-		t.Fatalf("leaving the crop wrote %q, want ESC[?1049l and a repaint", out)
+		t.Fatalf("leaving the crop wrote %q, want the modes reset, ESC[?1049l and a repaint", out)
 	}
 	out.Reset()
 	v.output([]byte("raw\x1b[1m"))
@@ -222,9 +244,9 @@ func TestTheWindowGrowingLeavesTheCrop(t *testing.T) {
 }
 
 func TestNoScreenMeansANoteNotBytes(t *testing.T) {
-	v, out := testView(t, 1000, 1000, 80, 24)
+	v, out := viewTest(t, 1000, 1000, 80, 24)
 	if v.screenOK() || !v.cropped() {
-		t.Fatalf("a 1000×1000 session: screen %v, cropped %v", v.screenOK(), v.cropped())
+		t.Fatalf("a 1000x1000 session: screen %v, cropped %v", v.screenOK(), v.cropped())
 	}
 	v.output([]byte("secret\r\nmore secret\x1b[31m"))
 	v.flush()
@@ -232,13 +254,23 @@ func TestNoScreenMeansANoteNotBytes(t *testing.T) {
 	if strings.Contains(got, "secret") {
 		t.Fatalf("the session's bytes reached the window: %q", got)
 	}
-	if !strings.Contains(got, "\x1b[2J") || !strings.Contains(got, "1000×1000") {
+	if !strings.Contains(got, "\x1b[2J") || !strings.Contains(got, "1000x1000") {
 		t.Errorf("no note on a cleared window: %q", got)
+	}
+	// The session's modes still reach the window, for its keys.
+	out.Reset()
+	v.output([]byte("\x1b[?2004hsecret"))
+	if !v.flush() || !strings.Contains(out.String(), "\x1b[?2004h") || strings.Contains(out.String(), "secret") {
+		t.Errorf("a mode change with no screen wrote %q", out)
+	}
+	out.Reset()
+	if v.output([]byte("more secret")); v.flush() || out.Len() != 0 {
+		t.Errorf("output with no screen and no mode change wrote %q", out)
 	}
 }
 
 func TestASessionGrowingPastTheWindowCrops(t *testing.T) {
-	v, out := testView(t, 80, 24, 80, 24)
+	v, out := viewTest(t, 80, 24, 80, 24)
 	v.output([]byte("hi"))
 	v.resized(100, 30)
 	if !v.cropped() || !strings.HasPrefix(out.String(), "hi\x1b[?1049h") {
@@ -255,7 +287,7 @@ func TestASessionGrowingPastTheWindowCrops(t *testing.T) {
 	v.resized(1000, 1000)
 	v.output([]byte("secret"))
 	v.flush()
-	if v.screenOK() || strings.Contains(out.String(), "secret") || !strings.Contains(out.String(), "1000×1000") {
+	if v.screenOK() || strings.Contains(out.String(), "secret") || !strings.Contains(out.String(), "1000x1000") {
 		t.Errorf("a session grown past a screen: screen %v, wrote %q", v.screenOK(), out)
 	}
 	// Smaller than the window again: the bytes pass, with nothing to repaint.

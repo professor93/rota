@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/x/ansi"
 )
 
-// cropScreen is a 20×5 screen with text on the second row, a red word and two
+// cropScreen is a 20x5 screen with text on the second row, a red word and two
 // wide characters on the third and fourth, and the cursor at row 2, column 3,
 // counted from 0.
 func cropScreen(t *testing.T) *Screen {
@@ -104,7 +104,7 @@ func TestCropShowsAWindowOntoTheScreen(t *testing.T) {
 		t.Errorf("cursor Row %d Col %d CursorIn %v, want 1 2 true", w.Row, w.Col, w.CursorIn)
 	}
 	if c, r := s.Size(); c != 20 || r != 5 {
-		t.Errorf("Size is %d×%d, want 20×5", c, r)
+		t.Errorf("Size is %dx%d, want 20x5", c, r)
 	}
 }
 
@@ -145,7 +145,7 @@ func TestCropWithoutAnEmulatorIsNothing(t *testing.T) {
 		t.Errorf("a closed screen cropped to %+v, %v", w, ok)
 	}
 	if c, r := s.Size(); c != 0 || r != 0 {
-		t.Errorf("a closed screen's size is %d×%d", c, r)
+		t.Errorf("a closed screen's size is %dx%d", c, r)
 	}
 	if w, ok := noScreen().Crop(0, 0, 10, 3); ok || w.Rows != nil {
 		t.Errorf("no screen cropped to %+v, %v", w, ok)
