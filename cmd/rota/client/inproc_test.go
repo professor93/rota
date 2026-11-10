@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/professor93/rota/api"
@@ -40,6 +41,11 @@ func TestInProcessServesTheHandler(t *testing.T) {
 	if resp, err := c.HTTP().Get("http://rota/v1/session"); err == nil {
 		resp.Body.Close()
 		t.Fatalf("a request after stop was answered %d", resp.StatusCode)
+	}
+	// What it says of itself reads as a sentence, its subject said once.
+	err = c.Health()
+	if err == nil || !strings.HasPrefix(err.Error(), "the rota daemon in this process: ") || strings.Count(err.Error(), "rota daemon") != 1 {
+		t.Fatalf("a request after stop: %v", err)
 	}
 	stop()
 }

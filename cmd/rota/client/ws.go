@@ -85,19 +85,34 @@ type wsConn struct {
 	heldOp  byte
 }
 
-// wsProtocolError is a frame the server should never have sent.
+// wsProtocolError is a frame the server should never have sent. Its
+// sentence has no subject: whoever returns it names the daemon.
 type wsProtocolError struct{ why string }
 
-func (e wsProtocolError) Error() string {
-	return "the rota daemon broke the WebSocket protocol: " + e.why
-}
+func (e wsProtocolError) Error() string { return "broke the WebSocket protocol: " + e.why }
 
 // wsQuietError is a server that said nothing, not even a ping, for as long
-// as one is waited for.
-type wsQuietError struct{ err error }
+// as a frame is waited for: a read that ran out of time, never a write.
+type wsQuietError struct {
+	wait time.Duration
+	err  error
+}
 
-func (e wsQuietError) Error() string { return "the rota daemon has said nothing for a minute" }
+func (e wsQuietError) Error() string { return "has said nothing for " + wsSpan(e.wait) }
 func (e wsQuietError) Unwrap() error { return e.err }
+
+// wsSpan is a wait in the words a person reads: a minute, 30s, 100ms.
+func wsSpan(d time.Duration) string {
+	switch {
+	case d == time.Minute:
+		return "a minute"
+	case d > time.Minute && d%time.Minute == 0:
+		return fmt.Sprintf("%d minutes", d/time.Minute)
+	case d >= time.Second:
+		return d.Round(time.Second).String()
+	}
+	return d.String()
+}
 
 // wsHandshake asks for the upgrade on conn and reads the answer. A 101 that
 // proves itself is the socket, read from what the answer left buffered;
@@ -145,6 +160,8 @@ func wsHandshake(conn net.Conn, path string, deadline time.Time) (*wsConn, *http
 		return nil, nil, nil, wsProtocolError{"its 101 answered another key"}
 	case len(resp.Header.Values("Sec-WebSocket-Extensions")) > 0:
 		return nil, nil, nil, wsProtocolError{"its 101 named an extension nobody asked for"}
+	case len(resp.Header.Values("Sec-WebSocket-Protocol")) > 0:
+		return nil, nil, nil, wsProtocolError{"its 101 named a subprotocol nobody asked for"}
 	}
 	return &wsConn{conn: conn, r: br, quiet: wsQuiet, turn: make(chan struct{}, 1)}, nil, nil, nil
 }
@@ -175,8 +192,12 @@ func (w *wsConn) send(op byte, payload []byte) error {
 // sendAll writes payload as frames of op of at most chunk bytes each, all
 // in one turn, so that nothing anybody else sends lands between them. The
 // last frame is never a single byte: the server reads a lone Esc or
-// Ctrl-C in a frame of its own as a key pressed on its own.
+// Ctrl-C in a frame of its own as a key pressed on its own. A chunk is at
+// least 3 bytes, the least for which keeping the tail off one byte never
+// makes another frame of one: under it the loop could not end, or would
+// only move the lone byte to the front.
 func (w *wsConn) sendAll(op byte, payload []byte, chunk int) error {
+	chunk = max(chunk, 3)
 	w.turn <- struct{}{}
 	defer func() { <-w.turn }()
 	for len(payload) > 0 {
@@ -266,10 +287,19 @@ func wsSendable(code int) bool {
 	return false
 }
 
-// frame reads one frame, waiting at most wait for it. The server's frames
-// are never masked, and a frame is judged by its head before its payload
-// is allocated.
+// frame reads one frame, waiting at most wait for it: a read that runs out
+// of time is a wsQuietError saying how long.
 func (w *wsConn) frame(wait time.Duration) (op byte, payload []byte, fin bool, err error) {
+	op, payload, fin, err = w.readFrame(wait)
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		err = wsQuietError{wait, err}
+	}
+	return op, payload, fin, err
+}
+
+// readFrame is frame's reading. The server's frames are never masked, and
+// a frame is judged by its head before its payload is allocated.
+func (w *wsConn) readFrame(wait time.Duration) (op byte, payload []byte, fin bool, err error) {
 	_ = w.conn.SetReadDeadline(time.Now().Add(wait))
 	var head [2]byte
 	if _, err := io.ReadFull(w.r, head[:]); err != nil {
@@ -332,8 +362,6 @@ func (w *wsConn) message(wait time.Duration) (op byte, payload []byte, err error
 			err = net.ErrClosed
 		case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
 			err = io.ErrUnexpectedEOF
-		case errors.Is(err, os.ErrDeadlineExceeded):
-			err = wsQuietError{err}
 		}
 		w.drop()
 	}

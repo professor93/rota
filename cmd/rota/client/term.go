@@ -1,6 +1,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,7 +22,7 @@ import (
 // what each sends goes out whole, never between another's frames.
 type Term struct {
 	ws    *wsConn
-	sock  string
+	said  string // what an error calls the daemon, as the Client does
 	hello Hello
 
 	closeOnce sync.Once
@@ -115,28 +116,28 @@ func (c *Client) Attach(id string, watch bool) (*Term, error) {
 	defer cancel()
 	conn, err := c.dial(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("the rota daemon on %s: %w", c.sock, err)
+		return nil, fmt.Errorf("%s: %w", c.said, err)
 	}
 	ws, resp, raw, err := wsHandshake(conn, path, deadline)
 	if err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("the rota daemon on %s: %w", c.sock, err)
+		return nil, fmt.Errorf("%s: %w", c.said, err)
 	}
 	if resp != nil {
 		conn.Close()
 		return nil, termRefusal(resp, raw, path)
 	}
-	t := &Term{ws: ws, sock: c.sock}
+	t := &Term{ws: ws, said: c.said}
 	op, payload, err := ws.message(time.Until(deadline))
 	if err != nil {
-		return nil, fmt.Errorf("the rota daemon on %s: %w", c.sock, err)
+		return nil, fmt.Errorf("%s: %w", c.said, err)
 	}
 	var kind struct {
 		Type string `json:"type"`
 	}
 	if op != wsOpText || !termDecode(payload, &kind) || kind.Type != "hello" || !termDecode(payload, &t.hello) {
 		ws.drop()
-		return nil, fmt.Errorf("the rota daemon on %s: %w", c.sock, wsProtocolError{"its first frame was not hello"})
+		return nil, fmt.Errorf("%s: %w", c.said, wsProtocolError{"its first frame was not hello"})
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return t, nil
@@ -144,8 +145,11 @@ func (c *Client) Attach(id string, watch bool) (*Term, error) {
 
 // termDecode reads a document into v leniently: a field of another type
 // than v's is passed over and the rest kept. It is false only for what is
-// not a JSON object at all.
+// not a JSON object at all, null among them.
 func termDecode(raw []byte, v any) bool {
+	if trimmed := bytes.TrimLeft(raw, " \t\r\n"); len(trimmed) == 0 || trimmed[0] != '{' {
+		return false
+	}
 	err := json.Unmarshal(raw, v)
 	var mistyped *json.UnmarshalTypeError
 	return err == nil || errors.As(err, &mistyped) && mistyped.Field != ""
@@ -188,7 +192,7 @@ func (t *Term) Next() (Frame, error) {
 	if err != nil {
 		var closed *Closed
 		if !errors.As(err, &closed) && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, net.ErrClosed) {
-			err = fmt.Errorf("the rota daemon on %s: %w", t.sock, err)
+			err = fmt.Errorf("%s: %w", t.said, err)
 		}
 		t.ended = err
 		return Frame{}, err

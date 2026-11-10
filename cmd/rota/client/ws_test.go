@@ -57,7 +57,7 @@ func peerRaw(t *testing.T, script func(pt *peerT, conn net.Conn, br *bufio.Reade
 			t.Error(e)
 		}
 	})
-	return dialledBy("a test peer", func(context.Context) (net.Conn, error) {
+	return dialledBy("the rota daemon on a test peer", func(context.Context) (net.Conn, error) {
 		server, client := net.Pipe()
 		wg.Add(1)
 		go func() {
@@ -223,6 +223,7 @@ func TestA101MustBeAWebSocketsOwn(t *testing.T) {
 		"no Connection":       "Upgrade: websocket\r\n",
 		"another key":         "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: AAAA\r\n",
 		"an extension":        "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Extensions: permessage-deflate\r\n",
+		"a subprotocol":       "Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Protocol: rota\r\n",
 		"no Upgrade: websock": "Upgrade: h2c\r\nConnection: Upgrade\r\n",
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -396,8 +397,21 @@ func TestASilentServerIsSaidSo(t *testing.T) {
 	}))
 	tm.ws.quiet = 100 * time.Millisecond
 	_, err := tm.Next()
-	if err == nil || !strings.Contains(err.Error(), "the rota daemon on a test peer") || !strings.Contains(err.Error(), "said nothing") {
+	if err == nil || err.Error() != "the rota daemon on a test peer: has said nothing for 100ms" {
 		t.Fatalf("a silent server: %v", err)
+	}
+}
+
+// A document that is not an object, null among them, is a broken protocol.
+func TestANullDocumentIsRefused(t *testing.T) {
+	tm := attachPeer(t, peer(t, func(_ *peerT, conn net.Conn, br *bufio.Reader) {
+		_ = peerWrite(conn, 0x1, []byte(" null"))
+		_, _, _, _ = peerRead(br)
+	}))
+	f, err := tm.Next()
+	var pe wsProtocolError
+	if !errors.As(err, &pe) || strings.Count(err.Error(), "rota daemon") != 1 {
+		t.Fatalf("a null document: %+v %v, want a protocol error naming the daemon once", f, err)
 	}
 }
 
@@ -512,5 +526,42 @@ func TestAPasteNeverEndsInALoneByte(t *testing.T) {
 	got := <-sizes
 	if len(got) != 2 || got[1] < 2 {
 		t.Fatalf("a paste of %d bytes went out as frames of %v", termTypeChunk+1, got)
+	}
+}
+
+// A chunk too small to keep every frame past one byte is taken as 3, so a
+// paste still ends, with no frame of one byte.
+func TestASmallChunkStillEnds(t *testing.T) {
+	sizes := make(chan []int, 2)
+	tm := attachPeer(t, peer(t, func(pt *peerT, _ net.Conn, br *bufio.Reader) {
+		for range 2 {
+			var got []int
+			for total := 0; total < 3; {
+				_, payload, _, err := peerRead(br)
+				if err != nil {
+					pt.Errorf("reading typing: %v", err)
+					return
+				}
+				got = append(got, len(payload))
+				total += len(payload)
+			}
+			sizes <- got
+		}
+		_, _, _, _ = peerRead(br)
+	}))
+	for _, chunk := range []int{1, 0} {
+		done := make(chan error, 1)
+		go func() { done <- tm.ws.sendAll(wsOpBinary, []byte("abc"), chunk) }()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatal(err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("sendAll with a chunk of %d never ended", chunk)
+		}
+		if got := <-sizes; len(got) != 1 || got[0] != 3 {
+			t.Fatalf("3 bytes with a chunk of %d went out as frames of %v, want one of 3", chunk, got)
+		}
 	}
 }

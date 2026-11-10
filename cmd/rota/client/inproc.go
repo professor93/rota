@@ -9,9 +9,13 @@ import (
 	"sync"
 )
 
-// inprocName is what a client of a handler in this process says it is
-// talking to, where a daemon's would name its socket.
-const inprocName = "in process"
+// inprocName is the address of a connection in process, and inprocSaid
+// what a client of a handler in this process says it is talking to, where
+// a daemon's client names its socket.
+const (
+	inprocName = "in process"
+	inprocSaid = "the rota daemon in this process"
+)
 
 // InProcess is a client of h itself, with no socket between: every request
 // and every attach is a connection of an in-memory pipe that an
@@ -26,7 +30,7 @@ func InProcess(h http.Handler) (c *Client, stop func()) {
 	// screen.
 	srv := &http.Server{Handler: h, ReadHeaderTimeout: requestWait, ErrorLog: log.New(io.Discard, "", 0)}
 	go func() { _ = srv.Serve(ln) }()
-	c = dialledBy(inprocName, ln.dial)
+	c = dialledBy(inprocSaid, ln.dial)
 	var once sync.Once
 	return c, func() {
 		once.Do(func() {
