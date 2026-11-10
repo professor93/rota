@@ -129,15 +129,15 @@ func TestAHintRowKeepsWholeItems(t *testing.T) {
 	}
 }
 
-// cup is a cursor position, CSI row;col H.
-var cup = regexp.MustCompile(`\x1b\[(\d+);(\d+)H`)
+// linesCUP is a cursor position, CSI row;col H.
+var linesCUP = regexp.MustCompile(`\x1b\[(\d+);(\d+)H`)
 
-// rowsOf splits what a draw wrote at each cursor position into its row,
+// linesRowsOf splits what a draw wrote at each cursor position into its row,
 // column and the printable text written there.
-func rowsOf(t *testing.T, b []byte) (rows, cols []int, texts []string) {
+func linesRowsOf(t *testing.T, b []byte) (rows, cols []int, texts []string) {
 	t.Helper()
 	s := string(b)
-	at := cup.FindAllStringSubmatchIndex(s, -1)
+	at := linesCUP.FindAllStringSubmatchIndex(s, -1)
 	for i, m := range at {
 		end := len(s)
 		if i+1 < len(at) {
@@ -180,7 +180,7 @@ func TestDrawnRowsFitTheWindow(t *testing.T) {
 		if !strings.HasPrefix(string(b), "\x1b7") || !strings.HasSuffix(string(b), "\x1b8") {
 			t.Errorf("%dx%d: drawCard does not save and restore the cursor: %q", cols, rows, b)
 		}
-		rs, cs, texts := rowsOf(t, b)
+		rs, cs, texts := linesRowsOf(t, b)
 		if len(rs) == 0 {
 			t.Errorf("%dx%d: drawCard drew nothing", cols, rows)
 		}
