@@ -19,7 +19,8 @@ import (
 // tab makes them: two control-only ones passed through env.gate, one
 // disabled and one with no help, so the footer and the help can be held to
 // exactly the enabled ones. With many it has as many keys as the Accounts
-// tab. It records the keys and clicks that reach it.
+// tab. It records the keys, pastes and clicks that reach it. A
+// chromeFocusMsg focuses its field, and esc puts the field down.
 type chromeTab struct {
 	title  string
 	e      *env
@@ -28,8 +29,13 @@ type chromeTab struct {
 	typing bool
 	lines  []string
 	keys   []string
+	pastes []string
 	mice   []string
 }
+
+// chromeFocusMsg gives a chromeTab's field focus, as a message a tab hears
+// after the chrome can.
+type chromeFocusMsg struct{}
 
 func (c *chromeTab) Title() string { return c.title }
 
@@ -37,8 +43,17 @@ func (c *chromeTab) Update(msg tea.Msg) (tab, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		c.keys = append(c.keys, msg.String())
+		if msg.String() == "esc" {
+			c.typing = false
+		}
+	case tea.PasteMsg:
+		c.pastes = append(c.pastes, msg.Content)
+	case chromeFocusMsg:
+		c.typing = true
 	case tea.MouseClickMsg:
 		c.mice = append(c.mice, fmt.Sprintf("click %d,%d", msg.X, msg.Y))
+	case tea.MouseReleaseMsg:
+		c.mice = append(c.mice, fmt.Sprintf("release %d,%d", msg.X, msg.Y))
 	case tea.MouseWheelMsg:
 		c.mice = append(c.mice, fmt.Sprintf("wheel %d,%d", msg.X, msg.Y))
 	}
@@ -149,12 +164,14 @@ func chromeWho(name, role string) *fakeBackend {
 
 func chromeLines(m *Model) []string { return strings.Split(plain(m), "\n") }
 
-// chromeBody is the rows between the header and the footer's last line,
-// each with its spaces run together, and the blank rows at the end left out.
-func chromeBody(m *Model) []string {
+// chromeRows is the body's rows, between the header and the footer with
+// its toasts, each with its spaces run together, the blank ones at the end
+// left out.
+func chromeRows(m *Model) []string {
 	lines := chromeLines(m)
+	top, h := m.body()
 	var out []string
-	for _, l := range lines[1 : len(lines)-1] {
+	for _, l := range lines[top : top+h] {
 		out = append(out, strings.Join(strings.Fields(l), " "))
 	}
 	for len(out) > 0 && out[len(out)-1] == "" {
@@ -164,6 +181,22 @@ func chromeBody(m *Model) []string {
 }
 
 func chromeQuits(seen []tea.Msg) bool { return slices.Contains(seen, tea.Msg(tea.QuitMsg{})) }
+
+// chromeAskRead is the quit ask as drawn, its rows joined: from the row it
+// starts on to the footer's last line.
+func chromeAskRead(m *Model) string {
+	lines := chromeLines(m)
+	var rows []string
+	for i, l := range lines[:len(lines)-1] {
+		if strings.HasPrefix(strings.TrimSpace(l), "press ") {
+			for _, r := range lines[i : len(lines)-1] {
+				rows = append(rows, strings.TrimSpace(r))
+			}
+			break
+		}
+	}
+	return strings.Join(rows, " ")
+}
 
 func chromeTrueColor(o *Options) {
 	p := colorprofile.TrueColor
@@ -285,18 +318,20 @@ func TestQuitTakesTwoPresses(t *testing.T) {
 		tabs := chromeRegister(t, 10, 30)
 		ticks := &fakeTicks{}
 		m := chromeModel(t, &fakeBackend{}, ticks, 120, 30)
-		tabs[30].busy = "an answer is streaming"
+		tabs[30].busy = "the open answer"
 		run(t, m, press("q")...)
-		if want := "press q again to quit; an answer is streaming ends too"; !strings.Contains(plain(m), want) {
-			t.Errorf("want %q in\n%s", want, plain(m))
+		if got, want := chromeAskRead(m), "press q again to quit; the open answer ends too"; got != want {
+			t.Errorf("the ask is %q, want %q", got, want)
 		}
 		// Two seconds on, its fade not delivered yet, a press asks again,
-		// and the new ask replaces the old.
+		// and the new ask replaces the old. A login flow put aside is not
+		// said to end: its login stays parked (R18).
 		ticks.advance(2 * time.Second)
+		tabs[10].busy = "the open run"
 		run(t, m, openMsg{O: chromeAsider{&shellOverlay{asider: true}, "login abc123 · 9m"}}, press("esc")[0])
 		run(t, m, press("q")...)
-		if want := "press q again to quit; an answer is streaming and login abc123 · 9m end too"; !strings.Contains(plain(m), want) {
-			t.Errorf("want %q in\n%s", want, plain(m))
+		if got, want := chromeAskRead(m), "press q again to quit; the open run and the open answer end too"; got != want {
+			t.Errorf("the ask is %q, want %q", got, want)
 		}
 		if strings.Count(plain(m), "again to quit") != 1 {
 			t.Errorf("a second ask did not replace the first:\n%s", plain(m))
@@ -311,6 +346,138 @@ func TestQuitTakesTwoPresses(t *testing.T) {
 			t.Errorf("three toasts after the ask:\n%s", p)
 		}
 	})
+	// The ask is wrapped to the width, never cut.
+	t.Run("wraps", func(t *testing.T) {
+		tabs := chromeRegister(t, 10, 30)
+		m := chromeModel(t, &fakeBackend{}, &fakeTicks{}, 60, 20)
+		tabs[10].busy, tabs[30].busy = "the open answer", "the open run"
+		run(t, m, press("q")...)
+		if got, want := chromeAskRead(m), "press q again to quit; the open answer and the open run end too"; got != want {
+			t.Errorf("at 60 columns the ask is %q, want %q", got, want)
+		}
+		lines := chromeLines(m)
+		for _, l := range lines[17:19] {
+			if textWidth(l) != 59 || strings.Contains(l, "…") {
+				t.Errorf("a row of the ask is %q, %d wide; want it whole, ending at column 59", l, textWidth(l))
+			}
+		}
+	})
+	// What has become busy since the first press is said before it ends.
+	t.Run("busy since", func(t *testing.T) {
+		tabs := chromeRegister(t, 10, 30)
+		m := chromeModel(t, &fakeBackend{}, &fakeTicks{}, 80, 24)
+		run(t, m, press("q")...)
+		tabs[30].busy = "the open answer"
+		if got, want := chromeAskRead(m), "press q again to quit; the open answer ends too"; got != want {
+			t.Errorf("the ask is drawn as %q, want %q", got, want)
+		}
+		if _, seen := run(t, m, press("q")...); chromeQuits(seen) {
+			t.Error("a press quit what became busy after the ask")
+		}
+		if _, seen := run(t, m, press("q")...); !chromeQuits(seen) {
+			t.Error("the press after the new ask did not quit")
+		}
+	})
+	// Once a field has focus the ask names ctrl+c, and a ctrl+c asks again
+	// rather than answer an ask that named q.
+	t.Run("label", func(t *testing.T) {
+		tabs := chromeRegister(t, 10)
+		m := chromeModel(t, &fakeBackend{}, &fakeTicks{}, 80, 24)
+		run(t, m, press("q")...)
+		tabs[10].typing = true
+		if got := chromeAskRead(m); got != "press ctrl+c again to quit" {
+			t.Errorf("with a field focused the ask is drawn as %q", got)
+		}
+		if _, seen := run(t, m, press("ctrl+c")...); chromeQuits(seen) {
+			t.Error("ctrl+c quit on an ask that named q")
+		}
+		if _, seen := run(t, m, press("ctrl+c")...); !chromeQuits(seen) {
+			t.Error("the second ctrl+c did not quit")
+		}
+	})
+}
+
+// M2: in a terminal too small to draw, the quit ask still shows under the
+// size message, so a second press never ends something unseen; ? opens
+// nothing there.
+func TestChromeAsksToQuitWhenTooSmall(t *testing.T) {
+	tabs := chromeRegister(t, 10)
+	m := chromeModel(t, &fakeBackend{}, &fakeTicks{}, 50, 10)
+	tabs[10].busy = "the open answer"
+	if _, seen := run(t, m, press("q")...); chromeQuits(seen) {
+		t.Fatal("one press quit")
+	}
+	lines := chromeLines(m)
+	if lines[0] != "rota needs a terminal of at least 60×14; this one is 50×10" {
+		t.Errorf("the first line is %q", lines[0])
+	}
+	var ask []string
+	for _, l := range lines[1:] {
+		if textWidth(l) > 49 {
+			t.Errorf("a row of the ask is %d wide: %q", textWidth(l), l)
+		}
+		ask = append(ask, strings.TrimSpace(l))
+	}
+	if got, want := strings.Join(ask, " "), "press q again to quit; the open answer ends too"; got != want {
+		t.Errorf("small, the ask is %q, want %q", got, want)
+	}
+	run(t, m, press("?")...)
+	run(t, m, size(80, 24))
+	if strings.Contains(plain(m), "Everywhere") {
+		t.Errorf("? while small opened the help:\n%s", plain(m))
+	}
+	run(t, m, size(50, 10))
+	if _, seen := run(t, m, press("q")...); !chromeQuits(seen) {
+		t.Error("the second press after a seen ask did not quit")
+	}
+}
+
+// M1: the help is modal for pastes too, and once a field has taken focus
+// under it, it is shut and stays shut when the field is put down.
+func TestChromeHelpTakesNoPasteAndStaysShut(t *testing.T) {
+	tabs := chromeRegister(t, 10)
+	m := chromeModel(t, &fakeBackend{}, &fakeTicks{}, 80, 24)
+	run(t, m, press("?")[0], tea.PasteStartMsg{}, tea.PasteMsg{Content: "pasted"}, tea.PasteEndMsg{})
+	if len(tabs[10].pastes) != 0 || !strings.Contains(plain(m), "Everywhere") {
+		t.Errorf("a paste under the help reached the tab (%q), or closed it:\n%s", tabs[10].pastes, plain(m))
+	}
+	run(t, m, append([]tea.Msg{chromeFocusMsg{}}, press("x", "esc")...)...)
+	if strings.Contains(plain(m), "Everywhere") || !slices.Equal(tabs[10].keys, []string{"x", "esc"}) {
+		t.Errorf("after a field took focus and was put down the help is back, or the field took %q:\n%s", tabs[10].keys, plain(m))
+	}
+	run(t, m, press("?")...)
+	o := &chromeOverlay{typing: true}
+	run(t, m, append([]tea.Msg{openMsg{O: o}}, press("a", "b", "esc")...)...)
+	if !o.closed || !slices.Equal(o.keys, []string{"a", "b", "esc"}) || strings.Contains(plain(m), "Everywhere") {
+		t.Errorf("after a form with a field: closed %v, keys %q, help\n%s", o.closed, o.keys, plain(m))
+	}
+}
+
+// Whatever reaches the chrome from outside, a name over SSH, a badge, a
+// tab's title, a binding's help or what a tab is busy with, is drawn
+// through clean: no escape, no key.
+func TestChromeCleansWhatOthersSay(t *testing.T) {
+	tabs := chromeRegister(t, 10, 30)
+	secret := "sk-ant-api03-" + strings.Repeat("B", 40)
+	tabs[30].title = "Ask\x1b[2J"
+	m := chromeModel(t, chromeWho("eve\x1b[2J "+secret, "control"), &fakeTicks{}, 120, 30, func(o *Options) { o.Remote = true })
+	run(t, m, openMsg{O: chromeAsider{&shellOverlay{asider: true}, "login \x1b]0;title\x07 " + secret}}, press("esc")[0])
+	views := []string{m.View().Content}
+	keys := []key.Binding{key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎\x1b[2J", "save "+secret))}
+	run(t, m, openMsg{O: &chromeOverlay{bindings: keys}}, press("?")[0])
+	views = append(views, m.View().Content)
+	tabs[10].busy = "the answer\x1b[2J " + secret
+	run(t, m, press("esc", "esc", "q")...)
+	views = append(views, m.View().Content)
+	for i, v := range views {
+		if strings.Contains(v, "\x1b[2J") || strings.Contains(v, "\x1b]0;") || strings.Contains(v, secret) {
+			t.Errorf("view %d draws what it was given as it was:\n%q", i, v)
+		}
+	}
+	if p := plain(m); !strings.Contains(p, "eve[2J sk-ant-[not repeated] · control") || !strings.Contains(p, "Ask[2J") ||
+		!strings.Contains(p, "the answer[2J sk-ant-[not repeated] ends too") {
+		t.Errorf("what was cleaned is not drawn:\n%s", p)
+	}
 }
 
 // chromeHelpWant is what the help should list for a tab's bindings: its
@@ -337,14 +504,24 @@ func TestHelpListsExactlyTheEnabledKeys(t *testing.T) {
 			m := chromeModel(t, chromeWho("p", role), &fakeTicks{}, 80, 40)
 			run(t, m, press("?")...)
 			want := chromeHelpWant("Accounts", tabs[10].Keys(), g.Quit, g.Help, g.Mouse, g.Next, g.Prev, g.Jump)
-			if got := chromeBody(m); !slices.Equal(got, want) {
+			if got := chromeRows(m); !slices.Equal(got, want) {
 				t.Errorf("the help lists\n%q\nwant\n%q", got, want)
 			}
-			if gated := slices.Contains(chromeBody(m), "n add"); gated != (role == "control") {
+			if gated := slices.Contains(chromeRows(m), "n add"); gated != (role == "control") {
 				t.Errorf("as %s the help lists n: %v", role, gated)
 			}
 		})
 	}
+	// With one tab there is nothing to switch to.
+	t.Run("one tab", func(t *testing.T) {
+		tabs := chromeRegister(t, 10)
+		m := chromeModel(t, &fakeBackend{}, &fakeTicks{}, 80, 40)
+		run(t, m, press("?")...)
+		want := chromeHelpWant("Accounts", tabs[10].Keys(), g.Quit, g.Help, g.Mouse)
+		if got := chromeRows(m); !slices.Equal(got, want) {
+			t.Errorf("with one tab the help lists\n%q\nwant\n%q", got, want)
+		}
+	})
 	// Over an overlay, its keys are listed, and switching tabs is not,
 	// since it does not work there.
 	t.Run("overlay", func(t *testing.T) {
@@ -356,7 +533,7 @@ func TestHelpListsExactlyTheEnabledKeys(t *testing.T) {
 		}
 		run(t, m, openMsg{O: &chromeOverlay{bindings: keys}}, press("?")[0])
 		want := chromeHelpWant("Here", keys, g.Quit, g.Help, g.Mouse)
-		if got := chromeBody(m); !slices.Equal(got, want) {
+		if got := chromeRows(m); !slices.Equal(got, want) {
 			t.Errorf("over an overlay the help lists\n%q\nwant\n%q", got, want)
 		}
 	})
@@ -386,25 +563,51 @@ func TestChromeHelpTakesTheInput(t *testing.T) {
 		t.Errorf("with the help open a tab took %q %q %q", tabs[10].keys, tabs[30].keys, tabs[10].mice)
 	}
 	// The wheel moved it by a line; ↑ moves it back, and ↓ stops at its end.
-	first := chromeBody(m)[0]
+	first := chromeRows(m)[0]
 	run(t, m, press("up")...)
-	if top := chromeBody(m)[0]; top == first || !strings.HasPrefix(top, "Accounts") {
+	if top := chromeRows(m)[0]; top == first || !strings.HasPrefix(top, "Accounts") {
 		t.Errorf("the help did not scroll: %q then %q", first, top)
 	}
 	run(t, m, press(slices.Repeat([]string{"down"}, 30)...)...)
-	if last := chromeBody(m); !strings.HasPrefix(last[len(last)-1], "e edit") {
+	if last := chromeRows(m); !strings.HasPrefix(last[len(last)-1], "e edit") {
 		t.Errorf("scrolled to its end the help shows\n%q", last)
 	}
 	// Past its end it stops, so one ↑ moves it straight back.
 	run(t, m, press("up")...)
-	if last := chromeBody(m); strings.HasPrefix(last[len(last)-1], "e edit") {
+	if last := chromeRows(m); strings.HasPrefix(last[len(last)-1], "e edit") {
 		t.Errorf("one ↑ after scrolling past the end did not move the help:\n%q", last)
 	}
-	// A click closes it and reaches no tab.
-	run(t, m, tea.MouseClickMsg{X: 5, Y: 3, Button: tea.MouseLeft})
-	if strings.Contains(plain(m), "Everywhere") || len(tabs[10].mice) != 0 {
+	// With toasts above the footer it has fewer rows, and still scrolls to
+	// its end and says it scrolls.
+	run(t, m, toastMsg{Text: "one"}, toastMsg{Text: "two"})
+	run(t, m, press(slices.Repeat([]string{"down"}, 30)...)...)
+	if last := chromeRows(m); len(last) == 0 || !strings.HasPrefix(last[len(last)-1], "e edit") {
+		t.Errorf("with two toasts, scrolled to its end the help shows\n%q", last)
+	}
+	if foot := chromeLines(m)[13]; !strings.Contains(foot, "↑/↓ scroll") {
+		t.Errorf("with two toasts the footer is %q", foot)
+	}
+	// M keeps its meaning inside the help, which stays open.
+	run(t, m, press("M")...)
+	if m.View().MouseMode != tea.MouseModeCellMotion || strings.Contains(plain(m), "tab Accounts") {
+		t.Errorf("M inside the help: mouse %v\n%s", m.View().MouseMode, plain(m))
+	}
+	// A click closes it, and neither it nor its release reaches the tab;
+	// the next click and release are the tab's.
+	run(t, m, tea.MouseClickMsg{X: 5, Y: 3, Button: tea.MouseLeft}, tea.MouseReleaseMsg{X: 5, Y: 3, Button: tea.MouseLeft})
+	if !strings.Contains(plain(m), "tab Accounts") || len(tabs[10].mice) != 0 {
 		t.Errorf("a click did not close the help, or reached the tab (%q):\n%s", tabs[10].mice, plain(m))
 	}
+	run(t, m, tea.MouseClickMsg{X: 5, Y: 3, Button: tea.MouseLeft}, tea.MouseReleaseMsg{X: 5, Y: 3, Button: tea.MouseLeft})
+	if want := []string{"click 5,2", "release 5,2"}; !slices.Equal(tabs[10].mice, want) {
+		t.Errorf("after the help closed the tab took %q, want %q", tabs[10].mice, want)
+	}
+	// Opened again, it starts at its top.
+	run(t, m, press("?")...)
+	if rows := chromeRows(m); len(rows) == 0 || !strings.HasPrefix(rows[0], "Accounts") {
+		t.Errorf("reopened, the help starts at %q", rows)
+	}
+	run(t, m, press("esc")...)
 	for _, closer := range []string{"esc", "?"} {
 		run(t, m, press("?", closer)...)
 		if strings.Contains(plain(m), "Everywhere") {
@@ -499,7 +702,7 @@ func TestMouseIsOffUntilM(t *testing.T) {
 		t.Errorf("a click on Accounts did not show it:\n%s", plain(m))
 	}
 	// Beside the tabs, and over an overlay, a click shows nothing new.
-	run(t, m, tea.MouseClickMsg{X: 2, Y: 0, Button: tea.MouseLeft}, tea.MouseClickMsg{X: ask + 6, Y: 0, Button: tea.MouseLeft})
+	run(t, m, tea.MouseClickMsg{X: 2, Y: 0, Button: tea.MouseLeft}, tea.MouseClickMsg{X: ask + 3, Y: 0, Button: tea.MouseLeft})
 	o := &shellOverlay{}
 	run(t, m, openMsg{O: o}, tea.MouseClickMsg{X: ask, Y: 0, Button: tea.MouseLeft}, press("esc")[0])
 	if !strings.Contains(plain(m), "tab Accounts") || len(o.mice) != 0 || len(tabs[10].mice)+len(tabs[30].mice) != 0 {
@@ -559,6 +762,14 @@ func TestChromeFitsItsWidth(t *testing.T) {
 			if strings.Contains(head, "someone") && !strings.HasSuffix(head, "… · control") && !strings.HasSuffix(head, long+" · control") {
 				t.Errorf("at %d columns the name is not cut whole: %q", w, head)
 			}
+			if textWidth(foot) > w-1 {
+				t.Errorf("at %d columns the footer reaches the last column: %q", w, foot)
+			}
+			if _, name, ok := strings.Cut(head, "live  "); ok && strings.Contains(name, "…") {
+				if kept, _, _ := strings.Cut(name, "…"); textWidth(kept) < 3 {
+					t.Errorf("at %d columns the name is cut to %q", w, kept)
+				}
+			}
 			if !strings.HasPrefix(foot, " login waiting") || !strings.HasSuffix(foot, "q quit") {
 				t.Errorf("at %d columns the footer is %q", w, foot)
 			}
@@ -568,6 +779,29 @@ func TestChromeFitsItsWidth(t *testing.T) {
 			if toast := strings.TrimRight(lines[22], " "); !strings.HasSuffix(toast, "…") && !strings.HasSuffix(toast, "toast") {
 				t.Errorf("at %d columns the toast is %q", w, toast)
 			}
+		}
+	}
+}
+
+// A cut that ends on a wide character leaves no blank cell before what
+// follows it: the name before " · role", the badge before the keys, a
+// toast before the edge.
+func TestChromeCutsEndOnALetter(t *testing.T) {
+	chromeRegister(t, 10, 30)
+	m := chromeModel(t, chromeWho(strings.Repeat("山田太郎", 10), "control"), &fakeTicks{}, 80, 24, func(o *Options) { o.Remote = true })
+	run(t, m, openMsg{O: chromeAsider{&shellOverlay{asider: true}, "ログイン" + strings.Repeat("待ち", 40)}}, press("esc")[0],
+		toastMsg{Text: strings.Repeat("日本語のアカウント", 10)})
+	for w := 60; w <= 120; w++ {
+		run(t, m, size(w, 24))
+		lines := chromeLines(m)
+		if head := lines[0]; !strings.HasSuffix(head, "… · control") {
+			t.Errorf("at %d columns the header is %q", w, head)
+		}
+		if toast := lines[22]; strings.HasSuffix(toast, " ") || textWidth(toast) > w-1 {
+			t.Errorf("at %d columns the toast is %q", w, toast)
+		}
+		if foot := lines[23]; strings.Contains(foot, "…   ") {
+			t.Errorf("at %d columns the badge leaves a blank: %q", w, foot)
 		}
 	}
 }
@@ -600,7 +834,7 @@ func TestChromeBothEastAsianModes(t *testing.T) {
 		env = append(env, "RUNEWIDTH_EASTASIAN=1")
 	}
 	cmd := exec.Command(exe, "-test.count=1", "-test.v", "-test.run",
-		"^(TestTextModeIsTheOneAsked|TestTheHeaderSaysWhatRuns|TestToastsStackAndFade|TestChromeHelpTakesTheInput|TestChromeFitsItsWidth)$")
+		"^(TestTextModeIsTheOneAsked|TestTheHeaderSaysWhatRuns|TestToastsStackAndFade|TestChromeHelpTakesTheInput|TestChromeFitsItsWidth|TestChromeCutsEndOnALetter|TestQuitTakesTwoPresses)$")
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {

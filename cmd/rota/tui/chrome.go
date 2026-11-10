@@ -7,8 +7,9 @@ package tui
 // takes every key and click while it is open; the two-step quit; and M,
 // which turns the mouse on, so that a click on a tab in the header shows it.
 //
-// The shell (model.go) calls header, footer, helpView, chromeKey,
-// chromeMouse and chromeUpdate, and keeps chromeState in Model.chrome.
+// The shell (model.go) calls header, footer, helpView (chrome_help.go),
+// chromeKey, chromeMouse and chromeUpdate, and keeps chromeState in
+// Model.chrome.
 // Nothing here does I/O, what is drawn depends on the model alone, and
 // every string drawn passes through clean and is measured with textWidth.
 
@@ -31,18 +32,23 @@ const (
 )
 
 // chromeState is what the chrome keeps between messages: the toasts shown,
-// the oldest first; when a first quit press asked, zero while none waits;
-// and whether the help is open, with the first of its lines shown.
+// the oldest first; when a first quit press asked and what its ask said,
+// zero while none waits; whether the help is open, with the first of its
+// lines shown; and that the release of the click that closed it is still
+// to come.
 type chromeState struct {
-	toasts []chromeToast
-	quitAt time.Time
-	help   bool
-	top    int
+	toasts  []chromeToast
+	quitAt  time.Time
+	ask     string
+	help    bool
+	top     int
+	release bool
 }
 
 // chromeToast is a toast being shown: its text, cleaned, its level, and
-// when it goes. quit marks the ask of the two-step quit, which a second ask
-// replaces and which more toasts never push out.
+// when it goes. quit marks the ask of the two-step quit: it is drawn as it
+// reads when drawn, a second ask replaces it, and more toasts never push it
+// out.
 type chromeToast struct {
 	text  string
 	level int
@@ -55,20 +61,18 @@ type chromeToast struct {
 // drawn, so the rows the footer takes do not change between Update and View.
 type chromeFadeMsg struct{}
 
-// chromeBindings are the chrome's keys beyond the global ones: those the
-// help takes while it is open, and ctrl+c as the footer and the quit ask
-// name it while a field takes q.
+// chromeBindings are the keys the help takes while it is open, beyond the
+// global ones.
 type chromeBindings struct {
-	Close, Up, Down, Interrupt key.Binding
+	Close, Up, Down key.Binding
 }
 
 func chromeKeys() chromeBindings {
 	return chromeBindings{
 		Close: key.NewBinding(key.WithKeys("esc", "?"), key.WithHelp("esc", "close")),
 		// Up's help stands for both ways; Down has none of its own.
-		Up:        key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/↓", "scroll")),
-		Down:      key.NewBinding(key.WithKeys("down", "j")),
-		Interrupt: key.NewBinding(key.WithKeys("ctrl+c"), key.WithHelp("ctrl+c", "quit")),
+		Up:   key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/↓", "scroll")),
+		Down: key.NewBinding(key.WithKeys("down", "j")),
 	}
 }
 
@@ -188,8 +192,9 @@ func (m *Model) chromeRuns(room int) chromeLine {
 		return append(slices.Clone(state), chromeSpan{"  " + name + sep + role, th.Muted})
 	}
 	var cut chromeLine
-	if rest := room - who("").width(); name != "" && rest >= 4 {
-		cut = who(fit(name, rest))
+	// A name is cut to no fewer than three columns and its "…".
+	if rest := room - who("").width(); name != "" && rest >= 3+textWidth("…") {
+		cut = who(strings.TrimRight(fit(name, rest), " "))
 	}
 	return chromeFirst(room, who(name), cut, state, state[:1])
 }
@@ -208,28 +213,39 @@ func chromeFirst(room int, lines ...chromeLine) chromeLine {
 // footer is the toasts, the newest lowest, and under them the keys that
 // work where the person is.
 func (m *Model) footer(width int) string {
-	var lines []string
-	for _, t := range m.chrome.toasts {
-		lines = append(lines, m.chromeToastLine(t, width))
-	}
-	return strings.Join(append(lines, m.chromeKeysLine(width)), "\n")
+	return strings.Join(append(m.chromeToastLines(width), m.chromeKeysLine(width)), "\n")
 }
 
-// chromeToastLine is a toast right-aligned one column in from the edge,
-// cut with "…" where it is wider than that leaves.
-func (m *Model) chromeToastLine(t chromeToast, width int) string {
-	text := t.text
-	if room := width - 2; textWidth(text) > room {
-		text = fit(text, room)
+// chromeToastLines are the toasts as drawn, the oldest first, each
+// right-aligned one column in from the edge: the quit ask as it reads now,
+// wrapped to the width, and every other toast cut with "…". The view of a
+// terminal too small to draw shows them too (model.go), so a second quit
+// press never ends something unseen.
+func (m *Model) chromeToastLines(width int) []string {
+	room := width - 2
+	var out []string
+	for _, t := range m.chrome.toasts {
+		texts := []string{t.text}
+		switch {
+		case t.quit:
+			texts = wrap(m.chromeAsk(), room)
+		case textWidth(t.text) > room:
+			texts = []string{strings.TrimRight(fit(t.text, room), " ")}
+		}
+		style := m.e.th.Good
+		switch t.level {
+		case levelWarn:
+			style = m.e.th.Warn
+		case levelErr:
+			style = m.e.th.Over
+		}
+		for _, s := range texts {
+			if s != "" {
+				out = append(out, strings.Repeat(" ", max(width-1-textWidth(s), 0))+style.Render(s))
+			}
+		}
 	}
-	style := m.e.th.Good
-	switch t.level {
-	case levelWarn:
-		style = m.e.th.Warn
-	case levelErr:
-		style = m.e.th.Over
-	}
-	return strings.Repeat(" ", max(width-1-textWidth(text), 0)) + style.Render(text)
+	return out
 }
 
 // chromeKeysLine is the footer's last line: the badge of a flow put aside,
@@ -245,7 +261,7 @@ func (m *Model) chromeKeysLine(width int) string {
 			here = append(here, chromeBound.Up)
 		}
 	case m.typing():
-		here, own = m.focusKeys(), []key.Binding{chromeBound.Interrupt}
+		here, own = m.focusKeys(), []key.Binding{m.own.Interrupt}
 	default:
 		here, own = m.focusKeys(), []key.Binding{m.keys.Help, m.keys.Quit}
 	}
@@ -268,7 +284,7 @@ func (m *Model) chromeKeysLine(width int) string {
 		}
 	}
 	if rest := room - line("", nil).width() - 2; badge != "" && rest > 0 {
-		return " " + line(fit(badge, rest), nil).draw()
+		return " " + line(strings.TrimRight(fit(badge, rest), " "), nil).draw()
 	}
 	return " " + chromeCut(line("", nil), room).draw()
 }
@@ -298,136 +314,6 @@ func chromeHelps(bs []key.Binding) []key.Help {
 	return out
 }
 
-// chromeGroup is one group of the help: its title and its bindings' help.
-type chromeGroup struct {
-	title string
-	keys  []key.Help
-}
-
-// chromeHelp is what the help lists: the enabled bindings of the view with
-// focus, under the tab's title or, for an overlay, "Here"; then the global
-// ones that work there, tab switching only where tabs switch.
-func (m *Model) chromeHelp() []chromeGroup {
-	var groups []chromeGroup
-	title := "Here"
-	if t := m.current(); len(m.stack) == 0 && t != nil {
-		title = clean(t.Title())
-	}
-	if here := chromeHelps(m.focusKeys()); len(here) > 0 {
-		groups = append(groups, chromeGroup{title, here})
-	}
-	global := []key.Binding{m.keys.Quit, m.keys.Help, m.keys.Mouse}
-	if len(m.stack) == 0 && len(m.tabs) > 1 {
-		global = append(global, m.keys.Next, m.keys.Prev, m.keys.Jump)
-	}
-	return append(groups, chromeGroup{"Everywhere", chromeHelps(global)})
-}
-
-// chromeHelpLines lays the help out for a body of width×height: the groups
-// one under another where that fits, else side by side where that does,
-// else one under another to scroll. Each line is two columns in and at most
-// width wide.
-func (m *Model) chromeHelpLines(width, height int) []chromeLine {
-	th := m.e.th
-	var blocks [][]chromeLine
-	for _, g := range m.chromeHelp() {
-		kw := 0
-		for _, h := range g.keys {
-			kw = max(kw, textWidth(h.Key))
-		}
-		block := []chromeLine{{{g.title, th.Title}}}
-		for _, h := range g.keys {
-			block = append(block, chromeLine{{fit(h.Key, kw), th.Key}, {"  " + h.Desc, th.Text}})
-		}
-		blocks = append(blocks, block)
-	}
-	var lines []chromeLine
-	for i, b := range blocks {
-		if i > 0 {
-			lines = append(lines, nil)
-		}
-		lines = append(lines, b...)
-	}
-	if side := m.chromeSide(blocks); len(lines) > height && len(side) < len(lines) && chromeWidest(side)+2 <= width {
-		lines = side
-	}
-	out := make([]chromeLine, len(lines))
-	for i, l := range lines {
-		if len(l) > 0 {
-			out[i] = append(chromeLine{{"  ", th.Text}}, chromeCut(l, width-2)...)
-		}
-	}
-	return out
-}
-
-// chromeSide is blocks side by side, four columns apart, with no spaces
-// left at the end of a row.
-func (m *Model) chromeSide(blocks [][]chromeLine) []chromeLine {
-	rows := 0
-	for _, b := range blocks {
-		rows = max(rows, len(b))
-	}
-	out := make([]chromeLine, rows)
-	for r := range out {
-		at, from := 0, 0 // where the row has got to, and where block i starts
-		for i, b := range blocks {
-			if i > 0 {
-				from += chromeWidest(blocks[i-1]) + 4
-			}
-			if r >= len(b) {
-				continue
-			}
-			if from > at {
-				out[r] = append(out[r], chromeSpan{strings.Repeat(" ", from-at), m.e.th.Text})
-			}
-			out[r] = append(out[r], b[r]...)
-			at = from + b[r].width()
-		}
-	}
-	return out
-}
-
-func chromeWidest(lines []chromeLine) int {
-	w := 0
-	for _, l := range lines {
-		w = max(w, l.width())
-	}
-	return w
-}
-
-// chromeHelpOpen says the help is shown: open, with no field taking keys,
-// since the shell gives a field every key but ctrl+c.
-func (m *Model) chromeHelpOpen() bool { return m.chrome.help && !m.typing() }
-
-// chromeBody is the body's height as the chrome lays the screen out: the
-// terminal's, less the header and the footer with its toasts (model.body,
-// which the footer cannot call, since body asks the footer).
-func (m *Model) chromeBody() int { return m.e.height - 2 - len(m.chrome.toasts) }
-
-// helpView is the help in place of the body, or "" while it is closed.
-func (m *Model) helpView(width, height int) string {
-	if !m.chromeHelpOpen() || height <= 0 {
-		return ""
-	}
-	lines := m.chromeHelpLines(width, height)
-	top := max(0, min(m.chrome.top, len(lines)-height))
-	var out []string
-	for _, l := range lines[top:min(top+height, len(lines))] {
-		out = append(out, l.draw())
-	}
-	if s := strings.Join(out, "\n"); s != "" {
-		return s
-	}
-	return " "
-}
-
-// chromeScroll moves the help by n lines, within what it has.
-func (m *Model) chromeScroll(n int) {
-	h := m.chromeBody()
-	last := len(m.chromeHelpLines(m.e.width, h)) - h
-	m.chrome.top = max(0, min(m.chrome.top+n, last))
-}
-
 // chromeKey takes a key no field is typing, or ctrl+c from one. While the
 // help is open it takes every key: ? or esc closes it, ↑ and ↓ scroll it,
 // and q and M still do what they do everywhere.
@@ -451,7 +337,8 @@ func (m *Model) chromeKey(k tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 	switch {
 	case key.Matches(k, m.keys.Quit):
 		return true, m.chromeQuit()
-	case key.Matches(k, m.keys.Help):
+	case key.Matches(k, m.keys.Help) && !m.small():
+		// Not while the terminal is too small to show it.
 		m.chrome.help, m.chrome.top = true, 0
 		return true, nil
 	case key.Matches(k, m.keys.Mouse):
@@ -461,15 +348,26 @@ func (m *Model) chromeKey(k tea.KeyPressMsg) (handled bool, cmd tea.Cmd) {
 }
 
 // chromeMouse takes every mouse message first. While the help is open it
-// takes them all: the wheel scrolls it and a click closes it. Otherwise it
-// takes the header's row, where a click on a tab's title shows that tab
-// when no overlay is open, and leaves the rest to the shell.
+// takes them all: the wheel scrolls it and a click closes it, the click's
+// release too. Otherwise it takes the header's row, where a click on a
+// tab's title shows that tab whenever no overlay is open, even while a
+// field has focus, since a click is no text the field could take; and it
+// leaves the rest to the shell.
 func (m *Model) chromeMouse(msg tea.MouseMsg) (handled bool, cmd tea.Cmd) {
 	if m.small() {
 		return false, nil
 	}
 	m.chromeFollow()
 	at := msg.Mouse()
+	switch msg.(type) {
+	case tea.MouseReleaseMsg:
+		if m.chrome.release {
+			m.chrome.release = false
+			return true, nil
+		}
+	case tea.MouseClickMsg:
+		m.chrome.release = false
+	}
 	if m.chromeHelpOpen() {
 		switch msg.(type) {
 		case tea.MouseWheelMsg:
@@ -480,7 +378,7 @@ func (m *Model) chromeMouse(msg tea.MouseMsg) (handled bool, cmd tea.Cmd) {
 				m.chromeScroll(1)
 			}
 		case tea.MouseClickMsg:
-			m.chrome.help = false
+			m.chrome.help, m.chrome.release = false, true
 		}
 		return true, nil
 	}
@@ -539,37 +437,40 @@ func (m *Model) chromeSay(text string, level int, d time.Duration, quit bool) te
 }
 
 // chromeQuit is a quit press. One within chromeQuitWindow of the first
-// quits; otherwise it asks, naming the key that works where the person is
-// and what quitting would end.
+// quits, when the ask still reads as it did then; otherwise it asks, so
+// what has become busy since, or a key that no longer quits from where the
+// person is, is said before anything ends.
 func (m *Model) chromeQuit() tea.Cmd {
-	now := m.e.now()
-	if !m.chrome.quitAt.IsZero() && now.Sub(m.chrome.quitAt) < chromeQuitWindow {
-		m.chrome.quitAt = time.Time{}
+	now, ask := m.e.now(), m.chromeAsk()
+	if !m.chrome.quitAt.IsZero() && now.Sub(m.chrome.quitAt) < chromeQuitWindow && ask == m.chrome.ask {
+		m.chrome.quitAt, m.chrome.ask = time.Time{}, ""
 		return tea.Quit
 	}
-	m.chrome.quitAt = now
-	k := m.keys.Quit.Help().Key
-	if m.typing() {
-		k = chromeBound.Interrupt.Help().Key
-	}
-	text := "press " + k + " again to quit"
-	if ends := m.chromeEnds(); ends != "" {
-		text += "; " + ends
-	}
-	return m.chromeSay(text, levelWarn, chromeQuitWindow, true)
+	m.chrome.quitAt, m.chrome.ask = now, ask
+	return m.chromeSay(ask, levelWarn, chromeQuitWindow, true)
 }
 
-// chromeEnds says what quitting ends besides the TUI: what each tab is
-// busy with, shown or not, and the login flow put aside, by its badge.
+// chromeAsk is the quit ask as it reads now: the key that quits from where
+// the person is, and what quitting ends.
+func (m *Model) chromeAsk() string {
+	k := m.keys.Quit.Help().Key
+	if m.typing() {
+		k = m.own.Interrupt.Help().Key
+	}
+	ask := "press " + k + " again to quit"
+	if ends := m.chromeEnds(); ends != "" {
+		ask += "; " + ends
+	}
+	return ask
+}
+
+// chromeEnds says what quitting ends besides the TUI: what each tab is busy
+// with, shown or not, as Busy names it. A login flow put aside is not among
+// them: its login stays parked, and Run's caller says how to finish it (R18).
 func (m *Model) chromeEnds() string {
 	var what []string
 	for _, t := range m.tabs {
 		if b := clean(t.Busy()); b != "" {
-			what = append(what, b)
-		}
-	}
-	if m.aside != nil {
-		if b := clean(m.aside.Badge(m.e.now())); b != "" {
 			what = append(what, b)
 		}
 	}
