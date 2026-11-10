@@ -18,7 +18,7 @@ Let me check.
 
 
 ────────────────────────────────────────────────────────────────────────────────
-> a question; enter asks, alt+enter starts a new line, esc leaves               
+> enter asks, alt+enter adds a line, esc leaves                                 
                                                                                 
                                                                                 
 account: auto (now #1 work@exam…)  with: … [ ] quota [x] tools …  keep open: off

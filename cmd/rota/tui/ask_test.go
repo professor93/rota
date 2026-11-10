@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -121,6 +122,9 @@ func TestAskStreamsTheAnswer(t *testing.T) {
 	}
 	if !strings.Contains(view, "#1 · 2.3s · $0.0123 · exit 0") {
 		t.Errorf("no end line:\n%s", view)
+	}
+	if strings.Contains(view, "{}") {
+		t.Errorf("no reading was asked for, and an empty one is drawn:\n%s", view)
 	}
 	if !strings.Contains(view, "> 2+2?") {
 		t.Errorf("the question is not above its answer:\n%s", view)
@@ -324,6 +328,12 @@ func TestAKeptOpenRunTakesMoreMessages(t *testing.T) {
 	if view := askView(t, m, 80, 20); askLine(view, "the run takes no more messages now") < 0 || a.area.Value() != "nope" || strings.Count(view, "> nope") != 1 {
 		t.Errorf("the refused message: field %q\n%s", a.area.Value(), view)
 	}
+	// A message not taken leaves nothing being answered: esc leaves the
+	// field.
+	run(t, m, press("esc")...)
+	if a.Typing() || len(b.named("InterruptRun")) != 1 {
+		t.Errorf("esc after a refused send: typing %v, %q", a.Typing(), b.calls())
+	}
 	run(t, m, press("ctrl+x")...)
 	if got := b.named("CloseRun"); len(got) != 1 || got[0].Args[0] != "r-1" {
 		t.Errorf("CloseRun calls %v", got)
@@ -390,6 +400,7 @@ func TestLeavingClosesAnOpenRun(t *testing.T) {
 				return wire.End{}, ctx.Err()
 			}
 		},
+		InterruptRunFn: func(context.Context, string) error { return nil },
 		CloseRunFn: func(context.Context, string) error {
 			once.Do(func() { close(closed) })
 			return nil
@@ -401,8 +412,10 @@ func TestLeavingClosesAnOpenRun(t *testing.T) {
 	if err := programLeave(m.leavers()); err != nil {
 		t.Fatal(err)
 	}
-	if got := b.named("CloseRun"); len(got) != 1 || got[0].Args[0] != "r-9" {
-		t.Errorf("leaving closed %v", got)
+	// Interrupted, then closed, as the server shuts a run nobody reads, so
+	// no turn goes on for nobody (M2).
+	if got := askShutCalls(b); !slices.Equal(got, []string{"InterruptRun(r-9)", "CloseRun(r-9)"}) {
+		t.Errorf("leaving sent %q", got)
 	}
 	askSettle(t, m)
 	// A tab with nothing open leaves nothing to close.
@@ -691,6 +704,374 @@ func TestAskDrawsNoCommandsAndNoKeys(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Errorf("%q is not shown as text:\n%s", want, view)
 		}
+	}
+}
+
+// askShutCalls is every InterruptRun and CloseRun the backend took, in
+// order.
+func askShutCalls(b *fakeBackend) []string {
+	var out []string
+	for _, c := range b.calls() {
+		if strings.HasPrefix(c, "InterruptRun(") || strings.HasPrefix(c, "CloseRun(") {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// askOpening is a backend whose Ask is asked to stay open and says its id
+// after sent is closed by the test, or at once when sent is nil; it says
+// on opened that it has, ends when the run is closed, and records whether
+// its context had ended by the time it said the id.
+type askOpening struct {
+	*fakeBackend
+	sent, opened, closed chan struct{}
+	once                 sync.Once
+	ctxAtInit            chan error
+}
+
+func askOpeningBackend(id string, sent chan struct{}) *askOpening {
+	o := &askOpening{fakeBackend: &fakeBackend{}, sent: sent, opened: make(chan struct{}), closed: make(chan struct{}), ctxAtInit: make(chan error, 1)}
+	o.AskFn = func(ctx context.Context, _ Question, each func(message.Event)) (wire.End, error) {
+		if o.sent != nil {
+			select {
+			case <-o.sent:
+			case <-ctx.Done():
+				return wire.End{}, ctx.Err()
+			}
+		}
+		o.ctxAtInit <- ctx.Err()
+		each(message.Event{Type: "init", RunID: id})
+		close(o.opened)
+		select {
+		case <-o.closed:
+			return wire.End{Type: "done"}, nil
+		case <-ctx.Done():
+			return wire.End{}, ctx.Err()
+		}
+	}
+	o.InterruptRunFn = func(context.Context, string) error { return nil }
+	o.CloseRunFn = func(context.Context, string) error {
+		o.once.Do(func() { close(o.closed) })
+		return nil
+	}
+	return o
+}
+
+// askStartAlone sends what the field holds and starts the stream itself,
+// not through the driver, so nothing reads it: what the stream's goroutine
+// reads, Update never hears of.
+func askStartAlone(t *testing.T, m *Model, text string) {
+	t.Helper()
+	a := askOf(t, m)
+	run(t, m, tea.PasteMsg{Content: text})
+	_, cmd := a.Update(press("enter")[0])
+	batch, ok := cmd().(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("enter gave %#v, want the stream and its wait", batch)
+	}
+	batch[0]()
+}
+
+// A run asked to stay open can be stopped before it opens (I1): with no id
+// known, esc cancels the request, so a run still waiting to start never
+// does; once the stream has read the id, esc interrupts and closes it by
+// that id, though the screen has not shown it yet.
+func TestEscStopsAKeptOpenAskBeforeItOpens(t *testing.T) {
+	t.Run("no id yet", func(t *testing.T) {
+		b := askOpeningBackend("r-1", make(chan struct{}))
+		m := askModel(t, b.fakeBackend)
+		a := askOf(t, m)
+		run(t, m, press("ctrl+s")...)
+		run(t, m, askAsk("stay")...)
+		if !askEnabled(a.Keys(), "esc") || askEnabled(a.Keys(), "ctrl+s") || a.Busy() != "the open answer" {
+			t.Errorf("while it opens: esc %v, ctrl+s %v, Busy %q", askEnabled(a.Keys(), "esc"), askEnabled(a.Keys(), "ctrl+s"), a.Busy())
+		}
+		run(t, m, press("esc")...)
+		askSettle(t, m)
+		if view := askView(t, m, 80, 20); !strings.Contains(view, "· stopped") || a.Busy() != "" {
+			t.Errorf("Busy %q:\n%s", a.Busy(), view)
+		}
+		if got := askShutCalls(b.fakeBackend); len(got) != 0 {
+			t.Errorf("a run with no id was reached by %q", got)
+		}
+	})
+	t.Run("the id read, not shown", func(t *testing.T) {
+		b := askOpeningBackend("r-2", nil)
+		m := askModel(t, b.fakeBackend)
+		a := askOf(t, m)
+		run(t, m, press("ctrl+s")...)
+		askStartAlone(t, m, "stay")
+		<-b.opened
+		_, cmd := a.Update(press("esc")[0])
+		if cmd == nil {
+			t.Fatal("esc did nothing")
+		}
+		a.Update(cmd())
+		if got := askShutCalls(b.fakeBackend); !slices.Equal(got, []string{"InterruptRun(r-2)", "CloseRun(r-2)"}) {
+			t.Errorf("esc sent %q", got)
+		}
+	})
+}
+
+// A run kept open goes on when the program ends, so its stream does too
+// until Leave has closed it (M1): Leave waits for an id still to come, and
+// closes the run by it; and it closes by the id the stream read even when
+// the screen never showed it.
+func TestLeavingClosesARunThatHasNotOpenedOnTheScreen(t *testing.T) {
+	t.Run("the id comes after the program ended", func(t *testing.T) {
+		sent := make(chan struct{})
+		b := askOpeningBackend("r-7", sent)
+		m := askModel(t, b.fakeBackend)
+		program, end := context.WithCancel(context.Background())
+		m.e.ctx = program
+		run(t, m, press("ctrl+s")...)
+		run(t, m, askAsk("stay")...)
+		end()
+		time.AfterFunc(200*time.Millisecond, func() { close(sent) })
+		if err := programLeave(m.leavers()); err != nil {
+			t.Fatal(err)
+		}
+		if err := <-b.ctxAtInit; err != nil {
+			t.Errorf("the stream ended with the program, before its run said its id: %v", err)
+		}
+		if got := askShutCalls(b.fakeBackend); !slices.Equal(got, []string{"InterruptRun(r-7)", "CloseRun(r-7)"}) {
+			t.Errorf("leaving sent %q", got)
+		}
+		askSettle(t, m)
+	})
+	t.Run("the id read, not shown", func(t *testing.T) {
+		b := askOpeningBackend("r-8", nil)
+		m := askModel(t, b.fakeBackend)
+		run(t, m, press("ctrl+s")...)
+		askStartAlone(t, m, "stay")
+		<-b.opened
+		if err := programLeave(m.leavers()); err != nil {
+			t.Fatal(err)
+		}
+		if got := askShutCalls(b.fakeBackend); !slices.Equal(got, []string{"InterruptRun(r-8)", "CloseRun(r-8)"}) {
+			t.Errorf("leaving sent %q", got)
+		}
+	})
+}
+
+// A run kept open whose stream is cut goes on without anyone reading it,
+// so it is shut by its id, and the answer says so (M3).
+func TestACutOpenRunIsShut(t *testing.T) {
+	b := &fakeBackend{
+		AskFn: func(_ context.Context, _ Question, each func(message.Event)) (wire.End, error) {
+			each(message.Event{Type: "init", RunID: "r-3"})
+			each(message.Event{Type: "text", Text: "half"})
+			return wire.End{}, fmt.Errorf("the answer was cut off before the run ended: %w", io.ErrUnexpectedEOF)
+		},
+		InterruptRunFn: func(context.Context, string) error { return nil },
+		CloseRunFn:     func(context.Context, string) error { return nil },
+	}
+	m := askModel(t, b)
+	run(t, m, press("ctrl+s")...)
+	run(t, m, askAsk("x")...)
+	askSettle(t, m)
+	view := askView(t, m, 80, 20)
+	if got := askShutCalls(b); !slices.Equal(got, []string{"InterruptRun(r-3)", "CloseRun(r-3)"}) {
+		t.Errorf("after the cut: %q", got)
+	}
+	if askLine(view, "cut off") < 0 || askLine(view, "· closing the run kept open") < askLine(view, "cut off") {
+		t.Errorf("the cut:\n%s", view)
+	}
+	// A one-shot answer that is cut has no run to shut.
+	b.AskFn = func(_ context.Context, _ Question, each func(message.Event)) (wire.End, error) {
+		return wire.End{}, io.ErrUnexpectedEOF
+	}
+	run(t, m, press("ctrl+s")...)
+	run(t, m, askAsk("y")...)
+	askSettle(t, m)
+	if got := askShutCalls(b); len(got) != 2 {
+		t.Errorf("a one-shot cut reached a run: %q", got)
+	}
+}
+
+// The run is answering again once the server says it took a message, even
+// when the last turn's idle comes after the person sent it (M4).
+func TestAMessageTakenAfterAnIdleIsBeingAnswered(t *testing.T) {
+	evs := make(chan message.Event)
+	var once sync.Once
+	b := &fakeBackend{
+		AskFn: func(ctx context.Context, _ Question, each func(message.Event)) (wire.End, error) {
+			for {
+				select {
+				case ev, ok := <-evs:
+					if !ok {
+						return wire.End{Type: "done"}, nil
+					}
+					each(ev)
+				case <-ctx.Done():
+					return wire.End{}, ctx.Err()
+				}
+			}
+		},
+		SendRunFn:      func(context.Context, string, string) error { return nil },
+		InterruptRunFn: func(context.Context, string) error { return nil },
+		CloseRunFn: func(context.Context, string) error {
+			once.Do(func() { close(evs) })
+			return nil
+		},
+	}
+	m := askModel(t, b)
+	a := askOf(t, m)
+	say := func(ev message.Event) {
+		t.Helper()
+		evs <- ev
+		await(t, m)
+	}
+	run(t, m, press("ctrl+s")...)
+	run(t, m, askAsk("one")...)
+	say(message.Event{Type: "init", RunID: "r-1"})
+	say(message.Event{Type: "text", Text: "1"})
+	run(t, m, askAsk("two")...)
+	say(message.Event{Type: "idle"})
+	say(message.Event{Type: "input", ID: "m-2", State: "accepted"})
+	if !a.answering() {
+		t.Fatal("a message taken after the idle is not being answered")
+	}
+	run(t, m, press("esc")...)
+	if got := b.named("InterruptRun"); len(got) != 1 || !a.Typing() {
+		t.Errorf("esc during the second turn: %v, typing %v", got, a.Typing())
+	}
+	run(t, m, press("ctrl+x")...)
+	askSettle(t, m)
+}
+
+// An Ask that ignores its context after esc is answered for at the same
+// grace env.call gives any call (M6).
+func TestAnAskThatIgnoresItsContextIsAnsweredFor(t *testing.T) {
+	release := make(chan struct{})
+	b := &fakeBackend{AskFn: func(_ context.Context, _ Question, each func(message.Event)) (wire.End, error) {
+		each(message.Event{Type: "text", Text: "so far"})
+		<-release
+		return wire.End{}, errors.New("late")
+	}}
+	m := askModel(t, b)
+	t.Cleanup(func() { close(release) })
+	a := askOf(t, m)
+	run(t, m, askAsk("x")...)
+	run(t, m, press("esc")...)
+	askSettle(t, m)
+	if view := askView(t, m, 80, 20); !strings.Contains(view, "· stopped") || a.Busy() != "" {
+		t.Errorf("Busy %q:\n%s", a.Busy(), view)
+	}
+}
+
+// A long line is laid out once, in time its length bounds, and what comes
+// after it lays out only itself (M5).
+func TestAskLaysOutALongLineOnce(t *testing.T) {
+	b := &fakeBackend{AskFn: func(ctx context.Context, _ Question, _ func(message.Event)) (wire.End, error) {
+		<-ctx.Done()
+		return wire.End{}, ctx.Err()
+	}}
+	m := askModel(t, b)
+	a := askOf(t, m)
+	run(t, m, askAsk("long")...)
+	id := a.run.id
+	long := strings.Repeat("lorem ipsum ", (180<<10)/12) + strings.Repeat("x", 20<<10)
+	before := a.work
+	a.Update(askEventMsg{id: id, event: message.Event{Type: "text", Text: long}})
+	a.View(80, 24)
+	if work := a.work - before; work > 5*len(long) {
+		t.Errorf("one %d-byte line took %d bytes of work to lay out", len(long), work)
+	}
+	for i, l := range a.lines {
+		if n := textWidth(ansi.Strip(l)); n > 80 {
+			t.Fatalf("line %d is %d wide", i, n)
+		}
+	}
+	if got := strings.Join(a.lines, ""); strings.Count(got, "x") != 20<<10 {
+		t.Errorf("the long word lost letters: %d of %d", strings.Count(got, "x"), 20<<10)
+	}
+	mid := a.work
+	for range 100 {
+		a.Update(askEventMsg{id: id, event: message.Event{Type: "tool", Tool: "Bash"}})
+		a.View(80, 24)
+	}
+	if work := a.work - mid; work > 100*64 {
+		t.Errorf("a hundred tool lines after it took %d bytes of work: the long line was laid out again", work)
+	}
+	run(t, m, press("esc")...)
+	askSettle(t, m)
+}
+
+// No event is lost when the screen falls behind the stream: more than the
+// channel holds arrive, in order.
+func TestAskLosesNoEventsWhenTheScreenIsBehind(t *testing.T) {
+	const n = 3 * askBuffer
+	b := &fakeBackend{AskFn: func(_ context.Context, _ Question, each func(message.Event)) (wire.End, error) {
+		for i := range n {
+			each(message.Event{Type: "text", Text: fmt.Sprintf("%d\n", i)})
+		}
+		return wire.End{Type: "done"}, nil
+	}}
+	m := askModel(t, b)
+	a := askOf(t, m)
+	run(t, m, askAsk("count")...)
+	askSettle(t, m)
+	var got []string
+	for _, p := range a.pieces {
+		if p.kind == askText && p.text != "" {
+			got = append(got, p.text)
+		}
+	}
+	for i := range n {
+		if i >= len(got) || got[i] != strconv.Itoa(i) {
+			t.Fatalf("event %d is missing or out of order: %d lines, from %q", i, len(got), got[max(i-2, 0):min(i+2, len(got))])
+		}
+	}
+}
+
+// What the run says along the way is shown where it happened: the CLI's
+// own error, a message that was not taken, an interrupt.
+func TestAskSaysWhatTheRunSaysAlongTheWay(t *testing.T) {
+	b := &fakeBackend{AskFn: func(_ context.Context, _ Question, each func(message.Event)) (wire.End, error) {
+		each(message.Event{Type: "text", Text: "first"})
+		each(message.Event{Type: "error", Text: "rate limited for a moment"})
+		each(message.Event{Type: "input", ID: "m-1", State: "failed", Reason: "the CLI took no input"})
+		each(message.Event{Type: "interrupted", ID: "i-1"})
+		each(message.Event{Type: "text", Text: "last"})
+		return wire.End{Type: "done"}, nil
+	}}
+	m := askModel(t, b)
+	run(t, m, askAsk("x")...)
+	askSettle(t, m)
+	view := askView(t, m, 80, 24)
+	order := []string{"first", "rate limited for a moment", "the CLI took no input", "· interrupted", "last"}
+	for i := 1; i < len(order); i++ {
+		if askLine(view, order[i-1]) < 0 || askLine(view, order[i]) <= askLine(view, order[i-1]) {
+			t.Errorf("%q is not shown after %q:\n%s", order[i], order[i-1], view)
+		}
+	}
+}
+
+// A stream that closed without saying how it ended ends all the same, as
+// its context did, or with words saying so (M7).
+func TestAskWaitEndsAStreamThatClosedWithoutAWord(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	r := &askRun{id: 4, ctx: ctx, cancel: cancel, ch: make(chan askEventMsg)}
+	close(r.ch)
+	if got := askWait(r)().(askEventMsg); !got.last || got.id != 4 || got.err == nil || errors.Is(got.err, context.Canceled) {
+		t.Errorf("an open context: %+v", got)
+	}
+	cancel()
+	if got := askWait(r)().(askEventMsg); !got.last || !errors.Is(got.err, context.Canceled) {
+		t.Errorf("an ended context: %+v", got)
+	}
+}
+
+// A call about an earlier run says nothing under the new answer; a message
+// it carried still goes back to the field, as the person's own (N2).
+func TestAskACallAboutAnEarlierRunSaysNothing(t *testing.T) {
+	m := askModel(t, &fakeBackend{})
+	a := askOf(t, m)
+	a.Update(askCallMsg{id: 99, text: "mine", err: &client.Refusal{Status: 409, Message: "the run has ended"}})
+	if view := askView(t, m, 80, 20); strings.Contains(view, "the run has ended") || a.area.Value() != "mine" {
+		t.Errorf("field %q:\n%s", a.area.Value(), view)
 	}
 }
 

@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -36,7 +35,7 @@ const (
 	askWatchWords = "asking runs an account, which the watch role may not do"
 	askHint       = "enter writes a question, and enter again asks it: of the account the rotation picks, or of the one chosen below"
 	askAreaRest   = "enter to write"
-	askAreaTyping = "a question; enter asks, alt+enter starts a new line, esc leaves"
+	askAreaTyping = "enter asks, alt+enter adds a line, esc leaves"
 )
 
 // askKeys are the Ask tab's keys. Every one but Focus and BackFocus is the
@@ -74,32 +73,18 @@ const (
 	askFocusParts
 )
 
-// askEventMsg is one event of the answer, or, with last, how the stream
-// ended: end, or err when it did not end as a run ends.
-type askEventMsg struct {
-	id    int
-	event message.Event
-	last  bool
-	end   wire.End
-	err   error
-}
-
-// askCallMsg is how a call into an open run went. text is the message a
-// send carried, given back to the field if the run would not take it.
-type askCallMsg struct {
-	id   int
-	text string
-	err  error
-}
-
 // askRun is one Ask in flight. Update alone touches its plain fields; the
 // stream's goroutine writes what it reads into ch, and runID under mu, so
-// Leave can close an open run that Update has not heard of yet.
+// esc and Leave can close an open run that Update has not heard of yet.
+// known is closed once that id is seen, or the stream has ended without
+// one.
 type askRun struct {
 	id     int
 	ctx    context.Context
 	cancel context.CancelFunc
 	ch     chan askEventMsg
+	known  chan struct{}
+	once   sync.Once
 	// input says the run was asked to stay open, and open is its id once
 	// its opening event said it.
 	input bool
@@ -115,6 +100,16 @@ type askRun struct {
 	mu    sync.Mutex
 	runID string
 }
+
+// seen is the run's id as the stream's goroutine read it, "" until then.
+func (r *askRun) seen() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.runID
+}
+
+// know says the run's id is known, or never will be.
+func (r *askRun) know() { r.once.Do(func() { close(r.known) }) }
 
 // push hands m to the screen, or drops it once nobody is reading: the
 // answer was stopped, or the program has ended.
@@ -148,14 +143,24 @@ type askTab struct {
 	cursor   int
 	keepOpen bool
 
+	// pieces is the answer; a text piece is one line of it, so text added
+	// to the line being written lays out that line again and no other.
 	pieces []askPiece
 	// shown is what fragments have shown of a piece still to arrive whole
 	// (eventStream's rule).
 	shown string
-	// lines is the answer laid out for linesW columns, until it changes.
+	// lines is the answer laid out for linesW columns: ends[i] is how many
+	// lines the pieces up to i make, and pieces from from on are to be laid
+	// out again. work counts the bytes layout has looked at, which a test
+	// holds to linear. blank is as many empty lines as there are lines,
+	// all the viewport is told of them: it keeps the scroll, and View draws
+	// the lines it says.
 	lines  []string
+	ends   []int
 	linesW int
-	dirty  bool
+	from   int
+	work   int
+	blank  []string
 
 	run     *askRun
 	seq     int
@@ -163,7 +168,7 @@ type askTab struct {
 }
 
 func askNew(e *env) tab {
-	a := &askTab{e: e, vp: viewport.New(), follow: true, with: make([]bool, len(message.Names)), dirty: true}
+	a := &askTab{e: e, vp: viewport.New(), follow: true, with: make([]bool, len(message.Names))}
 	a.vp.KeyMap = viewport.KeyMap{}
 	a.area = askArea(e.th)
 	a.area.SetWidth(max(e.width, 20))
@@ -213,20 +218,40 @@ func (a *askTab) Busy() string {
 	return "the open answer"
 }
 
-// Leave closes a run kept open, which outlives its stream until it is
-// closed, and stops an answer still streaming.
+// Leave stops an answer still streaming, and shuts a run kept open, which
+// the server keeps until it is closed. Such a run's stream outlived the
+// program's end for this: Leave waits, within ctx, until its id is known,
+// interrupts it and closes it by that id, and only then ends the stream. A
+// run still waiting to start when ctx ends is cancelled before it starts.
 func (a *askTab) Leave(ctx context.Context) {
 	r := a.run
 	if r == nil {
 		return
 	}
-	r.mu.Lock()
-	id := r.runID
-	r.mu.Unlock()
-	if id != "" {
-		_ = a.e.b.CloseRun(ctx, id)
+	defer r.cancel()
+	if !r.input {
+		return
 	}
-	r.cancel()
+	select {
+	case <-r.known:
+	case <-ctx.Done():
+	}
+	if id := r.seen(); id != "" {
+		_ = askShut(ctx, a.e.b, id)
+	}
+}
+
+// askShut ends a run kept open as the server ends one nobody reads: what
+// it is doing is interrupted, then it is closed, so it finishes no turn for
+// nobody.
+func askShut(ctx context.Context, b Backend, id string) error {
+	_ = b.InterruptRun(ctx, id)
+	return b.CloseRun(ctx, id)
+}
+
+// shut is askShut as a command, for the run whose answer is ask.
+func (a *askTab) shut(ask int, id string) tea.Cmd {
+	return a.call(ask, "", func(ctx context.Context, b Backend) error { return askShut(ctx, b, id) })
 }
 
 func (a *askTab) Update(msg tea.Msg) (tab, tea.Cmd) {
@@ -248,6 +273,7 @@ func (a *askTab) Update(msg tea.Msg) (tab, tea.Cmd) {
 		a.area.SetWidth(msg.Width)
 	case tea.BackgroundColorMsg:
 		a.area.SetStyles(askArea(a.e.th).Styles())
+		a.from = 0
 	case askEventMsg:
 		return a, a.event(msg)
 	case askCallMsg:
@@ -287,7 +313,7 @@ func (a *askTab) keys() askKeys {
 	only(&k.Left, a.focus != askOnPrompt)
 	only(&k.Right, a.focus != askOnPrompt)
 	only(&k.Toggle, a.focus == askOnReadings)
-	only(&k.KeepOpen, r == nil || r.open == "")
+	only(&k.KeepOpen, r == nil || !r.input)
 	switch {
 	case a.answering():
 	case editing:
@@ -306,15 +332,16 @@ func (a *askTab) Keys() []key.Binding {
 	return []key.Binding{k.Send, k.Newline, k.Focus, k.BackFocus, k.Left, k.Right, k.Toggle, k.KeepOpen, k.Stop, k.CloseRun, k.PageUp, k.PageDown}
 }
 
-// answering says esc would stop something: a one-shot answer still
-// streaming, or an open run working on a message.
+// answering says esc would stop something: an answer still coming, whether
+// a one-shot one or a run asked to stay open that has not opened yet, or an
+// open run working on a message.
 func (a *askTab) answering() bool {
 	r := a.run
 	if r == nil || r.stopping {
 		return false
 	}
-	if r.input {
-		return r.open != "" && r.answering
+	if r.input && r.open != "" {
+		return r.answering
 	}
 	return true
 }
@@ -403,20 +430,28 @@ func (a *askTab) step(d int) {
 	a.account = ids[(i+d+len(ids))%len(ids)]
 }
 
-// stop is esc: it cancels a one-shot answer, interrupts an open run that
-// is working, and otherwise leaves the field.
+// stop is esc. It interrupts an open run that is working. An answer still
+// coming is stopped: a run asked to stay open whose id the stream has
+// already read is interrupted and closed by it, and any other request is
+// cancelled, so one still waiting to start never starts. With nothing to
+// stop, esc leaves the field.
 func (a *askTab) stop() tea.Cmd {
 	r := a.run
 	switch {
-	case a.answering() && !r.input:
-		r.stopping = true
-		r.cancel()
-	case a.answering():
+	case !a.answering():
+		if a.editing() {
+			a.rest()
+		}
+		return nil
+	case r.input && r.open != "":
 		open := r.open
 		return a.call(r.id, "", func(ctx context.Context, b Backend) error { return b.InterruptRun(ctx, open) })
-	case a.editing():
-		a.rest()
 	}
+	r.stopping = true
+	if id := r.seen(); r.input && id != "" {
+		return a.shut(r.id, id)
+	}
+	r.cancel()
 	return nil
 }
 
@@ -440,11 +475,17 @@ func (a *askTab) send() tea.Cmd {
 	}
 	q := Question{Account: a.account, Prompt: text, Cwd: a.cwd(), With: a.chosen(), Input: a.keepOpen}
 	a.seq++
-	ctx, cancel := context.WithCancel(a.e.ctx)
-	r := &askRun{id: a.seq, ctx: ctx, cancel: cancel, ch: make(chan askEventMsg, askBuffer),
+	// A run kept open goes on without its stream, so its stream outlives
+	// the program's end until Leave has closed it by its id.
+	parent := a.e.ctx
+	if q.Input {
+		parent = context.WithoutCancel(parent)
+	}
+	ctx, cancel := context.WithCancel(parent)
+	r := &askRun{id: a.seq, ctx: ctx, cancel: cancel, ch: make(chan askEventMsg, askBuffer), known: make(chan struct{}),
 		input: q.Input, answering: true, prompt: text}
 	a.run = r
-	a.pieces, a.shown, a.follow = nil, "", true
+	a.pieces, a.shown, a.follow, a.from = nil, "", true, 0
 	a.say(askQuestion, text)
 	return tea.Batch(askStream(a.e.b, r, q), askWait(r))
 }
@@ -484,35 +525,41 @@ func (a *askTab) call(id int, text string, f func(context.Context, Backend) erro
 	}, func(err error) tea.Msg { return askCallMsg{id: id, text: text, err: err} }, nil)
 }
 
-// called is how a call into the open run went: a refusal is said under
-// the prompt, and a message not taken leaves the answer and goes back to
-// the field.
+// called is how a call into the open run went. A message not taken goes
+// back to the field, as the person's own. For the run on the screen, a
+// refusal is said under the prompt, and the message leaves the answer; a
+// call about an earlier run has nothing more to say.
 func (a *askTab) called(msg askCallMsg) {
 	if msg.err == nil {
+		return
+	}
+	if msg.text != "" && strings.TrimSpace(a.area.Value()) == "" {
+		a.area.SetValue(msg.text)
+	}
+	r := a.run
+	if r == nil || r.id != msg.id {
 		return
 	}
 	a.refusal = msg.err.Error()
 	if msg.text == "" {
 		return
 	}
-	if strings.TrimSpace(a.area.Value()) == "" {
-		a.area.SetValue(msg.text)
-	}
 	if n := len(a.pieces); n > 0 && a.pieces[n-1] == (askPiece{kind: askQuestion, text: msg.text}) {
-		a.pieces, a.dirty = a.pieces[:n-1], true
+		a.pieces = a.pieces[:n-1]
+		a.touch(n - 1)
 	}
-	if r := a.run; r != nil && r.id == msg.id {
-		r.answering = false
-	}
+	r.answering = false
 }
 
 // askStream starts r's answer on a goroutine of its own, which recovers
 // (F31): every event goes into r.ch, then how the stream ended, and r.ch
-// is closed after. The command itself returns at once.
+// is closed after. The run's id is kept as soon as it is read. The command
+// itself returns at once.
 func askStream(b Backend, r *askRun, q Question) tea.Cmd {
 	return func() tea.Msg {
 		go func() {
 			last := askEventMsg{id: r.id, last: true}
+			defer r.know()
 			defer close(r.ch)
 			defer func() {
 				if p := recover(); p != nil {
@@ -525,27 +572,11 @@ func askStream(b Backend, r *askRun, q Question) tea.Cmd {
 					r.mu.Lock()
 					r.runID = ev.RunID
 					r.mu.Unlock()
+					r.know()
 				}
 				r.push(askEventMsg{id: r.id, event: ev})
 			})
 		}()
 		return nil
-	}
-}
-
-// askWait delivers the next of r's events. A stream that closed without
-// saying how it ended, which happens only once its context had ended and
-// the screen was behind, ends here, as its context did.
-func askWait(r *askRun) tea.Cmd {
-	return func() tea.Msg {
-		m, ok := <-r.ch
-		if !ok {
-			err := r.ctx.Err()
-			if err == nil {
-				err = errors.New("the answer ended without saying how")
-			}
-			return askEventMsg{id: r.id, last: true, err: err}
-		}
-		return m
 	}
 }

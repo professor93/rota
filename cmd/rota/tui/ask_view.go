@@ -48,6 +48,60 @@ type askPiece struct {
 	text string
 }
 
+// askEventMsg is one event of the answer, or, with last, how the stream
+// ended: end, or err when it did not end as a run ends.
+type askEventMsg struct {
+	id    int
+	event message.Event
+	last  bool
+	end   wire.End
+	err   error
+}
+
+// askCallMsg is how a call into an open run went. text is the message a
+// send carried, given back to the field if the run would not take it.
+type askCallMsg struct {
+	id   int
+	text string
+	err  error
+}
+
+// askWait delivers the next of r's events. Once r's context has ended, a
+// stream that has not ended envCallGrace later is answered for, as env.call
+// answers for any call that ignores its context: the Backend's Ask should
+// have returned. A stream that closed without saying how it ended, which
+// happens only once its context had ended and the screen was behind, ends
+// here too.
+func askWait(r *askRun) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case m, ok := <-r.ch:
+			return askGot(r, m, ok)
+		case <-r.ctx.Done():
+		}
+		grace := time.NewTimer(envCallGrace)
+		defer grace.Stop()
+		select {
+		case m, ok := <-r.ch:
+			return askGot(r, m, ok)
+		case <-grace.C:
+			return askEventMsg{id: r.id, last: true, err: r.ctx.Err()}
+		}
+	}
+}
+
+// askGot is what askWait read: m, or the end when r.ch was closed.
+func askGot(r *askRun, m askEventMsg, ok bool) askEventMsg {
+	if ok {
+		return m
+	}
+	err := r.ctx.Err()
+	if err == nil {
+		err = errors.New("the answer ended without saying how")
+	}
+	return askEventMsg{id: r.id, last: true, err: err}
+}
+
 // event takes one message of the answer and waits for the next.
 func (a *askTab) event(msg askEventMsg) tea.Cmd {
 	r := a.run
@@ -55,8 +109,7 @@ func (a *askTab) event(msg askEventMsg) tea.Cmd {
 		return nil
 	}
 	if msg.last {
-		a.ended(r, msg)
-		return nil
+		return a.ended(r, msg)
 	}
 	ev := msg.event
 	switch ev.Type {
@@ -76,7 +129,13 @@ func (a *askTab) event(msg askEventMsg) tea.Cmd {
 	case "idle":
 		r.answering = false
 	case "input":
-		if ev.State == "failed" {
+		// The server says what became of each message in the order it
+		// happens, so a message taken after the last turn's idle has the
+		// run answering again.
+		switch ev.State {
+		case "accepted":
+			r.answering = true
+		case "failed":
 			a.say(askFail, cmp.Or(ev.Reason, "a message was not taken"))
 		}
 	case "error":
@@ -87,7 +146,8 @@ func (a *askTab) event(msg askEventMsg) tea.Cmd {
 
 // text is a text event, by eventStream's rule: a fragment is shown as it
 // comes, and the whole piece after it is skipped when the fragments said
-// it already.
+// it already. What is shown continues the line being written, and each
+// line break starts a piece of its own.
 func (a *askTab) text(ev message.Event) {
 	if ev.Text == "" {
 		return
@@ -101,19 +161,25 @@ func (a *askTab) text(ev message.Event) {
 	default:
 		a.shown = ""
 	}
+	lines := strings.Split(ev.Text, "\n")
 	if n := len(a.pieces); n > 0 && a.pieces[n-1].kind == askText {
-		a.pieces[n-1].text += ev.Text
-		a.dirty = true
-		return
+		a.pieces[n-1].text += lines[0]
+		a.touch(n - 1)
+	} else {
+		a.say(askText, lines[0])
 	}
-	a.say(askText, ev.Text)
+	for _, l := range lines[1:] {
+		a.say(askText, l)
+	}
 }
 
 // ended is the stream's end: the end line and the readings, a stop, the
-// server's refusal under the prompt, or why the stream was cut.
-func (a *askTab) ended(r *askRun, msg askEventMsg) {
+// server's refusal under the prompt, or why the stream was cut. A run kept
+// open whose stream was cut goes on without anyone reading it, so it is
+// shut by its id, when the id is known.
+func (a *askTab) ended(r *askRun, msg askEventMsg) tea.Cmd {
 	a.run = nil
-	r.cancel()
+	defer r.cancel()
 	var no *client.Refusal
 	switch err := msg.err; {
 	case err == nil:
@@ -121,14 +187,19 @@ func (a *askTab) ended(r *askRun, msg askEventMsg) {
 	case r.stopping && errors.Is(err, context.Canceled):
 		a.say(askNote, "stopped")
 	case errors.As(err, &no):
-		a.pieces, a.dirty = nil, true
+		a.pieces, a.from = nil, 0
 		a.refusal = err.Error()
 		if strings.TrimSpace(a.area.Value()) == "" {
 			a.area.SetValue(r.prompt)
 		}
 	default:
 		a.say(askFail, err.Error())
+		if id := cmp.Or(r.open, r.seen()); r.input && id != "" && !r.stopping {
+			a.say(askNote, "closing the run kept open")
+			return a.shut(r.id, id)
+		}
 	}
+	return nil
 }
 
 // end says how the run ended, #account · duration · $cost · exit code, then
@@ -165,8 +236,12 @@ func (a *askTab) end(r *askRun, end wire.End) {
 // say adds a piece to the answer.
 func (a *askTab) say(kind askKind, text string) {
 	a.pieces = append(a.pieces, askPiece{kind: kind, text: text})
-	a.dirty = true
+	a.touch(len(a.pieces) - 1)
 }
+
+// touch says piece i changed: it and every piece after it are laid out
+// again, and none before it.
+func (a *askTab) touch(i int) { a.from = max(min(a.from, i), 0) }
 
 // View draws the answer, a rule, the prompt, a refusal if there is one,
 // and the bottom line, in width columns and at most height rows; when
@@ -204,7 +279,9 @@ func (a *askTab) View(width, height int) string {
 }
 
 // answer is the h rows of the answer the viewport shows: its end while it
-// follows, or where the person paged to.
+// follows, or where the person paged to. The viewport is told only how many
+// lines there are, when that changes, since that is all its scroll needs;
+// the lines it says are drawn from here.
 func (a *askTab) answer(w, h int) []string {
 	lines := a.answerLines(w)
 	if len(a.pieces) == 0 {
@@ -215,9 +292,17 @@ func (a *askTab) answer(w, h int) []string {
 	}
 	a.vp.SetWidth(w)
 	a.vp.SetHeight(h)
-	a.vp.SetContentLines(lines)
+	if n := len(lines); n != len(a.blank) {
+		if n > cap(a.blank) {
+			a.blank = make([]string, n, 2*n)
+		}
+		a.blank = a.blank[:n]
+		a.vp.SetContentLines(a.blank)
+	}
 	if a.follow {
 		a.vp.GotoBottom()
+	} else {
+		a.vp.SetYOffset(a.vp.YOffset())
 	}
 	out := make([]string, h)
 	for i, off := 0, a.vp.YOffset(); i < h && off+i < len(lines); i++ {
@@ -226,43 +311,57 @@ func (a *askTab) answer(w, h int) []string {
 	return out
 }
 
-// answerLines is every piece of the answer laid out in w columns, kept
-// until the answer or the width changes.
+// answerLines is every piece of the answer laid out in w columns. Only the
+// pieces from the first one touched since are laid out again, which is
+// almost always the last: the line being written, or one just added.
 func (a *askTab) answerLines(w int) []string {
-	if !a.dirty && a.linesW == w {
-		return a.lines
+	if w != a.linesW {
+		a.linesW, a.from = w, 0
 	}
-	th := a.e.th
+	from := min(a.from, len(a.pieces), len(a.ends))
+	base := 0
+	if from > 0 {
+		base = a.ends[from-1]
+	}
+	a.lines, a.ends = a.lines[:base], a.ends[:from]
+	for i := from; i < len(a.pieces); i++ {
+		a.lines = append(a.lines, a.layout(i, w)...)
+		a.ends = append(a.ends, len(a.lines))
+	}
+	a.from = len(a.pieces)
+	return a.lines
+}
+
+// layout is piece i in w columns.
+func (a *askTab) layout(i, w int) []string {
+	th, p := a.e.th, a.pieces[i]
 	var out []string
 	add := func(st lipgloss.Style, lines []string) {
 		for _, l := range lines {
 			out = append(out, st.Render(l))
 		}
 	}
-	for i, p := range a.pieces {
-		switch p.kind {
-		case askQuestion:
-			if i > 0 {
-				out = append(out, "")
-			}
-			for j, l := range askWrap(p.text, w-2) {
-				lead := "  "
-				if j == 0 {
-					lead = th.Accent.Render("> ")
-				}
-				out = append(out, lead+th.Text.Render(l))
-			}
-		case askText:
-			add(th.Text, askWrap(p.text, w))
-		case askTool, askNote:
-			add(th.Muted, askWrap(askDot+" "+p.text, w))
-		case askFail, askEndBad:
-			add(th.Over, askWrap(p.text, w))
-		case askEnd, askJSON:
-			add(th.Muted, askWrap(p.text, w))
+	switch p.kind {
+	case askQuestion:
+		if i > 0 {
+			out = append(out, "")
 		}
+		for j, l := range askWrap(p.text, w-2, &a.work) {
+			lead := "  "
+			if j == 0 {
+				lead = th.Accent.Render("> ")
+			}
+			out = append(out, lead+th.Text.Render(l))
+		}
+	case askText:
+		add(th.Text, askWrap(p.text, w, &a.work))
+	case askTool, askNote:
+		add(th.Muted, askWrap(askDot+" "+p.text, w, &a.work))
+	case askFail, askEndBad:
+		add(th.Over, askWrap(p.text, w, &a.work))
+	case askEnd, askJSON:
+		add(th.Muted, askWrap(p.text, w, &a.work))
 	}
-	a.lines, a.linesW, a.dirty = out, w, false
 	return out
 }
 
@@ -401,14 +500,15 @@ func askFit(items []string, start, room, mark int) int {
 
 // askWrap is text laid out in w columns, cleaned line by line so its own
 // line breaks stay: a line keeps its indentation, on what it wraps onto
-// too, and the spaces inside it.
-func askWrap(text string, w int) []string {
+// too, and the spaces inside it. work counts the bytes looked at.
+func askWrap(text string, w int, work *int) []string {
 	w = max(w, 1)
 	var out []string
 	for _, line := range strings.Split(text, "\n") {
+		*work += len(line)
 		line = strings.TrimRight(clean(strings.ReplaceAll(line, "\t", "    ")), " ")
 		indent := min(len(line)-len(strings.TrimLeft(line, " ")), w/2)
-		for _, l := range askBreak(line[indent:], w-indent) {
+		for _, l := range askBreak(line[indent:], w-indent, work) {
 			out = append(out, line[:indent]+l)
 		}
 	}
@@ -416,19 +516,28 @@ func askWrap(text string, w int) []string {
 }
 
 // askBreak is one line cut into pieces of at most w columns, after the last
-// space that fits, or inside a word longer than a line.
-func askBreak(line string, w int) []string {
+// space that fits, or inside a word longer than a line. The line is
+// measured once and each piece's width taken off what is left, which the
+// measure allows since it adds up its runes' widths: a long line costs what
+// its length does, not its length times its pieces.
+func askBreak(line string, w int, work *int) []string {
+	*work += len(line)
+	left := textWidth(line)
 	var out []string
-	for textWidth(line) > w {
+	for left > w {
 		head, _ := textHead(line, w)
+		*work += len(head)
 		if rest := line[len(head):]; rest != "" && rest[0] != ' ' {
 			if sp := strings.LastIndexByte(head, ' '); sp > 0 && strings.TrimSpace(head[:sp]) != "" {
 				head = head[:sp]
 			}
 		}
+		next := strings.TrimLeft(line[len(head):], " ")
+		used := line[:len(line)-len(next)]
+		*work += len(used)
+		left -= textWidth(used)
 		out = append(out, strings.TrimRight(head, " "))
-		line = strings.TrimLeft(line[len(head):], " ")
-		if line == "" {
+		if line = next; line == "" {
 			return out
 		}
 	}
