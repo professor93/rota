@@ -3,6 +3,7 @@ package api
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"math"
 	"slices"
 	"strconv"
@@ -18,10 +19,10 @@ import (
 
 // The account events: what a background sweep read of the accounts, said
 // against what the sweep before it read. Each is a latch, said once on the
-// look where it changes and never for what the first look found, so a
-// daemon that restarts does not announce again every account over its
-// threshold. A look follows every sweep (nextReset and maintain), so with
-// the sweeps off there are none.
+// look where it changes and never for what was so before this server read
+// it: a daemon that starts after a night off does not announce every
+// window that came back meanwhile. A look follows every sweep (nextReset
+// and maintain), so with the sweeps off there are none.
 //
 //   - account.threshold: rotation.Spent changing between two readings that
 //     both exist. A failed reading is no reading, and changes no latch.
@@ -31,21 +32,28 @@ import (
 //   - account.rotated: the account rotation.Pick takes changing, with why.
 //     Busy accounts are not looked at: busyness is momentary.
 
-// accountResetMoved is how much later a window's reset must have moved for
-// the window to count as back: less is a provider's clock jittering, not a
-// new window.
+// accountResetMoved is how far a window's reset must move for the window to
+// count as back, and how near its old reset must be: less is a provider's
+// clock jittering, not a new window.
 const accountResetMoved = time.Minute
 
 // accountSessionsNamed is how many of an account's sessions an
-// account.threshold names; any more are counted.
-const accountSessionsNamed = 3
+// account.threshold names; any more are counted. accountSessionName is the
+// most of a name it repeats, so the sentence keeps its verb.
+const (
+	accountSessionsNamed = 3
+	accountSessionName   = 64
+)
 
 // accountWatch is what the account events are computed against: the last
-// look, nil until the first, which is the baseline and says nothing. Only
+// look, nil until the first, which is the baseline and says nothing. since
+// is when that first look was taken, which is as the server's sweeps begin:
+// a reading taken before it is not this server's, and counts as none. Only
 // the sweeps use it, one at a time, but under mu all the same.
 type accountWatch struct {
-	mu   sync.Mutex
-	last *accountsLook
+	mu    sync.Mutex
+	last  *accountsLook
+	since time.Time
 }
 
 // accountLook is what one look read of one account, copied out of the
@@ -53,7 +61,7 @@ type accountWatch struct {
 //
 // spent, percent, window and windows come from a reading. An account with
 // none this time carries them over from the look before (diffAccounts), and
-// read says whether they come from any reading at all.
+// read says whether they come from a reading at all.
 type accountLook struct {
 	id, order int
 	limit     int // rotation.Cutoff
@@ -65,9 +73,11 @@ type accountLook struct {
 	// highest reading, else the first unscoped one; "" when there is none.
 	window string
 	read   bool
-	// dead is Dead or LoginEnded: it needs a login. Pick passes by only the
-	// first, which available follows.
+	readAt int64 // QuotaAt, unix ms
+	// dead is Dead or LoginEnded: it needs a login. marked is Dead alone,
+	// which is all rotation.Pick passes an account by.
 	dead      bool
+	marked    bool
 	spent     bool // rotation.Spent
 	credit    bool // OutOfCredit
 	queued    bool // rotation.InQueue
@@ -96,7 +106,8 @@ func lookAccounts(accounts []*rota.Account) accountsLook {
 		l := accountLook{
 			id: a.ID, order: a.Order, limit: rotation.Cutoff(a),
 			label: a.Label(), provider: a.Provider,
-			read: a.Quota != nil, dead: a.Dead || a.LoginEnded(),
+			read: a.Quota != nil, readAt: a.QuotaAt,
+			dead: a.Dead || a.LoginEnded(), marked: a.Dead,
 			spent: rotation.Spent(a), credit: a.OutOfCredit(),
 			queued: rotation.InQueue(a), available: rotation.Available(a),
 			percent: a.Percent(),
@@ -129,23 +140,43 @@ func lookAccounts(accounts []*rota.Account) accountsLook {
 	return look
 }
 
+// readSince is look with every reading taken before since counted as none.
+// What the reading says still decides the rotation's pick, as it does Pick's,
+// but it is no latch: the first reading this server takes itself is.
+func (look accountsLook) readSince(since time.Time) accountsLook {
+	out := accountsLook{byID: make(map[int]accountLook, len(look.byID)), first: look.first}
+	for id, l := range look.byID {
+		if l.read && l.readAt < since.UnixMilli() {
+			l.read, l.windows = false, nil
+		}
+		out.byID[id] = l
+	}
+	return out
+}
+
+// pickable is rotation.Available said of a look: in the queue, not marked
+// dead, not spent and not out of credit. It is how a look's available is
+// made again once its spent latch has been carried or rebased.
+func (l accountLook) pickable() bool { return l.queued && !l.marked && !l.spent && !l.credit }
+
 // diffAccounts is what changed from prev to next, said as events, and next
 // as the following look should be compared with: an account next has no
 // reading for keeps prev's reading, so a reading that failed changes no
 // latch, and the rotation's pick is made again over what was kept.
 //
-// An account prev has not seen is a baseline of its own: nothing is said
-// about it until it changes, its being first in the rotation included. So
-// diffAccounts(accountsLook{}, next, now) says nothing at all. The events
-// come by account id, each account's in the order dead, reset, threshold,
-// and the rotation's last.
+// What is compared is a baseline of its own, and says nothing, until it
+// changes: an account prev has not seen, and the reading of one prev has
+// no reading of. Each is taken as next has it, in prev too, for every
+// event, the rotation's included. So diffAccounts(accountsLook{}, next, now)
+// says nothing at all. The events come by account id, each account's in
+// the order dead, reset, threshold, and the rotation's last.
 func diffAccounts(prev, next accountsLook, now time.Time) ([]events.Event, accountsLook) {
 	kept := accountsLook{byID: make(map[int]accountLook, len(next.byID)), first: next.first}
 	carried := false
 	for id, n := range next.byID {
 		if p, seen := prev.byID[id]; seen && !n.read {
 			n.read, n.spent, n.percent, n.window, n.windows = p.read, p.spent, p.percent, p.window, p.windows
-			n.available = n.available && !n.spent
+			n.available = n.pickable()
 			carried = true
 		}
 		kept.byID[id] = n
@@ -154,48 +185,85 @@ func diffAccounts(prev, next accountsLook, now time.Time) ([]events.Event, accou
 		kept.first = accountFirst(kept.byID)
 	}
 
-	var out []events.Event
-	ids := make([]int, 0, len(kept.byID))
-	for id := range kept.byID {
-		ids = append(ids, id)
+	base := accountsLook{byID: maps.Clone(prev.byID), first: prev.first}
+	if base.byID == nil {
+		base.byID = make(map[int]accountLook, len(kept.byID))
 	}
-	slices.Sort(ids)
-	for _, id := range ids {
-		if p, seen := prev.byID[id]; seen {
-			out = append(out, accountChanges(p, kept.byID[id], now)...)
+	rebased := false
+	for id, n := range kept.byID {
+		switch p, seen := prev.byID[id]; {
+		case !seen:
+			base.byID[id], rebased = n, true
+		case !p.read && n.read:
+			p.read, p.spent, p.percent, p.window, p.windows = n.read, n.spent, n.percent, n.window, n.windows
+			p.available = p.pickable()
+			base.byID[id], rebased = p, true
 		}
 	}
-	if e, ok := accountRotated(prev, kept); ok {
+	if rebased {
+		base.first = accountFirst(base.byID)
+	}
+
+	var out []events.Event
+	ids := slices.Sorted(maps.Keys(kept.byID))
+	for _, id := range ids {
+		evs, n := accountChanges(base.byID[id], kept.byID[id], now)
+		kept.byID[id] = n
+		out = append(out, evs...)
+	}
+	if e, ok := accountRotated(base, kept); ok {
 		out = append(out, e)
 	}
 	return out, kept
 }
 
-// accountChanges is what changed about one account from p to n.
-func accountChanges(p, n accountLook, now time.Time) []events.Event {
+// accountChanges is what changed about one account from p to n, and n as
+// the next look should compare with it.
+func accountChanges(p, n accountLook, now time.Time) ([]events.Event, accountLook) {
 	var out []events.Event
 	if n.dead && !p.dead {
 		out = append(out, events.Event{Type: events.AccountDead, Account: n.id, Name: n.label,
 			Reason: "login", Text: "needs a login: " + n.why})
 	}
 
-	// A window that had been used is back when its reset has moved on, or
-	// when its reset has passed and it reads lower or is gone.
-	names := make([]string, 0, len(p.windows))
-	for name := range p.windows {
-		names = append(names, name)
+	// A window that had been used is back when its reset has moved on from
+	// a reset that was due, or that it reads lower than; or when its reset
+	// has passed and it reads lower, or is gone. A reset that moves while
+	// the window fills is a provider's clock, and one that moves earlier is
+	// not a new window.
+	//
+	// A reset said before the provider moved it on is kept as no reset at
+	// all, for as long as the provider still gives the one that passed: when
+	// it does move on, it is the reset already said.
+	cloned := false
+	noReset := func(name string, w windowLook) {
+		if !cloned {
+			n.windows, cloned = maps.Clone(n.windows), true
+		}
+		w.resets = time.Time{}
+		n.windows[name] = w
 	}
-	slices.Sort(names)
-	for _, name := range names {
+	for _, name := range slices.Sorted(maps.Keys(p.windows)) {
 		was := p.windows[name]
-		if was.percent <= 0 || was.resets.IsZero() {
+		is, still := n.windows[name]
+		if was.resets.IsZero() {
+			if still && !is.resets.IsZero() && !now.Before(is.resets) {
+				noReset(name, is)
+			}
 			continue
 		}
-		is, still := n.windows[name]
-		moved := still && !is.resets.IsZero() && is.resets.Sub(was.resets) > accountResetMoved
-		passed := !now.Before(was.resets) && (!still || is.percent < was.percent)
+		if was.percent <= 0 {
+			continue
+		}
+		fell := still && is.percent < was.percent
+		due := !now.Before(was.resets.Add(-accountResetMoved))
+		moved := still && !is.resets.IsZero() && is.resets.Sub(was.resets) > accountResetMoved && (due || fell)
+		passed := !now.Before(was.resets) && (!still || fell)
 		if !moved && !passed {
 			continue
+		}
+		if still && !moved {
+			noReset(name, is)
 		}
 		had := was.percent
 		out = append(out, events.Event{Type: events.AccountReset, Account: n.id, Name: n.label,
@@ -218,17 +286,17 @@ func accountChanges(p, n accountLook, now time.Time) []events.Event {
 		}
 		out = append(out, e)
 	}
-	return out
+	return out, n
 }
 
 // accountRotated is the rotation's pick moving from prev's to next's, and
-// why, or false when it has not moved or what it moved to is an account
-// first seen.
+// why, or false when it has not moved. prev holds every account next does.
 //
 // When the new pick is ahead of the old one in the queue, or there was
 // none, the new pick is what changed: it can be used again (back), or it
 // was put ahead (order). Otherwise the old pick is what changed, and why it
-// is passed by is said of it.
+// is passed by is said of it, in the order Pick's reasons are worth acting
+// on: removed, left the rotation, marked dead, out of credit, spent.
 func accountRotated(prev, next accountsLook) (events.Event, bool) {
 	was, is := prev.first, next.first
 	if was == is {
@@ -244,11 +312,7 @@ func accountRotated(prev, next accountsLook) (events.Event, bool) {
 		}
 		return events.Event{Type: events.AccountRotated, Reason: "none", Text: text}, true
 	}
-	before, seen := prev.byID[is]
-	if !seen {
-		return events.Event{}, false
-	}
-	n := next.byID[is]
+	before, n := prev.byID[is], next.byID[is]
 	old, stays := next.byID[was]
 	var reason, why string
 	switch {
@@ -261,7 +325,7 @@ func accountRotated(prev, next accountsLook) (events.Event, bool) {
 		reason, why = "removed", prev.byID[was].label+" was removed"
 	case !old.queued:
 		reason, why = "left", old.label+" left the rotation"
-	case old.dead:
+	case old.marked:
 		reason, why = "dead", old.label+" needs a login"
 	case old.credit:
 		reason, why = "credit", old.label+" is out of credit"
@@ -312,16 +376,19 @@ func (s *Server) lookAtAccounts(st *store.Store) {
 }
 
 // watchAccounts is lookAtAccounts for a look already taken: the first is
-// kept as the baseline, and each after it is said against the last.
+// kept as the baseline, and each after it is said against the last. A
+// reading taken before the first look is none (readSince).
 func (s *Server) watchAccounts(next accountsLook) {
 	w := &s.accounts
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	if w.last == nil {
+		w.since = s.now()
+		next = next.readSince(w.since)
 		w.last = &next
 		return
 	}
-	evs, kept := diffAccounts(*w.last, next, s.now())
+	evs, kept := diffAccounts(*w.last, next.readSince(w.since), s.now())
 	w.last = &kept
 	for _, e := range evs {
 		if e.Type == events.AccountThreshold {
@@ -334,7 +401,8 @@ func (s *Server) watchAccounts(next accountsLook) {
 // accountRunsOn is what an account.threshold adds about the sessions still
 // running on account id, oldest first: "; refactor runs on it", "; refactor
 // and api run on it", "; a, b, c and 2 more run on it"; "" for none. They
-// are named as every event names a session (eventName).
+// are named as every event names a session (eventName), each cut to
+// accountSessionName bytes.
 func (s *Server) accountRunsOn(id int) string {
 	var on []*termSession
 	for _, ts := range s.everyTerminal() {
@@ -350,7 +418,7 @@ func (s *Server) accountRunsOn(id int) string {
 	})
 	names := make([]string, 0, accountSessionsNamed)
 	for _, ts := range on[:min(len(on), accountSessionsNamed)] {
-		names = append(names, ts.eventName())
+		names = append(names, cleanEventString(ts.eventName(), accountSessionName))
 	}
 	switch more := len(on) - len(names); {
 	case len(on) == 1:
