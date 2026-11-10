@@ -131,7 +131,7 @@ type Session struct {
 	drawn   int64        // em.off as of the screen's last catch-up
 	modes   vtscan.Modes // the modes as of the newest byte
 	title   string
-	bells   uint64
+	bells   uint64 // BELs, and the notifications OSC 9 and OSC 777 ask for
 	reg     *holdwire.Registry
 	gen     uint64 // counts changes to title, bells, modes and registry
 	cols    uint16
@@ -350,7 +350,9 @@ func (s *Session) took(p []byte) {
 		case vtscan.EventTitle:
 			changed = changed || e.Text != s.title
 			s.title = e.Text
-		case vtscan.EventBell:
+		case vtscan.EventBell, vtscan.EventNotify:
+			// A notification is counted as a bell, and its words, which
+			// may be the chat's own, go no further.
 			s.bells++
 			changed = true
 		}
