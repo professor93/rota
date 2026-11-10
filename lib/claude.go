@@ -384,18 +384,17 @@ func (claudeProvider) Identify(ctx context.Context, access string) (*Identity, e
 // claudeUsage mirrors the usage endpoint. Only scope.model is decoded from
 // `limits`: every other field is left alone so an unexpected shape there
 // cannot fail the whole reading.
+//
+// A figure is a pointer because Claude Code's own schema for this reply lets
+// utilization be null, and a null decoded into a float64 is 0%: a window
+// reported with no figure is a reading that failed (see Quota), not one with
+// all its room left.
 type claudeUsage struct {
-	FiveHour *struct {
-		Utilization float64 `json:"utilization"`
-		ResetsAt    When    `json:"resets_at"`
-	} `json:"five_hour"`
-	SevenDay *struct {
-		Utilization float64 `json:"utilization"`
-		ResetsAt    When    `json:"resets_at"`
-	} `json:"seven_day"`
-	Limits []struct {
-		Percent  float64 `json:"percent"`
-		ResetsAt When    `json:"resets_at"`
+	FiveHour *claudeWindow `json:"five_hour"`
+	SevenDay *claudeWindow `json:"seven_day"`
+	Limits   []struct {
+		Percent  *float64 `json:"percent"`
+		ResetsAt When     `json:"resets_at"`
 		Scope    *struct {
 			Model *struct {
 				DisplayName string `json:"display_name"`
@@ -410,6 +409,18 @@ type claudeUsage struct {
 	} `json:"extra_usage"`
 }
 
+// claudeWindow is one of the usage endpoint's own windows.
+type claudeWindow struct {
+	Utilization *float64 `json:"utilization"`
+	ResetsAt    When     `json:"resets_at"`
+}
+
+// noFigure is the reading that failed because the endpoint reported a window
+// and gave it no figure.
+func noFigure(what string) error {
+	return fmt.Errorf("the usage endpoint reported %s with no figure, so no reading was taken", what)
+}
+
 func (claudeProvider) Quota(ctx context.Context, access string) (*Quota, error) {
 	// Without a token the endpoint can only refuse, and asking at all tells
 	// whoever watches the wire that rota runs here.
@@ -420,18 +431,33 @@ func (claudeProvider) Quota(ctx context.Context, access string) (*Quota, error) 
 	if err := getJSON(ctx, ClaudeEndpoints.Usage, access, &u, map[string]string{"anthropic-beta": claudeBeta}); err != nil {
 		return nil, err
 	}
+	// A window that is null or absent is a limit the account does not have:
+	// an Ultra account has no five-hour window, a Team seat no seven-day one.
+	// A window that is there with no figure is a measurement that failed,
+	// and the whole reading with it, so the account keeps the last one it
+	// had: a reading missing a window that applies must never pass for one
+	// with room in it.
 	q := &Quota{}
-	if u.FiveHour != nil {
-		q.Windows = append(q.Windows, Window{Name: "5h", Percent: u.FiveHour.Utilization, ResetsAt: u.FiveHour.ResetsAt, Primary: true})
-	}
-	if u.SevenDay != nil {
-		q.Windows = append(q.Windows, Window{Name: "7d", Percent: u.SevenDay.Utilization, ResetsAt: u.SevenDay.ResetsAt})
+	for _, w := range []struct {
+		key, name string
+		w         *claudeWindow
+	}{{"five_hour", "5h", u.FiveHour}, {"seven_day", "7d", u.SevenDay}} {
+		if w.w == nil {
+			continue
+		}
+		if w.w.Utilization == nil {
+			return nil, noFigure(w.key)
+		}
+		q.Windows = append(q.Windows, Window{Name: w.name, Percent: *w.w.Utilization, ResetsAt: w.w.ResetsAt, Primary: w.name == "5h"})
 	}
 	for _, l := range u.Limits {
 		if l.Scope == nil || l.Scope.Model == nil || l.Scope.Model.DisplayName == "" {
 			continue // unscoped limits already appear as 5h / 7d
 		}
-		q.Windows = append(q.Windows, Window{Name: l.Scope.Model.DisplayName, Percent: l.Percent, ResetsAt: l.ResetsAt, Scoped: true})
+		if l.Percent == nil {
+			return nil, noFigure(l.Scope.Model.DisplayName + " window")
+		}
+		q.Windows = append(q.Windows, Window{Name: l.Scope.Model.DisplayName, Percent: *l.Percent, ResetsAt: l.ResetsAt, Scoped: true})
 	}
 	if e := u.Extra; e != nil && e.Enabled && e.UsedCredits != nil && e.MonthlyLimit != nil {
 		q.Note = fmt.Sprintf("extra usage %.2f / %.2f %s", *e.UsedCredits/100, *e.MonthlyLimit/100, e.Currency)

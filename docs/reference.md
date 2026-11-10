@@ -3969,6 +3969,17 @@ key*). Model-scoped windows (a separate weekly Fable budget, say) are shown
 but never count as spent, because nobody knows which model a session will
 use.
 
+A window is read only with its figure. One the usage endpoint leaves out,
+or sends as `null`, is a limit the account does not have: an Ultra account
+has no five-hour window, a Team seat no seven-day one. One it reports with
+no figure — `{"utilization": null}`, or a model's row with no `percent` —
+is a reading that failed, never 0%: nothing from it is kept, the account
+keeps the reading it had, dated when that was taken (or none, `-` and
+`never`, as before), and the listing says why on stderr, `the usage
+endpoint reported five_hour with no figure, so no reading was taken`.
+Read as 0%, such a reading would make its account look like the one with
+the most room left.
+
 ### When the provider asks rota to wait
 
 A usage endpoint that turns a reading away — `429`, or a `5xx` failure of
