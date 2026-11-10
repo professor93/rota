@@ -31,8 +31,10 @@ const (
 // in, at the pty's size, or 120×40 with none. It runs with the daemon's
 // environment, since only ctl.sock may hand a daemon another. The account
 // left out is the rotation's choice, and --shell is the login shell, which
-// the server's file must allow. It says the session started, or prints its
-// document with --json.
+// the server's file must allow. On a terminal it then attaches to the
+// session, as attach does; otherwise, or with --json, which asks for the
+// session's document on a terminal too, it says the session started, or
+// prints its document.
 //
 // What follows -- is the CLI's. Before it, a word that is not one of new's
 // flags is a prompt, which a session started for somebody to attach to has
@@ -79,6 +81,17 @@ func newRun(ctx context.Context, ch *Channel, args []string) int {
 	if *shell {
 		req.Kind = holdwire.KindShell
 	}
+	// On a terminal the session is attached to once it has started, and
+	// the attach's place is taken first: with none to be had, nothing is
+	// started that nobody could look at.
+	attaching := ch.PTY && !*asJSON
+	if attaching {
+		done, ok := attachPlace(ch)
+		if !ok {
+			return 1
+		}
+		defer done()
+	}
 	// The create ends with the channel: a person who leaves, or a server
 	// that stops, waits for no holder.
 	c, stop := clientFor(ctx, ch)
@@ -87,6 +100,9 @@ func newRun(ctx context.Context, ch *Channel, args []string) int {
 	if err != nil {
 		listFailed(ch, err)
 		return 1
+	}
+	if attaching {
+		return attachTo(ctx, ch, c, s.ID, "attach")
 	}
 	if *asJSON {
 		return listJSON(ch, s)

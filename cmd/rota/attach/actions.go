@@ -2,6 +2,7 @@ package attach
 
 import (
 	"math"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -149,11 +150,23 @@ func (r *runner) switchFailed(op runOpened, now time.Time) {
 		return
 	}
 	r.phase = runLive
-	name := r.target.Name
-	if name == "" {
-		name = r.target.ID
+	r.note("rota: "+OneLine(actionsName(r.target))+": "+op.err.Error(), now)
+}
+
+// actionsName is what a note calls a session: its name, and for a terminal
+// the server runs itself, which has none, its label, its folder or its id,
+// the order the daemon names a held one by. An id says nothing to a person,
+// and on a narrow window it would leave no room for what the note says.
+func actionsName(s client.Session) string {
+	switch {
+	case s.Name != "":
+		return s.Name
+	case s.Label != "":
+		return s.Label
+	case s.Cwd != "":
+		return filepath.Base(s.Cwd)
 	}
-	r.note("rota: "+OneLine(name)+": "+op.err.Error(), now)
+	return s.ID
 }
 
 // holds says whether this connection holds the keyboard.
@@ -365,10 +378,7 @@ func (r *runner) show(l link, sess client.Session, now time.Time) {
 	r.askedAt = time.Time{}
 	r.ov, r.wantRedraw, r.wantWindow, r.eating = runOverlay{}, false, false, false
 	r.phase = runLive
-	name := sess.Name
-	if name == "" {
-		name = sess.ID
-	}
+	name := actionsName(sess)
 	key := r.key
 	cols, rows := r.t.Size()
 	r.view = newView(r.out, int(r.hello.Cols), int(r.hello.Rows), cols, rows, func(sc, sr, wc, wr int) string {
