@@ -19,6 +19,11 @@ import (
 // budget of its own. What the budget leaves alone is drawn as x/vt draws it,
 // every cursor query is answered where x/vt has the cursor, and the next
 // batch has a budget of its own.
+//
+// Briefly is counted in the CPU time the process spends, not on the clock:
+// on a loaded machine the batch waits for a CPU for as long as the machine
+// makes it, and that wait is not the screen's doing. The 17 seconds were
+// seconds of drawing.
 func TestABatchOfRepeatsHoldsTheScreenBriefly(t *testing.T) {
 	const w, h = 200, 60
 	unit := "x\x1b[99999999b\x1b[6n"
@@ -72,14 +77,15 @@ func TestABatchOfRepeatsHoldsTheScreenBriefly(t *testing.T) {
 		}
 	}
 
-	start := time.Now()
+	start, worked := time.Now(), busy(t)
 	r.c.print(t, in)
 	p.output(0, len(in))
 	sh, _ := p.caughtUp(1, int64(len(in)))
-	asked := time.Since(start)
+	asked := busy(t) - worked
 	answered(answers.String())
-	if took, limit := time.Since(start), slow*200*time.Millisecond; asked > limit || took > limit {
-		t.Errorf("%d bytes at %dx%d: the Screen came after %v, the cursor answers after %v", len(in), w, h, asked, took)
+	if took, limit := busy(t)-worked, slow*200*time.Millisecond; asked > limit || took > limit {
+		t.Errorf("%d bytes at %dx%d: the Screen came after %v of work, the cursor answers after %v (%v on the clock)",
+			len(in), w, h, asked, took, time.Since(start))
 	}
 	if !sh.OK || sh.Offset != int64(len(in)) {
 		t.Fatalf("Screen %+v after %d bytes", sh, len(in))

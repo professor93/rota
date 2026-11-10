@@ -102,7 +102,8 @@ func TestASequenceCutAcrossWritesIsMadeSafeToo(t *testing.T) {
 
 // TestHugeCountsTakeNoTime: REP, ECH, CHT and CBT run their count in x/vt one
 // at a time, REP for about a minute at 99999999, all under the screen's lock.
-// The screen hands x/vt a count that draws the same.
+// The screen hands x/vt a count that draws the same. The time is the CPU
+// time the process spends (busy).
 func TestHugeCountsTakeNoTime(t *testing.T) {
 	for _, c := range []struct{ name, in, same string }{
 		{"REP", "x\x1b[99999999b", ""},
@@ -111,10 +112,10 @@ func TestHugeCountsTakeNoTime(t *testing.T) {
 		{"CBT", "\x1b[3;70H\x1b[99999999Zx", "\x1b[3;70H\x1b[80Zx"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			start := time.Now()
+			start := busy(t)
 			s := guarded(t, 80, 24, c.in)
-			if took := time.Since(start); took > time.Second {
-				t.Fatalf("%q took %v", c.in, took)
+			if took := busy(t) - start; took > time.Second {
+				t.Fatalf("%q took %v of work", c.in, took)
 			}
 			if !s.OK() {
 				t.Fatal("the screen retired")
@@ -261,16 +262,17 @@ func TestALongRunIsNotHeldForever(t *testing.T) {
 // screens of and then only the remainder of each. Past two screens of
 // repeats beyond a row's worth each, a batch of writes drops a REP that
 // would draw more, until the next Refill; a REP of a row or less is never
-// dropped.
+// dropped. The time is the CPU time the process spends (busy), which a
+// loaded machine does not lengthen.
 func TestAWriteOfRepeatsTakesNoTime(t *testing.T) {
 	const w, h, size = 200, 60, 32 << 10
 	const rep = "\x1b[99999999b"
 	quick := func(t *testing.T, in string) *Screen {
 		t.Helper()
-		start := time.Now()
+		start := busy(t)
 		s := guarded(t, w, h, in)
-		if took := time.Since(start); took > slow*200*time.Millisecond {
-			t.Errorf("%d bytes took %v", len(in), took)
+		if took := busy(t) - start; took > slow*200*time.Millisecond {
+			t.Errorf("%d bytes took %v of work", len(in), took)
 		}
 		if !s.OK() {
 			t.Fatal("the screen retired")
@@ -305,14 +307,14 @@ func TestAWriteOfRepeatsTakesNoTime(t *testing.T) {
 		// which the next batch gets afresh.
 		unit := "x" + rep + "\x1b[6n"
 		k := size / len(unit)
-		start := time.Now()
+		start := busy(t)
 		s := NewScreen(w, h)
 		t.Cleanup(s.Close)
 		for range k {
 			s.Write([]byte(unit))
 		}
-		if took := time.Since(start); took > slow*200*time.Millisecond {
-			t.Errorf("%d pieces took %v", k, took)
+		if took := busy(t) - start; took > slow*200*time.Millisecond {
+			t.Errorf("%d pieces took %v of work", k, took)
 		}
 		s.Refill()
 		s.Write([]byte(unit))
