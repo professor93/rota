@@ -195,18 +195,25 @@ func TestAnAnswerClearsOnlyTheVerdictItStartedUnder(t *testing.T) {
 	writeAccounts(t, dir, fmt.Sprintf(`{"accounts":[{"id":1,"provider":"claude","uuid":"apikey-test","credential":"apikey",`+
 		`"order":1,"noCreditUntil":%d,"token":{"accessToken":"`+testKey+`"}}],"nextId":2,"ordered":true}`, expired))
 	bin := t.TempDir()
-	ready := filepath.Join(t.TempDir(), "ready")
-	fakecli.Install(t, bin, "claude", fakecli.Spec{Stdout: []string{answer}, Ready: ready, Sleep: "2s"})
 	t.Setenv("PATH", bin)
 
-	s := openDir(t, dir)
-	a := s.Find(1)
-	done := make(chan error, 1)
-	go func() {
-		_, err := s.Run(context.Background(), a, rota.Spec{Prompt: "hi"}, nil, nil)
-		done <- err
-	}()
-	fakecli.WaitReady(t, ready)
+	// Started again should macOS kill the CLI on its way in: a run that
+	// never reached the API has no verdict to clear, and it ends before the
+	// next start opens the store again.
+	var done chan error
+	fakecli.Up(t, func(ready string) <-chan struct{} {
+		fakecli.Install(t, bin, "claude", fakecli.Spec{Stdout: []string{answer}, Ready: ready, Sleep: "2s"})
+		s := openDir(t, dir)
+		a := s.Find(1)
+		done = make(chan error, 1)
+		ended := make(chan struct{})
+		go func(done chan error) {
+			_, err := s.Run(context.Background(), a, rota.Spec{Prompt: "hi"}, nil, nil)
+			done <- err
+			close(ended)
+		}(done)
+		return ended
+	})
 	other := openDir(t, dir)
 	newer := time.Now().Add(CreditPause).UnixMilli()
 	other.Find(1).NoCreditUntil = newer
@@ -223,8 +230,8 @@ func TestAnAnswerClearsOnlyTheVerdictItStartedUnder(t *testing.T) {
 
 	// Answered without the API: no cost, nothing written.
 	claudeSays(t, `{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"","session_id":"s-local"}`)
-	s = openDir(t, dir)
-	a = s.Find(1)
+	s := openDir(t, dir)
+	a := s.Find(1)
 	if _, err := s.Run(context.Background(), a, rota.Spec{Prompt: "hi"}, nil, nil); err != nil {
 		t.Fatal(err)
 	}

@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"io"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -73,35 +72,48 @@ func checkStopCase(t *testing.T, res *Result, err error, c stopCase) {
 func runStopCase(t *testing.T, dir string, i int, c stopCase) (*Result, error) {
 	t.Helper()
 	name := "stop-case-" + string(rune('a'+i))
-	ready := filepath.Join(dir, name+".ready")
-	if c.cancel {
-		c.fake.Ready = ready
-	}
-	bin := fakecli.Install(t, dir, name, c.fake)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	a := &Account{ID: 1, Provider: "claude"}
-	a.Token.Access = "tok"
-	spec := c.spec
-	spec.Prompt, spec.flavorOverride = "p", "claude"
-	events := c.events
-	if events == nil {
-		events = &bytes.Buffer{}
-	}
 	type outcome struct {
 		res *Result
 		err error
 	}
-	done := make(chan outcome, 1)
-	go func() {
-		res, err := Run(ctx, a, "", &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}}, spec, c.lim, events)
-		done <- outcome{res, err}
-	}()
+	var done chan outcome
+	var cancel context.CancelFunc
+	// start installs the case's fake and runs it. ready is empty for a case
+	// that does not wait for its CLI.
+	start := func(ready string) <-chan struct{} {
+		fake := c.fake
+		fake.Ready = ready
+		bin := fakecli.Install(t, dir, name, fake)
+		var ctx context.Context
+		ctx, cancel = context.WithCancel(context.Background())
+		a := &Account{ID: 1, Provider: "claude"}
+		a.Token.Access = "tok"
+		spec := c.spec
+		spec.Prompt, spec.flavorOverride = "p", "claude"
+		events := c.events
+		if events == nil {
+			events = &bytes.Buffer{}
+		}
+		done = make(chan outcome, 1)
+		ended := make(chan struct{})
+		go func(done chan outcome) {
+			res, err := Run(ctx, a, "", &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}}, spec, c.lim, events)
+			done <- outcome{res, err}
+			close(ended)
+		}(done)
+		return ended
+	}
 	if c.cancel {
 		// The case is a running CLI being stopped. Stopped any sooner, it
-		// can die of the signal before its own handler for it is in.
-		fakecli.WaitReady(t, ready)
+		// can die of the signal before its own handler for it is in. It is
+		// started again should macOS kill it on its way in: one that never
+		// ran has nothing to be stopped.
+		fakecli.Up(t, start)
+		defer cancel()
 		cancel()
+	} else {
+		start("")
+		defer cancel()
 	}
 	o := <-done
 	return o.res, o.err

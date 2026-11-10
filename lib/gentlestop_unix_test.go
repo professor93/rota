@@ -60,20 +60,25 @@ func fakeRun(ctx context.Context, bin string) (*Result, error) {
 // the grace it did not need.
 func TestACancelledRunLetsItsCLIStopByItself(t *testing.T) {
 	dir := t.TempDir()
-	ready, stopped := filepath.Join(dir, "ready"), filepath.Join(dir, "stopped")
-	bin := fakecli.Install(t, dir, "polite-cli", fakecli.Spec{Term: "exit", TermTouch: stopped, Ready: ready, Sleep: "30s"})
+	stopped := filepath.Join(dir, "stopped")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	type outcome struct {
 		res *Result
 		err error
 	}
-	done := make(chan outcome, 1)
-	go func() {
-		res, err := fakeRun(ctx, bin)
-		done <- outcome{res, err}
-	}()
-	fakecli.WaitReady(t, ready)
+	var done chan outcome
+	fakecli.Up(t, func(ready string) <-chan struct{} {
+		bin := fakecli.Install(t, t.TempDir(), "polite-cli", fakecli.Spec{Term: "exit", TermTouch: stopped, Ready: ready, Sleep: "30s"})
+		done = make(chan outcome, 1)
+		ended := make(chan struct{})
+		go func(done chan outcome) {
+			res, err := fakeRun(ctx, bin)
+			done <- outcome{res, err}
+			close(ended)
+		}(done)
+		return ended
+	})
 	start := time.Now()
 	cancel()
 	o := <-done
@@ -107,17 +112,20 @@ func TestARunNobodyStoppedKeepsItsCLIsExit(t *testing.T) {
 // then rather than never.
 func TestACancelledRunKillsACLIThatIgnoresTheAsking(t *testing.T) {
 	graced(t, 300*time.Millisecond)
-	dir := t.TempDir()
-	ready := filepath.Join(dir, "ready")
-	bin := fakecli.Install(t, dir, "deaf-cli", fakecli.Spec{Term: "ignore", Ready: ready, Sleep: "30s"})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		_, err := fakeRun(ctx, bin)
-		done <- err
-	}()
-	pid := fakecli.WaitReady(t, ready)
+	var done chan error
+	pid := fakecli.Up(t, func(ready string) <-chan struct{} {
+		bin := fakecli.Install(t, t.TempDir(), "deaf-cli", fakecli.Spec{Term: "ignore", Ready: ready, Sleep: "30s"})
+		done = make(chan error, 1)
+		ended := make(chan struct{})
+		go func(done chan error) {
+			_, err := fakeRun(ctx, bin)
+			done <- err
+			close(ended)
+		}(done)
+		return ended
+	})
 	start := time.Now()
 	cancel()
 	select {
@@ -142,19 +150,26 @@ func TestACancelledRunKillsACLIThatIgnoresTheAsking(t *testing.T) {
 func TestAStopReachesTheHelpersInTheGroup(t *testing.T) {
 	graced(t, 300*time.Millisecond)
 	dir := t.TempDir()
-	heard, deafReady, ready := filepath.Join(dir, "heard"), filepath.Join(dir, "deaf-ready"), filepath.Join(dir, "ready")
+	heard, deafReady := filepath.Join(dir, "heard"), filepath.Join(dir, "deaf-ready")
 	politeReady := filepath.Join(dir, "polite-ready")
 	polite := fakecli.Install(t, dir, "polite-helper", fakecli.Spec{Term: "exit", TermTouch: heard, Ready: politeReady, Sleep: "30s"})
 	deaf := fakecli.Install(t, dir, "deaf-helper", fakecli.Spec{Term: "ignore", Ready: deafReady, Sleep: "30s", Spawn: polite})
-	bin := fakecli.Install(t, dir, "parent-cli", fakecli.Spec{Term: "exit", TermTouch: filepath.Join(dir, "parent"), Ready: ready, Sleep: "30s", Spawn: deaf})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		_, err := fakeRun(ctx, bin)
-		done <- err
-	}()
-	fakecli.WaitReady(t, ready)
+	// Only the CLI is started again should macOS kill it on its way in, and
+	// then it has started no helper either. The helpers are waited for.
+	var done chan error
+	fakecli.Up(t, func(ready string) <-chan struct{} {
+		bin := fakecli.Install(t, t.TempDir(), "parent-cli", fakecli.Spec{Term: "exit", TermTouch: filepath.Join(dir, "parent"), Ready: ready, Sleep: "30s", Spawn: deaf})
+		done = make(chan error, 1)
+		ended := make(chan struct{})
+		go func(done chan error) {
+			_, err := fakeRun(ctx, bin)
+			done <- err
+			close(ended)
+		}(done)
+		return ended
+	})
 	helper := fakecli.WaitReady(t, deafReady)
 	fakecli.WaitReady(t, politeReady)
 	cancel()
@@ -179,19 +194,26 @@ func TestAStopReachesTheHelpersInTheGroup(t *testing.T) {
 func TestAStopEndsAsSoonAsTheGroupHasGone(t *testing.T) {
 	graced(t, 2*time.Second)
 	dir := t.TempDir()
-	helperReady, ready := filepath.Join(dir, "helper-ready"), filepath.Join(dir, "ready")
+	helperReady := filepath.Join(dir, "helper-ready")
 	helper := fakecli.Install(t, dir, "slow-helper", fakecli.Spec{Term: "exit", TermDelay: "150ms",
 		TermTouch: filepath.Join(dir, "helper"), Ready: helperReady, Sleep: "30s"})
-	bin := fakecli.Install(t, dir, "parent-cli", fakecli.Spec{Term: "exit", TermTouch: filepath.Join(dir, "parent"),
-		Ready: ready, Sleep: "30s", Spawn: helper})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		_, err := fakeRun(ctx, bin)
-		done <- err
-	}()
-	fakecli.WaitReady(t, ready)
+	// Only the CLI is started again should macOS kill it on its way in, and
+	// then it has started no helper either. The helper is waited for.
+	var done chan error
+	fakecli.Up(t, func(ready string) <-chan struct{} {
+		bin := fakecli.Install(t, t.TempDir(), "parent-cli", fakecli.Spec{Term: "exit", TermTouch: filepath.Join(dir, "parent"),
+			Ready: ready, Sleep: "30s", Spawn: helper})
+		done = make(chan error, 1)
+		ended := make(chan struct{})
+		go func(done chan error) {
+			_, err := fakeRun(ctx, bin)
+			done <- err
+			close(ended)
+		}(done)
+		return ended
+	})
 	pid := fakecli.WaitReady(t, helperReady)
 	start := time.Now()
 	cancel()
@@ -234,28 +256,32 @@ func TestAProcessIsReadFromTheLineProcKeepsForIt(t *testing.T) {
 // after the CLI was waited for signals nothing: that pid is no longer ours.
 func TestAStopAsksOnceAndCannotHoldUpWait(t *testing.T) {
 	graced(t, 200*time.Millisecond)
-	dir := t.TempDir()
-	ready := filepath.Join(dir, "ready")
-	bin := fakecli.Install(t, dir, "deaf-cli", fakecli.Spec{Term: "ignore", Ready: ready, Sleep: "30s"})
-	c := exec.CommandContext(context.Background(), bin)
-	setPgid(c)
-	halt := newStopper(c)
-	if err := c.Start(); err != nil {
-		t.Fatal(err)
-	}
-	fakecli.WaitReady(t, ready)
+	var bin string
+	var c *exec.Cmd
+	var halt *stopper
+	var done chan struct{}
+	fakecli.Up(t, func(ready string) <-chan struct{} {
+		bin = fakecli.Install(t, t.TempDir(), "deaf-cli", fakecli.Spec{Term: "ignore", Ready: ready, Sleep: "30s"})
+		c = exec.CommandContext(context.Background(), bin)
+		setPgid(c)
+		halt = newStopper(c)
+		if err := c.Start(); err != nil {
+			t.Fatal(err)
+		}
+		done = make(chan struct{})
+		go func(c *exec.Cmd, halt *stopper, done chan struct{}) {
+			_ = c.Wait()
+			halt.settle()
+			close(done)
+		}(c, halt, done)
+		return done
+	})
 	halt.stop()
 	armed := halt.kill
 	halt.stop()
 	if halt.kill != armed {
 		t.Fatal("one kill, however often it is asked for")
 	}
-	done := make(chan struct{})
-	go func() {
-		_ = c.Wait()
-		halt.settle()
-		close(done)
-	}()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
@@ -276,20 +302,23 @@ func TestAStopAsksOnceAndCannotHoldUpWait(t *testing.T) {
 // until the kill.
 func TestARunThatHitsABoundEndsEvenIfItsCLIIgnoresTheAsking(t *testing.T) {
 	graced(t, 300*time.Millisecond)
-	dir := t.TempDir()
-	ready := filepath.Join(dir, "ready")
-	bin := fakecli.Install(t, dir, "loud-cli", fakecli.Spec{Term: "ignore", Ready: ready,
-		Stdout: []string{strings.Repeat("x", 4096), "{{sleep:30s}}"}})
-	a := &Account{ID: 1, Provider: "claude"}
-	a.Token.Access = "tok"
-	var out bytes.Buffer
-	done := make(chan error, 1)
-	go func() {
-		_, err := Run(context.Background(), a, "", &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}},
-			Spec{Prompt: "p", flavorOverride: "claude"}, &Limits{MaxBufferedOutput: 1024}, &out)
-		done <- err
-	}()
-	pid := fakecli.WaitReady(t, ready)
+	var done chan error
+	pid := fakecli.Up(t, func(ready string) <-chan struct{} {
+		a := &Account{ID: 1, Provider: "claude"}
+		a.Token.Access = "tok"
+		bin := fakecli.Install(t, t.TempDir(), "loud-cli", fakecli.Spec{Term: "ignore", Ready: ready,
+			Stdout: []string{strings.Repeat("x", 4096), "{{sleep:30s}}"}})
+		var out bytes.Buffer
+		done = make(chan error, 1)
+		ended := make(chan struct{})
+		go func(done chan error) {
+			_, err := Run(context.Background(), a, "", &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}},
+				Spec{Prompt: "p", flavorOverride: "claude"}, &Limits{MaxBufferedOutput: 1024}, &out)
+			done <- err
+			close(ended)
+		}(done)
+		return ended
+	})
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):

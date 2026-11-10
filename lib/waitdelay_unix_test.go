@@ -28,28 +28,33 @@ import (
 // it does, so the helper alone is holding the pipes when the deadline matters,
 // however slowly the two started.
 //
-// A run that ends by itself before then had no helper holding anything, most
-// likely because macOS killed a fake inside exec, as it now and then does (see
-// fakecli's warm): that takes the helper, or the CLI that would have started
-// one. It is not the case under test, so the run is started again, as a fake's
-// first run is. That the run did not end under a live helper is checked rather
-// than assumed, since it is the very thing under test: a helper that comes up
-// after such an end was alive all along, and fails the test.
+// A run that ends by itself before the helper is up had no helper holding
+// anything, most likely because macOS killed a fake inside exec, as it now and
+// then does (see fakecli's warm): that takes the helper, or the CLI that would
+// have started one. It is not the case under test, so fakecli.Up starts the
+// run again, as a fake's first run is. That the run did not end under a live
+// helper is checked rather than assumed, since it is the very thing under
+// test: a helper that Up finds up after such an end was alive all along, and
+// fails the test.
 func TestARunEndsWhenItsDeadlineDoesEvenIfAHelperKeepsThePipes(t *testing.T) {
 	dir := t.TempDir()
-	a := &Account{ID: 1, Provider: "claude"}
-	a.Token.Access = "tok"
 	type outcome struct {
 		res *Result
 		err error
 	}
-	const tries = 3
-	for try := 1; ; try++ {
+	var (
+		d        *testDeadline
+		done     chan outcome
+		ended    chan struct{}
+		finished string
+		tries    int
+	)
+	pid := fakecli.Up(t, func(ready string) <-chan struct{} {
 		// Fakes of its own for each try, so nothing a try finds is an earlier
 		// try's: a helper that comes up late writes only its own file.
-		tryDir := filepath.Join(dir, strconv.Itoa(try))
-		ready := filepath.Join(tryDir, "helper.ready")
-		finished := filepath.Join(tryDir, "cli.finished")
+		tries++
+		tryDir := filepath.Join(dir, strconv.Itoa(tries))
+		finished = filepath.Join(tryDir, "cli.finished")
 		// The helper leaves the CLI's process group, so killing the group
 		// does not reach it, and keeps the inherited stdout and stderr for
 		// 30s. The CLI prints its answer and touches a file on its way out.
@@ -62,63 +67,55 @@ func TestARunEndsWhenItsDeadlineDoesEvenIfAHelperKeepsThePipes(t *testing.T) {
 			}
 		})
 		given := &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}}
+		a := &Account{ID: 1, Provider: "claude"}
+		a.Token.Access = "tok"
 
-		d := newTestDeadline()
-		done := make(chan outcome, 1)
-		go func() {
+		d = newTestDeadline()
+		done = make(chan outcome, 1)
+		ended = make(chan struct{})
+		go func(d *testDeadline, done chan outcome, ended chan struct{}) {
 			res, err := Run(d, a, "", given, Spec{Prompt: "p", flavorOverride: "claude"}, nil, io.Discard)
 			done <- outcome{res, err}
-		}()
-		// Whichever comes first: the helper up with the CLI done, or the run
-		// ending by itself.
-		var pid int
-		var ended *outcome
-		for limit := time.Now().Add(30 * time.Second); ended == nil; {
-			if pid = readyPid(ready); pid > 0 && touched(finished) {
-				break
-			}
-			if time.Now().After(limit) {
-				d.pass()
-				<-done
-				t.Fatalf("the helper never said it was up (pid %d), or the CLI never finished (%v)", pid, touched(finished))
-			}
-			select {
-			case o := <-done:
-				ended = &o
-			case <-time.After(5 * time.Millisecond):
-			}
+			close(ended)
+		}(d, done, ended)
+		return ended
+	})
+	// The helper is up. A helper that runs at all held the pipes from the
+	// moment it was started, so the run must not have ended, now or before the
+	// CLI has done all it does.
+	for limit := time.Now().Add(30 * time.Second); !touched(finished); {
+		select {
+		case <-ended:
+			o := <-done
+			t.Fatalf("the run ended by itself (%s) while its helper, pid %d, held the pipes", describe(o.res, o.err), pid)
+		case <-time.After(5 * time.Millisecond):
 		}
-		if ended != nil {
-			// A helper that runs at all held the pipes from the moment it was
-			// started, so the run must not have ended. One killed inside exec
-			// never runs, and never says it is up.
-			for grace := time.Now().Add(5 * time.Second); time.Now().Before(grace); time.Sleep(5 * time.Millisecond) {
-				if late := readyPid(ready); late > 0 {
-					t.Fatalf("the run ended by itself (%s) while its helper, pid %d, held the pipes", describe(ended.res, ended.err), late)
-				}
-			}
-			if try < tries {
-				t.Logf("try %d: the run ended by itself and no helper came up (%s); again", try, describe(ended.res, ended.err))
-				continue
-			}
-			t.Fatalf("the run ended by itself and no helper came up, %d times; the last: %s", tries, describe(ended.res, ended.err))
+		if time.Now().After(limit) {
+			d.pass()
+			<-done
+			t.Fatalf("the CLI never finished (%v)", touched(finished))
 		}
-
-		d.pass()
-		passed := time.Now()
+	}
+	select {
+	case <-ended:
 		o := <-done
-		if took := time.Since(passed); took > waitDelay+5*time.Second {
-			t.Fatalf("the run outlived its deadline by %v: a helper holding the pipes must not pin it", took)
-		}
-		if !errors.Is(o.err, context.DeadlineExceeded) {
-			t.Fatalf("a run that hit its deadline says so: %v", o.err)
-		}
-		// And the helper is still there, out of the group's reach: the run
-		// ended without it, rather than because it went.
-		if syscall.Kill(pid, 0) != nil {
-			t.Fatal("the helper is gone: killing the CLI's group reached it")
-		}
-		return
+		t.Fatalf("the run ended by itself (%s) while its helper, pid %d, held the pipes", describe(o.res, o.err), pid)
+	default:
+	}
+
+	d.pass()
+	passed := time.Now()
+	o := <-done
+	if took := time.Since(passed); took > waitDelay+5*time.Second {
+		t.Fatalf("the run outlived its deadline by %v: a helper holding the pipes must not pin it", took)
+	}
+	if !errors.Is(o.err, context.DeadlineExceeded) {
+		t.Fatalf("a run that hit its deadline says so: %v", o.err)
+	}
+	// And the helper is still there, out of the group's reach: the run
+	// ended without it, rather than because it went.
+	if syscall.Kill(pid, 0) != nil {
+		t.Fatal("the helper is gone: killing the CLI's group reached it")
 	}
 }
 
