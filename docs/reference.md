@@ -2294,9 +2294,11 @@ styles, which is these files, the two shared ones and the terminal page's
 own under `/assets/term/`, and nothing else: no remote host, and no
 `unsafe-eval`, which the emulator does not need. The terminal page admits no
 inline script either, since all of its script is in those files; the
-playground still runs one of its own. Every asset either page asks for
-carries `?v=` and this server's version, so the year of caching never keeps
-an old script after an upgrade.
+playground still runs one of its own. The pages' own files, the two shared
+ones and those under `/assets/term/`, are asked for with `?v=` and a digest
+of every file the binary carries under `/assets/` rather than the version,
+so the year of caching never keeps an old script once the files have
+changed, even between two builds of one version.
 
 #### Limits, the audit log and recording
 

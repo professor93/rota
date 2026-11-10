@@ -1,7 +1,10 @@
 package api
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
+	"io/fs"
 	"net/http"
 	"strings"
 )
@@ -63,10 +66,11 @@ var assetTypes = map[string]string{
 // shared files, which exist wherever either page does, and the emulator and
 // the terminal page's own files, which belong to the terminal group alone.
 //
-// It is behind no credential, like the pages themselves. The page asks for
-// each file with ?v=<this server's version>, so the answer may be kept for
-// as long as a browser likes: a rota that has changed serves a page that
-// asks under a different query.
+// It is behind no credential, like the pages themselves. A page asks for
+// each of its files with ?v=<the assets' digest>, and for the emulator, whose
+// files are pinned by their sums, with ?v=<this server's version>; so the
+// answer may be kept for as long as a browser likes: a rota whose files have
+// changed serves a page that asks under a different query.
 func (s *Server) assetsIn(dir string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		name := dir + r.PathValue("file")
@@ -91,4 +95,34 @@ func (s *Server) assetsIn(dir string) http.HandlerFunc {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
 	}
+}
+
+// assetsDigest names what is embedded under assets/. The pages ask for their
+// files under it, so files that changed are a new URL even where the version
+// did not move, as between two builds of one beta.
+var assetsDigest = digestOf(assetFS, "assets")
+
+// digestOf is the first 16 hex characters of a SHA-256 over every file under
+// root, walked in name order, each as its path, a NUL and its bytes.
+func digestOf(fsys fs.FS, root string) string {
+	h := sha256.New()
+	err := fs.WalkDir(fsys, root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		raw, err := fs.ReadFile(fsys, p)
+		if err != nil {
+			return err
+		}
+		h.Write([]byte(p))
+		h.Write([]byte{0})
+		h.Write(raw)
+		return nil
+	})
+	if err != nil {
+		// Embedded at build time, so this does not fail on assetFS; a page
+		// would still get a query, only one that never changed.
+		return "0"
+	}
+	return hex.EncodeToString(h.Sum(nil))[:16]
 }

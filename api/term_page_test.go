@@ -12,8 +12,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
-
-	"github.com/professor93/rota/wire"
+	"testing/fstest"
 )
 
 // termFileRe finds the files under /assets/term/ that terminal.html asks
@@ -119,11 +118,15 @@ func TestTheTerminalPageInNode(t *testing.T) {
 // assetRefRe is every src or href a page's markup has.
 var assetRefRe = regexp.MustCompile(`(?:src|href)="([^"]*)"`)
 
-// Both pages are cached for a year, so each asks for its files under this
-// server's version: an upgraded rota is a different URL, never a stale script.
-func TestThePagesAskForTheirAssetsByVersion(t *testing.T) {
+// Both pages' files are cached for a year, so each page asks for them under
+// a digest of what is embedded: files that changed are a different URL, never
+// a stale script, even where the version did not move.
+func TestThePagesAskForTheirAssetsByDigest(t *testing.T) {
+	if !regexp.MustCompile(`^[0-9a-f]{16}$`).MatchString(assetsDigest) {
+		t.Fatalf("the assets' digest is %q, want 16 hex characters", assetsDigest)
+	}
 	h := newHarness(t, Options{Routes: terminalRoutes()})
-	want := "?v=" + url.QueryEscape(wire.Version)
+	want := "?v=" + url.QueryEscape(assetsDigest)
 	for _, p := range []string{"/playground", "/terminal"} {
 		resp, raw := h.do("GET", p, nil)
 		if resp.StatusCode != http.StatusOK {
@@ -149,6 +152,40 @@ func TestThePagesAskForTheirAssetsByVersion(t *testing.T) {
 	}
 }
 
+// The digest follows the bytes: any file's change, a file added, or a file
+// renamed is a new digest, and the same files are the same one.
+func TestTheAssetsDigestFollowsTheirBytes(t *testing.T) {
+	base := func() fstest.MapFS {
+		return fstest.MapFS{
+			"assets/page.js":       {Data: []byte("one")},
+			"assets/term/core.js":  {Data: []byte("two")},
+			"assets/term/term.css": {Data: []byte("three")},
+		}
+	}
+	was := digestOf(base(), "assets")
+	if again := digestOf(base(), "assets"); again != was {
+		t.Fatalf("the same files give %s and then %s", was, again)
+	}
+	for what, change := range map[string]func(fstest.MapFS){
+		"a byte changed": func(m fstest.MapFS) { m["assets/term/core.js"] = &fstest.MapFile{Data: []byte("twO")} },
+		"a file added":   func(m fstest.MapFS) { m["assets/term/new.js"] = &fstest.MapFile{Data: []byte("")} },
+		"a file renamed": func(m fstest.MapFS) {
+			m["assets/term/main.js"] = m["assets/term/core.js"]
+			delete(m, "assets/term/core.js")
+		},
+		"bytes moved between files": func(m fstest.MapFS) {
+			m["assets/page.js"] = &fstest.MapFile{Data: []byte("on")}
+			m["assets/term/core.js"] = &fstest.MapFile{Data: []byte("etwo")}
+		},
+	} {
+		m := base()
+		change(m)
+		if got := digestOf(m, "assets"); got == was {
+			t.Errorf("%s and the digest is still %s", what, got)
+		}
+	}
+}
+
 // Every file the terminal page names answers, with its type and the year's
 // cache; nothing else is reachable under /assets/term/, and none of it is
 // there without the terminal group.
@@ -164,7 +201,7 @@ func TestTheTerminalPagesOwnFilesAreServed(t *testing.T) {
 	}
 	for _, name := range named {
 		ctype := map[string]string{".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}[path.Ext(name)]
-		resp, _ := h.do("GET", "/assets/term/"+name+"?v="+url.QueryEscape(wire.Version), nil)
+		resp, _ := h.do("GET", "/assets/term/"+name+"?v="+url.QueryEscape(assetsDigest), nil)
 		if resp.StatusCode != http.StatusOK {
 			t.Errorf("GET /assets/term/%s: %d", name, resp.StatusCode)
 			continue
