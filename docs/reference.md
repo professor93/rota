@@ -663,11 +663,11 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/runs/{id}/ws` | watch | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
 | `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended`, `interrupted` or `broken`), `attachable`, `reachable`, `pid` (its holder), `name`, `title`, `conversation`, `conversation_cwd`, `resumable`, `ended_at` once it has stopped, `made_by` for a holder this rota cannot attach to (`unknown` when its record does not say), and `status` (`running`, `needs_you`, `quiet` or `stopped`). The daemon also lists the held sessions its store's records describe: the stopped ones, for `keep_stopped`, and the running ones it is not linked to |
 | `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard, and the same held fields, for a stopped held session too |
-| `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up. Over the control socket alone, `"env":["NAME=value",…]` is the environment a held session starts from in place of the daemon's, which its holder keeps the variables that describe another terminal out of, and `"remote_control":true`, or the session's name, starts an account's CLI with Claude Code's Remote Control on for whichever account is chosen, turning its setting on first and refusing what could not work, by the same rule and in the same words as `rota run --remote-control`. An empty `env` is `400`, since it would start the session with no `PATH`; from anybody else either is `403`: *env is taken only over the control socket*, or *remote_control is taken only over the control socket* |
+| `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up. Over the control socket alone, `"env":["NAME=value",…]` is the environment a held session starts from in place of the daemon's, which its holder keeps the variables that describe another terminal out of, and `"remote_control":true`, or the session's name, starts an account's CLI with Claude Code's Remote Control on for whichever account is chosen, turning its setting on first and refusing what could not work, by the same rule and in the same words as `rota run --remote-control`. So are `args` that ask for Remote Control themselves — `--remote-control`, `--remote-control=name`, or the word `remote-control` anywhere among them, Claude Code's subcommand — which are handed over as they are once the account is readied. An empty `env` is `400`, since it would start the session with no `PATH`; from anybody else each is `403`: *env is taken only over the control socket*, *remote_control is taken only over the control socket*, or *--remote-control and the remote-control subcommand are taken only over the control socket, as remote_control is*. A shell's `args` are the shell's, and are not read for it |
 | `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended; a running held session the daemon is not linked to is hung up by signal, once however often it is asked, and only while its pid is still the holder its record names: `409` when it is not, or when its record names no process this rota can check |
 | `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame. A held session the daemon is not linked to answers `409`, saying why |
 | `POST` | `/v1/terminals/{id}/messages` | control | `{"text":"…","force":false}` — type a message into a held session the way a person would, once it is ready for one: the text, then Enter. It is typing, so the keyboard must be free or held by the sender's own person, and until it is typed nobody else types into the session but one Esc or Ctrl-C. `200 {"ok":true}` once typed; `409` with `reason` `waiting` (the CLI waits on its person, where Enter may approve something; `"force":true` types anyway), `keyboard` (with `holder`), `ended`, or `not_held` (a terminal that is not a held session, or one the daemon is not linked to); `504` with `reason` `timeout` when it never became ready in 30 seconds |
-| `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token |
+| `PATCH` | `/v1/accounts/{id}` | control | `{"order":1,"threshold":80,"cwd":"/srv/api","config_dir":"/srv/homes/api","sessions":"own","remote_control":true,"long":"forget"}` — its place in the rotation, when to move on, where it belongs, where its conversations live (`shared`, `own`, or a directory — confined exactly as `config_dir` is), whether a claude account keeps its own `.claude.json` for Claude Code's Remote Control, and `"long":"forget"` to throw away its long-lived token. `remote_control`, on or off, is taken over the control socket alone, since it decides whose claude.ai identity the account's Remote Control acts as: from anybody else the whole request is `403` *remote_control is taken only over the control socket*, and nothing is changed |
 | `DELETE` | `/v1/accounts/{id}` | control | forget it, and delete the home rota made for it, staged credentials included; a `config_dir` somebody chose holds their memory and skills and stays, but for the account's login in it. A claude account's daemon is stopped first, and its macOS keychain item removed before its home |
 | `POST` | `/v1/login` | control | `{"provider":"claude","long":false}` → `{id, url, kind}`; `"long":true` asks for a long-lived token instead. `{"key":"sk-ant-api…","label":"…"}` makes an account on an API key at once → `{id, status, credential, order, label}`, with `warning` when the key could not be checked; `{"account":1,"token":"sk-ant-oat…"}` stores a `claude setup-token` token as that account's long-lived one → `{"long_until":"...","status":"long"}`, and an API key sent as `token` is refused with `400` by its prefix, without being sent anywhere. Neither comes back or is logged |
 | `POST` | `/v1/login/{id}` | control | `{"code":"..."}` → the account, or `{"status":"pending"}`; a long login answers `{"long_until":"...","status":"long"}` |
@@ -1281,7 +1281,9 @@ not by this one (M), so nothing was sent to it*.
 **What it serves.** Every route that takes a principal — the API, the
 WebSockets, and the terminals with their `send` — whatever `[routes]` says:
 routes choose what a port opens, and this is not a port. A new terminal's
-`env` and `remote_control` are taken here alone. Beside those it
+`env` and `remote_control`, the `args` of a terminal or a run that ask for
+Remote Control themselves, and an account's `remote_control` setting are
+taken here alone. Beside those it
 answers `GET /v1/health`, and `GET /v1/session` with
 `{"name":"local","role":…,"via":"local"}`, so a client can ask whether it
 may change anything before it tries. There is no page, asset or invite
@@ -2709,7 +2711,14 @@ config route was the same act by another door.
 `--allow-raw-flags` re-opens all four for an operator who is the only caller,
 and it is one flag rather than four because they are one question: whether
 this caller is trusted with the machine. Anyone holding it could write the
-flags by hand anyway.
+flags by hand anyway. One question it does not answer is whose claude.ai
+identity a session's Remote Control acts as, so `args` that ask for Remote
+Control — `--remote-control`, `--remote-control=name`, or the word
+`remote-control` — are taken over the control socket alone, exactly as a
+terminal's are, and the account readied first by the rule in *[Remote
+Control](#remote-control)*; from anybody else the run is `403` *--remote-control
+and the remote-control subcommand are taken only over the control socket, as
+remote_control is*.
 
 rota's own secrets never reach the agent: `ROTA_TOKEN` and `ROTA_HOME` are
 removed from the child environment unconditionally, as are the proxy and
@@ -3231,6 +3240,28 @@ Claude Code's running in the account's home: until then rota says that the
 setting takes effect when the account's running sessions end, and
 `rota run --remote-control` refuses rather than start a session whose Remote
 Control would act as the wrong account.
+
+On a server, everything that would start Remote Control is held to that one
+rule: a terminal's or a run's `remote_control`, and Claude Code's own flag or
+subcommand among their `args` — `--remote-control`, `--remote-control=name`,
+or the word `remote-control` anywhere, after `--` too, since telling a
+subcommand from a flag's value takes Claude Code's own grammar. Over the
+control socket each is readied as `rota run --remote-control` is: the setting
+turned on and saved, and a session whose Remote Control could not work
+refused, in the same words. From anybody else — a bearer token, a page's
+user, an invite — each is refused, and so is `PATCH remote_control`, on or
+off, because the setting decides whose claude.ai identity a session can be
+reached through. `rota run 2 --detach -- --remote-control` goes to the daemon
+over its socket, which readies it, and the command says the setting is on.
+
+In your own terminal the CLI's own arguments stay yours:
+`rota run 2 -- --remote-control`, or `-- remote-control`, hands Claude Code
+exactly that, without the setting, so its Remote Control acts as whoever the `.claude.json`
+in use names — you could run `claude` there yourself. rota's own
+`--remote-control`, before `--`, is the way that readies the account. And
+nothing outside a session stops `/remote-control` typed into it: whoever
+holds a session's keyboard can turn Remote Control on there, as whoever the
+account's setting makes it.
 
 An account with `--config` has no Remote Control in 1.3.0: it runs on a
 token, which Remote Control refuses. `rota run --remote-control`, `rota set

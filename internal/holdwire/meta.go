@@ -163,6 +163,25 @@ func StoredArgs(provider string, args []string) []string {
 	return append(out, args...)
 }
 
+// AsksRemoteControl reports whether a CLI's arguments start Claude Code's
+// Remote Control by themselves: its flag, bare or as --remote-control=name,
+// or its remote-control subcommand. Arguments that do are held to the rule
+// a request's remote_control is held to, so the account Remote Control acts
+// as is readied first.
+//
+// Every argument is read, those after "--" too: a subcommand is the first
+// operand however it is reached, and telling an operand from a flag's value
+// needs the CLI's arity, which rota does not keep. So a word that could be
+// either counts, which errs on the side of the check.
+func AsksRemoteControl(args []string) bool {
+	for _, a := range args {
+		if a == "remote-control" || a == "--remote-control" || strings.HasPrefix(a, "--remote-control=") {
+			return true
+		}
+	}
+	return false
+}
+
 // claudeStored drops Claude Code's flags that pick a conversation. --resume
 // and --from-pr take a value only when one follows (bare, they open a
 // picker); --session-id always does; --continue and --fork-session take

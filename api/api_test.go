@@ -505,10 +505,10 @@ func TestWhereConversationsLiveIsSetOverHTTP(t *testing.T) {
 	}
 }
 
-// Remote control is a claude account's to turn on and off, and the view says
-// which it is.
-func TestRemoteControlIsSetOverHTTP(t *testing.T) {
-	h := newHarness(t, Options{})
+// Remote control is a claude account's to turn on and off, over the control
+// socket, and the view says which it is.
+func TestRemoteControlIsSetOverTheControlSocket(t *testing.T) {
+	h := newHarness(t, Options{}).socket()
 	resp, raw := h.do("PATCH", "/v1/accounts/1", map[string]any{"remote_control": true})
 	var got wire.Account
 	json.Unmarshal(raw, &got)

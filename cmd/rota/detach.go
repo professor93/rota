@@ -46,7 +46,8 @@ const (
 // --remote-control with an account named is readied here, as a run that
 // opens the CLI readies it, and its flag added to the arguments. With none
 // named the account is not known until the daemon has chosen it, so the
-// daemon is asked to ready whichever it chooses.
+// daemon is asked to ready whichever it chooses. Remote Control asked for
+// in the CLI's own arguments, after -- or -i, is the daemon's to ready.
 func (c *cli) detach(id int, rest []string, ask shareAsk, remote remoteAsk) error {
 	if ask.on {
 		return usageErr("%s", detachWithShare)
@@ -80,6 +81,10 @@ func (c *cli) detach(id int, rest []string, ask shareAsk, remote remoteAsk) erro
 		req.Args = append(req.Args, more...)
 	case remote.on:
 		req.RemoteControl, req.RemoteControlName = true, remote.name
+		off = c.remoteControlOff()
+	case holdwire.AsksRemoteControl(req.Args):
+		// Claude Code's own flag or subcommand among the CLI's arguments,
+		// which the daemon readies as it readies the option.
 		off = c.remoteControlOff()
 	}
 

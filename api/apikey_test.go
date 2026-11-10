@@ -60,7 +60,7 @@ func TestPastedCredentialsOverHTTP(t *testing.T) {
 		t.Fatalf("%d %s", resp.StatusCode, raw)
 	}
 	keyed := strconv.Itoa(got.ID)
-	if resp, raw := h.do("PATCH", "/v1/accounts/"+keyed, map[string]any{"remote_control": true}); resp.StatusCode != 400 ||
+	if resp, raw := h.socket().do("PATCH", "/v1/accounts/"+keyed, map[string]any{"remote_control": true}); resp.StatusCode != 400 ||
 		!strings.Contains(string(raw), "API key") {
 		t.Fatalf("remote control refuses a key: %d %s", resp.StatusCode, raw)
 	}

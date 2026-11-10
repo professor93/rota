@@ -58,7 +58,9 @@ type termRequest struct {
 	// Control on, for whichever account is chosen, as `rota run
 	// --remote-control` does: the account's setting turned on first, and
 	// Claude Code's flag added last. It changes the account, so it too is
-	// taken only on the control socket.
+	// taken only on the control socket — as are Args that ask for Remote
+	// Control themselves (holdwire.AsksRemoteControl), which are readied the
+	// same way, and an account's remote_control setting (patchAccount).
 	RemoteControl remoteControl `json:"remote_control"`
 }
 
@@ -101,7 +103,18 @@ const (
 	envEmpty     = "env is empty, which would start the session with no PATH; leave it out for the daemon's own"
 	remoteLocal  = "remote_control is taken only over the control socket"
 	remoteShell  = "remote_control is Claude Code's, and a shell runs no account"
+	// remoteArgsLocal is for arguments that ask for Remote Control
+	// themselves, a terminal's or a run's.
+	remoteArgsLocal = "--remote-control and the remote-control subcommand are taken only over the control socket, as remote_control is"
 )
+
+// viaSocket reports whether a request came over the control socket, from
+// this machine's own user, the only caller who may decide whose identity an
+// account's Remote Control acts as.
+func viaSocket(r *http.Request) bool {
+	p := who(r)
+	return p != nil && p.Via == "local"
+}
 
 /* --------------------------------------------------------- the endpoints --- */
 
@@ -154,13 +167,17 @@ func (s *Server) createTerminal(w http.ResponseWriter, r *http.Request) {
 	}
 	// What only this machine's own user hands a daemon, refused from
 	// anybody else before anything is chosen or started.
-	if p := who(r); p == nil || p.Via != "local" {
+	if !viaSocket(r) {
 		switch {
 		case req.Env != nil:
 			fail(w, http.StatusForbidden, envLocal)
 			return
 		case req.RemoteControl.on:
 			fail(w, http.StatusForbidden, remoteLocal)
+			return
+		// A shell's arguments are the shell's, not Claude Code's.
+		case req.Kind != termKindShell && holdwire.AsksRemoteControl(req.Args):
+			fail(w, http.StatusForbidden, remoteArgsLocal)
 			return
 		}
 	}
@@ -570,16 +587,33 @@ func (s *Server) chooseTerminal(r *http.Request, kind string, id int) (*store.St
 
 // argsFor is what the account's CLI is handed: the request's arguments, and
 // where it asked for Remote Control, Claude Code's flag last, so nothing
-// before it is read as its name. The account is readied first by the
-// store's one rule for it, the one `rota run --remote-control` follows
-// (store.ReadyRemoteControl): its setting turned on and saved, and a session
-// whose Remote Control could not work refused, saying why.
+// before it is read as its name. Arguments that ask for Remote Control
+// themselves are handed over as they are, once readied as remote_control
+// is (readyRemoteControl).
 func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req *termRequest) ([]string, error) {
 	args := slices.Clone(req.Args)
 	rc := req.RemoteControl
+	if !rc.on && !holdwire.AsksRemoteControl(args) {
+		return args, nil
+	}
+	if err := s.readyRemoteControl(r, st, a); err != nil {
+		return nil, err
+	}
 	if !rc.on {
 		return args, nil
 	}
+	args = append(args, "--remote-control")
+	if rc.name != "" {
+		args = append(args, rc.name)
+	}
+	return args, nil
+}
+
+// readyRemoteControl readies an account for a session or a run with Remote
+// Control on, by the store's one rule for it, the one `rota run
+// --remote-control` follows (store.ReadyRemoteControl): its setting turned
+// on and saved, and whatever could not work refused, saying why.
+func (s *Server) readyRemoteControl(r *http.Request, st *store.Store, a *rota.Account) error {
 	turnedOn, err := st.ReadyRemoteControl(a)
 	if turnedOn {
 		s.log.Info("remote control turned on", "account", a.ID, "by", who(r).Name)
@@ -587,16 +621,9 @@ func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req 
 	if errors.Is(err, rota.ErrUnsupported) {
 		// About the account, not this server: said as it is, where a 502 of
 		// its own would be hidden as an internal error.
-		return nil, refuse(http.StatusBadGateway, err.Error())
+		return refuse(http.StatusBadGateway, err.Error())
 	}
-	if err != nil {
-		return nil, err
-	}
-	args = append(args, "--remote-control")
-	if rc.name != "" {
-		args = append(args, rc.name)
-	}
-	return args, nil
+	return err
 }
 
 // planShell is the opt-in, once chooseTerminal has allowed it: the person's

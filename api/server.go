@@ -1231,10 +1231,17 @@ func (s *Server) patchAccount(w http.ResponseWriter, r *http.Request) {
 		Long      *string        `json:"long"`
 		// RemoteControl gives a claude account its own .claude.json, which
 		// Claude Code's Remote Control reads the identity it acts as from.
+		// It is taken only over the control socket.
 		RemoteControl *bool `json:"remote_control"`
 	}
 	if err := decodeJSON(r, &body); err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	// The identity an account's Remote Control acts as is this machine's own
+	// user's to change, on or off, as a terminal's remote_control is.
+	if body.RemoteControl != nil && !viaSocket(r) {
+		fail(w, http.StatusForbidden, remoteLocal)
 		return
 	}
 	if body.Order == nil && body.Threshold == nil && body.Cwd == nil && body.ConfigDir == nil && body.Sessions == nil &&

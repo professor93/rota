@@ -358,14 +358,16 @@ func TestDetachJSONIsTheSessionAsTheAPIDescribesIt(t *testing.T) {
 // --remote-control with no account leaves the choice to the daemon, which
 // readies the account it chose and adds Claude Code's flag for it (P14);
 // with an account named, this command readies it and adds the flag, with
-// its name, itself. Either way the setting is saved and said.
+// its name, itself. Claude Code's own flag after -- is the daemon's to
+// ready, as the option is. Every way, the setting is saved and said.
 func TestDetachWithRemoteControl(t *testing.T) {
 	r := newDaemonRig(t)
 	until := time.Now().Add(time.Hour).UnixMilli()
-	writeStore(t, r.home, fmt.Sprintf(`{"ordered":true,"nextId":3,"accounts":[
+	writeStore(t, r.home, fmt.Sprintf(`{"ordered":true,"nextId":4,"accounts":[
 		{"id":1,"provider":"claude","email":"a@x","uuid":"u1","order":1,"token":{"accessToken":"A1","refreshToken":"r1","expiresAt":%d}},
-		{"id":2,"provider":"claude","email":"b@x","uuid":"u2","order":2,"token":{"accessToken":"A2","refreshToken":"r2","expiresAt":%d}}]}`,
-		until, until))
+		{"id":2,"provider":"claude","email":"b@x","uuid":"u2","order":2,"token":{"accessToken":"A2","refreshToken":"r2","expiresAt":%d}},
+		{"id":3,"provider":"claude","email":"c@x","uuid":"u3","order":3,"token":{"accessToken":"A3","refreshToken":"r3","expiresAt":%d}}]}`,
+		until, until, until))
 	r.start()
 	for _, c := range []struct {
 		args    []string
@@ -376,6 +378,7 @@ func TestDetachWithRemoteControl(t *testing.T) {
 		{[]string{"run", "--detach", "--remote-control"}, 1, "claude/a@x", []string{"--remote-control"}},
 		{[]string{"run", "2", "--detach", "--remote-control=laptop", "--", "--model", "opus"}, 2, "claude/b@x",
 			[]string{"--model", "opus", "--remote-control", "laptop"}},
+		{[]string{"run", "3", "--detach", "--", "--remote-control=desk"}, 3, "claude/c@x", []string{"--remote-control=desk"}},
 	} {
 		id, _, errb := r.detach(r.cmd(c.args...))
 		on := fmt.Sprintf("rota: remote control is on for %s from now on; `rota set %d --remote-control off` turns it off\n", c.who, c.account)
@@ -399,7 +402,8 @@ func TestDetachWithRemoteControl(t *testing.T) {
 			RemoteControl bool `json:"remoteControl"`
 		} `json:"accounts"`
 	}
-	if err := json.Unmarshal(raw, &doc); err != nil || len(doc.Accounts) != 2 || !doc.Accounts[0].RemoteControl || !doc.Accounts[1].RemoteControl {
-		t.Fatalf("the setting is saved on both: %s", raw)
+	if err := json.Unmarshal(raw, &doc); err != nil || len(doc.Accounts) != 3 || !doc.Accounts[0].RemoteControl ||
+		!doc.Accounts[1].RemoteControl || !doc.Accounts[2].RemoteControl {
+		t.Fatalf("the setting is saved on all three: %s", raw)
 	}
 }

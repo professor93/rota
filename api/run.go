@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/professor93/rota/internal/holdwire"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
 	"github.com/professor93/rota/rotation"
@@ -150,6 +151,13 @@ func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, 
 	if req.TimeoutSeconds < 0 {
 		return nil, refuse(http.StatusBadRequest, "timeout_seconds must not be negative")
 	}
+	// Raw arguments that ask for Remote Control are held to a terminal's
+	// rule: refused from anybody but this machine's own user, before
+	// anything is spent, and readied below for that user.
+	remote := holdwire.AsksRemoteControl(req.Extra)
+	if remote && !viaSocket(r) {
+		return nil, refuse(http.StatusForbidden, remoteArgsLocal)
+	}
 	// A reading nobody knows is refused before anything is spent. The
 	// readings that ask the CLI for more become request fields here; the
 	// fields a caller set directly count as the same asking.
@@ -260,6 +268,13 @@ func (s *Server) prepare(r *http.Request, req *request, hold *held) (*prepared, 
 	// does not include.
 	if err := req.CheckFor(a, st.Home(a), lim); err != nil {
 		return nil, err
+	}
+	// Only once the request is known to be allowed, args included: a
+	// refused one leaves the account's setting as it was.
+	if remote {
+		if err := s.readyRemoteControl(r, st, a); err != nil {
+			return nil, err
+		}
 	}
 	if req.Resume != "" && req.Resume != "last" {
 		// The conversation may live in a sibling account's home; copy it in
