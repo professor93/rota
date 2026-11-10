@@ -3128,7 +3128,7 @@ belongs to one login or one daemon:
 | `statsig`, `mcp-needs-auth-cache.json`, `telemetry` | per-login caches and spools: feature flags, which MCP servers want a sign-in, what is waiting to be reported |
 | `policy-limits.json`, `remote-settings.json`, `remote-settings-helper-consent`, `remote-settings-consent.json`, and any name that is one of them followed by a dot, such as `policy-limits.json.signature.json` or `remote-settings.json.synced-at` | the policy and the settings the login's organisation set, cached, with what the login agreed to of them: shared, one organisation's would apply under another account, and two accounts of one organisation would keep replacing each other's consent |
 | `.session_ingress_token`, and any name that is it followed by a dot | the token a self-hosted runner gives one session |
-| any `*.lock` | locks Claude Code takes for this directory's own processes |
+| any `*.lock`, and any name with `.lock.` in it, such as `.oauth_refresh.lock.owner` | locks Claude Code takes for this directory's own processes, and what it keeps beside them: the refresh lock's owner record says whose pid may take the lock over |
 | `.claude.json` and `backups/` — with Remote Control on | the identity Remote Control acts as, and Claude Code's backups of that file |
 
 Shared, any of these would let one account's processes sign in with
@@ -3279,8 +3279,33 @@ there and launches on what it finds, and does not write the store, refresh
 the login, or rewrite the home's `.claude.json`. Alive means a rota run
 holding the account, a `daemon.lock` naming a live process, or a
 `sessions/<pid>.json` naming one — and a record nobody can read counts as
-alive. When nothing is alive, rota may refresh, and a refresh is followed at
-once — after the store is saved — by writing the new login into the home.
+alive. A session record whose pid has since gone to another process, as
+after a crash or a reboot, does not: it carries its writer's start,
+`procStart`, in the form Claude Code's build for the system writes it.
+
+- On Linux it is the start in clock ticks since boot, field 22 of
+  `/proc/<pid>/stat`, which no setting of the clock moves: the process at the
+  pid is the writer only if it started at the same tick.
+- On macOS it is the start as a UTC time, `ps -o lstart=`: a process at the
+  pid that started more than two minutes after it is not the writer. This is
+  believed only when the record's own `startedAt`, the moment it was made,
+  agrees with it to within minutes.
+
+Either is believed only of a record whose `pidDomain` is this machine's pid
+space — `darwin` on macOS, `linux:<machine-id>:<pid namespace>` on Linux — so
+on Linux a record written on another host or in another container that
+shares the home is judged by its pid alone; every Mac's pid space is
+`darwin`, so on macOS the field tells no host from another. A record that
+names no pid space is judged by its pid alone too, as before: `daemon.lock`,
+which Claude Code writes with a start but no `pidDomain`, and a session
+record from a Claude Code that does not write the field. So are a record
+with no `procStart`, one with a start in another system's form, and every
+record on Windows. A known limit: on Linux the start is read through the
+reader's time namespace, so a Claude Code in another time namespace that
+shares rota's pid namespace would look like a leftover; nothing guards
+against that. When nothing is alive, rota may refresh, and a refresh is
+followed at once — after the store is saved — by writing the new login into
+the home.
 Before rota refreshes — for a launch, a listing, usage read over HTTP or a
 server's maintenance — the store is saved, and when that save fails nothing is
 refreshed. A home holding no usable login, or the one rota wrote there and has

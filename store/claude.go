@@ -356,10 +356,12 @@ var hostedKinds = []string{"bg", "daemon", "daemon-worker"}
 // process, removed when that process exits. Both are the account's own,
 // never shared with anybody's.
 //
-// A record naming a pid that is no longer running is a leftover and says
-// nothing. A record that cannot be read could be anything, and counts as
-// alive: the two mistakes do not cost the same, and a home wrongly thought
-// quiet has its login written over underneath a running process.
+// A record naming a pid that is no longer running, or that has since been
+// given to a process started after the record's writer (see recycled), is
+// a leftover and says nothing. A record that cannot be read could be
+// anything, and counts as alive: the two mistakes do not cost the same, and
+// a home wrongly thought quiet has its login written over underneath a
+// running process.
 func claudeLiveThings(home string) []liveThing {
 	var live []liveThing
 	if what, ok := daemonAlive(home); ok {
@@ -378,12 +380,12 @@ func claudeLiveThings(home string) []liveThing {
 		if errors.Is(err, fs.ErrNotExist) {
 			continue // ended between the listing and now
 		}
-		pid, kind, ok := readRecord(raw, err)
+		rec, ok := readRecord(raw, err)
 		switch {
 		case !ok:
 			live = append(live, liveThing{what: claudeSessionsDir + "/" + e.Name() + " (unreadable)"})
-		case proc.Alive(pid):
-			live = append(live, liveThing{what: "session " + strconv.Itoa(pid), hosted: slices.Contains(hostedKinds, kind)})
+		case rec.running():
+			live = append(live, liveThing{what: "session " + strconv.Itoa(rec.pid), hosted: slices.Contains(hostedKinds, rec.kind)})
 		}
 	}
 	return live
@@ -406,29 +408,62 @@ func daemonAlive(home string) (string, bool) {
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", false
 	}
-	pid, _, ok := readRecord(raw, err)
+	rec, ok := readRecord(raw, err)
 	switch {
 	case !ok:
 		return claudeDaemonLock + " (unreadable)", true
-	case proc.Alive(pid):
-		return "daemon " + strconv.Itoa(pid), true
+	case rec.running():
+		return "daemon " + strconv.Itoa(rec.pid), true
 	}
 	return "", false
 }
 
-// readRecord reads the pid and kind a liveness record names.
-func readRecord(raw []byte, err error) (pid int, kind string, ok bool) {
+// record is what a liveness record says: the pid it names, the kind of
+// session, when its writer started as the writer read it, when it made the
+// record (milliseconds since the epoch), and the pid space it wrote in.
+type record struct {
+	pid                        int
+	kind, procStart, pidDomain string
+	startedAt                  int64
+}
+
+// running reports whether the process a Claude Code record names is still
+// the one that wrote it: its pid is alive, and was not given to a later
+// process (see recycled).
+func (r record) running() bool { return proc.Alive(r.pid) && !recycled(r) }
+
+// readRecord reads what a liveness record says.
+func readRecord(raw []byte, err error) (record, bool) {
 	if err != nil {
-		return 0, "", false
+		return record{}, false
 	}
 	var rec struct {
-		PID  float64 `json:"pid"`
-		Kind string  `json:"kind"`
+		PID       float64        `json:"pid"`
+		Kind      string         `json:"kind"`
+		ProcStart jsontext.Value `json:"procStart"`
+		StartedAt jsontext.Value `json:"startedAt"`
+		PIDDomain jsontext.Value `json:"pidDomain"`
 	}
 	if rota.UnmarshalLenient(raw, &rec) != nil || rec.PID <= 0 {
-		return 0, "", false
+		return record{}, false
 	}
-	return int(rec.PID), rec.Kind, true
+	// A field that is not what Claude Code writes there is missing, not an
+	// unreadable record: the record was read as well as it ever was.
+	var startedAt float64
+	if len(rec.StartedAt) > 0 && (rota.UnmarshalLenient(rec.StartedAt, &startedAt) != nil || startedAt < 0 || startedAt > 1e15) {
+		startedAt = 0
+	}
+	return record{pid: int(rec.PID), kind: rec.Kind, procStart: jsonString(rec.ProcStart),
+		pidDomain: jsonString(rec.PIDDomain), startedAt: int64(startedAt)}, true
+}
+
+// jsonString is a JSON string's value, and empty for anything else.
+func jsonString(v jsontext.Value) string {
+	var s string
+	if len(v) == 0 || rota.UnmarshalLenient(v, &s) != nil {
+		return ""
+	}
+	return s
 }
 
 // things is everything alive in the home, a rota run holding the account

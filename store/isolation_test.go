@@ -27,7 +27,8 @@ func personWorld(t *testing.T) string {
 	for _, name := range []string{"settings.json", "CLAUDE.md", "history.jsonl", "daemon.lock", "daemon.log",
 		".credentials.json", "policy-limits.json", "policy-limits.json.signature.json", "remote-settings.json",
 		"remote-settings.json.synced-at", "remote-settings-consent.json", "remote-settings-helper-consent",
-		"mcp-needs-auth-cache.json", "hfi-auth.json", ".session_ingress_token.e1", "ide.lock"} {
+		"mcp-needs-auth-cache.json", "hfi-auth.json", ".session_ingress_token.e1", "ide.lock",
+		".oauth_refresh.lock.owner", ".oauth_refresh.lock.owner.tmp.5f3a"} {
 		writeFile(t, filepath.Join(src, name), name)
 	}
 	writeFile(t, filepath.Join(src, ".claude.json"), `{
@@ -46,7 +47,8 @@ func personWorld(t *testing.T) string {
 var neverShared = []string{"sessions", "telemetry", "daemon", "daemon.lock", "daemon.log",
 	".credentials.json", "policy-limits.json", "policy-limits.json.signature.json", "remote-settings.json",
 	"remote-settings.json.synced-at", "remote-settings-consent.json", "remote-settings-helper-consent",
-	"statsig", "mcp-needs-auth-cache.json", ".session_ingress_token.e1", "bridge-spawn", "ide.lock"}
+	"statsig", "mcp-needs-auth-cache.json", ".session_ingress_token.e1", "bridge-spawn", "ide.lock",
+	".oauth_refresh.lock.owner", ".oauth_refresh.lock.owner.tmp.5f3a"}
 
 // sameThing reports whether two paths lead to the same file or directory.
 func sameThing(a, b string) bool {
@@ -298,7 +300,7 @@ func TestALinkForANameNoLongerSharedWaitsForAQuietHome(t *testing.T) {
 	if err := os.MkdirAll(dst, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"telemetry", "statsig"} {
+	for _, name := range []string{"telemetry", "statsig", ".oauth_refresh.lock.owner"} {
 		if err := os.Symlink(filepath.Join(src, name), filepath.Join(dst, name)); err != nil {
 			t.Fatal(err)
 		}
@@ -307,6 +309,9 @@ func TestALinkForANameNoLongerSharedWaitsForAQuietHome(t *testing.T) {
 	if _, err := s.command(a, true); err != nil {
 		t.Fatal(err)
 	}
+	// The refresh lock's owner record beside the person's lock is no
+	// directory a daemon has open, and goes at once.
+	absent(t, filepath.Join(dst, ".oauth_refresh.lock.owner"))
 	linksTo(t, filepath.Join(dst, "telemetry"), filepath.Join(src, "telemetry"))
 	linksTo(t, filepath.Join(dst, "statsig"), filepath.Join(src, "statsig"))
 	linksTo(t, filepath.Join(dst, "projects"), filepath.Join(src, "projects"))
@@ -360,6 +365,25 @@ func TestPerLoginStateIsDecidedByExactPrefix(t *testing.T) {
 		}
 	}
 	for _, name := range append(append(slices.Clone(nearLoginState), sharedKeyed...), "settings.json", "skills", "remote-settings", "policy-limits", "cache", "state") {
+		if !sharedWithClaude(name) {
+			t.Fatalf("%s is not shared", name)
+		}
+	}
+}
+
+// A lock Claude Code takes is its own processes', and so is what it keeps
+// beside one under the lock's name and a dot: the record of who holds its
+// refresh lock, `.oauth_refresh.lock.owner`, which says which pid may take
+// the lock over, and anything on its way to replacing that. Linked, a home
+// would read and write the person's record.
+func TestNothingBesideALockIsShared(t *testing.T) {
+	for _, name := range []string{".oauth_refresh.lock", ".oauth_refresh.lock.owner", ".oauth_refresh.lock.owner.tmp.5f3a",
+		".design_oauth_refresh.lock", "scheduled_tasks.lock", "ide.lock", "x.lock.anything"} {
+		if sharedWithClaude(name) {
+			t.Fatalf("%s is shared", name)
+		}
+	}
+	for _, name := range []string{"lock", "locks", "lockfile", "x.locked", "settings.json"} {
 		if !sharedWithClaude(name) {
 			t.Fatalf("%s is not shared", name)
 		}

@@ -153,10 +153,12 @@ func (s *Store) mirrorClaude(a *rota.Account, quiet bool) (string, error) {
 	// While anything is alive here a link is not taken away because its name
 	// stopped being shared: the daemon has that directory open through it.
 	// Conversation links still follow the sessions setting as they always
-	// have.
+	// have. What sits beside a lock is a file nothing holds open, and a link
+	// to the person's would be read and written as the home's own, so it
+	// goes at once.
 	hold := func(string) bool { return false }
 	if !quiet {
-		hold = func(name string) bool { return !keepsConversations(name) }
+		hold = func(name string) bool { return !keepsConversations(name) && !strings.Contains(name, ".lock.") }
 	}
 	blocked, err := relink(dst, want, func(string) bool { return true }, hold)
 	if err != nil {
@@ -344,7 +346,11 @@ func makeConversationState(dir string) error {
 //   - every name in perLogin, and every name that is one of them followed by
 //     a dot: state Claude Code keeps for the login it runs as, see there;
 //   - any name ending in `.lock` is a lock Claude Code takes for this
-//     directory's own processes;
+//     directory's own processes, and any name with `.lock.` in it is
+//     something kept beside such a lock under its name: the record of who
+//     holds the refresh lock, `.oauth_refresh.lock.owner` (Claude Code
+//     2.1.310 on), which says whose pid may take the lock over, and whatever
+//     is on its way to replacing it;
 //   - `.claude.json` is dealt with on its own, `.claude.json.own` and
 //     `backups.own` are rota's names for an account's own copies put aside,
 //     and `.DS_Store` is noise a file manager leaves behind.
@@ -354,7 +360,7 @@ func makeConversationState(dir string) error {
 // is, the account's own while the account keeps its own file.
 func sharedWithClaude(name string) bool {
 	switch {
-	case strings.HasPrefix(name, "daemon"), strings.HasSuffix(name, ".lock"), perLoginFile(name):
+	case strings.HasPrefix(name, "daemon"), strings.HasSuffix(name, ".lock"), strings.Contains(name, ".lock."), perLoginFile(name):
 		return false
 	}
 	switch name {
