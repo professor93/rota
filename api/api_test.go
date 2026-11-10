@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"github.com/professor93/rota/internal/claudecode"
 	"github.com/professor93/rota/internal/fakecli"
+	"github.com/professor93/rota/internal/proc"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -108,7 +109,18 @@ func fakeSleepAndExit() {
 	os.Exit(0)
 }
 
+// fakeStarted writes, when FAKE_STARTED names a file, this process's pid and
+// the moment it began, so a test can tell how long the CLI itself was alive
+// and whether it still is.
+func fakeStarted() {
+	if path := os.Getenv("FAKE_STARTED"); path != "" {
+		line := fmt.Sprintf("%d %s", os.Getpid(), time.Now().Format(time.RFC3339Nano))
+		_ = os.WriteFile(path, []byte(line), 0o600)
+	}
+}
+
 func fakeClaude() {
+	fakeStarted()
 	args := os.Args[1:]
 	prompt, _ := io.ReadAll(os.Stdin)
 	var files []string
@@ -834,20 +846,52 @@ func TestRunCodexMapsFieldsAndReadsLastMessage(t *testing.T) {
 	}
 }
 
+// A timeout bounds the CLI's run, which starts when the CLI does: the time a
+// request spends before that — the slot, the store, staging the login — is
+// not the timeout's, and on a busy Windows runner it has taken over two
+// seconds by itself. So the run is timed from the moment the fake began,
+// which it writes down, and never from when the request was sent.
+//
+// The fake would sleep for a minute. A child the timeout killed is gone a
+// moment after its second is up; one it failed to kill would be waited for
+// until exec's own last resort, waitDelay after the deadline, and still be
+// running for the rest of the minute.
 func TestRunTimesOutAndKillsTheChild(t *testing.T) {
-	h := newHarness(t, Options{Timeout: time.Second})
-	t.Setenv("FAKE_SLEEP", "3s")
-	start := time.Now()
-	code, _, raw := h.run(1, map[string]any{"prompt": "p"})
-	if code != 504 || time.Since(start) > 2*time.Second {
-		t.Fatalf("%d after %v: %s", code, time.Since(start), raw)
+	timedOut := func(t *testing.T, h *harness, body map[string]any) {
+		t.Helper()
+		started := filepath.Join(t.TempDir(), "started")
+		t.Setenv("FAKE_SLEEP", "1m")
+		t.Setenv("FAKE_STARTED", started)
+		code, _, raw := h.run(1, body)
+		answered := time.Now()
+		line, err := os.ReadFile(started)
+		if err != nil {
+			t.Fatalf("the CLI never started: %d %s", code, raw)
+		}
+		var pid int
+		var at string
+		if _, err := fmt.Sscan(string(line), &pid, &at); err != nil {
+			t.Fatalf("what the fake wrote: %q: %v", line, err)
+		}
+		began, err := time.Parse(time.RFC3339Nano, at)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if proc.Alive(pid) {
+			if p, err := os.FindProcess(pid); err == nil {
+				_ = p.Kill()
+			}
+			t.Fatalf("the CLI (pid %d) outlived its timeout: %d %s", pid, code, raw)
+		}
+		if code != 504 {
+			t.Fatalf("%d: %s", code, raw)
+		}
+		if ran := answered.Sub(began); ran > 4*time.Second {
+			t.Fatalf("answered %v after the CLI started: killed by the last resort, not by the timeout", ran)
+		}
 	}
-	h2 := newHarness(t, Options{})
-	t.Setenv("FAKE_SLEEP", "3s")
-	start = time.Now()
-	if code, _, raw := h2.run(1, map[string]any{"prompt": "p", "timeout_seconds": 1}); code != 504 || time.Since(start) > 2*time.Second {
-		t.Fatalf("per-request timeout: %d after %v: %s", code, time.Since(start), raw)
-	}
+	timedOut(t, newHarness(t, Options{Timeout: time.Second}), map[string]any{"prompt": "p"})
+	timedOut(t, newHarness(t, Options{}), map[string]any{"prompt": "p", "timeout_seconds": 1})
 }
 
 func TestStreamStopsWhenClientLeaves(t *testing.T) {
