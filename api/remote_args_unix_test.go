@@ -106,8 +106,8 @@ func TestAHeldSessionIsHandedTheGuardOnlyWithRemoteControlOff(t *testing.T) {
 		if resp, raw := h.do("POST", "/v1/terminals", map[string]any{"account": 1, "args": []string{"--model", "opus"}}); resp.StatusCode != http.StatusCreated {
 			t.Fatalf("%s: %d %s", name, resp.StatusCode, raw)
 		}
-		if got := handed(); guardDoc(t, got) == nil || !slices.Equal(got[:len(got)-2], []string{"--model", "opus"}) {
-			t.Errorf("%s, remote control off: the holder was handed %q, want the guard last", name, got)
+		if got := handed(); guardDoc(t, got) == nil || !slices.Equal(guardRest(got), []string{"--model", "opus"}) {
+			t.Errorf("%s, remote control off: the holder was handed %q, want the guard at both ends", name, got)
 		}
 	}
 	raw, err := os.ReadFile(filepath.Join(p.dir, "accounts.json"))
@@ -136,5 +136,53 @@ func TestAHeldSessionIsHandedTheGuardOnlyWithRemoteControlOff(t *testing.T) {
 	}
 	if got := handed(); !slices.Equal(got, []string{"--model", "opus"}) {
 		t.Errorf("remote control on: the holder was handed %q, want the arguments as they were", got)
+	}
+}
+
+// The holder is told, beside the guarded arguments its CLI runs with, the
+// arguments the session's record keeps: the ones it was asked for, before
+// the guard, a --settings file still a path. A session started again from
+// that record (as Resume will) on an account whose Remote Control is on by
+// then carries no guard, since each launch decides the guard afresh.
+func TestAHeldSessionsRecordIsTheArgumentsBeforeTheGuard(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "request.json")
+	p := withHeld(t, []string{"FAKE_HOLDER_LOG=" + log})
+	if err := os.WriteFile(filepath.Join(p.root, "mine.json"), []byte(`{"model":"y"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request := func() holdwire.Request {
+		t.Helper()
+		raw, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var seen struct {
+			Request holdwire.Request `json:"request"`
+		}
+		if err := json.Unmarshal(raw, &seen); err != nil {
+			t.Fatal(err)
+		}
+		return seen.Request
+	}
+	given := []string{"--settings", "mine.json", "--model", "opus"}
+	local := p.door(&localControl)
+	if resp, raw := local.do("POST", "/v1/terminals", map[string]any{"account": 1, "cwd": p.root, "args": given}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("%d %s", resp.StatusCode, raw)
+	}
+	r := request()
+	if !slices.Equal(r.Keep, given) {
+		t.Fatalf("the record is to keep %q, want %q as given", r.Keep, given)
+	}
+	if doc := guardDoc(t, r.Args); doc == nil || doc["model"] != "y" || slices.Contains(r.Args, "mine.json") {
+		t.Fatalf("the CLI is handed %q, want the guard with the file folded in", r.Args)
+	}
+	p.turnOn(1)
+	if resp, raw := local.do("POST", "/v1/terminals", map[string]any{"account": 1, "cwd": p.root, "args": r.Keep}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("started again: %d %s", resp.StatusCode, raw)
+	}
+	again := request()
+	if !slices.Equal(again.Args, given) || !slices.Equal(again.Keep, given) ||
+		strings.Contains(strings.Join(again.Args, " "), "disableRemoteControl") {
+		t.Fatalf("started again with remote control on: handed %q, kept %q; want %q and no guard", again.Args, again.Keep, given)
 	}
 }

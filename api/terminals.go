@@ -556,7 +556,7 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest, cw
 		return s.planShell(req)
 	}
 	defer st.Close()
-	args, err := s.argsFor(r, st, a, req, cwd)
+	args, _, err := s.argsFor(r, st, a, req, cwd)
 	if err != nil {
 		return nil, err
 	}
@@ -642,22 +642,26 @@ func (s *Server) chooseTerminal(r *http.Request, kind string, id int) (*store.St
 // this machine's own terminal can type into: a page's user, an SSH user, or
 // whoever attaches to a held session. So a claude account whose remote
 // control setting is off is launched behind Claude Code's own guard against
-// Remote Control (holdwire.GuardRemoteControl). It is first among its
-// arguments, with a --settings of theirs folded in, so Remote Control cannot
-// be started in that session under the identity a shared .claude.json names:
-// not from /remote-control, nor auto-started by a remoteControlAtStartup
-// that /config wrote into the settings every account shares. An account
-// whose setting is on has its own identity and is left as it is.
-func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req *termRequest, cwd string) ([]string, error) {
-	args := slices.Clone(req.Args)
+// Remote Control (holdwire.GuardRemoteControl). It is their last --settings,
+// with a --settings of theirs folded in, so Remote Control cannot be started
+// in that session under the identity a shared .claude.json names: not from
+// /remote-control, nor auto-started by a remoteControlAtStartup that /config
+// wrote into the settings every account shares. An account whose setting is
+// on has its own identity and is left as it is.
+//
+// keep is what a held session's record keeps (holdwire.Request.Keep): the
+// arguments before the guard, rota's own --remote-control included, as
+// every launch decides the guard afresh.
+func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req *termRequest, cwd string) (args, keep []string, err error) {
+	args = slices.Clone(req.Args)
 	rc := req.RemoteControl
 	asks, err := remoteArgs(r, a, args, cwd)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if rc.on || asks {
 		if err := s.readyRemoteControl(r, st, a); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	if rc.on {
@@ -667,18 +671,21 @@ func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req 
 		}
 	}
 	if rota.Flavor(a.Provider) != "claude" || a.RemoteControl {
-		return args, nil
+		return args, args, nil
 	}
 	// The policy tier ranks above --settings, so one that turns
 	// disableRemoteControl off would lift the guard from above it.
 	if holdwire.ReadManaged(args).Reenables {
-		return nil, refuse(http.StatusBadRequest, managedReenables)
+		return nil, nil, refuse(http.StatusBadRequest, managedReenables)
 	}
 	guarded, err := holdwire.GuardRemoteControl(args, cwd)
 	if err != nil {
-		return nil, refuse(http.StatusBadRequest, guardUnread)
+		return nil, nil, refuse(http.StatusBadRequest, guardUnread)
 	}
-	return guarded, nil
+	if args == nil {
+		args = []string{} // said, so the record keeps nothing rather than the guard
+	}
+	return guarded, args, nil
 }
 
 // readyRemoteControl readies an account for a session or a run with Remote

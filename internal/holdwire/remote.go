@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"errors"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -36,39 +37,61 @@ var (
 	// Control. Anywhere else they are ordinary words.
 	remoteFirst = []string{"remote-control", "rc", "remote", "sync", "bridge"}
 	// requiredFlags take the next argument as their value whatever it is, a
-	// "--" or another flag included, as Commander reads a required value.
-	// optionalFlags take it only when it does not start with "-". For the
-	// command words both count as values (valueFlags), and a flag missing
-	// from both is read as taking no value, so the word after it still
-	// counts, which errs on the side of the check. --debug is missing on
-	// purpose: it binds a filter only in its "=" form.
-	requiredFlags = map[string]bool{
-		"--add-dir": true, "--advisor": true, "--agent": true, "--agents": true,
-		"--allowedTools": true, "--allowed-tools": true,
-		"--append-subagent-system-prompt": true, "--append-subagent-system-prompt-file": true,
-		"--append-system-prompt": true, "--append-system-prompt-file": true,
-		"--autocompact": true, "--betas": true, "--channels": true,
-		"--dangerously-load-development-channels": true, "--debug-file": true,
-		"--disallowedTools": true, "--disallowed-tools": true, "--effort": true,
-		"--environment": true, "--exec": true, "--fallback-model": true,
-		"--input-format": true, "--json-schema": true, "--max-budget-usd": true,
-		"--max-turns": true, "--mcp-config": true, "--model": true, "--name": true, "-n": true,
-		"--output-format": true, "--permission-mode": true, "--permission-prompt-tool": true,
-		"--permission-prompts": true, "--plugin-dir": true, "--plugin-url": true, "--ref": true,
-		"--remote-control-session-name-prefix": true, "--session-id": true,
-		"--setting-sources": true, "--system-prompt": true, "--system-prompt-file": true,
-		"--system-prompt-snapshot": true, "--teammate-mode": true, "--tools": true,
-		"--settings": true, "--managed-settings": true,
-	}
-	optionalFlags = map[string]bool{
-		"--resume": true, "-r": true, "--worktree": true, "-w": true, "--from-pr": true,
-		"--cloud": true, "--remote": true, "--teleport": true,
-		"--remote-control": true, "--rc": true,
-	}
+	// "--" or another flag included. optionalFlags take it only when it does
+	// not start with "-". These are Claude Code 2.1.322's own two sets, `l`
+	// and `d` in its binary, which its early reading of --settings
+	// (eagerParseCliFlag) walks the arguments by. The required set is copied
+	// whole, with the flags it hides. A flag missing from both is read as
+	// taking no value. The guard does not rely on these being complete
+	// (GuardRemoteControl), and the command words count wherever that errs
+	// on the side of the check (valueFlags).
+	requiredFlags = setOf(
+		"--prefill", "--prefill-b64", "--deep-link-repo", "--deep-link-last-fetch", "--deep-link-cwd-b64",
+		"--handle-uri", "--settings", "--managed-settings", "--setting-sources", "--client-data-url",
+		"--watch-artifact", "--watch-artifact-no-autoreact", "--team-name", "--agent-id", "--agent-name",
+		"--agent-color", "--parent-session-id", "--agent-type", "--model", "--agent", "--routine", "--effort",
+		"--fast-mode", "--permission-mode", "--inherit-permission-mode", "--proactivity", "--debug-file",
+		"--system-prompt", "--system-prompt-file", "--append-system-prompt", "--append-system-prompt-file",
+		"--system-prompt-snapshot", "--append-subagent-system-prompt", "--append-subagent-system-prompt-file",
+		"--plan-mode-instructions", "--permission-prompt-tool", "--permission-prompts", "--json-schema",
+		"--fallback-model", "--advisor", "--agents", "--name", "-n", "--allowedTools", "--allowed-tools",
+		"--disallowedTools", "--disallowed-tools", "--tools", "--add-dir", "--mcp-config", "--betas", "--file",
+		"--channels", "--dangerously-load-development-channels", "--plugin-dir", "--plugin-dir-no-mcp",
+		"--plugin-url", "--remote-control-session-name-prefix", "--exec", "-m", "--sdk-url", "--thinking",
+		"--thinking-display", "--max-thinking-tokens", "--max-turns", "--max-budget-usd", "--task-budget",
+		"--autocompact", "--rewind-files", "--resume-session-at", "--resume-drops-turn", "--workload",
+		"--output-format", "--input-format", "--teammate-mode", "--messaging-socket-path", "--session-id",
+		"--environment", "--pool", "--ref", "--on-branch", "--correlation-id", "--forward-home-settings",
+		"--project-config-root", "--attach-serve", "--runner-declares", "--session-began-as-copy",
+	)
+	optionalFlags = setOf(
+		"-d", "--debug", "-r", "--resume", "--from-pr", "-w", "--worktree", "--teleport", "--cloud",
+		"--remote", "--project", "--remote-control", "--rc", "--prompt-suggestions",
+	)
 )
 
-// valueFlags reports whether flag takes a value, required or optional.
-func valueFlags(flag string) bool { return requiredFlags[flag] || optionalFlags[flag] }
+// ValueFlags is Claude Code 2.1.322's flags that take a value, required and
+// optional, sorted: the ones rota reads a claude CLI's arguments by.
+func ValueFlags() (required, optional []string) {
+	return slices.Sorted(maps.Keys(requiredFlags)), slices.Sorted(maps.Keys(optionalFlags))
+}
+
+func setOf(flags ...string) map[string]bool {
+	set := make(map[string]bool, len(flags))
+	for _, f := range flags {
+		set[f] = true
+	}
+	return set
+}
+
+// valueFlags reports whether the word after flag is its value rather than
+// an operand that could be Claude Code's command. --debug and -d are left
+// out: Claude Code binds --debug's filter only in its "=" form, so the word
+// after it can be the command, and counting it errs on the side of the
+// check.
+func valueFlags(flag string) bool {
+	return requiredFlags[flag] || (optionalFlags[flag] && flag != "--debug" && flag != "-d")
+}
 
 // settingsFlag takes a settings file's path, or the document itself inline,
 // whose remoteControlAtStartup true connects the session to Remote Control
@@ -257,11 +280,17 @@ const remoteGuardKey = "disableRemoteControl"
 // them (flagWalk), is folded into the guard's document, inline or the file it
 // names relative to cwd, and is left out. The last of them is the one folded
 // in. A --settings that is another flag's value stays exactly where and as it
-// is, and so does everything else. The guard goes where the options end:
-// before a "--" that ends them, or before a flag left without its value,
-// which would otherwise take the guard for one. When the last --settings
-// cannot be read as one JSON object, the answer is the error, and the session
-// is never to be launched without its guard.
+// is, and so does everything else.
+//
+// The guard goes at both ends. Last, where the options end as far as rota
+// knows Claude Code's flags: before a "--" that ends them, or before a flag
+// left without its value, which would otherwise take the guard for one. And
+// first, so that a value flag rota does not know, one a later Claude Code
+// adds say, cannot take the guard away by taking the last copy for its
+// value: Claude Code then reads the first, the only other --settings in a
+// flag's position. Both copies are the same document. When the last
+// --settings cannot be read as one JSON object, the answer is the error, and
+// the session is never to be launched without its guard.
 func GuardRemoteControl(args []string, cwd string) ([]string, error) {
 	return GuardRemoteControlOver(args, cwd, "", false)
 }
@@ -290,19 +319,29 @@ func GuardRemoteControlOver(args []string, cwd, before string, haveBefore bool) 
 	if err != nil {
 		return nil, err
 	}
-	out := make([]string, 0, len(args)+2)
+	// The guard where the options end, as far as flagWalk can tell.
+	body := make([]string, 0, len(args)+2)
+	at := -1
 	for i, a := range args {
 		if i == end {
-			out = append(out, settingsFlag, string(guard))
+			at = len(body)
+			body = append(body, settingsFlag, string(guard))
 		}
 		if !drop[i] {
-			out = append(out, a)
+			body = append(body, a)
 		}
 	}
 	if end == len(args) {
-		out = append(out, settingsFlag, string(guard))
+		at = len(body)
+		body = append(body, settingsFlag, string(guard))
 	}
-	return out, nil
+	// And again first, unless that is where it already is: should a flag
+	// rota does not know take the last copy for its value, Claude Code reads
+	// this one, since every other --settings in a flag's position is gone.
+	if at == 0 {
+		return body, nil
+	}
+	return append([]string{settingsFlag, string(guard)}, body...), nil
 }
 
 // HasFlagSettings reports whether the arguments carry a --settings in a
@@ -372,7 +411,7 @@ func flagWalk(args []string) (settings []int, end int) {
 		default:
 			for j := 1; j < len(a); j++ {
 				flag := "-" + a[j:j+1]
-				if !valueFlags(flag) {
+				if !requiredFlags[flag] && !optionalFlags[flag] {
 					continue
 				}
 				if j+1 == len(a) {

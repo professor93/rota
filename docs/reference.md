@@ -663,7 +663,7 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/runs/{id}/ws` | watch | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
 | `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended`, `interrupted` or `broken`), `attachable`, `reachable`, `pid` (its holder), `name`, `title`, `conversation`, `conversation_cwd`, `resumable`, `ended_at` once it has stopped, `made_by` for a holder this rota cannot attach to (`unknown` when its record does not say), and `status` (`running`, `needs_you`, `quiet` or `stopped`). The daemon also lists the held sessions its store's records describe: the stopped ones, for `keep_stopped`, and the running ones it is not linked to |
 | `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard, and the same held fields, for a stopped held session too |
-| `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up. Over the control socket alone, `"env":["NAME=value",…]` is the environment a held session starts from in place of the daemon's, which its holder keeps the variables that describe another terminal out of, and `"remote_control":true`, or the session's name, starts an account's CLI with Claude Code's Remote Control on for whichever account is chosen, turning its setting on first and refusing what could not work, by the same rule and in the same words as `rota run --remote-control`. So are a claude account's `args` that ask for Remote Control themselves, in the spellings *[Remote Control](#remote-control)* lists, which are handed over as they are once the account is readied. An empty `env` is `400`, since it would start the session with no `PATH`. From a token or a page's user each is `403`: *env is taken only over the control socket*, *remote_control is taken only over the control socket*, or *--remote-control and the remote-control subcommand are taken only over the control socket, as remote_control is*, and a `--settings` rota cannot read is *--settings that rota cannot read is taken only over the control socket, since it could turn Remote Control on*. Another provider's `args` and a shell's are not read for it. A claude account whose remote control setting is off is launched behind Claude Code's own `disableRemoteControl`, given as the last `--settings`, with the session's own one in a flag's position folded in and one that is another flag's value left as it is; over the socket one rota cannot read is `400` *--settings that rota cannot read leaves no way to keep Remote Control off in this session, so it is not started; name a settings file rota can read, or give the settings inline* |
+| `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up. Over the control socket alone, `"env":["NAME=value",…]` is the environment a held session starts from in place of the daemon's, which its holder keeps the variables that describe another terminal out of, and `"remote_control":true`, or the session's name, starts an account's CLI with Claude Code's Remote Control on for whichever account is chosen, turning its setting on first and refusing what could not work, by the same rule and in the same words as `rota run --remote-control`. So are a claude account's `args` that ask for Remote Control themselves, in the spellings *[Remote Control](#remote-control)* lists, which are handed over as they are once the account is readied. An empty `env` is `400`, since it would start the session with no `PATH`. From a token or a page's user each is `403`: *env is taken only over the control socket*, *remote_control is taken only over the control socket*, or *--remote-control and the remote-control subcommand are taken only over the control socket, as remote_control is*, and a `--settings` rota cannot read is *--settings that rota cannot read is taken only over the control socket, since it could turn Remote Control on*. Another provider's `args` and a shell's are not read for it. A claude account whose remote control setting is off is launched behind Claude Code's own `disableRemoteControl`, given as `--settings` at both ends of the arguments, with the session's own one in a flag's position folded in and one that is another flag's value left as it is; over the socket one rota cannot read is `400` *--settings that rota cannot read leaves no way to keep Remote Control off in this session, so it is not started; name a settings file rota can read, or give the settings inline* |
 | `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended; a running held session the daemon is not linked to is hung up by signal, once however often it is asked, and only while its pid is still the holder its record names: `409` when it is not, or when its record names no process this rota can check |
 | `GET` | `/v1/terminals/{id}/ws` | watch | attach to one, `?since=N` in bytes and `?mode=watch` to look without taking the keyboard; what may be sent *back* in is decided per frame. A held session the daemon is not linked to answers `409`, saying why |
 | `POST` | `/v1/terminals/{id}/messages` | control | `{"text":"…","force":false}` — type a message into a held session the way a person would, once it is ready for one: the text, then Enter. It is typing, so the keyboard must be free or held by the sender's own person, and until it is typed nobody else types into the session but one Esc or Ctrl-C. `200 {"ok":true}` once typed; `409` with `reason` `waiting` (the CLI waits on its person, where Enter may approve something; `"force":true` types anyway), `keyboard` (with `holder`), `ended`, or `not_held` (a terminal that is not a held session, or one the daemon is not linked to); `504` with `reason` `timeout` when it never became ready in 30 seconds |
@@ -1940,9 +1940,9 @@ one used, the credential staged, the account's own Claude world mirrored —
 with `TERM=xterm-256color` and `COLORTERM=truecolor` added and the request's
 `args` appended verbatim. For a claude account whose remote control setting
 is off, those `args` go behind Claude Code's own guard against Remote
-Control, `--settings '{"disableRemoteControl":true}'` as their last
-`--settings`, as *[Remote Control](#remote-control)* says. A plain login shell is available, and only
-if the file says so.
+Control, `--settings '{"disableRemoteControl":true}'` at both their ends,
+as *[Remote Control](#remote-control)* says. A plain login shell is
+available, and only if the file says so.
 
 It runs on **linux and macOS**. A pseudo-terminal is a Unix device; a server
 asked for one anywhere else refuses to start, naming the platform, rather
@@ -3297,7 +3297,7 @@ for an account whose setting is off goes behind Claude Code's own guard. That
 covers a web or SSH terminal, a held session however it was asked for
 (`rota run --detach` included), and a run: `/v1/run`, with `input` or
 without, and the run WebSocket. It is `--settings '{"disableRemoteControl":true}'`,
-the last `--settings` among the process's arguments. With it, Claude Code
+given at both ends of the process's arguments. With it, Claude Code
 refuses `claude remote-control`, the `--remote-control` and `--rc` flags,
 auto-start, and the in-session toggle. `--settings` ranks above your own, a
 project's and a local settings file, so a `remoteControlAtStartup` there does
@@ -3306,23 +3306,30 @@ Code honouring `disableRemoteControl` as documented: only the refusal of
 `claude remote-control` could be read in Claude Code's own code, and nothing
 is run to check the rest.
 
-Claude Code reads only the last `--settings`. A session's own one, standing
-where a flag stands as Claude Code's parser reads it, is folded into the
-guard's document, inline or read from its file, and left out of the
-arguments. The guard goes where the options end: before a `--` that ends
-them, or before a last flag left without its value. A `--settings` that is
-another flag's value, `--append-system-prompt --settings` say, reaches Claude
-Code exactly where and as it was. A run's guard is the last of its raw
-`args` when it has any, with the run's own `settings` folded in when they
-carry no `--settings` of their own. Otherwise its `settings` gain the key.
+Claude Code reads only the last `--settings` it finds where a flag stands. A
+session's own one, standing there as Claude Code 2.1.322's parser reads it,
+is folded into the guard's document, inline or read from its file, and left
+out of the arguments. A `--settings` that is another flag's value,
+`--append-system-prompt --settings` say, reaches Claude Code exactly where
+and as it was. The same document is put at both ends, so that a value flag
+rota does not know cannot take the guard away by taking it for its value.
+One copy goes first. The other goes where the options end as far as rota
+knows Claude Code's flags, which are its 2.1.322 sets: before a `--` that
+ends them, or before a last flag left without its value. Should a flag rota
+does not know take the last copy for its value, Claude Code reads the first.
+A run's guard is at both ends of its raw `args` when it has any, with the
+run's own `settings` folded in when they carry no `--settings` of their own.
+Otherwise its `settings` gain the key.
 Over the control socket, a `--settings` rota cannot read refuses the launch:
 *--settings that rota cannot read leaves no way to keep Remote Control off in
 this session, so it is not started; name a settings file rota can read, or
 give the settings inline*. An account whose setting is on keeps its own
 `.claude.json` and gets no guard. A foreground `rota run` at this machine's
 own terminal gets none either, a question asked there with `-p` included:
-nobody else can type into it. A held session's record keeps the guard among
-its arguments, as it keeps rota's own `--remote-control`.
+nobody else can type into it. A held session's record keeps its arguments
+as they were asked for, without the guard: a `--settings` file stays a path,
+and every launch decides the guard afresh, so a session started again on an
+account whose Remote Control is on by then carries none.
 
 The control role is trust equal to a shell on this machine. A keyboard in a
 coding agent can have it run any command, `claude` itself included, as this
@@ -3333,7 +3340,9 @@ And `/config` in a session rota did not start, your own `claude` say, can
 still change the user settings every account shares.
 
 This is a guard, not a wall. Claude Code's own releases add spellings this
-list does not know yet. An agent in a session held by a daemon that serves
+list does not know yet. Two value flags rota does not know yet, in one
+command line, could still take both copies of the guard. An agent in a
+session held by a daemon that serves
 another store than the default is not seen as inside it. Auto-connect can
 also come from your own settings, the organisation's managed settings, the
 key in `.claude.json`, or the organisation's default, for a session the guard

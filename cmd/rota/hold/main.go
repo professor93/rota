@@ -191,7 +191,13 @@ func (h *holder) start(in io.Reader, open func() (*store.Store, error)) error {
 	}
 	if a := p.account; a != nil {
 		m.Account, m.Provider = a.ID, a.Provider
-		m.Args = holdwire.StoredArgs(a.Provider, h.req.Args)
+		// The arguments as asked for, never the guard against Remote Control
+		// the CLI runs behind: each launch decides that afresh.
+		kept := h.req.Keep
+		if kept == nil {
+			kept = h.req.Args
+		}
+		m.Args = holdwire.StoredArgs(a.Provider, kept)
 		h.tokenUntil = holdwire.LoginUntil(a, p.env)
 		if rota.Flavor(a.Provider) == "claude" {
 			h.registry, h.zone = registryOf(env, h.child.Pid())

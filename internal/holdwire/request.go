@@ -24,10 +24,18 @@ type Request struct {
 	Kind    string   `json:"kind"`
 	Account int      `json:"account"`
 	Args    []string `json:"args"`
-	Cwd     string   `json:"cwd"`
-	Name    string   `json:"name"`
-	Cols    uint16   `json:"cols"`
-	Rows    uint16   `json:"rows"`
+	// Keep is what the session's record keeps of its arguments (Meta.Args,
+	// through StoredArgs): the ones it was asked for, exactly as given,
+	// before the guard against Remote Control that Args may carry. Each
+	// launch decides the guard afresh, so the record never holds it, a
+	// --settings file stays a path, and a later launch from the record
+	// carries no guard onto an account whose Remote Control is on by then.
+	// Nil keeps Args.
+	Keep []string `json:"keep,omitzero"`
+	Cwd  string   `json:"cwd"`
+	Name string   `json:"name"`
+	Cols uint16   `json:"cols"`
+	Rows uint16   `json:"rows"`
 	// Env, when set, is the environment the session starts from — the
 	// caller's own, already filtered of anything that is a credential — in
 	// place of the daemon's.
