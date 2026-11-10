@@ -86,7 +86,7 @@ func streamFrom(t *testing.T, base, query string, header http.Header) (*events.R
 
 // eventsGet is one GET /v1/events?<query> on base with header, through a
 // transport of its own so that no connection is shared with another test.
-// The caller closes the body.
+// The caller may close the body; it is closed when the test ends anyway.
 func eventsGet(t *testing.T, base, query string, header http.Header) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, base+"/v1/events?"+query, nil)
@@ -102,6 +102,9 @@ func eventsGet(t *testing.T, base, query string, header http.Header) *http.Respo
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Closed when the test ends too, whatever it did with it: a stream left
+	// open would keep the harness's server from closing.
+	t.Cleanup(func() { resp.Body.Close() })
 	return resp
 }
 

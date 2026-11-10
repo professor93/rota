@@ -292,11 +292,17 @@ type Server struct {
 	// could publish, and closed once as shutdown begins (closeEvents).
 	// accounts is what the account events are computed against, the
 	// sweeps' alone. streams is how many streams are open from anybody but
-	// the local principal, which eventStreams caps.
+	// the local principal, which eventStreams caps; streamsBy is the same
+	// by sign-in, which eventStreamsEach caps, under streamsMu. tested is
+	// when a test event was last posted for each sink, under testedMu.
 	events    *events.Ring
 	closeOnce sync.Once
 	accounts  accountWatch
 	streams   atomic.Int32
+	streamsMu sync.Mutex
+	streamsBy map[string]int
+	testedMu  sync.Mutex
+	tested    map[string]time.Time
 }
 
 // New validates options and builds a server. It refuses to start without a

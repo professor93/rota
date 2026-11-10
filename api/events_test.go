@@ -150,12 +150,15 @@ func TestAGapIsSaid(t *testing.T) {
 
 /* -------------------------------------------------------- a stream's life --- */
 
-// A stream is a request that lasts, so the server's ReadTimeout, which is
-// for reading a request, must not end it (Review Focus 3).
-func TestAStreamOutlivesReadTimeout(t *testing.T) {
+// A stream is a request that lasts, so neither of the server's own
+// timeouts, for reading a request and for writing its answer, may end it
+// (Review Focus 3). The write timeout is what a stream's own deadline before
+// each write takes the place of.
+func TestAStreamOutlivesTheServersTimeouts(t *testing.T) {
 	h := eventsServer(t)
 	srv := httptest.NewUnstartedServer(h.api.Handler())
 	srv.Config.ReadTimeout = 200 * time.Millisecond
+	srv.Config.WriteTimeout = 200 * time.Millisecond
 	srv.Start()
 	defer srv.Close()
 	rd, done := streamFrom(t, srv.URL, "", bearer(h.token))
@@ -299,8 +302,12 @@ func TestAnExpiredSignInEndsItsStream(t *testing.T) {
 // daemon's sinks read, is never one of them (I6).
 func TestStreamsAreBounded(t *testing.T) {
 	h := eventsServer(t)
-	for range eventStreams {
-		_, done := streamFrom(t, h.srv.URL, "", bearer(h.token))
+	for i := range eventStreams {
+		p, err := h.api.sessions.start(Principal{Name: "u" + strconv.Itoa(i), Role: RoleWatch, Via: "user"}, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, done := streamFrom(t, h.srv.URL, "", http.Header{"Cookie": {sessionCookie + "=" + p.session}})
 		defer done() // before the harness's server, whose Close waits on them
 	}
 	resp := eventsGet(t, h.srv.URL, "", bearer(h.token))
@@ -319,6 +326,37 @@ func TestStreamsAreBounded(t *testing.T) {
 	if n := h.api.streams.Load(); n != eventStreams {
 		t.Fatalf("streams counts %d, want %d: the local one is not counted", n, eventStreams)
 	}
+}
+
+// One sign-in holds at most eventStreamsEach of those places, so a single
+// client, a watch invite as much as the server's own token, cannot take
+// them all; the next sign-in still has its own. A place given back is a
+// place again.
+func TestOneSignInHoldsAFewStreams(t *testing.T) {
+	h := eventsServer(t)
+	var dones []func()
+	for range eventStreamsEach {
+		_, done := streamFrom(t, h.srv.URL, "", bearer(h.token))
+		defer done()
+		dones = append(dones, done)
+	}
+	resp := eventsGet(t, h.srv.URL, "", bearer(h.token))
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("stream %d of one token answered %d", eventStreamsEach+1, resp.StatusCode)
+	}
+	if got := refusalOf(t, resp); got != "too many event streams are open for this sign-in" {
+		t.Fatalf("stream %d of one token is refused with %q", eventStreamsEach+1, got)
+	}
+	_, other := streamFrom(t, h.srv.URL, "", bearer("watch-token-eeee"))
+	defer other()
+	dones[0]()
+	for end := time.Now().Add(2 * time.Second); h.api.streams.Load() != eventStreamsEach; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatalf("a closed stream's place was not given back: %d open", h.api.streams.Load())
+		}
+	}
+	_, again := streamFrom(t, h.srv.URL, "", bearer(h.token))
+	defer again()
 }
 
 /* --------------------------------------------------------- who may ask --- */
@@ -390,8 +428,26 @@ func TestATestEventIsPublished(t *testing.T) {
 	if resp, raw := h.do("POST", "/v1/events", strings.Repeat("x", 5000)); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("a body over 4 KiB answered %d %s", resp.StatusCode, raw)
 	}
-	if n := len(published(h.api, events.Test)); n != 2 {
-		t.Fatalf("%d test events were published, want 2", n)
+	// One a second for each sink, and for every sink at once, so a double
+	// click is not two messages; another sink is another sink.
+	for sink, want := range map[string]string{"tg": "a test event for tg was sent a moment ago",
+		"": "a test event for every sink was sent a moment ago"} {
+		resp, raw := h.do("POST", "/v1/events", map[string]any{"type": "test", "sink": sink})
+		if resp.StatusCode != http.StatusTooManyRequests || !strings.Contains(string(raw), want) {
+			t.Fatalf("a second test event for %q at once answered %d %s", sink, resp.StatusCode, raw)
+		}
+	}
+	if resp, raw := h.do("POST", "/v1/events", map[string]any{"type": "test", "sink": "hook"}); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("a test event for another sink answered %d %s", resp.StatusCode, raw)
+	}
+	if n := len(published(h.api, events.Test)); n != 3 {
+		t.Fatalf("%d test events were published, want 3", n)
+	}
+	h.api.testedMu.Lock()
+	h.api.tested["tg"] = time.Now().Add(-testEvery) // its second has passed
+	h.api.testedMu.Unlock()
+	if resp, raw := h.do("POST", "/v1/events", map[string]any{"type": "test", "sink": "tg"}); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("a test event for tg once its second had passed answered %d %s", resp.StatusCode, raw)
 	}
 
 	h.api.StopRefreshing()
@@ -426,6 +482,18 @@ func TestEventTextCarriesNoSecret(t *testing.T) {
 	}
 	if !strings.HasPrefix(e.Text, "dead: sk-ant-[not repeated]") || !strings.HasSuffix(e.Text, " end") {
 		t.Errorf("the text is %q", e.Text)
+	}
+	// A key a colour escape is wrapped around is still a key: the escape
+	// goes, whole, and the key is masked.
+	coloured := "dead: \x1b[1m" + key + "\x1b[0m and \x1b[31m" + others[0] + "\x1b[0m, \x1b]8;;http://x\x1b\\" + others[1] + "\x1b]8;;\x1b\\ end"
+	e = h.api.emit(events.Event{Type: events.AccountDead, Text: coloured})
+	for _, bad := range []string{"AAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBB", "CCCCCCCCCCCCCCCC", "[1m", "[0m", "[31m", "8;;", "\x1b"} {
+		if strings.Contains(e.Text, bad) {
+			t.Errorf("a coloured text holds %q: %q", bad, e.Text)
+		}
+	}
+	if !strings.Contains(e.Text, "sk-ant-[not repeated]") || !strings.HasSuffix(e.Text, " end") {
+		t.Errorf("the coloured text is %q", e.Text)
 	}
 	long := strings.Repeat("é", 1000)
 	e = h.api.emit(events.Event{Type: events.SessionEnded, Name: long, Text: long})

@@ -40,6 +40,10 @@ var (
 	// newEventRing makes a server's ring, a seam so that a test can make it
 	// small.
 	newEventRing = events.NewRing
+	// testEvery is how often a test event may be posted for one sink, so a
+	// double click or a loop does not spend a sink's own rate limit, nor
+	// push real events out of the ring.
+	testEvery = time.Second
 )
 
 const (
@@ -51,6 +55,10 @@ const (
 	// this machine's own user, and a crowd on the network must not be able
 	// to switch them off.
 	eventStreams = 64
+	// eventStreamsEach is how many of those one sign-in may hold: a page
+	// session, else a token or a user by name. So one client, an invite
+	// left open on a tablet least of all, cannot take every place.
+	eventStreamsEach = 16
 	// eventBody bounds what POST /v1/events reads.
 	eventBody = 4 << 10
 )
@@ -69,10 +77,20 @@ const (
 // an xAI key (xai-…). wire.Unsecret takes out Anthropic's.
 var otherSecret = regexp.MustCompile(`(^|[^A-Za-z0-9])(sk|xai)-[A-Za-z0-9_-]{16,}`)
 
+// escapeSeq is a whole terminal escape sequence: a CSI (ESC [, or U+009B)
+// with its parameters and final byte, or an OSC up to its BEL or ST. Clean
+// alone would blank only a CSI's ESC, and a key right after "\x1b[1m" would
+// then follow the "m" as part of one word, which no key pattern matches.
+var escapeSeq = regexp.MustCompile(`(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)`)
+
 // cleanEventString is s fit to travel in an event: valid UTF-8 with no
 // control byte, nothing shaped like a credential, and at most max bytes.
-// Controls go first, so a key split by one is still a key.
+// Escape sequences go first, each as a space, so a key they were wrapped
+// around stands as a word of its own and is masked. A control byte inside
+// a key becomes a space, which splits it: what follows the space is no
+// longer a key's shape, and is kept.
 func cleanEventString(s string, max int) string {
+	s = escapeSeq.ReplaceAllString(s, " ")
 	s = events.Clean(s, 0)
 	s = wire.Unsecret(s)
 	s = otherSecret.ReplaceAllString(s, "${1}${2}-[not repeated]")
@@ -253,21 +271,20 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if p.Via != "local" {
-		if s.streams.Add(1) > eventStreams {
-			s.streams.Add(-1)
-			fail(w, http.StatusServiceUnavailable, "too many event streams are open")
-			return
-		}
-		defer s.streams.Add(-1)
+	release, refused := s.takeStream(p)
+	if refused != "" {
+		fail(w, http.StatusServiceUnavailable, refused)
+		return
 	}
+	defer release()
 
 	beatEvery, writeFor := eventBeat, eventWrite
 	rc := http.NewResponseController(w)
 	// The request has been read; what is left of the connection is this
-	// answer, which lasts. net/http clears a ReadTimeout's deadline itself
-	// once a request's body is read through, but not before (a GET that
-	// carried one), and not on every transport; this says so for all.
+	// answer, which lasts. A server's ReadTimeout does not reach a response
+	// on HTTP/1.1 or h2, since nothing reads after this, so clearing the
+	// read deadline is belt and braces. A WriteTimeout would end the stream;
+	// the deadline set before each write below takes its place.
 	_ = rc.SetReadDeadline(time.Time{})
 	// Whatever ends the stream, the connection is left with no deadline,
 	// so a request after it on the same connection is not cut short.
@@ -347,6 +364,41 @@ func (s *Server) streamEvents(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// takeStream takes a place for one stream of p's, and gives the function
+// that gives it back; or, when there is none, the sentence it is refused
+// with. The local principal, the control socket's (the daemon's own sinks,
+// and this machine's user), takes no place.
+func (s *Server) takeStream(p *Principal) (release func(), refused string) {
+	if p.Via == "local" {
+		return func() {}, ""
+	}
+	key := p.session
+	if key == "" {
+		key = p.Via + "\x00" + p.Name
+	}
+	s.streamsMu.Lock()
+	defer s.streamsMu.Unlock()
+	switch {
+	case s.streams.Load() >= eventStreams:
+		return nil, "too many event streams are open"
+	case s.streamsBy[key] >= eventStreamsEach:
+		return nil, "too many event streams are open for this sign-in"
+	}
+	if s.streamsBy == nil {
+		s.streamsBy = map[string]int{}
+	}
+	s.streamsBy[key]++
+	s.streams.Add(1)
+	return func() {
+		s.streamsMu.Lock()
+		defer s.streamsMu.Unlock()
+		if s.streamsBy[key]--; s.streamsBy[key] <= 0 {
+			delete(s.streamsBy, key)
+		}
+		s.streams.Add(-1)
+	}, ""
+}
+
 // stillSignedIn reports whether the principal a stream was opened by is
 // still who it was: a page sign-in, a person's or an invite's, ends with
 // its session, signed out or expired. A bearer token and the local
@@ -392,10 +444,49 @@ func (s *Server) postEvent(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "sink must be a sink's name, or empty for every sink")
 		return
 	}
+	select {
+	case <-s.events.Closed():
+		fail(w, http.StatusServiceUnavailable, "this server is stopping")
+		return
+	default:
+	}
+	if !s.mayTest(in.Sink) {
+		what := in.Sink
+		if what == "" {
+			what = "every sink"
+		}
+		fail(w, http.StatusTooManyRequests, "a test event for "+what+" was sent a moment ago")
+		return
+	}
 	e := s.emit(events.Event{Type: events.Test, Sink: in.Sink, Text: "A test event from " + who(r).Name})
 	if e.ID == 0 {
 		fail(w, http.StatusServiceUnavailable, "this server is stopping")
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"id": e.ID})
+}
+
+// mayTest reports whether a test event may be posted for sink now, and if
+// so counts it as posted: at most one each testEvery for one sink, and for
+// every sink at once (""). What it remembers is pruned as it grows, so a
+// caller naming a new sink each time costs nothing lasting.
+func (s *Server) mayTest(sink string) bool {
+	now := time.Now()
+	s.testedMu.Lock()
+	defer s.testedMu.Unlock()
+	if at, ok := s.tested[sink]; ok && now.Sub(at) < testEvery {
+		return false
+	}
+	if s.tested == nil {
+		s.tested = map[string]time.Time{}
+	}
+	if len(s.tested) >= 64 {
+		for k, at := range s.tested {
+			if now.Sub(at) >= testEvery {
+				delete(s.tested, k)
+			}
+		}
+	}
+	s.tested[sink] = now
+	return true
 }
