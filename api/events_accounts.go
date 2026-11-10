@@ -1,13 +1,363 @@
 package api
 
-import "github.com/professor93/rota/store"
+import (
+	"cmp"
+	"fmt"
+	"math"
+	"slices"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 
-// accountWatch is what the account events are computed against: what the
-// last sweep read of every account. It is empty until the account events
-// are written; until then a sweep says nothing.
-type accountWatch struct{}
+	"github.com/professor93/rota/internal/events"
+	rota "github.com/professor93/rota/lib"
+	"github.com/professor93/rota/rotation"
+	"github.com/professor93/rota/store"
+)
+
+// The account events: what a background sweep read of the accounts, said
+// against what the sweep before it read. Each is a latch, said once on the
+// look where it changes and never for what the first look found, so a
+// daemon that restarts does not announce again every account over its
+// threshold. A look follows every sweep (nextReset and maintain), so with
+// the sweeps off there are none.
+//
+//   - account.threshold: rotation.Spent changing between two readings that
+//     both exist. A failed reading is no reading, and changes no latch.
+//   - account.reset: a window that had been used coming back, once.
+//   - account.dead (reason login): the account coming to need a login,
+//     marked dead or its login ended. A new login re-arms it silently.
+//   - account.rotated: the account rotation.Pick takes changing, with why.
+//     Busy accounts are not looked at: busyness is momentary.
+
+// accountResetMoved is how much later a window's reset must have moved for
+// the window to count as back: less is a provider's clock jittering, not a
+// new window.
+const accountResetMoved = time.Minute
+
+// accountSessionsNamed is how many of an account's sessions an
+// account.threshold names; any more are counted.
+const accountSessionsNamed = 3
+
+// accountWatch is what the account events are computed against: the last
+// look, nil until the first, which is the baseline and says nothing. Only
+// the sweeps use it, one at a time, but under mu all the same.
+type accountWatch struct {
+	mu   sync.Mutex
+	last *accountsLook
+}
+
+// accountLook is what one look read of one account, copied out of the
+// store's account so that nothing is shared with it.
+//
+// spent, percent, window and windows come from a reading. An account with
+// none this time carries them over from the look before (diffAccounts), and
+// read says whether they come from any reading at all.
+type accountLook struct {
+	id, order int
+	limit     int // rotation.Cutoff
+	label     string
+	provider  string
+	// why is what the account needs a login for, while dead.
+	why string
+	// window is the window percent comes from: the unscoped one with the
+	// highest reading, else the first unscoped one; "" when there is none.
+	window string
+	read   bool
+	// dead is Dead or LoginEnded: it needs a login. Pick passes by only the
+	// first, which available follows.
+	dead      bool
+	spent     bool // rotation.Spent
+	credit    bool // OutOfCredit
+	queued    bool // rotation.InQueue
+	available bool // rotation.Available
+	percent   float64
+	windows   map[string]windowLook // the unscoped windows, by name
+}
+
+// windowLook is one window as a look read it.
+type windowLook struct {
+	percent float64
+	resets  time.Time
+}
+
+// accountsLook is one look at every account, and the account the rotation
+// picks from them, 0 for none.
+type accountsLook struct {
+	byID  map[int]accountLook
+	first int
+}
+
+// lookAccounts is one look at accounts, as a sweep has just left them.
+func lookAccounts(accounts []*rota.Account) accountsLook {
+	look := accountsLook{byID: make(map[int]accountLook, len(accounts))}
+	for _, a := range accounts {
+		l := accountLook{
+			id: a.ID, order: a.Order, limit: rotation.Cutoff(a),
+			label: a.Label(), provider: a.Provider,
+			read: a.Quota != nil, dead: a.Dead || a.LoginEnded(),
+			spent: rotation.Spent(a), credit: a.OutOfCredit(),
+			queued: rotation.InQueue(a), available: rotation.Available(a),
+			percent: a.Percent(),
+		}
+		switch {
+		case a.Dead:
+			l.why = a.WhyDead()
+		case l.dead:
+			l.why = fmt.Sprintf("its login ended on %s UTC; rota login %d makes a new one",
+				a.LoginUntil().UTC().Format(time.DateOnly), a.ID)
+		}
+		if a.Quota != nil {
+			l.windows = make(map[string]windowLook, len(a.Quota.Windows))
+			top := math.Inf(-1)
+			for _, w := range a.Quota.Windows {
+				if w.Scoped {
+					continue // Percent leaves them out, and so do the events
+				}
+				l.windows[w.Name] = windowLook{percent: w.Percent, resets: w.ResetsAt.Time}
+				if w.Percent > top {
+					top, l.window = w.Percent, w.Name
+				}
+			}
+		}
+		look.byID[a.ID] = l
+	}
+	if a, err := rotation.Pick(accounts); err == nil {
+		look.first = a.ID
+	}
+	return look
+}
+
+// diffAccounts is what changed from prev to next, said as events, and next
+// as the following look should be compared with: an account next has no
+// reading for keeps prev's reading, so a reading that failed changes no
+// latch, and the rotation's pick is made again over what was kept.
+//
+// An account prev has not seen is a baseline of its own: nothing is said
+// about it until it changes, its being first in the rotation included. So
+// diffAccounts(accountsLook{}, next, now) says nothing at all. The events
+// come by account id, each account's in the order dead, reset, threshold,
+// and the rotation's last.
+func diffAccounts(prev, next accountsLook, now time.Time) ([]events.Event, accountsLook) {
+	kept := accountsLook{byID: make(map[int]accountLook, len(next.byID)), first: next.first}
+	carried := false
+	for id, n := range next.byID {
+		if p, seen := prev.byID[id]; seen && !n.read {
+			n.read, n.spent, n.percent, n.window, n.windows = p.read, p.spent, p.percent, p.window, p.windows
+			n.available = n.available && !n.spent
+			carried = true
+		}
+		kept.byID[id] = n
+	}
+	if carried {
+		kept.first = accountFirst(kept.byID)
+	}
+
+	var out []events.Event
+	ids := make([]int, 0, len(kept.byID))
+	for id := range kept.byID {
+		ids = append(ids, id)
+	}
+	slices.Sort(ids)
+	for _, id := range ids {
+		if p, seen := prev.byID[id]; seen {
+			out = append(out, accountChanges(p, kept.byID[id], now)...)
+		}
+	}
+	if e, ok := accountRotated(prev, kept); ok {
+		out = append(out, e)
+	}
+	return out, kept
+}
+
+// accountChanges is what changed about one account from p to n.
+func accountChanges(p, n accountLook, now time.Time) []events.Event {
+	var out []events.Event
+	if n.dead && !p.dead {
+		out = append(out, events.Event{Type: events.AccountDead, Account: n.id, Name: n.label,
+			Reason: "login", Text: "needs a login: " + n.why})
+	}
+
+	// A window that had been used is back when its reset has moved on, or
+	// when its reset has passed and it reads lower or is gone.
+	names := make([]string, 0, len(p.windows))
+	for name := range p.windows {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	for _, name := range names {
+		was := p.windows[name]
+		if was.percent <= 0 || was.resets.IsZero() {
+			continue
+		}
+		is, still := n.windows[name]
+		moved := still && !is.resets.IsZero() && is.resets.Sub(was.resets) > accountResetMoved
+		passed := !now.Before(was.resets) && (!still || is.percent < was.percent)
+		if !moved && !passed {
+			continue
+		}
+		had := was.percent
+		out = append(out, events.Event{Type: events.AccountReset, Account: n.id, Name: n.label,
+			Window: name, Percent: &had, Limit: n.limit,
+			Text: fmt.Sprintf("has its %s window back: it had reached %s", name, roundPercent(had))})
+	}
+
+	if p.read && n.read && p.spent != n.spent {
+		at := "usage at " + roundPercent(n.percent)
+		if n.window != "" {
+			at = n.window + " at " + roundPercent(n.percent)
+		}
+		reading := n.percent
+		e := events.Event{Type: events.AccountThreshold, Account: n.id, Name: n.label,
+			Window: n.window, Percent: &reading, Limit: n.limit}
+		if n.spent {
+			e.Reason, e.Text = "up", fmt.Sprintf("reached its %d%% limit: %s", n.limit, at)
+		} else {
+			e.Reason, e.Text = "down", fmt.Sprintf("is under its %d%% limit again: %s", n.limit, at)
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// accountRotated is the rotation's pick moving from prev's to next's, and
+// why, or false when it has not moved or what it moved to is an account
+// first seen.
+//
+// When the new pick is ahead of the old one in the queue, or there was
+// none, the new pick is what changed: it can be used again (back), or it
+// was put ahead (order). Otherwise the old pick is what changed, and why it
+// is passed by is said of it.
+func accountRotated(prev, next accountsLook) (events.Event, bool) {
+	was, is := prev.first, next.first
+	if was == is {
+		return events.Event{}, false
+	}
+	if is == 0 {
+		text := "No account is available in the rotation: no account is in it"
+		for _, l := range next.byID {
+			if l.queued {
+				text = "No account is available in the rotation: every account in it is spent, needs a login or is out of credit"
+				break
+			}
+		}
+		return events.Event{Type: events.AccountRotated, Reason: "none", Text: text}, true
+	}
+	before, seen := prev.byID[is]
+	if !seen {
+		return events.Event{}, false
+	}
+	n := next.byID[is]
+	old, stays := next.byID[was]
+	var reason, why string
+	switch {
+	case was == 0 || stays && old.queued && accountAhead(n, old):
+		reason, why = "order", "the rotation was reordered"
+		if before.queued && !before.available {
+			reason, why = "back", "it can be used again"
+		}
+	case !stays:
+		reason, why = "removed", prev.byID[was].label+" was removed"
+	case !old.queued:
+		reason, why = "left", old.label+" left the rotation"
+	case old.dead:
+		reason, why = "dead", old.label+" needs a login"
+	case old.credit:
+		reason, why = "credit", old.label+" is out of credit"
+	case old.spent:
+		reason, why = "spent", fmt.Sprintf("%s reached its %d%% limit", old.label, old.limit)
+	default:
+		reason, why = "order", "the rotation was reordered"
+	}
+	return events.Event{Type: events.AccountRotated, Account: is, Name: n.label, Reason: reason,
+		Text: "is first in the rotation now: " + why}, true
+}
+
+// accountAhead reports whether a comes before b in the rotation's queue:
+// lower order first, then lower id, as rotation.Pick tries them.
+func accountAhead(a, b accountLook) bool {
+	return cmp.Or(cmp.Compare(a.order, b.order), cmp.Compare(a.id, b.id)) < 0
+}
+
+// accountFirst is the account rotation.Pick would take of looks: the first
+// in the queue that is available, or 0 for none.
+func accountFirst(byID map[int]accountLook) int {
+	var first *accountLook
+	for _, l := range byID {
+		if l.available && (first == nil || accountAhead(l, *first)) {
+			first = &l
+		}
+	}
+	if first == nil {
+		return 0
+	}
+	return first.id
+}
+
+// roundPercent is a reading in words: rounded to a whole number, "82%".
+func roundPercent(p float64) string { return strconv.Itoa(int(math.Round(p))) + "%" }
 
 // lookAtAccounts compares what a sweep has just read of the accounts with
 // what the one before it read, and says what changed. The first look is a
-// baseline and says nothing. It is called with the store a sweep has open.
-func (s *Server) lookAtAccounts(st *store.Store) {}
+// baseline and says nothing. It is called with the store a sweep has open,
+// and a panic in it costs this look, not the sweep.
+func (s *Server) lookAtAccounts(st *store.Store) {
+	defer func() {
+		if v := recover(); v != nil {
+			s.log.Error("panic while looking at the accounts for their events", "panic", v)
+		}
+	}()
+	s.watchAccounts(lookAccounts(st.Accounts))
+}
+
+// watchAccounts is lookAtAccounts for a look already taken: the first is
+// kept as the baseline, and each after it is said against the last.
+func (s *Server) watchAccounts(next accountsLook) {
+	w := &s.accounts
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.last == nil {
+		w.last = &next
+		return
+	}
+	evs, kept := diffAccounts(*w.last, next, s.now())
+	w.last = &kept
+	for _, e := range evs {
+		if e.Type == events.AccountThreshold {
+			e.Text += s.accountRunsOn(e.Account)
+		}
+		s.emit(e)
+	}
+}
+
+// accountRunsOn is what an account.threshold adds about the sessions still
+// running on account id, oldest first: "; refactor runs on it", "; refactor
+// and api run on it", "; a, b, c and 2 more run on it"; "" for none. They
+// are named as every event names a session (eventName).
+func (s *Server) accountRunsOn(id int) string {
+	var on []*termSession
+	for _, ts := range s.everyTerminal() {
+		if ts.account == id && !ts.over() {
+			on = append(on, ts)
+		}
+	}
+	if len(on) == 0 {
+		return ""
+	}
+	slices.SortFunc(on, func(a, b *termSession) int {
+		return cmp.Or(a.started.Compare(b.started), strings.Compare(a.id, b.id))
+	})
+	names := make([]string, 0, accountSessionsNamed)
+	for _, ts := range on[:min(len(on), accountSessionsNamed)] {
+		names = append(names, ts.eventName())
+	}
+	switch more := len(on) - len(names); {
+	case len(on) == 1:
+		return "; " + names[0] + " runs on it"
+	case more > 0:
+		return "; " + strings.Join(names, ", ") + " and " + strconv.Itoa(more) + " more run on it"
+	default:
+		return "; " + strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1] + " run on it"
+	}
+}
