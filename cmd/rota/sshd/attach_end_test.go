@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -41,9 +42,24 @@ func TestTheEndOfASessionEndsTheChannel(t *testing.T) {
 	attachGivenBack(t, r)
 }
 
+// Each attach takes one of the places the server keeps for them, once it
+// has found the session and before it starts, and gives it back when it
+// ends; new on a terminal takes it before it starts anything, and a sign-in
+// that may only watch is refused for that before it takes one.
 func TestAnAttachTakesAPlace(t *testing.T) {
 	r := commandsStart(t, commandsTty)
 	r.open(t, "api")
+	old := r.open(t, "old")
+	if err := r.c.Stop(old.ID); err != nil {
+		t.Fatal(err)
+	}
+	sshdEventually(t, func() error {
+		got, err := r.c.Get(old.ID)
+		if err == nil && got.Ended == nil {
+			err = errors.New("still running")
+		}
+		return err
+	})
 	c := r.signIn(r.me)
 	seats := []*ssh.Session{limitsSeat(t, r.sshdRig, c), limitsSeat(t, r.sshdRig, c)}
 	const full = "rota over ssh has 2 sessions attached on this connection; leave one first\r\n"
@@ -55,6 +71,17 @@ func TestAnAttachTakesAPlace(t *testing.T) {
 	if got := r.created(); len(got) != 0 {
 		t.Errorf("new with no place asked for %q", got)
 	}
+	// With every place taken, a session not found, or ended, is still said
+	// as such: the place is asked for only once there is one to attach to.
+	for _, cmd := range []string{"attach", "watch"} {
+		if _, errOut, code := commandsPty(t, c, cmd+" nosuch", 80, 24); code != 1 || !strings.HasPrefix(errOut, `no session is "nosuch"`) {
+			t.Errorf("%s nosuch with no place: %d %q", cmd, code, errOut)
+		}
+		if _, errOut, code := commandsPty(t, c, cmd+" "+old.ID, 80, 24); code != 1 || errOut != "session old has ended\r\n" {
+			t.Errorf("%s of an ended session with no place: %d %q", cmd, code, errOut)
+		}
+	}
+
 	seats[0].Close()
 	sshdEventually(t, func() error {
 		if n := attachPlaces(r); n != 1 {
@@ -79,8 +106,79 @@ func TestAnAttachTakesAPlace(t *testing.T) {
 	})
 	seats[1].Close()
 	attachGivenBack(t, r)
+
+	// eye, with every place of its connection taken, is told what its
+	// sign-in may do, not that there is no place.
+	ce := r.signIn(r.eye)
+	limitsSeat(t, r.sshdRig, ce)
+	limitsSeat(t, r.sshdRig, ce)
+	if _, errOut, code := commandsPty(t, ce, "new --label w", 80, 24); code != 1 || errOut != "this sign-in may only watch; nothing here can be changed from it\r\n" {
+		t.Errorf("eye's new on a terminal: %d %q", code, errOut)
+	}
+	all, err := r.c.List()
+	if err != nil || len(all) != 2 {
+		t.Errorf("eye's new started something: %v %+v", err, all)
+	}
 }
 
+// attachRunning counts the goroutines now, and those of an attach over
+// SSH: the window's follower, the channel's reader, and the attach's own.
+func attachRunning() (all, ours int) {
+	buf := make([]byte, 8<<20)
+	buf = buf[:runtime.Stack(buf, true)]
+	for _, g := range strings.Split(string(buf), "\n\n") {
+		all++
+		if strings.Contains(g, "sshd.(*chanTerm).follow") || strings.Contains(g, "sshd.(*input).pump") ||
+			strings.Contains(g, "rota/cmd/rota/attach.") {
+			ours++
+		}
+	}
+	return all, ours
+}
+
+// Twenty attaches, one after another on one connection, leave nothing
+// running once each has ended: no follower of a window, no reader of a
+// channel, nothing of an attach.
+func TestAttachesLeaveNothingRunning(t *testing.T) {
+	r := commandsStart(t, commandsTty)
+	r.open(t, "api")
+	c := r.signIn(r.me)
+	once := func() {
+		t.Helper()
+		a := attachOpen(t, c, "attach api", 80, 24)
+		a.wait(0, "ready 80x24")
+		a.typ("\x1cd")
+		if code := a.end(); code != 0 {
+			t.Fatalf("exit %d; stderr %q", code, a.err.String())
+		}
+	}
+	once()
+	attachGivenBack(t, r)
+	// The baseline: once the first attach's goroutines have ended, or as
+	// many of them as will.
+	all0, ours0 := attachRunning()
+	for deadline := time.Now().Add(5 * time.Second); ours0 > 0 && time.Now().Before(deadline); {
+		time.Sleep(50 * time.Millisecond)
+		all0, ours0 = attachRunning()
+	}
+	for range 20 {
+		once()
+	}
+	attachGivenBack(t, r)
+	all, ours := attachRunning()
+	for deadline := time.Now().Add(5 * time.Second); (ours > ours0 || all > all0+2) && time.Now().Before(deadline); {
+		time.Sleep(50 * time.Millisecond)
+		all, ours = attachRunning()
+	}
+	if ours > ours0 || all > all0+2 {
+		buf := make([]byte, 8<<20)
+		t.Errorf("after 20 attaches %d goroutines (%d an attach's), from %d (%d):\n%s",
+			all, ours, all0, ours0, buf[:runtime.Stack(buf, true)])
+	}
+}
+
+// A panic in an attach gives the person's terminal back before it ends the
+// connection, gives the attach's place back, and leaves the server serving.
 func TestAPanicGivesTheTerminalBack(t *testing.T) {
 	// Set before the server starts and put back once it has stopped, after
 	// every goroutine of it has returned: what reads it is the server's.
@@ -115,6 +213,8 @@ func TestAPanicGivesTheTerminalBack(t *testing.T) {
 	}
 }
 
+// A connection that drops ends its attach, which gives its place back and
+// leaves the session running; a server that stops ends every attach at once.
 func TestAnAttachEndsWithItsConnection(t *testing.T) {
 	r := commandsStart(t, commandsTty)
 	s := r.open(t, "api")

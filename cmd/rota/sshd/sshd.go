@@ -73,7 +73,9 @@ type Options struct {
 
 // TUISession is what Options.TUI is given: the person's terminal, its TERM
 // (Env holds only TERM=…) and size, its resizes, a client for the API as
-// that person, the chord's key, and whether a person has been shown it.
+// that person, and the chord's key. Taught is each attach's Options.Teach,
+// as Options.Taught is: true for a person still to be shown the chord,
+// recording them as shown.
 //
 // Slot is taken before each attach the TUI makes and given back after it,
 // by calling done: an attach keeps a copy of a session's screen in the

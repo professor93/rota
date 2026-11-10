@@ -522,13 +522,6 @@ func TestTwoPeopleKeepTheirKeyboards(t *testing.T) {
 	attachGivenBack(t, r)
 }
 
-// Each attach takes one of the places the server keeps for them, before it
-// starts, and gives it back when it ends; new on a terminal takes it
-// before it starts anything.
-// A panic in an attach gives the person's terminal back before it ends the
-// connection, gives the attach's place back, and leaves the server serving.
-// A connection that drops ends its attach, which gives its place back and
-// leaves the session running; a server that stops ends every attach at once.
 // The window an attach is given follows the channel: the pty's size, then
 // each window-change, each said once it comes.
 func TestAChanTermFollowsTheWindow(t *testing.T) {

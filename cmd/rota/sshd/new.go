@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/professor93/rota/api"
 	"github.com/professor93/rota/cmd/rota/attach"
 	"github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/internal/holdwire"
@@ -83,8 +84,9 @@ func newRun(ctx context.Context, ch *Channel, args []string) int {
 	}
 	// On a terminal the session is attached to once it has started, and
 	// the attach's place is taken first: with none to be had, nothing is
-	// started that nobody could look at.
-	attaching := ch.PTY && !*asJSON
+	// started that nobody could look at. A sign-in that may only watch
+	// starts nothing, and takes no place to be told so by the API.
+	attaching := ch.PTY && !*asJSON && ch.User.Role == api.RoleControl
 	if attaching {
 		done, ok := attachPlace(ch)
 		if !ok {

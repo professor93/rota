@@ -6,11 +6,13 @@ import (
 	"io"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	"github.com/professor93/rota/api"
 	"github.com/professor93/rota/cmd/rota/attach"
 	"github.com/professor93/rota/cmd/rota/client"
+	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/vtscan"
 )
 
@@ -84,13 +86,20 @@ func attachCommand(ctx context.Context, ch *Channel, args []string, word string)
 
 // attachFind is the session word means among all, by client.Match's rule: an
 // id or the start of one, then the label, name or folder of a live session.
+// So an exact id is never taken by a label that spells it, and two live
+// sessions of one name are refused, not guessed between.
+//
 // A terminal the server runs itself says no state, and is live until it has
 // ended, as list says it is running; Match is shown it so, and so finds it
-// by its label as it finds a held one.
+// by its label as it finds a held one. That is only for the kinds a person
+// signed in here starts, an account's CLI and a shell. A shared terminal's
+// label is whatever the process that shared it chose, which may be an agent
+// inside a session, so it is found by its id alone, never by a name it gave
+// itself: a session of the owner's that is not live cannot be stood in for.
 func attachFind(all []client.Session, word string) (client.Session, error) {
 	live := slices.Clone(all)
-	for i := range live {
-		if live[i].State == "" && live[i].Ended == nil {
+	for i, s := range live {
+		if s.State == "" && s.Ended == nil && (s.Kind == holdwire.KindAccount || s.Kind == holdwire.KindShell) {
 			live[i].State = "live"
 		}
 	}
@@ -131,7 +140,6 @@ func attachTo(ctx context.Context, ch *Channel, c *client.Client, id, word strin
 		Key:   ch.Key,
 		Watch: word == "watch" || ch.User.Role != api.RoleControl,
 		Teach: ch.Taught,
-		Again: func(w string) string { return word + " " + w },
 	}
 	res := attachLoop(ctx, t, c, id, o)
 	if res.Session.Name == "" {
@@ -139,9 +147,35 @@ func attachTo(ctx context.Context, ch *Channel, c *client.Client, id, word strin
 		// list calls it, which attach finds it by.
 		res.Session.Name = listName(res.Session)
 	}
+	// The way back is typed after `ssh -t host`, where the person's shell
+	// takes off any quotes and ssh joins the words with spaces, so what
+	// arrives is never the quoted word: a name a shell would quote is given
+	// as the session's id.
+	o.Again = func(w string) string {
+		if !attachPlain(w) {
+			w = attach.OneLine(res.Session.ID)
+		}
+		return word + " " + w
+	}
 	_, _ = io.WriteString(ch.Out, "\r\n")
 	dispatchText(ch.Err, ch.PTY, res.Line(o)+"\n")
 	return res.ExitCode()
+}
+
+// attachPlain says w is a word no shell changes and words reads back as it
+// is: ASCII letters and digits and . _ @ % + = : , / -, at least one.
+// Anything else, a space, a quote, a backslash, any other character a shell
+// acts on, or one beyond ASCII, is not.
+func attachPlain(w string) bool {
+	for i := 0; i < len(w); i++ {
+		switch c := w[i]; {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			strings.IndexByte("._@%+=:,/-", c) >= 0:
+		default:
+			return false
+		}
+	}
+	return w != ""
 }
 
 // attachRescue, deferred while an attach has the channel's terminal, puts
