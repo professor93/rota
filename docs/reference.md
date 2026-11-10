@@ -662,7 +662,7 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/ws` | control | a WebSocket that starts a run on whichever account the rotation picks and carries it both ways |
 | `GET` | `/v1/accounts/{id}/ws` | control | the same, on that account |
 | `GET` | `/v1/runs/{id}/ws` | watch | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
-| `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended`, `interrupted` or `broken`), `attachable`, `reachable`, `pid` (its holder), `name`, `title`, `conversation`, `conversation_cwd`, `resumable`, `ended_at` once it has stopped, `made_by` for a holder this rota cannot attach to (`unknown` when its record does not say), `status` (`running`, `needs_you`, `quiet` or `stopped`), and, for one the daemon has taken up, `waiting_for`: what it waits on its person for. The daemon also lists the held sessions its store's records describe: the stopped ones, for `keep_stopped`, and the running ones it is not linked to |
+| `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended`, `interrupted` or `broken`), `attachable`, `reachable`, `pid` (its holder), `name`, `title`, `conversation`, `conversation_cwd`, `resumable`, `ended_at` once it has stopped, `made_by` for a holder this rota cannot attach to (`unknown` when its record does not say), `status` (`running`, `needs_you`, `quiet` or `stopped`), and `waiting_for`, what it waits on its person for, which a session listed from its record alone leaves out. The daemon also lists the held sessions its store's records describe: the stopped ones, for `keep_stopped`, and the running ones it is not linked to |
 | `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard, and the same held fields, for a stopped held session too |
 | `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up. Over the control socket alone, `"env":["NAME=value",…]` is the environment a held session starts from in place of the daemon's, which its holder keeps the variables that describe another terminal out of, and `"remote_control":true`, or the session's name, starts an account's CLI with Claude Code's Remote Control on for whichever account is chosen, turning its setting on first and refusing what could not work, by the same rule and in the same words as `rota run --remote-control`. An empty `env` is `400`, since it would start the session with no `PATH`; from anybody else either is `403`: *env is taken only over the control socket*, or *remote_control is taken only over the control socket* |
 | `DELETE` | `/v1/terminals/{id}` | control | end one: a hangup, then a kill three seconds later, or five for a held session, whose holder kills its own CLI at three and records how it ended; a running held session the daemon is not linked to is hung up by signal, once however often it is asked, and only while its pid is still the holder its record names: `409` when it is not, or when its record names no process this rota can check |
@@ -2086,11 +2086,10 @@ while the CLI waits on a permission or a question, `quiet` after 30 seconds
 with no output, or `stopped`; `waiting_for`, what the CLI waits on its
 person for as it recorded it, such as `permission` or `question`, and empty
 while it waits for nothing, as a stopped one always does (one listed from
-its record alone leaves it out); and `name`, the
-first there is of the label,
-the CLI's own name for the conversation, and the folder — what its record
-calls it too, so `rota list --sessions` and `rota send` use the same name,
-and the title never changes it. A held session is never
+its record alone leaves it out); and `name`, the first there is of the
+label, the CLI's own name for the conversation, and the folder — what its
+record calls it too, so `rota list --sessions` and `rota send` use the same
+name, and the title never changes it. A held session is never
 ended for being idle. `reachable` is whether the daemon's link to its
 holder is up; `conversation_cwd` is the folder the conversation is in,
 which for a worktree is not `cwd`; `resumable` is an interrupted session
@@ -2136,7 +2135,7 @@ Out:
 | *binary* | output: write it to the terminal emulator as it arrives |
 | `hello{id,kind,cols,rows,offset,holder,you:{name,role,conn},viewers}` | the first frame, always; `repaint:true` on a held session attached without `since`, whose first binary frame is then its current screen, standing for `offset`; a held session's also has `holder_conn` |
 | `keyboard{holder}` | who holds it now, `null` for nobody; a held session's also has `holder_conn`, the `conn` of the connection holding it, since one person may be attached from several devices |
-| `state{status,waiting_for,title,name}` | a held session's `status` (`running`, `needs_you` or `quiet`), what its CLI waits on its person for, its title and its name, as its description says them: sent after `hello` and before any output, and again to everyone attached whenever any of the four changes, `quiet` within ten seconds of its starting. A session that has stopped says so with `exit` instead, and a terminal that is not held sends none |
+| `state{status,waiting_for,title,name}` | a held session's `status` (`running`, `needs_you` or `quiet`), what its CLI waits on its person for, its title and its name, as its description says them: sent after `hello` and before any output, and again to everyone attached whenever any of the four changes; a session that goes quiet is told so within ten seconds of its going quiet. A session that has stopped says so with `exit` instead, and a terminal that is not held sends none |
 | `repaint{offset,cols,rows}` | a held session's viewer that fell behind: the next binary frame is the screen at that size, standing for `offset`, and output goes on from there |
 | `claim_request{by,id}` | somebody is asking the holder for it |
 | `resized{cols,rows}` | the terminal is a different size now; a held session's fit that was dropped is not answered at all (*Only a fit resizes*, above) |
@@ -2225,23 +2224,23 @@ back.
 **The list**, on the left: every terminal this server holds, in two groups.
 *Live* comes first, newest started first; *Stopped* after, the one that
 stopped last first; two that tie go by id. The order is the page's own,
-never the order the server happened to list them in, and a change of status
-never moves a row, so a poll does not put another row under a finger. Each
-row is four lines: its name, with its status as a chip — *running*, *needs
-you*, *quiet* or *stopped*, and *ended* for a terminal that is not held;
-what it is about, the title its CLI set or else its folder's last element,
-or, for a shared terminal, *shared from a local terminal*; what it runs on,
-the account and the credential it launches on — *login*, *long token* or
-*API key* — or *a plain shell*; and who holds its keyboard and how many are
-watching, or, once it has stopped, how it ended and, where that is known,
-how long ago. The Live heading counts its rows
-and the ones that need you, *Live · 3 · 1 needs you*, and so does the tab's
-title, *(1) rota terminal*, so a session waiting on its person shows in a
-tab that is not in front. *Stopped · N* folds its rows away and back again,
-which this device remembers; a stopped session that is open keeps its group
-unfolded. The list is refreshed when a terminal is started or stopped, when
-a frame about the open terminal arrives, and otherwise every ten seconds
-while somebody is looking at it.
+never the order the server happened to list them in, and within its group a
+change of status never moves a row, so a poll does not put another row under
+a finger. Each row is four lines: its name, with its status as a chip —
+*running*, *needs you*, *quiet* or *stopped*, and *ended* for a terminal
+that is not held; what it is about, the title its CLI set or else its
+folder's last element, or, for a shared terminal, *shared from a local
+terminal*; what it runs on, the account and the credential it launches on —
+*login*, *long token* or *API key* — or *a plain shell*; and who holds its
+keyboard and how many are watching, or, once it has stopped, how it ended
+and, where that is known, how long ago. The Live heading counts its rows and
+the ones that need you, *Live · 3 · 1 needs you*, and the tab's title counts
+the ones that need you, *(1) rota terminal*, so a session waiting on its
+person shows in a tab that is not in front. *Stopped · N* folds its rows
+away and back again, which this device remembers; a stopped session that is
+open keeps its group unfolded. The list is refreshed when a terminal is
+started or stopped, when a frame about the open terminal arrives, and
+otherwise every ten seconds while somebody is looking at it.
 
 **A link to a session.** The open terminal is in the address, as
 `/terminal#<id>`, so the address is a link to it; choosing another replaces
@@ -2261,7 +2260,7 @@ them, as far as quoting goes, with nothing expanded; a folder, with the note
 that the session starts with the environment of the rota serving the page,
 not the shell of whoever is looking at it; **Worktree**; and a plain shell
 where `terminal.shell` allowed one. A worktree is Claude Code's, so it is
-offered only for a claude account chosen by id and never beside a plain
+offered only for a claude account chosen by id and never with a plain
 shell: it adds `--worktree` to the arguments unless they ask for one already,
 as `-w`, `--worktree` or `--worktree=…`, and its note says that Claude Code
 makes a git worktree for the session, in which the files git ignores, such
@@ -2321,7 +2320,7 @@ offered only to whoever may type into the open terminal. It has two parts:
   Ctrl+Enter or ⌘+Enter, posts it to `/v1/terminals/{id}/messages`, so
   it is typed into the session in one piece once the session is ready, then
   Enter. Trailing whitespace is trimmed and nothing else is changed, and a
-  message is at most 256 KiB. A send that is answered clears what was sent
+  message is at most 256 KiB. A send the server takes clears what was sent
   and keeps anything written after it; a refusal is said in the server's
   words and keeps the text, and a `409` whose reason is `waiting` — the CLI
   waits on its person, where Enter may approve something — also offers
@@ -2375,42 +2374,51 @@ the screen names the session and says why: *this session has stopped:
 interrupted; its screen is not kept*, *made by rota 1.4.0-beta.3, which this
 rota cannot attach to; stop it, or attach with that version*, or *no
 session 9a4c1e77b2d05f31 on this server*. A session the server lists keeps
-its information, from its description.
+its information, from its description; an id it does not have has none,
+and the information says what the screen says.
 
 **The information**, on the right: a held session's name, or another
 terminal's label; its status, with what it waits for while it does (*needs
 you: waiting for a permission*), and the title its CLI set; the account, the
 credential it launches on and the provider; the folder and, where the
-conversation is in a worktree of its own, the worktree's path with
-**Copy**, since a path that long is wanted in another terminal rather than
-read — where the browser will not copy, as over plain `http` from another
-machine, the strip says so; the first eight characters of the conversation's
-id; how long ago it started, and stopped; the size; who holds the keyboard;
-who is watching and as what; whether it is being recorded — and **the login
-inside lapses in …**, from `token_until`, which turns into a warning under
-an hour, because nothing else on the screen shows that the CLI in there will
-stop working at a particular time. Once it has ended it says how; a holder
-made by another rota says which version made it; and a held session whose
-holder the daemon has lost its link to says *not answering; tried again
-shortly*. A control principal also gets **Stop** for a held session, behind
-a confirmation that names it and says that its CLI is sent a hangup and a
-worktree it used is left as it is, and **Kill** for any other terminal,
-behind one of its own; neither once it has ended. An ended terminal the
-server still keeps reads the same way, and its scrollback is replayed for as
-long as it is kept.
+conversation is in a worktree of its own, the worktree's path with **Copy**,
+since a path that long is wanted in another terminal rather than read —
+where the browser will not copy, as on a page that is not a secure context
+or has no permission to, the strip says so; the first eight characters of
+the conversation's id; how long ago it started, and stopped; the size; who
+holds the keyboard; who is watching and as what; whether it is being
+recorded — and **the login inside lapses in …**, from `token_until`, which
+turns into a warning under an hour, because nothing else on the screen shows
+that the CLI in there will stop working at a particular time. Once it has
+ended it says how; a holder made by another rota says which version made it,
+and, since it is never linked to, *not reachable from this server; not tried
+again*; and a held session whose holder the daemon has lost its link to says
+*not answering; tried again shortly*. A control principal also gets **Stop**
+for a held session, behind a confirmation that names it and says that its
+CLI is sent a hangup and a worktree it used is left as it is, and **Kill**
+for any other terminal, behind one of its own; neither once it has ended. An
+ended terminal the server still keeps reads the same way, and its scrollback
+is replayed for as long as it is kept.
 
 **From a phone.** A phone opens the page at the server's own address, as any
 browser does, so the rule in *A terminal on the server* holds there too: off
-the loopback, the terminal group is served over TLS or not at all. Two ways
-in fit that rule. One is a private network that both the phone and the
-server are on, Tailscale or WireGuard, with the server listening on its
-address in that network, so the port is reached only from that network's
-devices, the phone among them, and never from the open internet; the
-certificate is then one for the server's
-name there, such as the one `tailscale cert` makes. The other is a real
-certificate, from an authority the phone already trusts, on the server's own
-address. Either way the phone talks to this server and nothing else: rota
-has no relay of its own and sends nothing through anybody else's.
+the loopback, a server with the terminal group on does not start without
+TLS. Two ways in fit that rule. One is a private network that both the
+phone and the server are on, Tailscale or WireGuard, with the server
+listening on its address in that network, so the port is reached only from
+that network's devices, the phone among them, and never from the open
+internet; the certificate is then one for the server's name there. For
+Tailscale that is the one `tailscale cert <machine>.<tailnet>.ts.net` makes,
+and the phone opens the page by that name; it can be made once HTTPS is
+turned on for the tailnet in its admin console, which publishes the
+tailnet's machine names in a public ledger of certificates. It lasts 90 days
+and renewing it is yours to do, and rota reads its certificate as it starts,
+so a renewed one is served once rota is started again. The other way in is a
+real certificate, from an authority the phone already trusts, on the
+server's own address. Either way the phone talks to this server itself:
+rota has no relay of its own, and a relay the network uses on the way, as
+Tailscale does when two devices cannot reach each other directly, carries
+only TLS that ends here.
 
 #### Vendored assets
 
