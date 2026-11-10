@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,8 +15,8 @@ import (
 	"github.com/professor93/rota/internal/proc"
 )
 
-// lstart is a start as Claude Code writes it into a record's procStart:
-// `ps -o lstart=` under LC_ALL=C TZ=UTC.
+// lstart is a start as Claude Code's macOS build writes it into a record's
+// procStart: `ps -o lstart=` under LC_ALL=C TZ=UTC.
 func lstart(t time.Time) string { return t.UTC().Format(time.ANSIC) }
 
 // claudeRecord is a record as Claude Code writes one: its pid, its
@@ -43,22 +44,57 @@ func (r claudeRecord) write(t *testing.T, home, name string) {
 	writeFile(t, filepath.Join(home, name), body+"}")
 }
 
-// writtenBy is the record a Claude Code that started at start writes about
-// itself as pid, made a few seconds after it started.
-func writtenBy(pid int, start time.Time) claudeRecord {
-	return claudeRecord{pid: pid, procStart: lstart(start), startedAt: start.Add(3 * time.Second)}
+// with is r with one change made.
+func (r claudeRecord) with(change func(*claudeRecord)) claudeRecord {
+	change(&r)
+	return r
+}
+
+// The two pid spaces the tests play: a macOS one, and a Linux one as
+// Claude Code names it there.
+const (
+	macDomain   = "darwin"
+	linuxDomain = "linux:5f0c2a1e7b3d4e8a9c612d4f8a0b3e17:pid:[4026531836]"
+)
+
+// onMac makes the store read records as on macOS; onLinux, as on Linux,
+// with the process at each pid started at the tick the map gives.
+func onMac(t *testing.T) {
+	t.Helper()
+	seam(t, &startsInTicks, false)
+	seam(t, &ourPidDomain, func() string { return macDomain })
+}
+
+func onLinux(t *testing.T, ticks map[int]int64) {
+	t.Helper()
+	seam(t, &startsInTicks, true)
+	seam(t, &ourPidDomain, func() string { return linuxDomain })
+	seam(t, &ticksOf, func(pid int) (int64, error) {
+		if n, ok := ticks[pid]; ok {
+			return n, nil
+		}
+		return 0, errors.New("no such process")
+	})
+}
+
+// macWrittenBy is the record Claude Code's macOS build writes about itself
+// as pid, having started at start, made a few seconds after it started.
+func macWrittenBy(pid int, start time.Time) claudeRecord {
+	return claudeRecord{pid: pid, procStart: lstart(start), startedAt: start.Add(3 * time.Second), pidDomain: macDomain}
+}
+
+// linuxWrittenBy is the record Claude Code's Linux build writes about itself
+// as pid, having started at tick ticks.
+func linuxWrittenBy(pid int, ticks int64) claudeRecord {
+	return claudeRecord{pid: pid, procStart: strconv.FormatInt(ticks, 10), startedAt: time.Now(), pidDomain: linuxDomain}
 }
 
 // sleeper starts a fake that does nothing for a while and gives its pid; it
 // is killed when the test ends.
-func sleeper(t *testing.T) int { return sleeperCalled(t, "sleeper") }
-
-// sleeperCalled is a sleeper installed as name, in a folder named after the
-// test.
-func sleeperCalled(t *testing.T, name string) int {
+func sleeper(t *testing.T) int {
 	t.Helper()
 	ready := filepath.Join(t.TempDir(), "ready")
-	path := fakecli.Install(t, t.TempDir(), name, fakecli.Spec{Sleep: "60s", Ready: ready})
+	path := fakecli.Install(t, t.TempDir(), "sleeper", fakecli.Spec{Sleep: "60s", Ready: ready})
 	cmd := exec.Command(path)
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -75,60 +111,100 @@ func seam[T any](t *testing.T, at *T, v T) {
 	t.Cleanup(func() { *at = old })
 }
 
-// A record whose pid is alive but now names a process that started after
-// the one that wrote it is a leftover: after a crash or a reboot the number
-// went to something else. A record whose procStart is this process's own
-// start is alive; so is every record that leaves a doubt: one with no
-// procStart, one in a layout Claude Code does not write, one whose procStart
-// its own startedAt does not bear out, one with no startedAt, and one from
-// another pid space. The process here is this test's, whatever its name.
-func TestARecordWhosePidWentToAnotherProcessIsALeftover(t *testing.T) {
-	started, err := proc.StartTime(os.Getpid())
-	if err != nil {
-		t.Skipf("no start time here: %v", err)
-	}
-	seam(t, &looksLikeClaude, func(int) bool { return false })
-	me := os.Getpid()
-	before := writtenBy(me, started.Add(-time.Hour))
-	noStartedAt, disagrees, foreign, ours := before, before, before, before
-	noStartedAt.startedAt = time.Time{}
-	disagrees.startedAt = started.Add(-5 * time.Hour)
-	foreign.pidDomain = "darwin:another-machine:pid:[4026531836]"
-	ours.pidDomain = ourPidDomain()
-	noProcStart := writtenBy(me, started)
-	noProcStart.procStart = ""
-	badLayout := writtenBy(me, started)
-	badLayout.procStart = "1793942047"
+// aliveIn reports whether a home holding only rec, as name, is alive.
+func aliveIn(t *testing.T, rec claudeRecord, name string) bool {
+	t.Helper()
+	home := t.TempDir()
+	rec.write(t, home, name)
+	return len(claudeLive(home)) > 0
+}
+
+// On Linux a record's procStart is its writer's start in clock ticks since
+// boot, which the kernel fixes for a process's life: the process at the pid
+// is the writer exactly when it started at the same tick, and a leftover
+// whose pid went to another process — after a crash, or any process after a
+// reboot — started at another. Every record that leaves a doubt is alive:
+// one from another pid space, one with a start in the shape macOS writes,
+// none, or a number that is no tick, and one whose process's start cannot
+// be read.
+func TestOnLinuxARecordIsItsWritersByTheTickItStarted(t *testing.T) {
+	pid := os.Getpid()
+	onLinux(t, map[int]int64{pid: 48273615})
+	same := linuxWrittenBy(pid, 48273615)
 	for _, name := range []string{"sessions/41.json", claudeDaemonLock} {
 		for _, c := range []struct {
 			what  string
 			rec   claudeRecord
 			alive bool
 		}{
-			{"its own start", writtenBy(me, started), true},
-			{"its own start a second off", writtenBy(me, started.Add(-time.Second)), true},
-			{"no procStart", noProcStart, true},
-			{"a procStart in no layout Claude Code writes", badLayout, true},
-			{"a start an hour before this process's", before, false},
-			{"a start before the last reboot", writtenBy(me, started.Add(-72*time.Hour)), false},
-			{"a start before, in this machine's pid space", ours, false},
-			// A writer that started after the process now at its pid is not
-			// one a recycled pid makes; whatever it is, it is not proof.
-			{"a start an hour after this process's", writtenBy(me, started.Add(time.Hour)), true},
-			{"a start before, with no startedAt", noStartedAt, true},
-			{"a start before that its startedAt does not bear out", disagrees, true},
-			{"a start before, in another pid space", foreign, true},
+			{"the writer itself", same, true},
+			{"a writer that started a tick earlier", linuxWrittenBy(pid, 48273614), false},
+			{"a writer from before a reboot", linuxWrittenBy(pid, 912), false},
+			{"a writer that started later", linuxWrittenBy(pid, 48273715), false},
+			{"no pidDomain, another tick", same.with(func(r *claudeRecord) { r.pidDomain, r.procStart = "", "912" }), false},
+			{"another machine", same.with(func(r *claudeRecord) { r.pidDomain, r.procStart = "linux:another:pid:[4026531836]", "912" }), true},
+			{"another pid namespace", same.with(func(r *claudeRecord) {
+				r.pidDomain, r.procStart = "linux:5f0c2a1e7b3d4e8a9c612d4f8a0b3e17:pid:[4026532001]", "912"
+			}), true},
+			{"a macOS pid space", same.with(func(r *claudeRecord) { r.pidDomain, r.procStart = macDomain, "912" }), true},
+			{"a start in the shape macOS writes", same.with(func(r *claudeRecord) { r.procStart = lstart(time.Now().Add(-time.Hour)) }), true},
+			{"no procStart", same.with(func(r *claudeRecord) { r.procStart = "" }), true},
+			{"a signed number", same.with(func(r *claudeRecord) { r.procStart = "+912" }), true},
+			{"zero", same.with(func(r *claudeRecord) { r.procStart = "0" }), true},
+			{"a process whose start cannot be read", same.with(func(r *claudeRecord) { r.pid, r.procStart = os.Getppid(), "912" }), true},
 		} {
-			home := t.TempDir()
-			c.rec.write(t, home, name)
-			if got := len(claudeLive(home)) > 0; got != c.alive {
-				t.Fatalf("%s, %s: alive=%v %v", name, c.what, got, claudeLive(home))
+			if got := aliveIn(t, c.rec, name); got != c.alive {
+				t.Fatalf("%s, %s: alive=%v", name, c.what, got)
 			}
 		}
 	}
-	// A procStart or a startedAt that is not what Claude Code writes there
-	// is missing, and the record is read as well as it ever was: a daemon,
-	// not an unreadable lock.
+}
+
+// On macOS a record's procStart is its writer's start as a UTC time, and a
+// process at the pid that started more than two minutes after it is not
+// the writer. It is believed only when the record's own startedAt bears it
+// out, and only in this machine's pid space; every doubt is alive. The
+// process here is this test's, whatever its name.
+func TestOnMacARecordIsItsWritersByTheTimeItStarted(t *testing.T) {
+	started, err := proc.StartTime(os.Getpid())
+	if err != nil {
+		t.Skipf("no start time here: %v", err)
+	}
+	onMac(t)
+	me := os.Getpid()
+	before := macWrittenBy(me, started.Add(-time.Hour))
+	for _, name := range []string{"sessions/41.json", claudeDaemonLock} {
+		for _, c := range []struct {
+			what  string
+			rec   claudeRecord
+			alive bool
+		}{
+			{"its own start", macWrittenBy(me, started), true},
+			{"its own start a second off", macWrittenBy(me, started.Add(-time.Second)), true},
+			{"a start an hour before this process's", before, false},
+			{"a start before the last reboot", macWrittenBy(me, started.Add(-72*time.Hour)), false},
+			{"a start before, with no pidDomain", before.with(func(r *claudeRecord) { r.pidDomain = "" }), false},
+			// A writer that started after the process now at its pid is not
+			// one a recycled pid makes; whatever it is, it is not proof.
+			{"a start an hour after this process's", macWrittenBy(me, started.Add(time.Hour)), true},
+			{"no procStart", macWrittenBy(me, started).with(func(r *claudeRecord) { r.procStart = "" }), true},
+			{"a start in the shape Linux writes", before.with(func(r *claudeRecord) { r.procStart = "1793942047" }), true},
+			{"a start before, with no startedAt", before.with(func(r *claudeRecord) { r.startedAt = time.Time{} }), true},
+			{"a start before that its startedAt does not bear out", before.with(func(r *claudeRecord) { r.startedAt = started.Add(-5 * time.Hour) }), true},
+			{"a start before, in a Linux pid space", before.with(func(r *claudeRecord) { r.pidDomain = linuxDomain }), true},
+		} {
+			if got := aliveIn(t, c.rec, name); got != c.alive {
+				t.Fatalf("%s, %s: alive=%v", name, c.what, got)
+			}
+		}
+	}
+}
+
+// A procStart, a startedAt or a pidDomain that is not what Claude Code
+// writes there is missing, and the record is read as well as it ever was:
+// a daemon, not an unreadable lock.
+func TestAFieldOfTheWrongKindIsMissing(t *testing.T) {
+	me := os.Getpid()
 	for _, body := range []string{`"procStart":1793942047`, `"startedAt":"soon"`, `"pidDomain":7`} {
 		home := t.TempDir()
 		writeFile(t, filepath.Join(home, claudeDaemonLock), `{"pid":`+itoa(me)+`,`+body+`}`)
@@ -138,7 +214,7 @@ func TestARecordWhosePidWentToAnotherProcessIsALeftover(t *testing.T) {
 	}
 }
 
-// A Claude Code that wrote procStart in its own local time, not UTC, is
+// A macOS record whose procStart was written in local time, not UTC, is
 // still alive, west of UTC — where its procStart reads hours before its
 // real start — and east of it: the record's startedAt, which has no zone,
 // does not bear the procStart out, so it proves nothing.
@@ -147,143 +223,62 @@ func TestAProcStartInLocalTimeProvesNothing(t *testing.T) {
 	if err != nil {
 		t.Skipf("no start time here: %v", err)
 	}
-	seam(t, &looksLikeClaude, func(int) bool { return false })
+	onMac(t)
 	for _, zone := range []*time.Location{time.FixedZone("EST", -5*3600), time.FixedZone("UZT", 5*3600),
 		time.FixedZone("HST", -10*3600), time.FixedZone("LINT", 14*3600)} {
-		rec := writtenBy(os.Getpid(), started)
-		rec.procStart = started.In(zone).Format(time.ANSIC)
-		home := t.TempDir()
-		rec.write(t, home, "sessions/9.json")
-		if len(claudeLive(home)) == 0 {
+		rec := macWrittenBy(os.Getpid(), started).with(func(r *claudeRecord) { r.procStart = started.In(zone).Format(time.ANSIC) })
+		if !aliveIn(t, rec, "sessions/9.json") {
 			t.Fatalf("a procStart in %s reads as a leftover", zone)
 		}
 	}
 }
 
-// A fakecli child is a live process of its own: its record is alive with
-// its own start, and a leftover with another's — by what rota itself makes
-// of the child, on macOS and on Linux alike, since the child is no claude.
+// On the system the tests run on, by nothing but what the system says: a
+// record in the shape Claude Code writes here — ticks on Linux, a UTC time
+// on macOS, with this machine's pid space — is alive for a live fakecli
+// child that wrote its own start, and a leftover with an earlier writer's.
 func TestAChildsRecordIsAliveOnlyWithItsOwnStart(t *testing.T) {
 	child := sleeper(t)
-	started, err := proc.StartTime(child)
-	if err != nil {
-		t.Skipf("no start time here: %v", err)
+	var own, earlier claudeRecord
+	switch runtime.GOOS {
+	case "linux":
+		ticks, err := proc.StartTicks(child)
+		if err != nil {
+			t.Fatal(err)
+		}
+		own = claudeRecord{pid: child, procStart: strconv.FormatInt(ticks, 10), startedAt: time.Now(), pidDomain: thisPidDomain()}
+		earlier = own.with(func(r *claudeRecord) { r.procStart = strconv.FormatInt(ticks-6000, 10) })
+	case "darwin":
+		started, err := proc.StartTime(child)
+		if err != nil {
+			t.Fatal(err)
+		}
+		own = macWrittenBy(child, started)
+		earlier = macWrittenBy(child, started.Add(-10*time.Minute))
+	default:
+		t.Skipf("Claude Code's records are not checked on %s", runtime.GOOS)
 	}
 	home := t.TempDir()
 	name := "sessions/" + itoa(child) + ".json"
-	writtenBy(child, started).write(t, home, name)
+	own.write(t, home, name)
 	if live := claudeLive(home); len(live) != 1 || live[0] != "session "+itoa(child) {
 		t.Fatalf("the child's own record: %v", live)
 	}
-	if strings.Contains(strings.ToLower(os.TempDir()), "claude") && startsMove {
-		t.Skipf("the temporary folder %s names claude, so the child reads as one", os.TempDir())
-	}
-	writtenBy(child, started.Add(-10*time.Minute)).write(t, home, name)
+	earlier.write(t, home, name)
 	if live := claudeLive(home); len(live) != 0 {
 		t.Fatalf("another's record at the child's pid: %v", live)
 	}
 }
 
-// On Linux a start time is the boot time plus the ticks since boot, and the
-// boot time moves when the clock is set: a laptop's WSL resuming from a
-// night's sleep steps the clock by hours, and a live Claude Code then reads
-// as having started after its own record. So there a later start is a
-// leftover only when the process at the pid is no claude; on macOS, whose
-// start times are written once at fork, it is a leftover whatever runs.
-func TestAClaudeWhoseStartMovedWithTheClockIsStillAlive(t *testing.T) {
-	recorded := time.Date(2026, 11, 9, 22, 0, 0, 0, time.UTC)
-	seam(t, &startOf, func(int) (time.Time, error) { return recorded.Add(9 * time.Hour), nil })
-	for _, c := range []struct {
-		moves, claude, alive bool
-	}{
-		{moves: true, claude: true, alive: true},
-		{moves: true, claude: false, alive: false},
-		{moves: false, claude: true, alive: false},
-		{moves: false, claude: false, alive: false},
-	} {
-		seam(t, &startsMove, c.moves)
-		seam(t, &looksLikeClaude, func(int) bool { return c.claude })
-		home := t.TempDir()
-		writtenBy(os.Getpid(), recorded).write(t, home, "sessions/7.json")
-		if got := len(claudeLive(home)) > 0; got != c.alive {
-			t.Fatalf("clock moves %v, a claude %v: alive=%v", c.moves, c.claude, got)
-		}
+// Records give their writer's start in ticks on Linux alone.
+func TestStartsAreTicksOnLinuxAlone(t *testing.T) {
+	if startsInTicks != (runtime.GOOS == "linux") {
+		t.Fatalf("on %s starts are ticks: %v", runtime.GOOS, startsInTicks)
 	}
 }
 
-// Start times move with the clock on Linux alone.
-func TestStartTimesMoveOnLinuxAlone(t *testing.T) {
-	if startsMove != (runtime.GOOS == "linux") {
-		t.Fatalf("on %s start times move: %v", runtime.GOOS, startsMove)
-	}
-}
-
-// What a Linux process is, for the guard above, is the names it goes by: one
-// naming claude anywhere, in any case, is a claude, and one none of whose
-// names rota can read could be. A process whose names name no claude is
-// not.
-func TestAClaudeIsKnownByTheNamesItGoesBy(t *testing.T) {
-	for _, c := range []struct {
-		names  []string
-		err    error
-		claude bool
-	}{
-		{names: []string{"claude", "--resume"}, claude: true},
-		{names: []string{"/home/me/.local/share/claude/versions/2.1.322", "daemon"}, claude: true},
-		{names: []string{"node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"}, claude: true},
-		{names: []string{"/opt/ai/bin/cc", "cc", "/home/me/.local/share/claude/versions/2.1.322"}, claude: true},
-		{names: []string{"/usr/bin/Claude"}, claude: true},
-		{names: []string{"/usr/bin/python3", "-m", "http.server", "python3", "/usr/bin/python3.12"}, claude: false},
-		{names: nil, claude: false},
-		{err: os.ErrPermission, claude: true},
-	} {
-		if got := claudeIn(c.names, c.err); got != c.claude {
-			t.Fatalf("%q (%v): claude=%v", c.names, c.err, got)
-		}
-	}
-}
-
-// A look at a process's names that does not end — a process stuck in the
-// kernel holds its command line — is given up on, and the process could be
-// a claude.
-func TestALookAtANameThatDoesNotEndCountsAsAClaude(t *testing.T) {
-	stuck := make(chan struct{})
-	t.Cleanup(func() { close(stuck) })
-	seam(t, &namesOf, func(int) ([]string, error) { <-stuck; return []string{"sshd"}, nil })
-	begun := time.Now()
-	if !looksLikeClaude(os.Getpid()) {
-		t.Fatal("a look that never ended is no claude")
-	}
-	if waited := time.Since(begun); waited > namesWait+5*time.Second {
-		t.Fatalf("the look took %v", waited)
-	}
-	seam(t, &namesOf, func(int) ([]string, error) { return []string{"sshd"}, nil })
-	if looksLikeClaude(os.Getpid()) {
-		t.Fatal("sshd is a claude")
-	}
-}
-
-// On Linux the guard reads a live process's own names: a fake installed as
-// claude is a claude, and one installed as something else, in a folder
-// whose path names no claude, is not.
-func TestALiveProcessIsJudgedByItsOwnNames(t *testing.T) {
-	if _, err := proc.Names(os.Getpid()); err != nil {
-		t.Skipf("no process names here: %v", err)
-	}
-	if strings.Contains(strings.ToLower(os.TempDir()), "claude") {
-		t.Skipf("the temporary folder %s names claude", os.TempDir())
-	}
-	if pid := sleeperCalled(t, "claude"); !looksLikeClaude(pid) {
-		t.Fatal("a process run as claude is no claude")
-	}
-	pid := sleeper(t)
-	if looksLikeClaude(pid) {
-		names, err := proc.Names(pid)
-		t.Fatalf("the sleeper reads as a claude: %q, %v", names, err)
-	}
-}
-
-// This machine's pid space is named as Claude Code names it.
+// This machine's pid space is named as Claude Code's build for this system
+// names it.
 func TestThisMachinesPidSpaceIsNamedAsClaudeCodeNamesIt(t *testing.T) {
 	switch got := thisPidDomain(); runtime.GOOS {
 	case "darwin":
@@ -291,7 +286,8 @@ func TestThisMachinesPidSpaceIsNamedAsClaudeCodeNamesIt(t *testing.T) {
 			t.Fatalf("macOS: %q", got)
 		}
 	case "linux":
-		if !strings.HasPrefix(got, "darwin:") || strings.Count(got, ":") < 2 {
+		ns, _ := os.Readlink("/proc/self/ns/pid")
+		if !strings.HasPrefix(got, "linux:") || !strings.HasSuffix(got, ":"+ns) {
 			t.Fatalf("linux: %q", got)
 		}
 	default:

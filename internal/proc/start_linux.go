@@ -8,7 +8,7 @@ import (
 )
 
 // kernel is this machine's /proc.
-var kernel = Procfs{Read: os.ReadFile, Link: os.Readlink}
+var kernel = Procfs{Read: os.ReadFile}
 
 // StartTime is when a process started, which tells a pid from the same
 // number given to a later process. On Linux it is Procfs.StartTime, which
@@ -18,9 +18,6 @@ func StartTime(pid int) (time.Time, error) { return kernel.StartTime(pid) }
 // StartTicks is when a process started in clock ticks since boot, which
 // no setting of the clock moves: field 22 of /proc/<pid>/stat.
 func StartTicks(pid int) (int64, error) { return kernel.StartTicks(pid) }
-
-// Names is every name a process goes by: Procfs.Names.
-func Names(pid int) ([]string, error) { return kernel.Names(pid) }
 
 // Parent is a process's parent: field 4 of /proc/<pid>/stat.
 func Parent(pid int) (int, error) { return kernel.Parent(pid) }

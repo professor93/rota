@@ -3279,20 +3279,25 @@ there and launches on what it finds, and does not write the store, refresh
 the login, or rewrite the home's `.claude.json`. Alive means a rota run
 holding the account, a `daemon.lock` naming a live process, or a
 `sessions/<pid>.json` naming one — and a record nobody can read counts as
-alive. A record whose pid has since gone to another process does not: each
-record carries its writer's start, `procStart`, and a process at that pid
-that started more than two minutes after it is not the writer, as after a
-crash or a reboot. procStart is believed only when the record's own
-`startedAt`, the moment it was made, agrees with it to within minutes, and
-only of a record whose `pidDomain` is this machine's pid space: a record
-written on another host or in another container that shares the home is
-judged by its pid alone. On Linux, where a start time moves when the clock
-is set, a later process still counts while its command line, its command
-name or the program it runs names claude, or when none of them can be read.
-A record with no `procStart` or `startedAt`, and one on Windows, are judged
-by the pid alone. When nothing is alive, rota may refresh, and a refresh is
-followed at once — after the store is saved — by writing the new login into
-the home.
+alive. A record whose pid has since gone to another process, as after a
+crash or a reboot, does not: each record carries its writer's start,
+`procStart`, in the form Claude Code's build for the system writes it.
+
+- On Linux it is the start in clock ticks since boot, field 22 of
+  `/proc/<pid>/stat`, which no setting of the clock moves: the process at the
+  pid is the writer only if it started at the same tick.
+- On macOS it is the start as a UTC time, `ps -o lstart=`: a process at the
+  pid that started more than two minutes after it is not the writer. This is
+  believed only when the record's own `startedAt`, the moment it was made,
+  agrees with it to within minutes.
+
+Either is believed only of a record whose `pidDomain` is this machine's pid
+space — `darwin` on macOS, `linux:<machine-id>:<pid namespace>` on Linux — so
+a record written on another host or in another container that shares the
+home is judged by its pid alone. So is a record with no `procStart`, one with
+a start in another system's form, and every record on Windows. When nothing
+is alive, rota may refresh, and a refresh is followed at once — after the
+store is saved — by writing the new login into the home.
 Before rota refreshes — for a launch, a listing, usage read over HTTP or a
 server's maintenance — the store is saved, and when that save fails nothing is
 refreshed. A home holding no usable login, or the one rota wrote there and has
