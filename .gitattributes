@@ -8,3 +8,4 @@ api/*.html     -text
 api/testdata/* -text
 cmd/rota/testdata/* -text
 cmd/rota/hold/testdata/** -text
+cmd/rota/tui/testdata/** -text
