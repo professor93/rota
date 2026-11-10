@@ -4007,7 +4007,7 @@ reading at all — a model's row alone would read the account as 0% — so
 the account keeps the reading it had, dated when that was taken (or
 none, `-` and `never`, as before), and the usage endpoint is left alone for
 the backoff below, as after a `429`, with its own reason: `the usage
-endpoint gave no window a figure`.
+endpoint gave no figure for the account as a whole`.
 
 ### When the provider asks rota to wait
 

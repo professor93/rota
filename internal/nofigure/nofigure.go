@@ -10,4 +10,4 @@ package nofigure
 import "errors"
 
 // Err is a usage reply whose windows all came without a figure.
-var Err = errors.New("the usage endpoint gave no window a figure")
+var Err = errors.New("the usage endpoint gave no figure for the account as a whole")

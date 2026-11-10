@@ -77,7 +77,7 @@ func TestAReadingWithNoFigureKeepsTheLastOne(t *testing.T) {
 	if strings.Contains(out, " 0%") {
 		t.Fatalf("nothing reads as 0%%:\n%s", out)
 	}
-	if !strings.Contains(errOut, "no window a figure") || !strings.Contains(errOut, "not asked again until") {
+	if !strings.Contains(errOut, "no figure for the account as a whole") || !strings.Contains(errOut, "not asked again until") {
 		t.Fatalf("stderr says why there is no new reading, and until when: %q", errOut)
 	}
 	if n := asked(); n != 2 {

@@ -669,7 +669,7 @@ func waitNote(a *rota.Account, cause error) error {
 	switch w.Status {
 	case http.StatusTooManyRequests:
 	case http.StatusOK:
-		why = "the usage endpoint gave no window a figure"
+		why = "the usage endpoint gave no figure for the account as a whole"
 	default:
 		why = fmt.Sprintf("the provider is failing (http %d)", w.Status)
 	}
