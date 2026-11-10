@@ -45,8 +45,8 @@ Usage:
                                 stdin; it starts out of the rotation
   rota login <account-id> --token   a token from ` + "`claude setup-token`" + `,
                                 read the same way, as that account's long one
-  rota login <login-id> [code]  finish that login elsewhere: off a terminal, or
-                                with --json (no code for device flows)
+  rota login <login-id> [code]  finish a login later, or one begun off a
+                                terminal or with --json (no code for device flows)
   rota login <account-id>       sign that account in again: a login only its
                                 approval finishes, or its own CLI's if that
                                 keeps its credentials
@@ -441,12 +441,11 @@ const loginUsage = `usage: rota login [provider]             start a new account
        rota login --long                 a year-long token for an account already here
        rota login --key [--label name]   an account on a Claude Console API key, read from stdin
        rota login <account-id> --token   a token from ` + "`claude setup-token`" + `, as its long-lived one
-       rota login <login-id> [code]      finish that login
+       rota login <login-id> [code]      finish a login later, or one begun off a terminal or with --json
        rota login <account-id>           sign it in again; only that account's approval finishes it
        rota login <account-id> [options] one whose CLI keeps its own credentials, through that CLI
 
-On a terminal, a login started here waits for what finishes it; off one, and with --json,
-rota login <login-id> [code] finishes it.
+At a terminal, a login started here waits for what finishes it: the code, or a key, unseen.
 
 `
 

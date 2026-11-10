@@ -15,7 +15,7 @@ import (
 	"github.com/professor93/rota/store"
 )
 
-// On a terminal, a login is one command: rota prints what it always prints
+// At a terminal, a login is one command: rota prints what it always prints
 // and then waits, in the same process, for whatever finishes the login — the
 // code from the page, a key, or nothing at all while a device login is
 // approved. Anywhere else, and always with --json, a login is the two steps
@@ -24,12 +24,13 @@ import (
 // rota still opens no browser. It waits for what a person brings back from
 // one.
 
-// loginTerminal reports whether a login's input is a person at a terminal,
-// who can be asked for the code. A variable so a test can say yes for a pipe.
+// loginTerminal reports whether one end of a login, its input or the output
+// its URL is printed to, is a terminal. A variable so a test can say yes for a
+// pipe.
 var loginTerminal = isLoginTerminal
 
-func isLoginTerminal(in io.Reader) bool {
-	f, ok := in.(*os.File)
+func isLoginTerminal(end any) bool {
+	f, ok := end.(*os.File)
 	return ok && isTerminal(f)
 }
 
@@ -38,18 +39,25 @@ func isLoginTerminal(in io.Reader) bool {
 var loginTTL = store.PendingTTL
 
 // devicePoll is how long a device login waits between two questions to the
-// provider when the login does not say (its state's "interval", in seconds).
-// Five seconds is the interval RFC 8628 gives a client that is told none.
+// provider: the interval RFC 8628 gives a client that is told none.
 var devicePoll = 5 * time.Second
+
+// pendingCheck is how often a wait looks whether its login is still parked,
+// so that one finished by another rota meanwhile is said to be that, rather
+// than waited on until it seems to have run out.
+var pendingCheck = 10 * time.Second
 
 // awaitBegun, when set, is called once the wait has its signals and before
 // anything is read: how a test does something at the moment a person would.
 var awaitBegun func(context.Context)
 
 // waits reports whether this login is waited for here rather than finished by
-// a second command. A delegated login is the vendor CLI's to finish.
+// a second command: only with a person at a terminal on both ends, the one
+// typing and the one the URL is printed to. A delegated login is the vendor
+// CLI's to finish, and so is one that can also be delegated, grok's: its
+// keyless route is a second command, which a wait for the key would take away.
 func (c *cli) waits(l *rota.Login) bool {
-	return !c.json && l.Kind != "delegated" && loginTerminal(c.in)
+	return !c.json && l.Kind != "delegated" && !l.Delegated && loginTerminal(c.in) && loginTerminal(c.out)
 }
 
 // afterBegin waits for the login just printed, when it is waited for. The
@@ -63,12 +71,23 @@ func (c *cli) afterBegin(s *store.Store, l *rota.Login) error {
 	return c.await(l)
 }
 
+// waitFor is one login being waited for, and the clocks that end the wait.
+type waitFor struct {
+	l      *rota.Login
+	ends   time.Time
+	runOut *time.Timer
+	check  *time.Ticker
+	ctx    context.Context
+}
+
 // await waits until the login is finished, runs out, or cannot be finished.
 //
 // A rejected code, and an approval by the wrong account, are mistakes
 // approving again puts right, so the wait says what went wrong and asks
 // again, on the same parked login. Where approving again cannot help
-// (store.Unfinishable), or the login is gone, it stops with that error.
+// (store.Unfinishable), it stops with that error; so does a device login the
+// provider refuses, whose code is spent. A login another rota finished
+// meanwhile is said to be finished there.
 //
 // The end of the input, or an interrupt, ends the wait and not the login: it
 // stays parked, and the command that finishes it later is said. A login that
@@ -79,22 +98,25 @@ func (c *cli) await(l *rota.Login) error {
 	if awaitBegun != nil {
 		awaitBegun(ctx)
 	}
-	ends := time.UnixMilli(l.CreatedAt).Add(loginTTL)
-	runOut := time.NewTimer(time.Until(ends))
-	defer runOut.Stop()
+	w := &waitFor{l: l, ends: time.UnixMilli(l.CreatedAt).Add(loginTTL), ctx: ctx}
+	w.runOut = time.NewTimer(time.Until(w.ends))
+	defer w.runOut.Stop()
+	w.check = time.NewTicker(pendingCheck)
+	defer w.check.Stop()
 	done := make(chan struct{})
 	defer close(done)
 
 	var lines <-chan typedLine
 	if l.Kind == "device" {
-		fmt.Fprintf(c.err, "Waiting for the approval (%s left; ^C stops waiting and leaves it open)...\n", timeLeft(ends))
+		fmt.Fprintf(c.err, "Waiting for the approval (%s left; ^C stops waiting and leaves it open)...\n", timeLeft(w.ends))
 	} else {
 		lines = typedLines(c.in, done)
 	}
+	said := "" // the last failure said, so a device wait says each once
 	for {
 		code := ""
 		if l.Kind != "device" {
-			r, why := c.ask(ctx, l, ends, lines, runOut.C)
+			r, why := c.ask(w, lines)
 			if why != nil {
 				return why
 			}
@@ -108,24 +130,50 @@ func (c *cli) await(l *rota.Login) error {
 		}
 		waiting, err := c.finishOnce(s, l.ID, code)
 		s.Close()
+		var refused *rota.OAuthError
 		switch {
 		case err == nil && !waiting:
 			return nil
-		case errors.Is(err, rota.ErrNoLogin), store.Unfinishable(err):
+		case errors.Is(err, rota.ErrNoLogin):
+			return c.gone(w)
+		case store.Unfinishable(err):
 			return err
-		case err != nil:
-			say(c.err, 0, "error: "+unsecret(err.Error())+"\n")
+		case l.Kind == "device" && errors.As(err, &refused):
+			return err
+		case err != nil && l.Kind != "device":
+			c.sayFailure(w, err)
 			continue
+		case err != nil:
+			if msg := err.Error(); msg != said {
+				c.sayFailure(w, err)
+				said = msg
+			}
 		case l.Kind != "device":
 			fmt.Fprintln(c.err, "Not approved yet; approve in the browser, then give it again.")
 			continue
 		}
+		if why := c.pause(w); why != nil {
+			return why
+		}
+	}
+}
+
+// pause is a device wait's time between two questions, ended early by
+// whatever ends the wait.
+func (c *cli) pause(w *waitFor) error {
+	next := time.After(devicePoll)
+	for {
 		select {
-		case <-ctx.Done():
-			return c.leftOpen(l, ends, errInterrupted)
-		case <-runOut.C:
-			return expired(l)
-		case <-time.After(pollEvery(l)):
+		case <-w.ctx.Done():
+			return c.leftOpen(w, errInterrupted)
+		case <-w.runOut.C:
+			return expired(w.l)
+		case <-w.check.C:
+			if !stillParked(w.l.ID) {
+				return c.gone(w)
+			}
+		case <-next:
+			return nil
 		}
 	}
 }
@@ -134,28 +182,35 @@ func (c *cli) await(l *rota.Login) error {
 // is read with the terminal's echo off, the way every pasted key is (noEcho);
 // a code is read as typed, since it is good once and for nothing without the
 // verifier that stays on this machine. why is what ends the wait instead.
-func (c *cli) ask(ctx context.Context, l *rota.Login, ends time.Time, lines <-chan typedLine, runOut <-chan time.Time) (line string, why error) {
+func (c *cli) ask(w *waitFor, lines <-chan typedLine) (line string, why error) {
 	read := func() (string, error) {
-		select {
-		case <-ctx.Done():
-			fmt.Fprintln(c.err)
-			return "", c.leftOpen(l, ends, errInterrupted)
-		case <-runOut:
-			fmt.Fprintln(c.err)
-			return "", expired(l)
-		case r := <-lines:
-			if r.err != nil {
+		for {
+			select {
+			case <-w.ctx.Done():
 				fmt.Fprintln(c.err)
-				return "", c.leftOpen(l, ends, exitCode(1))
+				return "", c.leftOpen(w, errInterrupted)
+			case <-w.runOut.C:
+				fmt.Fprintln(c.err)
+				return "", expired(w.l)
+			case <-w.check.C:
+				if !stillParked(w.l.ID) {
+					fmt.Fprintln(c.err)
+					return "", c.gone(w)
+				}
+			case r := <-lines:
+				if r.err != nil {
+					fmt.Fprintln(c.err)
+					return "", c.leftOpen(w, exitCode(1))
+				}
+				return r.line, nil
 			}
-			return r.line, nil
 		}
 	}
-	if l.Kind != "apikey" {
-		fmt.Fprintf(c.err, "Code from the page (%s left): ", timeLeft(ends))
+	if w.l.Kind != "apikey" {
+		fmt.Fprintf(c.err, "Code from the page (%s left): ", timeLeft(w.ends))
 		return read()
 	}
-	fmt.Fprintf(c.err, "Paste the key (it is not shown; %s left): ", timeLeft(ends))
+	fmt.Fprintf(c.err, "Paste the key (it is not shown; %s left): ", timeLeft(w.ends))
 	tty, _ := c.in.(*os.File)
 	if tty == nil {
 		return read()
@@ -167,9 +222,50 @@ func (c *cli) ask(ctx context.Context, l *rota.Login, ends time.Time, lines <-ch
 	return line, why
 }
 
+// sayFailure says why an attempt failed, before the wait goes on. A rejected
+// code is said in the wait's own words: lib tells whoever has no wait to go
+// back to to start a new login, and this one asks again on the same login.
+func (c *cli) sayFailure(w *waitFor, err error) {
+	var refused *rota.OAuthError
+	if errors.As(err, &refused) && refused.Code == "invalid_grant" {
+		fmt.Fprintf(c.err, "error: that code was not accepted (mistyped, already used, or expired); give it again, "+
+			"or approve again at the same link for a new one:\n  %s\n", w.l.URL)
+		return
+	}
+	say(c.err, 0, "error: "+unsecret(err.Error())+"\n")
+}
+
+// stillParked reports whether the login with this id is still waiting to be
+// finished. A store that cannot be opened says nothing either way, and the
+// wait goes on.
+func stillParked(id string) bool {
+	s, err := store.Open("")
+	if err != nil {
+		return true
+	}
+	defer s.Close()
+	l, err := s.PendingLogin(id)
+	return err != nil || l != nil
+}
+
+// gone ends a wait whose login is no longer parked: finished by another rota
+// while there was still time, which ends this command as a success too, or
+// run out. It is never nil: whatever it says ends the wait.
+func (c *cli) gone(w *waitFor) error {
+	if !time.Now().Before(w.ends) {
+		return expired(w.l)
+	}
+	fmt.Fprintf(c.err, "The login %s is no longer open: another rota finished it meanwhile. `rota list` shows how the account stands.\n", w.l.ID)
+	return finishedElsewhere
+}
+
+// finishedElsewhere ends a wait whose login another rota finished, with the
+// status of a login finished here.
+const finishedElsewhere = exitCode(0)
+
 // leftOpen ends the wait with code and says how the login is finished later.
-func (c *cli) leftOpen(l *rota.Login, ends time.Time, code exitCode) error {
-	fmt.Fprintf(c.err, "The login stays open for %s: %s\n", timeLeft(ends), finishLater(l))
+func (c *cli) leftOpen(w *waitFor, code exitCode) error {
+	fmt.Fprintf(c.err, "The login stays open for %s: %s\n", timeLeft(w.ends), finishLater(w.l))
 	return code
 }
 
@@ -200,14 +296,6 @@ func expired(l *rota.Login) error {
 	}
 	return fmt.Errorf("the login %s has expired: a login can be finished for %d minutes after it begins; `%s` begins another",
 		l.ID, int(store.PendingTTL/time.Minute), again)
-}
-
-// pollEvery is how long a device login waits before asking again.
-func pollEvery(l *rota.Login) time.Duration {
-	if n, err := strconv.Atoi(l.State["interval"]); err == nil && n > 0 {
-		return time.Duration(n) * time.Second
-	}
-	return devicePoll
 }
 
 // timeLeft is how long until the login runs out, in the minutes a person

@@ -29,7 +29,7 @@ func typing(t *testing.T, lines string) (w *os.File) {
 		t.Fatal(err)
 	}
 	wasIn, wasTerm := stdin, loginTerminal
-	stdin, loginTerminal = r, func(io.Reader) bool { return true }
+	stdin, loginTerminal = r, func(any) bool { return true }
 	t.Cleanup(func() {
 		stdin, loginTerminal = wasIn, wasTerm
 		w.Close()
@@ -95,8 +95,13 @@ func TestLoginOnATerminalWaitsForTheCodeAndTakesAnotherAfterAWrongOne(t *testing
 	if !strings.Contains(out, "Open this and approve") || !strings.Contains(out, "Then: rota login ") {
 		t.Fatalf("what a login prints is printed first: %q", out)
 	}
-	if strings.Count(errOut, "m left") < 3 || !strings.Contains(errOut, "authorization code was rejected") {
+	if strings.Count(errOut, "m left") < 3 || !strings.Contains(errOut, "that code was not accepted") {
 		t.Fatalf("a prompt for each line, the time left in it, and the rejection: %q", errOut)
+	}
+	// The wait asks again on the same login, so it does not say to start a
+	// new one, as lib says to whoever has no wait to go back to.
+	if strings.Contains(errOut, "start a new login") || !strings.Contains(errOut, "approve again") {
+		t.Fatalf("the rejection must say what this wait does next: %q", errOut)
 	}
 	if p := parked(t, home); p != "" {
 		t.Fatalf("finished, and still parked: %s", p)
@@ -276,6 +281,85 @@ func TestKeyLoginOnATerminalReadsTheKeyUnseen(t *testing.T) {
 	}
 	if p := parked(t, home); p != "" {
 		t.Fatalf("finished, and still parked: %s", p)
+	}
+}
+
+// parkedID is the id of the one login parked in this store.
+func parkedID(t *testing.T, home string) string {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(parked(t, home)), &m); err != nil || len(m) != 1 {
+		t.Fatalf("one parked login: %v %s", err, parked(t, home))
+	}
+	for id := range m {
+		return id
+	}
+	return ""
+}
+
+// A login finished in another shell while this one waits is said to be that,
+// not to have run out: whether the wait notices by itself or when the next
+// line is typed.
+func TestLoginOnATerminalSaysWhenAnotherRotaFinishedIt(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		check time.Duration
+		typed string
+	}{
+		{"noticed by itself", 20 * time.Millisecond, ""},
+		{"noticed at the next line", time.Hour, "AS12\n"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			home := seedTwoClaude(t)
+			approvalsByCode(t, known)
+			typing(t, c.typed)
+			was := pendingCheck
+			pendingCheck = c.check
+			t.Cleanup(func() { pendingCheck = was })
+			duringWait(t, func(context.Context) {
+				// The second shell, following the printed Then: line.
+				if out, errOut, code := call(t, "login", parkedID(t, home), "AS12"); code != 0 {
+					t.Errorf("the other shell: %d %q %q", code, out, errOut)
+				}
+			})
+			out, errOut, code := call(t, "login", "12")
+			if code != 0 || !strings.Contains(out+errOut, "another rota finished it") || strings.Contains(out+errOut, "expired") {
+				t.Fatalf("%d\n%s\n%s", code, out, errOut)
+			}
+			if !strings.Contains(out+errOut, "rota list") {
+				t.Fatalf("where to look: %q", out+errOut)
+			}
+		})
+	}
+}
+
+// The URL goes to standard output, so a wait whose output is not a terminal
+// would leave a person with a prompt and nothing to open.
+func TestLoginWithItsOutputElsewhereDoesNotWait(t *testing.T) {
+	home := seedTwoClaude(t)
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	wasIn, wasTerm := stdin, loginTerminal
+	stdin, loginTerminal = r, func(f any) bool { return f == r }
+	t.Cleanup(func() { stdin, loginTerminal = wasIn, wasTerm })
+	out, errOut, code := call(t, "login", "12")
+	if code != 0 || strings.Contains(errOut, "left") || !strings.Contains(parked(t, home), loginIDFrom(t, out)) {
+		t.Fatalf("%d\n%s\n%s", code, out, errOut)
+	}
+}
+
+// grok's login takes a key, and also offers to register a subscription with no
+// key at all, by a second command: a wait for the key would take that away.
+func TestALoginThatCanAlsoBeDelegatedDoesNotWait(t *testing.T) {
+	t.Setenv("ROTA_HOME", t.TempDir())
+	typing(t, "")
+	out, errOut, code := call(t, "login", "grok")
+	if code != 0 || !strings.Contains(out, "Or, without a key: rota login ") || strings.Contains(errOut, "left") {
+		t.Fatalf("%d\n%s\n%s", code, out, errOut)
 	}
 }
 

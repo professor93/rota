@@ -22,8 +22,6 @@ type Provider interface {
 	// (default; the user pastes a code), "device" (the user only approves in
 	// the browser), "apikey" (the user pastes a key) or "delegated" (nothing
 	// is pasted: the vendor CLI signs itself in, in the account's own home).
-	// A device login may also say in "interval" how many seconds apart a
-	// caller waiting on its approval should ask.
 	Begin(ctx context.Context) (url string, state map[string]string, err error)
 	// Complete turns what the user pasted (or nothing, for device flows)
 	// into a token. ErrAuthPending means "not approved yet, ask again".
