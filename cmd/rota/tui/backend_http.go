@@ -140,7 +140,9 @@ func (b *backendHTTP) PasteToken(ctx context.Context, account int, token string)
 
 // login posts one step of a login that ends in an account, and reads how it
 // ended. secret is what the person typed or pasted: it is taken out of a
-// refusal's sentence whatever its shape, as a key-shaped value already is.
+// refusal's sentence, reason and holder whatever its shape, as a key-shaped
+// value already is. A value shorter than any real code, key or token is
+// left alone, since taking out one letter would garble the sentence.
 func (b *backendHTTP) login(ctx context.Context, path string, body map[string]any, secret string) (LoginEnd, error) {
 	var doc struct {
 		// The id is a login's while it is pending and an account's after.
@@ -158,8 +160,10 @@ func (b *backendHTTP) login(ctx context.Context, path string, body map[string]an
 	}
 	if err := b.call(ctx, http.MethodPost, path, body, &doc); err != nil {
 		var no *client.Refusal
-		if secret != "" && errors.As(err, &no) {
-			no.Message = strings.ReplaceAll(no.Message, secret, "[not repeated]")
+		if s := strings.TrimSpace(secret); len(s) >= 8 && errors.As(err, &no) {
+			for _, f := range []*string{&no.Message, &no.Reason, &no.Holder} {
+				*f = strings.ReplaceAll(*f, s, "[not repeated]")
+			}
 		}
 		return LoginEnd{}, err
 	}
@@ -214,6 +218,11 @@ func (b *backendHTTP) Ask(ctx context.Context, q Question, each func(message.Eve
 		if err := rota.UnmarshalLenient(line, &head); err != nil {
 			return wire.End{}, fmt.Errorf("the rota API sent a line that is not an event: %w", err)
 		}
+		// An open run's stream says it is alive every so often; that is the
+		// transport's, not something the run did.
+		if head.Type == "ping" {
+			continue
+		}
 		// The stream's last word is rota's own done or error, which always
 		// carries the exit code. An error event without one is the CLI's,
 		// said along the way.
@@ -222,6 +231,7 @@ func (b *backendHTTP) Ask(ctx context.Context, q Question, each func(message.Eve
 			if err := rota.UnmarshalLenient(line, &end); err != nil {
 				return wire.End{}, fmt.Errorf("the rota API's last event: %w", err)
 			}
+			end.Error = wire.Unsecret(end.Error)
 			return end, nil
 		}
 		var ev message.Event

@@ -15,7 +15,8 @@ import (
 //
 // Every call ends when its context does. A refusal is a *client.Refusal
 // carrying the status, the reason a program can act on and the server's
-// sentence, with anything shaped like a key taken out of the sentence.
+// sentence, with anything shaped like a key taken out of it; so is the error
+// a run ends with.
 type Backend interface {
 	// Who is the principal the server sees: GET /v1/session.
 	Who(ctx context.Context) (Principal, error)

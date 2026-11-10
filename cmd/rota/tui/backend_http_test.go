@@ -375,9 +375,18 @@ func TestPastedSecretsNeverComeBack(t *testing.T) {
 	rota.ClaudeModelsEndpoint = console.URL
 	defer func() { rota.ClaudeModelsEndpoint = old }()
 	r := backendHTTPServe(t, api.RoleControl, seedStore(t, ""))
+	// Error() is a refusal's Message alone, so its reason and holder are
+	// looked at by themselves.
 	clean := func(what string, v ...any) {
 		t.Helper()
-		if s := fmt.Sprintf("%+v", v); strings.Contains(s, "TESTONLY") {
+		s := fmt.Sprintf("%+v", v)
+		for _, x := range v {
+			var no *client.Refusal
+			if err, ok := x.(error); ok && errors.As(err, &no) {
+				s += fmt.Sprintf(" %#v", *no)
+			}
+		}
+		if strings.Contains(s, "TESTONLY") {
 			t.Fatalf("%s: a credential came back: %s", what, s)
 		}
 	}
@@ -505,8 +514,75 @@ func TestAStreamCutShortIsAnError(t *testing.T) {
 	_, err := NewHTTP(cut.Client(), cut.URL).Ask(context.Background(), Question{Prompt: "p"}, func(e message.Event) { seen = append(seen, e) })
 	// A CLI's own error event is an event; only the stream's last word,
 	// which carries the exit code, ends it.
-	if err == nil || len(seen) != 2 || seen[1].Type != "error" {
+	if !errors.Is(err, io.ErrUnexpectedEOF) || len(seen) != 2 || seen[1].Type != "error" {
 		t.Fatalf("%v %+v", err, seen)
+	}
+}
+
+// The heartbeat an open run's stream sends is the transport's: nobody
+// reading events sees it.
+func TestAStreamsHeartbeatIsNoEvent(t *testing.T) {
+	beat := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		io.WriteString(w, `{"type":"init","account":1,"run_id":"r1"}`+"\n"+`{"type":"ping"}`+"\n"+
+			`{"type":"done","exit_code":0,"is_error":false,"account":1}`+"\n")
+	}))
+	defer beat.Close()
+	var seen []string
+	end, err := NewHTTP(beat.Client(), beat.URL).Ask(context.Background(), Question{Prompt: "p", Input: true},
+		func(e message.Event) { seen = append(seen, e.Type) })
+	if err != nil || end.Type != "done" || strings.Join(seen, ",") != "init" {
+		t.Fatalf("%+v %v %v", end, err, seen)
+	}
+}
+
+// A run that cannot start ends with the run's own error, not as a cut
+// stream: here no claude is on PATH, which TestMain left empty.
+func TestAnAskThatCannotStartEndsWithItsError(t *testing.T) {
+	r := backendHTTPServe(t, api.RoleControl, seedStore(t, ""))
+	var seen []string
+	end, err := r.b.Ask(context.Background(), Question{Account: 1, Prompt: "p"}, func(e message.Event) { seen = append(seen, e.Type) })
+	if err != nil || end.Type != "error" || end.Error == "" {
+		t.Fatalf("%+v %v %v", end, err, seen)
+	}
+}
+
+// The error a run ends with has any key in it taken out, as a refusal's
+// sentence has.
+func TestARunsErrorEndHoldsNoKey(t *testing.T) {
+	leak := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		fmt.Fprintf(w, `{"type":"error","exit_code":0,"is_error":false,"error":"bad key %s"}`+"\n", backendHTTPKey)
+	}))
+	defer leak.Close()
+	end, err := NewHTTP(leak.Client(), leak.URL).Ask(context.Background(), Question{Prompt: "p"}, nil)
+	if err != nil || end.Type != "error" || !strings.Contains(end.Error, "bad key") || strings.Contains(end.Error, "TESTONLY") {
+		t.Fatalf("%+v %v", end, err)
+	}
+}
+
+// What the person typed is taken out of a refusal that quotes it, whatever
+// its shape and wherever it is quoted, but a value too short to be a code is
+// left alone rather than cut out of every word it occurs in.
+func TestATypedValueIsNotRepeated(t *testing.T) {
+	const code = "my-plain-code-123"
+	hostile := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(400)
+		fmt.Fprintf(w, `{"error":"code %s was refused","reason":"bad:%s","holder":"%s"}`, code, code, code)
+	}))
+	defer hostile.Close()
+	b := NewHTTP(hostile.Client(), hostile.URL)
+	for _, typed := range []string{code, " " + code + "\n"} {
+		_, err := b.FinishLogin(context.Background(), "l-1", typed)
+		no := backendHTTPRefusal(t, err)
+		if no.Message != "code [not repeated] was refused" || no.Reason != "bad:[not repeated]" || no.Holder != "[not repeated]" {
+			t.Fatalf("%q: %#v", typed, *no)
+		}
+	}
+	_, err := b.FinishLogin(context.Background(), "l-1", "e")
+	if no := backendHTTPRefusal(t, err); no.Message != "code "+code+" was refused" || no.Reason != "bad:"+code {
+		t.Fatalf("one letter garbled the sentence: %#v", *no)
 	}
 }
 
