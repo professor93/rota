@@ -156,6 +156,15 @@ var chordCases = []chordCase{
 	{"kitty base layout key", 0x1c, "\x1c\x1b[1074::100u", []chordEvent{chordLeave}},
 	{"kitty base layout key with shift", 0x1c, "\x1c\x1b[1090:1058:110;2u", []chordEvent{chordNext}},
 	{"kitty base layout prefix", 0x1c, "\x1b[1105::92;5ud", []chordEvent{chordLeave}},
+	{"Ukrainian ctrl-ghe is the prefix", 0x1c, "\x1b[1169::92;5ud", []chordEvent{chordLeave}},
+	{"Dvorak e is not d", 0x1c, "\x1c\x1b[101::100u", []chordEvent{chordCxl}},
+	{"Dvorak t is not k", 0x1c, "\x1c\x1b[116::107u", []chordEvent{chordCxl}},
+	{"QWERTZ y is not z", 0x1c, "\x1c\x1b[121::122u", []chordEvent{chordCxl}},
+	{"AZERTY w is not z", 0x1c, "\x1c\x1b[119::122u", []chordEvent{chordCxl}},
+	{"German ctrl-# is not the prefix", 0x1c, "\x1b[35::92;5ux", []chordEvent{chordTy("\x1b[35::92;5ux")}},
+	{"French ctrl-* is not the prefix", 0x1c, "\x1b[42::92;5ud", []chordEvent{chordTy("\x1b[42::92;5ud")}},
+	{"a held prefix's repeat is not sent through", 0x1c, "\x1b[92;5u\x1b[92;5:2ud", []chordEvent{chordLeave}},
+	{"a held prefix's repeats are not sent through", 0x1c, "\x1b[92;5u\x1b[92;5:2u\x1b[92;5:2ud", []chordEvent{chordLeave}},
 	{"level shifts and locks ignored while armed", 0x1c, "\x1c\x1b[57453u\x1b[57454u\x1b[57358u\x1b[57360;129ud", []chordEvent{chordLeave}},
 	{"an unknown kitty event is not a key", 0x1c, "\x1c\x1b[100;1:9u", []chordEvent{chordCxl}},
 	{"a broken CSI is typed", 0x1c, "\x1b[1\x03x", []chordEvent{chordTy("\x1b[1\x03x")}},
@@ -228,14 +237,58 @@ func TestAPasteIsNeverAChord(t *testing.T) {
 	if got := c.feed([]byte("\x1b[200~\x1cd"), chordT0); !chordSame(got, []chordEvent{chordTy("\x1b[200~\x1cd")}) {
 		t.Fatalf("open paste: got %s", chordShow(got))
 	}
-	if _, ok := c.due(); ok {
-		t.Fatal("an open paste is waiting on a deadline")
+	if d, ok := c.due(); !ok || !d.Equal(chordT0.Add(pasteIdle)) {
+		t.Fatalf("an open paste: due() = %v %v, want %v", d, ok, chordT0.Add(pasteIdle))
 	}
 	if got := c.feed([]byte("\x1b[20"), chordT0); !chordSame(got, []chordEvent{chordTy("\x1b[20")}) {
 		t.Fatalf("a cut paste end: got %s", chordShow(got))
 	}
 	if got := c.feed([]byte("1~\x1cd"), chordT0); !chordSame(got, []chordEvent{chordTy("1~"), chordLeave}) {
 		t.Fatalf("the paste's end: got %s", chordShow(got))
+	}
+}
+
+func TestChordEndsAPasteThatGoesIdle(t *testing.T) {
+	c := newChord(0x1c)
+	if got := c.feed([]byte("\x1b[200~ab"), chordT0); !chordSame(got, []chordEvent{chordTy("\x1b[200~ab")}) {
+		t.Fatalf("feed: got %s", chordShow(got))
+	}
+	if d, ok := c.due(); !ok || !d.Equal(chordT0.Add(pasteIdle)) {
+		t.Fatalf("due() = %v %v, want %v", d, ok, chordT0.Add(pasteIdle))
+	}
+	at := chordT0.Add(900 * time.Millisecond)
+	if got := c.feed([]byte("c\x1cd"), at); !chordSame(got, []chordEvent{chordTy("c\x1cd")}) {
+		t.Fatalf("feed at +900ms: got %s", chordShow(got))
+	}
+	if d, _ := c.due(); !d.Equal(at.Add(pasteIdle)) {
+		t.Fatalf("due() = %v, want the deadline pushed on to %v", d, at.Add(pasteIdle))
+	}
+	if got := c.tick(chordT0.Add(pasteIdle)); len(got) != 0 {
+		t.Fatalf("tick before the deadline: got %s", chordShow(got))
+	}
+	if got := c.tick(at.Add(pasteIdle)); len(got) != 0 {
+		t.Fatalf("tick at the deadline: got %s", chordShow(got))
+	}
+	if _, ok := c.due(); ok {
+		t.Fatal("still due after the paste ended")
+	}
+	if got := c.feed([]byte("\x1cd"), at.Add(pasteIdle)); !chordSame(got, []chordEvent{chordLeave}) {
+		t.Fatalf("after the paste: got %s", chordShow(got))
+	}
+
+	// A read after the deadline, with no tick between, ends the paste first.
+	c = newChord(0x1c)
+	c.feed([]byte("\x1b[200~ab"), chordT0)
+	if got := c.feed([]byte("\x1cd"), chordT0.Add(pasteIdle)); !chordSame(got, []chordEvent{chordLeave}) {
+		t.Fatalf("late read: got %s", chordShow(got))
+	}
+
+	// The tail of a stalled paste is still typed byte for byte.
+	c = newChord(0x1c)
+	c.feed([]byte("\x1b[200~ab"), chordT0)
+	c.tick(chordT0.Add(pasteIdle))
+	if got := c.feed([]byte("cd\x1b[201~"), chordT0.Add(2*pasteIdle)); !chordSame(got, []chordEvent{chordTy("cd\x1b[201~")}) {
+		t.Fatalf("the tail: got %s", chordShow(got))
 	}
 }
 
@@ -292,8 +345,8 @@ func TestChordHoldsOnlyEscapes(t *testing.T) {
 		if got := c.feed([]byte(in), chordT0); !chordSame(got, []chordEvent{chordTy(in)}) {
 			t.Errorf("feed(%q) = %s, want it typed at once", in, chordShow(got))
 		}
-		if _, ok := c.due(); ok {
-			t.Errorf("feed(%q) left something waiting", in)
+		if len(c.held) != 0 || c.state != chordGround {
+			t.Errorf("feed(%q) held %q", in, c.held)
 		}
 	}
 	c := newChord(0x1c)
@@ -445,6 +498,13 @@ func TestChordLateReadDoesNotCompleteAStaleHold(t *testing.T) {
 	c.feed([]byte("\x1c\x1b"), chordT0)
 	if got := c.feed([]byte("d"), chordT0.Add(200*time.Millisecond)); !chordSame(got, []chordEvent{chordCxl, chordTy("d")}) {
 		t.Fatalf("armed: got %s", chordShow(got))
+	}
+	// The hint coming due first does not hide a stale hold.
+	c = newChord(0x1c)
+	c.feed([]byte("\x1c"), chordT0)
+	c.feed([]byte("\x1b"), chordT0.Add(390*time.Millisecond))
+	if got := c.feed([]byte("d"), chordT0.Add(time.Second)); !chordSame(got, []chordEvent{chordCxl, chordTy("d")}) {
+		t.Fatalf("armed, hint due first: got %s", chordShow(got))
 	}
 	c = newChord(0x1c)
 	c.feed([]byte("\x1b[92"), chordT0)

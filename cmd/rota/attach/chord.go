@@ -13,6 +13,12 @@ var (
 	holdFor   = 25 * time.Millisecond
 )
 
+// pasteIdle ends a bracketed paste whose end marker has not come after this
+// long with no input, so one lost ESC[201~ does not leave the person without
+// the chord. Its tail is still typed byte for byte; only a prefix inside it
+// would act. There is never a byte limit: a long paste is legitimate.
+var pasteIdle = time.Second
+
 // action is what a chordEvent asks of the attach.
 type action int
 
@@ -80,8 +86,9 @@ type chord struct {
 	heldAt  time.Time
 	discard bool // reset came while held: drop the sequence whole
 
-	paste   bool
-	pasteAt int // bytes of chordPasteEnd matched so far
+	paste      bool
+	pasteMatch int // bytes of chordPasteEnd matched so far
+	pasteLast  time.Time
 
 	on      bool // the prefix was read, and the second key is awaited
 	armedAt time.Time
@@ -108,17 +115,26 @@ func chordCodepoint(k byte) int {
 }
 
 // feed reads p, which may be any part of the input, and says what it means.
-// Held bytes whose holdFor has passed go first, so a late read never
-// completes a stale sequence.
+// Held bytes whose holdFor has passed, or a paste gone idle, go first, so a
+// late read never completes a stale sequence.
 func (c *chord) feed(p []byte, now time.Time) []chordEvent {
-	if len(p) > 0 && c.state != chordGround && !now.Before(c.heldAt.Add(holdFor)) {
-		c.flush()
+	if len(p) == 0 {
+		return nil
+	}
+	if c.paste && !now.Before(c.pasteLast.Add(pasteIdle)) {
+		c.expire(chordDuePaste)
+	}
+	if c.state != chordGround && !now.Before(c.heldAt.Add(holdFor)) {
+		c.expire(chordDueHold)
 	}
 	for _, b := range p {
 		c.step(b, now)
 	}
-	if len(p) > 0 && c.state != chordGround {
+	if c.state != chordGround {
 		c.heldAt = now
+	}
+	if c.paste {
+		c.pasteLast = now
 	}
 	return c.take()
 }
@@ -127,18 +143,32 @@ func (c *chord) feed(p []byte, now time.Time) []chordEvent {
 // the chord has waited hintAfter, each in the order of its deadline.
 func (c *chord) tick(now time.Time) []chordEvent {
 	for {
-		at, hold, ok := c.next()
+		at, what, ok := c.next()
 		if !ok || now.Before(at) {
 			break
 		}
-		if hold {
-			c.flush()
-		} else {
-			c.hinted = true
-			c.emit(actHint)
-		}
+		c.expire(what)
 	}
 	return c.take()
+}
+
+// What comes due: held bytes, the hint, or the end of an idle paste.
+const (
+	chordDueHold = iota
+	chordDueHint
+	chordDuePaste
+)
+
+func (c *chord) expire(what int) {
+	switch what {
+	case chordDueHold:
+		c.flush()
+	case chordDueHint:
+		c.hinted = true
+		c.emit(actHint)
+	case chordDuePaste:
+		c.paste, c.pasteMatch = false, 0
+	}
 }
 
 // due is the next time tick has something to do.
@@ -154,7 +184,8 @@ func (c *chord) armed() bool { return c.on }
 // the input's place: a paste under way is still a paste, the rest of a
 // dropped character is still dropped, and a sequence still open is dropped
 // whole when it completes, breaks or times out, so its tail is not typed
-// into the next session. A paste that starts across the reset still starts.
+// into the next session. A paste that starts across the reset still starts,
+// and a paste ends only at its end marker or after pasteIdle.
 func (c *chord) reset() {
 	c.disarm()
 	c.armedAt = time.Time{}
@@ -164,16 +195,21 @@ func (c *chord) reset() {
 	c.out = nil
 }
 
-func (c *chord) next() (at time.Time, hold, ok bool) {
+// next is the earliest deadline, and what comes due at it. A paste holds
+// nothing and is never armed, so its deadline stands alone.
+func (c *chord) next() (at time.Time, what int, ok bool) {
+	if c.paste {
+		return c.pasteLast.Add(pasteIdle), chordDuePaste, true
+	}
 	if c.state != chordGround {
-		at, hold, ok = c.heldAt.Add(holdFor), true, true
+		at, what, ok = c.heldAt.Add(holdFor), chordDueHold, true
 	}
 	if c.on && !c.hinted {
 		if h := c.armedAt.Add(hintAfter); !ok || h.Before(at) {
-			at, hold, ok = h, false, true
+			at, what, ok = h, chordDueHint, true
 		}
 	}
-	return at, hold, ok
+	return at, what, ok
 }
 
 func (c *chord) take() []chordEvent {
@@ -232,14 +268,14 @@ func (c *chord) step(b byte, now time.Time) {
 	if c.paste {
 		c.typed([]byte{b})
 		switch {
-		case b == chordPasteEnd[c.pasteAt]:
-			if c.pasteAt++; c.pasteAt == len(chordPasteEnd) {
-				c.paste, c.pasteAt = false, 0
+		case b == chordPasteEnd[c.pasteMatch]:
+			if c.pasteMatch++; c.pasteMatch == len(chordPasteEnd) {
+				c.paste, c.pasteMatch = false, 0
 			}
 		case b == 0x1b:
-			c.pasteAt = 1
+			c.pasteMatch = 1
 		default:
-			c.pasteAt = 0
+			c.pasteMatch = 0
 		}
 		return
 	}
@@ -379,7 +415,7 @@ func (c *chord) csi(seq []byte, now time.Time) {
 			c.done(actCancel)
 		}
 		c.typed(seq)
-		c.paste, c.pasteAt = true, 0
+		c.paste, c.pasteMatch = true, 0
 		return
 	}
 	k, ok := chordParse(seq)
@@ -396,8 +432,10 @@ func (c *chord) csi(seq []byte, now time.Time) {
 		// A mouse or focus report, or a terminal's reply, is the
 		// session's, and the chord still waits for its key.
 		c.typed(seq)
-	case ok && (k.event == chordRelease || chordModifier(k.cp)):
-		// A release, or a modifier key on its own, is not the second key.
+	case ok && (k.event == chordRelease || chordModifier(k.cp)),
+		ok && k.event == 2 && c.prefix(k):
+		// A release, a modifier key on its own, or the prefix held into
+		// auto-repeat, is not the second key.
 	case ok && c.prefix(k):
 		c.disarm()
 		c.typed(seq)
@@ -426,12 +464,14 @@ func chordModifier(cp int) bool {
 }
 
 // prefix says whether k is the chord's key pressed or repeated with Ctrl,
-// by its codepoint or by the key at its place on a US layout.
+// by its codepoint, or, for a non-Latin character, by the key at its place
+// on a US layout. Latin layouts (Dvorak, AZERTY, QWERTZ) carry a base key
+// too, and keep reading their own characters.
 func (c *chord) prefix(k chordKey) bool {
 	if k.mods&chordCtrl == 0 || k.event != 1 && k.event != 2 || c.cp == 0 {
 		return false
 	}
-	return c.prefixAt(k.cp, k.mods) || k.base != 0 && c.prefixAt(k.base, k.mods)
+	return c.prefixAt(k.cp, k.mods) || k.cp > 0x7f && k.base != 0 && c.prefixAt(k.base, k.mods)
 }
 
 func (c *chord) prefixAt(cp, mods int) bool {
@@ -451,15 +491,14 @@ func chordSecond(b byte) action {
 		return actHelp
 	case b >= 0x01 && b <= 0x1a:
 		b += 'a' - 1
-	case b >= 'A' && b <= 'Z':
-		b += 'a' - 'A'
 	}
 	return chordLetter(int(b))
 }
 
 // chordSecondKey is what the kitty or modifyOtherKeys key k means as the
 // second key: unmodified, with Shift, or with Ctrl. The letter is the key's
-// codepoint, or else the key at its place on a US layout.
+// codepoint, or, for a non-Latin character, the key at its place on a US
+// layout.
 func chordSecondKey(k chordKey) action {
 	m := k.mods &^ chordLocks
 	if m&^chordShift == 0 && (k.cp == '?' || k.shifted == '?' || k.text == '?') {
@@ -468,20 +507,17 @@ func chordSecondKey(k chordKey) action {
 	if m&^chordShift != 0 && (m&chordCtrl == 0 || m&^(chordCtrl|chordShift) != 0) {
 		return actCancel
 	}
-	if a := chordLetter(chordLower(k.cp)); a != actCancel || k.base == 0 {
+	if a := chordLetter(k.cp); a != actCancel || k.base == 0 || k.cp <= 0x7f {
 		return a
 	}
-	return chordLetter(chordLower(k.base))
+	return chordLetter(k.base)
 }
 
-func chordLower(cp int) int {
-	if cp >= 'A' && cp <= 'Z' {
-		return cp + 'a' - 'A'
-	}
-	return cp
-}
-
+// chordLetter is what a letter, in either case, means as the second key.
 func chordLetter(cp int) action {
+	if cp >= 'A' && cp <= 'Z' {
+		cp += 'a' - 'A'
+	}
 	switch cp {
 	case 'd':
 		return actLeave
