@@ -623,6 +623,9 @@ func TestALeadWhoseCallerLeftPresentsNothing(t *testing.T) {
 		t.Fatalf("stopped under the lock: %v", e)
 	}
 	noPresenting(t, w.s)
+	if missed, ok := w.a.Extra[leadMissedKey]; ok {
+		t.Fatalf("a launch whose caller left records no miss, so the next one leads: %q", missed)
+	}
 }
 
 // refusedLaunch revokes the lineage, launches once, and then makes every look
@@ -1049,6 +1052,50 @@ func TestTheHomeIsReadAgainAfterARefusalWithTheTokensRealExpiry(t *testing.T) {
 		const want = "Claude Code cleared the login in its home, and the provider refused rota's own refresh token too"
 		if !w.a.Dead || !strings.HasPrefix(w.a.DeadReason, want) {
 			t.Fatalf("dead with the rescue's own reason: %v %q", w.a.Dead, w.a.DeadReason)
+		}
+	})
+	// On the keychain: Claude Code rotated R0 into its item, a look took R1, and
+	// rota's seed file holding R0 is still beside the item. The item is blanked,
+	// the rescue presents R1 and is refused, and an older login of the account's
+	// own then lands in the item; read again, the home's store is the seed file,
+	// newer than that item, holding R0, which Claude Code has spent. Judged by the
+	// forced past, R0 read as a new login, which the profile took, and the account
+	// was alive on a spent token; by R1's real expiry it is the older copy it is.
+	t.Run("keychain/blanked rescue", func(t *testing.T) {
+		w := newLineageWorld(t, true)
+		w.cc.start()
+		w.clock.pass(10 * time.Minute)
+		if got := w.cc.refresh("claude-code"); got != "rotated to R1" {
+			t.Fatalf("setup: %q", got)
+		}
+		lineageLooks()[1].do(t, w) // a look in sync, on R1
+		if w.a.Token.Refresh != "R1" || refreshOf(readFile(filepath.Join(w.cc.home, claudeCredentials))) != "R0" {
+			t.Fatalf("setup: rota on R1 and the seed file on R0: %s", w.a.Token.Refresh)
+		}
+		w.cc.write(clearedLogin)
+		w.p.revoke("signed out elsewhere")
+		done := false
+		w.p.onRota = func(string) {
+			if !done {
+				done = true
+				w.cc.write(storeLogin("A-older", "R-older", rota.Now().Add(-time.Hour).UnixMilli(), lineageUntil))
+			}
+		}
+		lineageLooks()[1].do(t, w)
+		w.p.onRota = nil
+		for i := 0; i < 2; i++ {
+			for _, look := range lineageLooks() {
+				look.do(t, w)
+			}
+		}
+		w.p.dump(t)
+		if mine := w.p.byRota(); len(mine) != 1 || mine[0].rt != "R1" {
+			t.Fatalf("the rescue presents R1 once, and nothing after: %+v", mine)
+		}
+		const want = "Claude Code cleared the login in its home, and the provider refused rota's own refresh token too"
+		if !w.a.Dead || w.a.Token.Refresh != "R1" || !strings.HasPrefix(w.a.DeadReason, want) {
+			t.Fatalf("dead on R1 with the rescue's own reason, not alive on the spent R0: dead=%v holds %s %q",
+				w.a.Dead, w.a.Token.Refresh, w.a.DeadReason)
 		}
 	})
 }
