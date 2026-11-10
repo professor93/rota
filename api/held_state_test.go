@@ -139,11 +139,41 @@ func TestAnUnchangedStateIsNotSaidAgain(t *testing.T) {
 	}
 }
 
-// Quiet is said by no frame from the holder, only by time: each beat asks
-// tellState, which says it once it is so, and output tells everyone at once,
-// without waiting for a beat, that it is over. The beat is stood in for by
-// calling tellState here: holdBeat is not shortened, since a goroutine an
-// earlier test left behind may still be reading it.
+// Quiet is said by no frame from the holder, only by time, so each beat
+// asks tellState: one quiet frame comes within a beat, and the beats after
+// it say nothing more.
+func TestAQuietSessionSaysSo(t *testing.T) {
+	// Set before the server and restored after its cleanup, so no session's
+	// ping reads it while it changes. A second, not less: it is the link's
+	// silence limit too.
+	was := holdBeat
+	holdBeat = time.Second
+	t.Cleanup(func() { holdBeat = was })
+	p := withHeld(t, nil)
+	id := p.start(nil)["id"].(string)
+	tm := p.attach(id, p.alice, "")
+	wantState(t, "an attach", tm.afterHello(), map[string]any{"status": "running"})
+
+	p.api.clock.set(func() time.Time { return time.Now().Add(heldQuiet + time.Second) })
+	t.Cleanup(func() { p.api.clock.set(nil) })
+	tm.waitDoc("a quiet state", func(doc map[string]any) bool {
+		return doc["type"] == "state" && doc["status"] == "quiet"
+	})
+	quiet := 0
+	for _, doc := range append(tm.states(), tm.textsFor(2*holdBeat+holdBeat/2)...) {
+		if doc["type"] == "state" && doc["status"] == "quiet" {
+			quiet++
+		}
+	}
+	if quiet != 1 {
+		t.Fatalf("three beats of quiet gave %d quiet frames, want 1", quiet)
+	}
+}
+
+// Output ends quiet at once, without waiting for a beat. The beat here is
+// the default, ten seconds, so the beat's announcement is stood in for by
+// calling tellState, and a running frame that comes at once can only be the
+// output's.
 func TestQuietIsSaidAndSoIsWakingUp(t *testing.T) {
 	p := withHeld(t, nil)
 	id := p.start(nil)["id"].(string)

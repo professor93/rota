@@ -283,11 +283,11 @@ func (h *heldTerm) describe(doc map[string]any) {
 	doc["resumable"] = h.state == heldInterrupted && h.conv != ""
 	doc["name"] = h.name()
 	doc["status"] = h.status()
-	doc["waiting_for"] = ""
 	if h.state == heldLive {
-		doc["waiting_for"] = h.reg.WaitingFor // a session that stopped waits for nothing
-	}
-	if h.state != heldLive {
+		doc["waiting_for"] = h.reg.WaitingFor
+	} else {
+		// A session that stopped waits for nothing.
+		doc["waiting_for"] = ""
 		// Said as soon as the state is, rather than once the terminal has
 		// finished: a reader that sees a session ended or interrupted sees
 		// how it ended in the same description.
