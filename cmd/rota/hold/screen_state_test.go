@@ -51,8 +51,25 @@ func TestTheStateSaysWhetherTheScreenIsKept(t *testing.T) {
 	p.stateSays(true, 5*time.Second)
 
 	// So it is for a size past the budget, and for a fit back within it.
+	// The Resized and the State may come in either order; both are read
+	// before the next fit, which takes the first Resized it finds.
 	p.json(holdwire.Resize, holdwire.SizeMsg{Cols: 500, Rows: 401})
-	p.stateSays(false, time.Second)
+	resized, retiredSaid := false, false
+	for deadline := time.Now().Add(time.Second); !resized || !retiredSaid; {
+		p.c.Deadline(deadline)
+		kind, b, err := p.c.Read()
+		if err != nil {
+			t.Fatalf("past the budget: resized %v, a State said no screen %v: %v", resized, retiredSaid, err)
+		}
+		switch kind {
+		case holdwire.Resized:
+			var z holdwire.SizeMsg
+			resized = resized || (share.Unmarshal(b, &z) == nil && z.Cols == 500 && z.Rows == 401)
+		case holdwire.State:
+			var m holdwire.StateMsg
+			retiredSaid = retiredSaid || (share.Unmarshal(b, &m) == nil && !m.Screen)
+		}
+	}
 	// Nothing can be kept before the CLI prints after the fit, so the
 	// Resized is read past no State that matters.
 	p.fit(80, 24)

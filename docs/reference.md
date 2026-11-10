@@ -2131,7 +2131,7 @@ Out:
 | *binary* | output: write it to the terminal emulator as it arrives |
 | `hello{id,kind,cols,rows,offset,holder,you:{name,role,conn},viewers}` | the first frame, always; `repaint:true` on a held session attached without `since`, whose first binary frame is then its current screen, standing for `offset`; a held session's also has `holder_conn` |
 | `keyboard{holder}` | who holds it now, `null` for nobody; a held session's also has `holder_conn`, the `conn` of the connection holding it, since one person may be attached from several devices |
-| `repaint{offset,cols,rows}` | a held session's viewer that fell behind: the next binary frame is the screen at that size, standing for `offset`, and output goes on from there |
+| `repaint{offset,cols,rows}` | a held session's viewer that fell behind, or any viewer of a held session when its holder's screen comes back: the next binary frame is the screen at that size, standing for `offset`, and output goes on from there |
 | `claim_request{by,id}` | somebody is asking the holder for it |
 | `resized{cols,rows}` | the terminal is a different size now; a held session's fit that was dropped is not answered at all (*Only a fit resizes*, above) |
 | `viewers{list}` | who is attached: name, role and since — never an address |
@@ -2194,18 +2194,18 @@ the CLI to draw again, so a CLI that redraws itself when it is resized, as
 a full-screen one does, is all there after a fit back, and one that does
 not shows only what it printed since. Otherwise the fresh screen shows
 what a replayed viewer sees, or the end of it, and what the CLI drew
-before that is lost to it. A viewer attached meanwhile is repainted once
-it is, as one that fell behind is, and the `hello` of the next attach has
-the fresh screen too; a holder from an older rota does not say when its
-screen comes back, so its viewers get it at their next `repaint`. What a
-held session's viewer is replayed — on
-attaching, or after a repaint — comes in frames of at most 64 KiB, each
-with its own write deadline, and one viewer is repainted at most four
-times a second. Documents still arrive, and the ones that came while it
-was behind arrive after the repaint; a viewer owed more
-documents than it has room for (64 waiting to be written, or 1024 waiting
-for its repaint) is closed with `1013` after all, since a repaint does not
-say them again.
+before that is lost to it. When the screen is kept again, every viewer
+then attached is repainted from it, as one that fell behind is, so one
+attached meanwhile leaves its replay, and the `hello` of the next attach
+has the fresh screen too; a holder from an older rota does not say when
+its screen comes back, so its viewers get it at their next `repaint`. What
+a held session's viewer is replayed — on attaching, or after a repaint —
+comes in frames of at most 64 KiB, each with its own write deadline, and
+one viewer is repainted at most four times a second. Documents still
+arrive, and the ones that came while it was behind arrive after the
+repaint; a viewer owed more documents than it has room for (64 waiting to
+be written, or 1024 waiting for its repaint) is closed with `1013` after
+all, since a repaint does not say them again.
 
 ```js
 const ws = new WebSocket(`wss://host/v1/terminals/${id}/ws`);

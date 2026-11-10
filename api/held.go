@@ -172,9 +172,10 @@ type heldTerm struct {
 	convCwd string
 	// convName is the name the CLI gave the conversation, kept the same way.
 	convName string
-	// stated is this link having sent a State, and kept what its last one
-	// said of the holder's screen: a screen that comes back is one a link
-	// said was gone.
+	// stated is the holder having sent a State, and kept what its last one
+	// said of its screen: a screen that comes back is one it said was gone.
+	// Both outlive a relink, which dials the same holder process; a server
+	// that adopts the session starts them afresh.
 	stated, kept bool
 
 	lastOut time.Time
@@ -389,9 +390,6 @@ func (h *heldTerm) read(conn *share.Conn) (code int, ended bool) {
 	if conn == nil {
 		return 0, false
 	}
-	h.mu.Lock()
-	h.stated, h.kept = false, false
-	h.mu.Unlock()
 	for {
 		kind, payload, err := conn.Read()
 		if err != nil {
@@ -531,9 +529,10 @@ func (h *heldTerm) setState(state string, code int) {
 
 // noteState keeps what the holder last said about the session. A registry
 // that has gone keeps the conversation it last named. cameBack is the
-// holder's screen kept again after this link said it was retired. A link's
-// first State says only what is so, and a holder older than the field never
-// says it keeps one, so neither ever comes back.
+// holder's screen kept again after it said it was retired, on this link or
+// one before it. The first State this server has from the holder says only
+// what is so, and a holder older than the field never says it keeps one, so
+// neither ever comes back.
 func (h *heldTerm) noteState(msg *holdwire.StateMsg) (cameBack bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
