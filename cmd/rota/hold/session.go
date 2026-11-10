@@ -23,7 +23,8 @@ import (
 //     keeps it in the ring, and wakes the others;
 //   - the emulator feeds the ring to the Screen, a sequence boundary at a
 //     time, answers the cursor-position queries the Screen alone knows, and
-//     takes each size the terminal took where in the output it took it;
+//     takes each size the terminal took where in the output it took it,
+//     and keeps a retired screen again once the CLI is quiet;
 //   - the writer is the only thing that writes to the CLI: answers first,
 //     then keystrokes, from a queue that refuses out loud when it is full;
 //   - the link, when the daemon has one, sends the ring from wherever the
@@ -115,9 +116,11 @@ type sized struct {
 // Session is one held CLI. Start makes it, Serve links it to the daemon, and
 // Done says when the CLI has ended and everything about it is finished.
 type Session struct {
-	cfg    Config
-	child  Child
-	scan   *vtscan.Scanner // the pump's alone
+	cfg   Config
+	child Child
+	scan  *vtscan.Scanner // the pump's alone
+	// screen is replaced only by renew, under both s.mu and em.lock, so it
+	// may be read under either.
 	screen *Screen
 	w      *writer
 
@@ -154,14 +157,17 @@ type Session struct {
 		modes   vtscan.Modes
 		cols    uint16
 		rows    uint16
-		retired bool
+		sizedAt int64 // where the ring was when the terminal took cols×rows
+		retired bool  // no screen is kept, until renew keeps one again
+		broken  bool  // its emulator panicked: retired for the session's life
 	}
 	emWake chan struct{}
 	emDone chan struct{} // the emulator's goroutine has returned
 	sizing sync.Mutex    // one resize at a time, the CLI's and the screen's in one order
-	// wait is how long a repaint waits for the emulator: repaintWait when
-	// the session was made.
-	wait time.Duration
+	// wait is how long a repaint waits for the emulator, and renewAfter how
+	// quiet the CLI must be for a retired screen to be kept again: the
+	// package's values when the session was made.
+	wait, renewAfter time.Duration
 
 	turn     chan struct{} // one send types at a time
 	finished chan struct{} // the session is ending: the emulator stops
@@ -203,7 +209,7 @@ func newSession(cfg Config, c Child) *Session {
 		done:     make(chan struct{}),
 	}
 	s.em.lock, s.em.cols, s.em.rows = make(waitLock, 1), cols, rows
-	s.wait = repaintWait
+	s.wait, s.renewAfter = repaintWait, renewAfter
 	if holdwire.ScreenFits(cols, rows) {
 		s.screen = NewScreen(int(cols), int(rows))
 	} else {
@@ -436,10 +442,10 @@ func (s *Session) life() {
 	close(s.finished)
 	select {
 	case <-s.emDone:
-		s.screen.Close()
+		s.screenNow().Close()
 	case <-time.After(exitFlush):
 		s.log("the screen did not stop in time")
-		go s.screen.Close()
+		go s.screenNow().Close()
 	}
 	s.log("the CLI ended", "code", code)
 }
@@ -455,7 +461,7 @@ func (s *Session) end() {
 		_ = s.child.Close()
 		s.w.stop()
 		close(s.finished)
-		go s.screen.Close()
+		go s.screenNow().Close()
 	}
 	close(s.done)
 	s.mu.Lock()
@@ -468,6 +474,14 @@ func (s *Session) end() {
 }
 
 /* --------------------------------------------------------------- the rest --- */
+
+// screenNow is the session's Screen: renew replaces a retired one, and once
+// finished is closed it is the last.
+func (s *Session) screenNow() *Screen {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.screen
+}
 
 func (s *Session) log(msg string, args ...any) {
 	if s.cfg.Log != nil {

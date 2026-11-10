@@ -388,6 +388,17 @@ func (p *peer) screen(seq uint64) (holdwire.ScreenHead, string) {
 	return h, string(repaint)
 }
 
+// fit resizes the session as a fit does, and expects it done as asked.
+func (p *peer) fit(cols, rows uint16) {
+	p.t.Helper()
+	p.json(holdwire.Resize, holdwire.SizeMsg{Cols: cols, Rows: rows})
+	var got holdwire.SizeMsg
+	p.decode(holdwire.Resized, &got)
+	if got.Cols != cols || got.Rows != rows {
+		p.t.Fatalf("asked %dx%d, resized to %+v", cols, rows, got)
+	}
+}
+
 // caughtUp asks for the screen, from sequence seq on, until it stands for
 // offset off: a screen far behind its CLI answers at once with none.
 func (p *peer) caughtUp(seq uint64, off int64) (holdwire.ScreenHead, string) {
