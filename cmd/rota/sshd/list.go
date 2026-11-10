@@ -1,11 +1,15 @@
 package sshd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/professor93/rota/cmd/rota/attach"
 	"github.com/professor93/rota/cmd/rota/client"
@@ -14,15 +18,23 @@ import (
 
 // clientFor is a client of the API as the channel's person, in process:
 // the connection's Handler with no socket between, reached as ctl.sock
-// reaches the daemon's. The func lets it go, WebSockets and all.
-func clientFor(ch *Channel) (*client.Client, func()) {
+// reaches the daemon's. The func lets it go, WebSockets and all, and so
+// does the end of ctx, the command's: a request under way when the channel
+// closes or the server stops ends then, rather than holding the command,
+// its places and Server.Close until the API answers.
+func clientFor(ctx context.Context, ch *Channel) (*client.Client, func()) {
 	h := ch.Handler
 	if h == nil {
 		// A server started with no API refuses every request, rather than
 		// have net/http serve its own default handler in its place.
 		h = http.NotFoundHandler()
 	}
-	return client.InProcess(h)
+	c, stop := client.InProcess(h)
+	after := context.AfterFunc(ctx, stop)
+	return c, func() {
+		after()
+		stop()
+	}
 }
 
 // listTakes is said, before usage, of a list given anything but --json.
@@ -31,7 +43,7 @@ const listTakes = "list takes --json and nothing else\n"
 // listRun is `list [--json]`: every session the daemon holds or lists, one
 // line each, or none; with --json, {"terminals":[…]} holding each session's
 // own document, as GET /v1/terminals answers.
-func listRun(_ context.Context, ch *Channel, args []string) int {
+func listRun(ctx context.Context, ch *Channel, args []string) int {
 	asJSON := false
 	switch {
 	case len(args) == 0:
@@ -41,7 +53,7 @@ func listRun(_ context.Context, ch *Channel, args []string) int {
 		dispatchText(ch.Err, ch.PTY, listTakes+usage)
 		return 2
 	}
-	c, stop := clientFor(ch)
+	c, stop := clientFor(ctx, ch)
 	defer stop()
 	all, err := c.List()
 	if err != nil {
@@ -49,15 +61,9 @@ func listRun(_ context.Context, ch *Channel, args []string) int {
 		return 1
 	}
 	if asJSON {
-		raw, err := json.Marshal(struct {
+		return listJSON(ch, struct {
 			Terminals []client.Session `json:"terminals"`
 		}{all})
-		if err != nil {
-			listFailed(ch, err)
-			return 1
-		}
-		dispatchText(ch.Out, ch.PTY, string(raw)+"\n")
-		return 0
 	}
 	if len(all) == 0 {
 		dispatchText(ch.Out, ch.PTY, "no sessions\n")
@@ -122,6 +128,33 @@ func listName(s client.Session) string {
 		return filepath.Base(s.Cwd)
 	}
 	return s.ID
+}
+
+// listJSON prints v as JSON on the channel's stdout, exit 0, with every
+// control character escaped: encoding/json escapes C0 but writes C1 as it
+// is, and a terminal shown U+009B or U+009D acts on it as on ESC [ or
+// ESC ]. The escape is JSON's own, so what is read back is the same.
+func listJSON(ch *Channel, v any) int {
+	raw, err := json.Marshal(v)
+	if err != nil {
+		listFailed(ch, err)
+		return 1
+	}
+	var b bytes.Buffer
+	for i := 0; i < len(raw); {
+		r, size := utf8.DecodeRune(raw[i:])
+		if unicode.IsControl(r) {
+			// Marshal's output holds no whitespace between its values, so
+			// any control is inside a string, where this is its escape.
+			fmt.Fprintf(&b, `\u%04x`, r)
+		} else {
+			b.Write(raw[i : i+size])
+		}
+		i += size
+	}
+	b.WriteByte('\n')
+	dispatchText(ch.Out, ch.PTY, b.String())
+	return 0
 }
 
 // listFailed says on the channel's stderr why a request to the API failed:

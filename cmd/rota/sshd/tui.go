@@ -25,7 +25,7 @@ func tuiBare(ctx context.Context, ch *Channel) int {
 func tuiOpen(ctx context.Context, ch *Channel) int {
 	in := inputPump(ch.In)
 	defer in.stop()
-	c, stop := clientFor(ch)
+	c, stop := clientFor(ctx, ch)
 	defer stop()
 	var env []string
 	if ch.Term != "" {

@@ -32,6 +32,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/professor93/rota/api"
+	"github.com/professor93/rota/cmd/rota/attach"
 	"github.com/professor93/rota/cmd/rota/client"
 )
 
@@ -61,7 +62,9 @@ type Options struct {
 	// person has been shown it; both are handed to each Channel.
 	Key    byte
 	Taught func(person string) bool
-	// TUI, when set, is what a bare `ssh host` runs.
+	// TUI, when set, is what a bare `ssh host` on a terminal runs. It must
+	// return once ctx is done, which it is when the person's channel or
+	// connection closes and when the server stops: Close waits for it.
 	TUI func(ctx context.Context, s TUISession) error
 }
 
@@ -73,6 +76,21 @@ type Options struct {
 // by calling done: an attach keeps a copy of a session's screen in the
 // daemon, so a TUI's attaches count against the same places an `ssh host
 // attach` does. Its error is the sentence to show.
+//
+// In is the one reader of what the person types (a pump), which every
+// receiver of it shares, one at a time, so that nothing typed is lost or
+// reordered as the terminal goes from the TUI to an attach and back. Beside
+// Read it has the methods
+//
+//	Input() <-chan []byte // each chunk typed, for an attach
+//	Hold()                // end a waiting Read with io.EOF, taking nothing, until Resume
+//	Resume()              // let Reads go on
+//
+// Before the TUI hands the terminal to an attach, it calls Hold; the attach
+// receives on Input (attach.Command takes as stdin a file, such a pump, or
+// nil, and refuses anything else); and once the attach has returned the TUI
+// calls Resume and reads again. A Read must never be waiting while an
+// attach runs: it would take the attach's first key.
 type TUISession struct {
 	In         io.Reader
 	Out        io.Writer
@@ -159,9 +177,6 @@ var sshdKeyExchanges = []string{
 // never SHA-1 and never one cut to 96 bits.
 var sshdMACs = []string{ssh.HMACSHA256ETM, ssh.HMACSHA512ETM, ssh.HMACSHA256, ssh.HMACSHA512}
 
-// sshdDefaultKey is Ctrl-\, the chord's key when Options names none.
-const sshdDefaultKey = 0x1C
-
 // Server is one SSH listener and the connections it has taken.
 type Server struct {
 	o        Options
@@ -222,7 +237,7 @@ func Listen(o Options) (*Server, error) {
 	}
 	o.Users = slices.Clone(o.Users)
 	if o.Key == 0 {
-		o.Key = sshdDefaultKey
+		o.Key = attach.DefaultKey
 	}
 	log := o.Log
 	if log == nil {

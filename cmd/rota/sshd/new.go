@@ -2,12 +2,12 @@ package sshd
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"io"
 	"slices"
 	"strings"
+	"unicode"
 
 	"github.com/professor93/rota/cmd/rota/attach"
 	"github.com/professor93/rota/cmd/rota/client"
@@ -39,7 +39,7 @@ const (
 // flags is a prompt, which a session started for somebody to attach to has
 // nobody to answer; and -p or --print anywhere would have the CLI answer
 // one and exit.
-func newRun(_ context.Context, ch *Channel, args []string) int {
+func newRun(ctx context.Context, ch *Channel, args []string) int {
 	own, cli := args, []string(nil)
 	if i := slices.Index(args, "--"); i >= 0 {
 		own, cli = args[:i], args[i+1:]
@@ -61,7 +61,7 @@ func newRun(_ context.Context, ch *Channel, args []string) int {
 		dispatchText(ch.Err, ch.PTY, say)
 		return 2
 	}
-	if fs.NArg() > 0 || *p || *printOne || slices.ContainsFunc(cli, func(a string) bool { return a == "-p" || a == "--print" }) {
+	if fs.NArg() > 0 || *p || *printOne || slices.ContainsFunc(cli, newPrints) {
 		dispatchText(ch.Err, ch.PTY, newWithPrompt)
 		return 2
 	}
@@ -80,7 +80,9 @@ func newRun(_ context.Context, ch *Channel, args []string) int {
 	if *shell {
 		req.Kind = holdwire.KindShell
 	}
-	c, stop := clientFor(ch)
+	// The create ends with the channel: a person who leaves, or a server
+	// that stops, waits for no holder.
+	c, stop := clientFor(ctx, ch)
 	defer stop()
 	s, err := c.Create(req)
 	if err != nil {
@@ -88,14 +90,26 @@ func newRun(_ context.Context, ch *Channel, args []string) int {
 		return 1
 	}
 	if *asJSON {
-		raw, err := json.Marshal(s)
-		if err != nil {
-			listFailed(ch, err)
-			return 1
-		}
-		dispatchText(ch.Out, ch.PTY, string(raw)+"\n")
-		return 0
+		return listJSON(ch, s)
 	}
 	dispatchText(ch.Out, ch.PTY, "held as session "+attach.OneLine(listName(s))+" ("+attach.OneLine(s.ID)+")\n")
 	return 0
+}
+
+// newPrints says a CLI argument asks the CLI to print one answer and exit:
+// -p or --print, --print=…, or -p among single-letter flags written
+// together, such as -cp.
+func newPrints(a string) bool {
+	switch {
+	case a == "--print", strings.HasPrefix(a, "--print="):
+		return true
+	case len(a) < 2 || a[0] != '-' || a[1] == '-':
+		return false
+	}
+	for _, c := range a[1:] {
+		if !unicode.IsLetter(c) {
+			return false
+		}
+	}
+	return strings.ContainsRune(a[1:], 'p')
 }
