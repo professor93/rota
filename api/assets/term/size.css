@@ -1,2 +1,5 @@
-/* The size of the terminal on the screen: how it is scaled and panned.
-   Nothing yet; the screen scrolls inside its container (term.css). */
+/* The size of the terminal on the screen. A held session is drawn at its own
+   size, scaled by its font; whatever is still wider or taller pans, because
+   the screen scrolls inside its container (term.css). */
+.termstrip .termbig { margin:0; color:var(--warn) }
+.termstrip #term_fit[disabled] { opacity:.55; cursor:not-allowed }
