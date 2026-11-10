@@ -26,6 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/professor93/rota/internal/events"
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/pty"
 	rota "github.com/professor93/rota/lib"
@@ -286,6 +287,16 @@ type Server struct {
 	decoy    *password
 	sessions *sessionTable
 	invites  *inviteTable
+	// events is the ring of what this server says has happened, which
+	// GET /v1/events streams (events.go). It is made before anything that
+	// could publish, and closed once as shutdown begins (closeEvents).
+	// accounts is what the account events are computed against, the
+	// sweeps' alone. streams is how many streams are open from anybody but
+	// the local principal, which eventStreams caps.
+	events    *events.Ring
+	closeOnce sync.Once
+	accounts  accountWatch
+	streams   atomic.Int32
 }
 
 // New validates options and builds a server. It refuses to start without a
@@ -376,6 +387,7 @@ func New(opts Options) (*Server, error) {
 		invites:  newInvites(),
 	}
 	s.sweeps, s.stopSweeps = context.WithCancel(ctx)
+	s.events = newEventRing(eventRing, s.now)
 	s.killHolderAfter = holdKillAfter()
 	// Before anything else starts: a server that may not be this store's
 	// daemon must leave nothing running behind its refusal.
@@ -388,6 +400,8 @@ func New(opts Options) (*Server, error) {
 		// here, and every stopped session is listed, before the first
 		// request can ask.
 		s.sweepRecords()
+		// What it found is the baseline, said once in so many words.
+		s.daemonStarted()
 	}
 	if opts.RefreshEvery > 0 {
 		s.keeperDone = make(chan struct{})
@@ -396,6 +410,7 @@ func New(opts Options) (*Server, error) {
 	if opts.HoldCommand != nil {
 		s.heldDone = make(chan struct{})
 		go s.keepHeldFresh(heldLookEvery())
+		go s.keepAttending()
 	}
 	// A daemon holds terminals whatever its routes say: they are reached
 	// over more than the routes this file registers.
@@ -517,6 +532,7 @@ func (s *Server) nextReset() time.Time {
 		return time.Time{}
 	}
 	defer st.Close()
+	s.lookAtAccounts(st) // the account events' baseline
 	return st.NextReset()
 }
 
@@ -622,6 +638,7 @@ func (s *Server) maintain() (reset time.Time) {
 		sweeps = store.WithCaller(sweeps, "daemon") // and a foreground serve's are serve's
 	}
 	errs := st.Maintain(sweeps)
+	s.lookAtAccounts(st)
 	for _, e := range errs {
 		s.log.Warn("background refresh", "err", e)
 	}
@@ -654,6 +671,9 @@ func (s *Server) Stop() {
 	s.termsMu.Lock()
 	s.stopping = true
 	s.termsMu.Unlock()
+	// The events first, while the sessions that go on are still listed to
+	// be counted (StopRefreshing, below, would close them after).
+	s.closeEvents()
 	// The socket first, so nothing new is offered to a server that is
 	// stopping, and the file it left behind goes with it.
 	if s.share != nil {
@@ -677,7 +697,15 @@ func (s *Server) Stop() {
 // begins, before it waits for the requests in flight, which can take as long
 // as a run does: a sweep started meanwhile would be one more refresh for a
 // second interrupt to cut short. Stop calls it too; once is enough.
-func (s *Server) StopRefreshing() { s.stopSweeps() }
+//
+// It is also where the server's events end, for good: a daemon says it is
+// stopping, the ring takes nothing more, and every GET /v1/events stream
+// ends after the events it has not yet read. So it is no pause: a caller
+// that uses it to stop the sweeps for a while has no events after it.
+func (s *Server) StopRefreshing() {
+	s.stopSweeps()
+	s.closeEvents()
+}
 
 // stopMargin is how much longer than store.RefreshTimeout Stop waits. The
 // bound ends the work that was under way; the margin is for what follows it,
@@ -849,6 +877,10 @@ func (s *Server) guardedIn(terminal bool) map[string]http.HandlerFunc {
 		"POST /v1/auth/{id}": s.loginFinish,
 		// A link for somebody who should see and not touch.
 		"POST /v1/invites": s.makeInvite,
+		// What this server says has happened, as a stream, and the test
+		// button's own event (events.go).
+		"GET /v1/events":  s.streamEvents,
+		"POST /v1/events": s.postEvent,
 	}
 	// A group that is off is not registered at all, so its paths answer 404
 	// like any path this server never had.
@@ -920,11 +952,17 @@ func (t *trackingWriter) Write(b []byte) (int, error) {
 	return t.ResponseWriter.Write(b)
 }
 
-func (t *trackingWriter) Flush() {
-	if f, ok := t.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
+func (t *trackingWriter) Flush() { _ = t.FlushError() }
+
+// FlushError is Flush that says when it failed, which is how a stream
+// (http.ResponseController) learns that its reader has gone.
+func (t *trackingWriter) FlushError() error {
+	return http.NewResponseController(t.ResponseWriter).Flush()
 }
+
+// Unwrap is the writer underneath, so that http.ResponseController reaches
+// the connection's deadlines through this one.
+func (t *trackingWriter) Unwrap() http.ResponseWriter { return t.ResponseWriter }
 
 // Hijack hands the connection over, which is how a request becomes a
 // WebSocket. Nothing may be written as a response afterwards, so the
