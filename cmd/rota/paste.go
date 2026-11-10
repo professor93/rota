@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/professor93/rota/cmd/rota/loginpage"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/store"
 	"github.com/professor93/rota/wire"
@@ -81,16 +82,46 @@ func (c *cli) loginKey(provider string, long bool, rest []string, label string) 
 	if provider == "" {
 		provider = rota.DefaultProvider
 	}
+	if c.web != nil {
+		// The key comes from the one-time page instead, where it is pasted
+		// into a password field; each one pasted there is tried in turn. A
+		// label or a provider no key can satisfy is refused first, in the
+		// order and the words a paste would get.
+		if err := checkLabel(label); err != nil {
+			return err
+		}
+		if err := takesPaste(provider); err != nil {
+			return err
+		}
+		if err := c.readyWeb(); err != nil {
+			return err
+		}
+		return c.awaitWeb(nil, loginpage.Options{Want: loginpage.Key, Provider: provider,
+			Submit: func(ctx context.Context, key string) (string, error) {
+				wait, stopWait := lockWait(ctx)
+				defer stopWait()
+				work, cancel := checking(ctx)
+				defer cancel()
+				return "", c.storeKey(wait, work, provider, key, label)
+			}})
+	}
 	key, err := c.askSecret("API key")
 	if err != nil {
 		return err
 	}
-	s, err := c.openStore()
+	return c.storeKey(context.Background(), context.Background(), provider, key, label)
+}
+
+// storeKey makes or updates the account this API key belongs to, and says
+// which, by its last four characters at most. The store's lock is waited for
+// under wait, and the key is checked under work.
+func (c *cli) storeKey(wait, work context.Context, provider, key, label string) error {
+	s, err := c.openStoreCtx(wait)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-	a, added, unverified, err := s.LoginKey(context.Background(), provider, key, label)
+	a, added, unverified, err := s.LoginKey(work, provider, key, label)
 	if err != nil {
 		return err
 	}
@@ -133,16 +164,61 @@ func (c *cli) loginToken(provider string, long bool, rest []string) error {
 	if err != nil {
 		return err
 	}
+	if c.web != nil {
+		// The account is looked for before a page is served for it, and
+		// the token comes from the page: an account removed meanwhile ends
+		// the page, and any other refusal is one more try.
+		s, err := c.openStore()
+		if err != nil {
+			return err
+		}
+		a := s.Find(id)
+		s.Close()
+		// What no token can put right is refused before a page is served,
+		// in the words a pasted one would get.
+		switch {
+		case a == nil:
+			return fmt.Errorf("%w; see `rota list`", rota.WrapNoAccount(id))
+		case a.APIKey():
+			return rota.Invalid("%s runs on an API key; a token from `claude setup-token` belongs on the claude.ai account it was made for", a)
+		}
+		if err := takesPaste(a.Provider); err != nil {
+			return err
+		}
+		if err := c.readyWeb(); err != nil {
+			return err
+		}
+		approve := oneLine(a.Email)
+		if approve == "" {
+			approve = labelOf(a)
+		}
+		return c.awaitWeb(nil, loginpage.Options{Want: loginpage.Token, Provider: a.Provider, Approve: approve,
+			Submit: func(ctx context.Context, tok string) (string, error) {
+				wait, stopWait := lockWait(ctx)
+				defer stopWait()
+				err := c.storeToken(wait, id, tok)
+				if errors.Is(err, rota.ErrNoAccount) {
+					return "", loginpage.Final(err)
+				}
+				return "", err
+			}})
+	}
 	tok, err := c.askSecret("token from `claude setup-token`")
 	if err != nil {
 		return err
 	}
-	s, err := c.openStore()
+	return c.storeToken(context.Background(), id, tok)
+}
+
+// storeToken puts a pasted setup token on account id as its long-lived one,
+// and says so without it.
+func (c *cli) storeToken(ctx context.Context, id int, tok string) error {
+	s, err := c.openStoreCtx(ctx)
 	if err != nil {
 		return err
 	}
 	defer s.Close()
-	a, err := s.PasteLong(context.Background(), id, tok)
+	a, err := s.PasteLong(ctx, id, tok)
 	if err != nil {
 		if errors.Is(err, rota.ErrNoAccount) {
 			return fmt.Errorf("%w; see `rota list`", err)

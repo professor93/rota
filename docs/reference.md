@@ -181,6 +181,7 @@ rota login 2 --token          # paste a `claude setup-token` token as account 2'
 rota login <login-id> <code>  # finish a login later, or one begun off a terminal or with --json
 rota login <login-id>         # finish a delegated login, which takes no code (grok)
 rota login 2                  # sign account 2 in again: only account 2's approval finishes it
+rota login 2 --web            # ...taking the code from a one-time page, from a phone or another machine
 rota list                     # every account, in rotation order, with usage
 rota list --short             # the same, reading no usage from any provider
 rota list --sessions          # ...and what is running, and what could resume
@@ -240,6 +241,7 @@ every way an account is signed in.
 | `--label <name>` | with `--key`: what to call the account; otherwise it is `api key ...` and the key's last four characters |
 | `--token` | after an account id: a token from `claude setup-token`, read the same way, stored as that account's long-lived token |
 | `--provider <name>` | the provider, spelled out where a bare name would read as something else |
+| `--web [addr]` | take the code, the key of `--key` or the token of `--token` from a one-time page on `addr` instead of the terminal — see *A one-time page for the code* |
 
 Neither `--key` nor `--token` takes its credential on the command line, where
 every process on the machine and the shell's history could read it: written
@@ -522,6 +524,65 @@ window for the next one, and for `rota login <account-id>` a window signed in as
 the account it names. Several logins can be open at once, across providers
 as well as within one; a rejected code costs one retry, not a whole login, and
 so does approving as the wrong account.
+
+#### A one-time page for the code
+
+`rota login --web [addr]` takes what finishes a login from a page instead of
+the terminal: the code, an API key with `--key`, or a `claude setup-token`
+token with `<account-id> --token`, pasted on a phone or another computer, or in
+a browser where a paste is easier than at a prompt. It works with every login
+that takes a code or a key: a new one, one on a provider, `--long` and
+`<account-id>`, and `rota login <login-id> --web` serves a page for one already
+parked. Where the page listens is settled first, as below, and the login is
+then begun and printed as always, followed by the page's link:
+
+```
+Open the one-time page: http://127.0.0.1:8788/<secret>
+It ends after one login, five wrong tries, 10 minutes or ^C.
+From another machine: ssh -L 8788:127.0.0.1:8788 you@host, then open the link there.
+```
+
+The link's path holds 256 random bits, and every other path answers 404. The
+page shows the sign-in link and a field for the code, or a password field for a
+key or a token. What is pasted travels only in the form's body; it is never
+printed, logged or echoed, and the page sets no cache. A refusal is shown on the
+page with the value taken out, and the next value is tried on the same login;
+one that approving again cannot put right ends the page with it, as the terminal
+wait ends. A value already being checked is given its answer, for up to 60
+seconds, whatever else ends the page meanwhile: a code the provider has taken
+finishes the login, and a key the API refuses is never stored.
+The page closes, and its port with it, after the login it finishes,
+after five rejected values, at the earlier of 10 minutes and the login's own
+end, or on `^C`. A login another rota finishes meanwhile ends it as it ends the
+terminal wait.
+
+`addr` is `host:port`, `host` or `:port`, where the host is an IP address or
+`localhost`, never a name. With no port the page takes 8788, so that an
+`ssh -L` can be set up first, or the kernel's port when 8788 is busy. The word
+after `--web` is the address only when it reads as one: it holds a colon,
+parses as an IP address, or is `localhost`. So `rota login --web 12` is account
+12, a port alone is written `--web :8788`, and `--web=ADDR` always names one.
+With no address, at a terminal rota lists this machine's addresses, `127.0.0.1`
+first and `0.0.0.0` last, each saying who can reach it, with any reachable
+beyond this machine's own networks marked `— warning`, and asks; Enter takes the
+first. Off a terminal it takes `127.0.0.1` and says so. The address is listened
+on once before anything begins, so one that is not this machine's, or a port
+that is busy, ends the command with no login begun. Off loopback the page is
+HTTPS only, with a certificate made for this run, and rota prints its SHA-256
+fingerprint to compare with what the browser shows; plain HTTP is never served
+there.
+
+The command ends with the page. A value that finishes the login prints what a
+login prints and exits 0. Five wrong tries, or the page's 10 minutes, exit 1
+with the line that finishes the login later, since it stays parked; a key or a
+token says nothing was stored. A login that runs out says it expired, and `^C`
+exits 130 with the login left open. `--web` takes no `--json` and no code after
+a login id: both are a usage error. An account whose CLI keeps its own
+credentials has no page, and neither has a login that takes nothing pasted.
+What no paste could satisfy is refused before a page is served, in the words a
+paste would get: `--key` on a provider that takes no key or with a `--label`
+longer than 64 characters or more than one line, and `--token` on an account on
+an API key or a provider that takes no setup token.
 
 ## The HTTP API
 

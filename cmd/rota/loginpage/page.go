@@ -239,7 +239,7 @@ func Serve(ctx context.Context, o Options) (*Page, error) {
 		done:   done,
 		served: make(chan struct{}),
 	}
-	s.srv = newServer(s, cfg)
+	s.srv, s.ln = newServer(s, cfg), ln
 
 	go func() {
 		defer close(s.served)
@@ -345,6 +345,7 @@ type state struct {
 	path string
 	end  time.Time
 	srv  *http.Server
+	ln   net.Listener // closed first when the page stops, so nothing new arrives
 
 	ctx    context.Context // ends with the page; Submit runs under it
 	cancel context.CancelFunc
@@ -370,13 +371,15 @@ func (s *state) conclude(why Why, msg string) {
 	})
 }
 
-// stop ends the page from outside a request: the listener closes and a
-// Submit under way is cancelled, and once it returns, an acceptance it
-// made still ends the page as Accepted.
+// stop ends the page from outside a request: the listener closes, so nothing
+// new arrives, and a Submit under way is cancelled. Its connection stays open
+// until it returns, so the browser that sent the value gets its answer, and an
+// acceptance it made still ends the page as Accepted. Every connection closes
+// after that, in conclude.
 func (s *state) stop(why Why) {
 	s.closing.Store(true)
 	s.cancel()
-	_ = s.srv.Close()
+	_ = s.ln.Close()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.conclude(why, "")

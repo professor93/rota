@@ -74,6 +74,9 @@ func (c *cli) waits(l *rota.Login) bool {
 // while a person reads a browser page: every other rota command needs it
 // meanwhile, so each attempt takes it again.
 func (c *cli) afterBegin(s *store.Store, l *rota.Login, account int) error {
+	if c.web != nil {
+		return c.webWait(s, l, account)
+	}
 	if !c.waits(l) {
 		return nil
 	}
@@ -147,7 +150,7 @@ func (c *cli) await(l *rota.Login, account int, before map[int]string, dir strin
 		if err != nil {
 			return err
 		}
-		waiting, err := c.finishOnce(s, l.ID, code)
+		waiting, err := c.finishOnce(context.Background(), s, l.ID, code)
 		s.Close()
 		var refused *rota.OAuthError
 		switch {
