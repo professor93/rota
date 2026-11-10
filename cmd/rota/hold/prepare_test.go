@@ -160,6 +160,35 @@ func TestASignalWhileAHolderPreparesFinishesTheRefreshAndStartsNothing(t *testin
 	}
 }
 
+// A signal that comes as the prepare ends is not lost on the way to the signals
+// going back: the launch is said to be cut short, so no CLI starts, and the
+// holder does not go on to be a session it was told to stop before it was one.
+func TestASignalAsThePrepareEndsCutsTheLaunch(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGTERM, syscall.SIGHUP} {
+		t.Run(sig.String(), func(t *testing.T) {
+			if signal.Ignored(sig) {
+				t.Skip("left as this process was started, by design")
+			}
+			// Taken here too, so that one reaching this process once the
+			// launch has given the signals back is not the test's end.
+			kept := make(chan os.Signal, 1)
+			signal.Notify(kept, sig)
+			t.Cleanup(func() { signal.Stop(kept) })
+			for i := range 50 {
+				cut := finishingOnSignal(func(context.Context) {
+					if err := syscall.Kill(os.Getpid(), sig); err != nil {
+						t.Fatal(err)
+					}
+				})
+				if !cut {
+					t.Fatalf("try %d: the signal was taken and the launch went on", i)
+				}
+				<-kept
+			}
+		})
+	}
+}
+
 // Once the launch is made the signals are what they were before it: SIGTERM ends
 // the process as it would have, and a signal the process was started ignoring is
 // ignored throughout. Each is measured in a process of its own.

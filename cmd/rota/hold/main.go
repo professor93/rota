@@ -331,6 +331,10 @@ func (h *holder) plan(st *store.Store) (*plan, error) {
 // write into the home included, and starts nothing else, and no CLI is started.
 // A signal this process was started ignoring stays ignored. Once the launch is
 // made both go back to what they were, before the CLI starts.
+//
+// Whether one came is asked only once they have gone back, so that none is
+// taken and then lost: each came while they were taken, and is counted, or
+// after, and does what it always did.
 func finishingOnSignal(prepare func(context.Context)) (cut bool) {
 	var sigs []os.Signal
 	for _, sig := range []os.Signal{syscall.SIGHUP, syscall.SIGTERM} {
@@ -338,17 +342,34 @@ func finishingOnSignal(prepare func(context.Context)) (cut bool) {
 			sigs = append(sigs, sig)
 		}
 	}
-	ctx, stop := context.WithCancel(context.Background())
-	if len(sigs) > 0 { // with none, NotifyContext would take every signal
-		stop()
-		ctx, stop = signal.NotifyContext(context.Background(), sigs...)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	came := make(chan os.Signal, 1)
+	heard := make(chan struct{})
+	if len(sigs) > 0 { // with none, Notify would take every signal
+		signal.Notify(came, sigs...)
+		go func() {
+			defer close(heard)
+			select {
+			case <-came:
+				cut = true
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	} else {
+		close(heard)
 	}
-	defer stop()
 	if prepareBegun != nil {
 		prepareBegun(ctx)
 	}
 	prepare(ctx)
-	return ctx.Err() != nil
+	// Once Stop has returned, a signal delivered to came is in it, if the
+	// goroutine has not taken it.
+	signal.Stop(came)
+	cancel()
+	<-heard
+	return cut || len(came) > 0
 }
 
 // prepareBegun, when set, is told of a launch's context: how a test waits for a
