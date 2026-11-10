@@ -251,7 +251,10 @@ func askShut(ctx context.Context, b Backend, id string) error {
 
 // shut is askShut as a command, for the run whose answer is ask.
 func (a *askTab) shut(ask int, id string) tea.Cmd {
-	return a.call(ask, "", func(ctx context.Context, b Backend) error { return askShut(ctx, b, id) })
+	b := a.e.b
+	return a.e.callOr(envCallTimeout, func(ctx context.Context) tea.Msg {
+		return askCallMsg{id: ask, shut: true, err: askShut(ctx, b, id)}
+	}, func(err error) tea.Msg { return askCallMsg{id: ask, shut: true, err: err} }, nil)
 }
 
 func (a *askTab) Update(msg tea.Msg) (tab, tea.Cmd) {
@@ -531,6 +534,12 @@ func (a *askTab) call(id int, text string, f func(context.Context, Backend) erro
 // call about an earlier run has nothing more to say.
 func (a *askTab) called(msg askCallMsg) {
 	if msg.err == nil {
+		return
+	}
+	if msg.shut {
+		// Most often after a cut stream, when the answer it was for has
+		// ended; the person should still know the run goes on.
+		a.say(askFail, "the run kept open could not be closed: "+msg.err.Error()+"; the server closes a run nobody reads after a minute, by default")
 		return
 	}
 	if msg.text != "" && strings.TrimSpace(a.area.Value()) == "" {

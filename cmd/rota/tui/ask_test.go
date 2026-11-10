@@ -212,7 +212,7 @@ func TestAskPicksAutoOrAnAccount(t *testing.T) {
 	run(t, m, askAsk("four")...)
 	askSettle(t, m)
 	view := askView(t, m, 120, 20)
-	refusal := askLine(view, "account 3 is busy:[2J another codex run holds it")
+	refusal := askLine(view, "account 3 is busy: another codex run holds it")
 	if refusal < 0 || strings.Contains(view, "\x1b") {
 		t.Fatalf("the refusal is not shown cleaned:\n%q", view)
 	}
@@ -679,6 +679,7 @@ func TestAskDrawsNoCommandsAndNoKeys(t *testing.T) {
 		},
 		AskFn: func(_ context.Context, _ Question, each func(message.Event)) (wire.End, error) {
 			each(message.Event{Type: "text", Text: "a\x1b]0;title\x07b and " + key + " 日本語のアカウント 👨‍👩‍👧 family"})
+			each(message.Event{Type: "text", Text: "\nglued\x1b[2J" + key})
 			each(message.Event{Type: "tool", Tool: "\x1b[31mBash"})
 			return wire.End{Type: "done", Error: "\x1b[2J bad key " + key}, nil
 		},
@@ -699,10 +700,19 @@ func TestAskDrawsNoCommandsAndNoKeys(t *testing.T) {
 			}
 		}
 	}
+	// clean takes an escape sequence out whole, leaving a space only
+	// between two words. The question keeps its [2J: the field's own
+	// sanitizer dropped only the ESC from what was pasted, and that is the
+	// person's own text.
 	view := askView(t, m, 120, 20)
-	for _, want := range []string{"[2Jevil@x", "a]0;titleb", "· tool [31mBash", "日本語のアカウント"} {
+	for _, want := range []string{"#1 evil@x", "a b and", "· tool Bash", "日本語のアカウント", "> q[2J"} {
 		if !strings.Contains(view, want) {
 			t.Errorf("%q is not shown as text:\n%s", want, view)
+		}
+	}
+	for _, gone := range []string{"[2Jevil", "]0;", "[31m"} {
+		if strings.Contains(view, gone) {
+			t.Errorf("what is left of an escape sequence, %q, is drawn:\n%s", gone, view)
 		}
 	}
 }
@@ -721,8 +731,9 @@ func askShutCalls(b *fakeBackend) []string {
 
 // askOpening is a backend whose Ask is asked to stay open and says its id
 // after sent is closed by the test, or at once when sent is nil; it says
-// on opened that it has, ends when the run is closed, and records whether
-// its context had ended by the time it said the id.
+// on opened that it has, ends when the run is closed, and puts on
+// ctxAtInit whether its context had ended by the time it said the id, or
+// how it ended while it was still waiting to.
 type askOpening struct {
 	*fakeBackend
 	sent, opened, closed chan struct{}
@@ -737,6 +748,7 @@ func askOpeningBackend(id string, sent chan struct{}) *askOpening {
 			select {
 			case <-o.sent:
 			case <-ctx.Done():
+				o.ctxAtInit <- ctx.Err()
 				return wire.End{}, ctx.Err()
 			}
 		}
@@ -802,7 +814,7 @@ func TestEscStopsAKeptOpenAskBeforeItOpens(t *testing.T) {
 		a := askOf(t, m)
 		run(t, m, press("ctrl+s")...)
 		askStartAlone(t, m, "stay")
-		<-b.opened
+		askWithin(t, b.opened)
 		_, cmd := a.Update(press("esc")[0])
 		if cmd == nil {
 			t.Fatal("esc did nothing")
@@ -832,7 +844,7 @@ func TestLeavingClosesARunThatHasNotOpenedOnTheScreen(t *testing.T) {
 		if err := programLeave(m.leavers()); err != nil {
 			t.Fatal(err)
 		}
-		if err := <-b.ctxAtInit; err != nil {
+		if err := askWithin(t, b.ctxAtInit); err != nil {
 			t.Errorf("the stream ended with the program, before its run said its id: %v", err)
 		}
 		if got := askShutCalls(b.fakeBackend); !slices.Equal(got, []string{"InterruptRun(r-7)", "CloseRun(r-7)"}) {
@@ -845,7 +857,7 @@ func TestLeavingClosesARunThatHasNotOpenedOnTheScreen(t *testing.T) {
 		m := askModel(t, b.fakeBackend)
 		run(t, m, press("ctrl+s")...)
 		askStartAlone(t, m, "stay")
-		<-b.opened
+		askWithin(t, b.opened)
 		if err := programLeave(m.leavers()); err != nil {
 			t.Fatal(err)
 		}
@@ -1073,6 +1085,178 @@ func TestAskACallAboutAnEarlierRunSaysNothing(t *testing.T) {
 	if view := askView(t, m, 80, 20); strings.Contains(view, "the run has ended") || a.area.Value() != "mine" {
 		t.Errorf("field %q:\n%s", a.area.Value(), view)
 	}
+	// And with a newer run on the screen (R1-M3): its answer and its
+	// prompt line stay as they are.
+	b := askQuiet()
+	m = askModel(t, b)
+	a = askOf(t, m)
+	run(t, m, askAsk("first")...)
+	run(t, m, press("esc")...)
+	askSettle(t, m)
+	run(t, m, askAsk("second")...)
+	earlier := a.run.id - 1
+	pieces := slices.Clone(a.pieces)
+	a.Update(askCallMsg{id: earlier, text: "late", err: &client.Refusal{Status: 409, Message: "the run has ended"}})
+	if view := askView(t, m, 80, 20); strings.Contains(view, "the run has ended") || a.refusal != "" || a.area.Value() != "late" || !slices.Equal(a.pieces, pieces) {
+		t.Errorf("field %q, refusal %q, pieces %v:\n%s", a.area.Value(), a.refusal, a.pieces, view)
+	}
+	run(t, m, press("esc")...)
+	askSettle(t, m)
+}
+
+// askQuiet is a backend whose Ask says nothing until its context ends.
+func askQuiet() *fakeBackend {
+	return &fakeBackend{AskFn: func(ctx context.Context, _ Question, _ func(message.Event)) (wire.End, error) {
+		<-ctx.Done()
+		return wire.End{}, ctx.Err()
+	}}
+}
+
+// Leave ends a kept-open Ask whose id never comes, so one still waiting
+// for a slot when the TUI quits never starts (R1-M3).
+func TestLeavingCancelsAKeptOpenAskStillWaiting(t *testing.T) {
+	b := askOpeningBackend("r-never", make(chan struct{}))
+	m := askModel(t, b.fakeBackend)
+	run(t, m, press("ctrl+s")...)
+	run(t, m, askAsk("stay")...)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	askOf(t, m).Leave(ctx)
+	if err := askWithin(t, b.ctxAtInit); !errors.Is(err, context.Canceled) {
+		t.Errorf("the request still waiting ended with %v, want it cancelled", err)
+	}
+	if got := askShutCalls(b.fakeBackend); len(got) != 0 {
+		t.Errorf("a run with no id was reached by %q", got)
+	}
+	askSettle(t, m)
+}
+
+// A narrower window lays the answer out again in its width, losing no
+// letter (R1-M3).
+func TestAskLaysTheAnswerOutAgainForANewWidth(t *testing.T) {
+	m := askModel(t, askQuiet())
+	a := askOf(t, m)
+	run(t, m, askAsk("wide")...)
+	text := strings.Repeat("abcdefghij ", 60) + strings.Repeat("z", 150)
+	a.Update(askEventMsg{id: a.run.id, event: message.Event{Type: "text", Text: text}})
+	letters := func() int {
+		n := 0
+		for _, l := range a.lines {
+			n += strings.Count(ansi.Strip(l), "j") + strings.Count(ansi.Strip(l), "z")
+		}
+		return n
+	}
+	for _, w := range []int{120, 60, 100} {
+		a.View(w, 24)
+		for i, l := range a.lines {
+			if n := textWidth(ansi.Strip(l)); n > w {
+				t.Fatalf("at %d, line %d is %d wide", w, i, n)
+			}
+		}
+		if got := letters(); got != 60+150 {
+			t.Errorf("at %d, %d of %d letters are laid out", w, got, 60+150)
+		}
+	}
+	run(t, m, press("esc")...)
+	askSettle(t, m)
+}
+
+// Text added to the line being written lays that line out again, as the
+// program draws between every two messages (R1-M3).
+func TestAskLaysOutTheLineBeingWrittenAsItGrows(t *testing.T) {
+	m := askModel(t, askQuiet())
+	a := askOf(t, m)
+	run(t, m, askAsk("spell it")...)
+	for _, d := range []string{"fo", "ur", " and", " more\nnext"} {
+		a.Update(askEventMsg{id: a.run.id, event: message.Event{Type: "text", Text: d, Delta: true}})
+		a.View(80, 24)
+	}
+	view := ansi.Strip(a.View(80, 24))
+	if askLine(view, "four and more") < 0 || askLine(view, "next") <= askLine(view, "four and more") {
+		t.Errorf("the line was not laid out again as it grew:\n%s", view)
+	}
+	run(t, m, press("esc")...)
+	askSettle(t, m)
+}
+
+// Every width layout takes is counted, so a line measured again for each
+// row it breaks into shows in the count (R1-M3).
+func TestAskBreakCountsEveryMeasure(t *testing.T) {
+	work := 0
+	if n := askMeasure("日本 ab", &work); n != 7 || work != len("日本 ab") {
+		t.Errorf("askMeasure gave %d and counted %d", n, work)
+	}
+	line := strings.Repeat("word ", 20<<10)
+	work = 0
+	rows := askBreak(line, 80, &work)
+	if work > 4*len(line) {
+		t.Errorf("breaking %d bytes into %d rows looked at %d", len(line), len(rows), work)
+	}
+	if got := strings.Count(strings.Join(rows, " "), "word"); got != 20<<10 {
+		t.Errorf("%d words of %d came back", got, 20<<10)
+	}
+}
+
+// An id the stream read just after esc cancelled the request is a run that
+// opened all the same: it is shut by that id (R1-N1).
+func TestAnIdReadJustAfterEscIsShut(t *testing.T) {
+	b := &fakeBackend{
+		AskFn: func(ctx context.Context, _ Question, each func(message.Event)) (wire.End, error) {
+			<-ctx.Done()
+			each(message.Event{Type: "init", RunID: "r-race"})
+			return wire.End{}, ctx.Err()
+		},
+		InterruptRunFn: func(context.Context, string) error { return nil },
+		CloseRunFn:     func(context.Context, string) error { return nil },
+	}
+	m := askModel(t, b)
+	run(t, m, press("ctrl+s")...)
+	run(t, m, askAsk("stay")...)
+	run(t, m, press("esc")...)
+	askSettle(t, m)
+	if got := askShutCalls(b); !slices.Equal(got, []string{"InterruptRun(r-race)", "CloseRun(r-race)"}) {
+		t.Errorf("after the stop: %q", got)
+	}
+	if view := askView(t, m, 80, 20); !strings.Contains(view, "· stopped") {
+		t.Errorf("the stop:\n%s", view)
+	}
+}
+
+// A shut that fails is said, though the answer it was for has ended
+// (R1-N2).
+func TestAFailedShutIsSaid(t *testing.T) {
+	b := &fakeBackend{
+		AskFn: func(_ context.Context, _ Question, each func(message.Event)) (wire.End, error) {
+			each(message.Event{Type: "init", RunID: "r-4"})
+			return wire.End{}, io.ErrUnexpectedEOF
+		},
+		InterruptRunFn: func(context.Context, string) error { return nil },
+		CloseRunFn: func(context.Context, string) error {
+			return &client.Refusal{Status: 502, Message: "the daemon went away"}
+		},
+	}
+	m := askModel(t, b)
+	run(t, m, press("ctrl+s")...)
+	run(t, m, askAsk("x")...)
+	askSettle(t, m)
+	view := askView(t, m, 80, 24)
+	if askLine(view, "could not be closed: the daemon went away") <= askLine(view, "closing the run kept open") {
+		t.Errorf("the failed shut is not said:\n%s", view)
+	}
+}
+
+// askWithin is the next value on ch, or a failed test after five seconds,
+// so a regression shows as a failure rather than as the package's timeout.
+func askWithin[T any](t *testing.T, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatal("nothing came within five seconds")
+	}
+	var zero T
+	return zero
 }
 
 // askEnabled says whether a binding for k is enabled among bs.

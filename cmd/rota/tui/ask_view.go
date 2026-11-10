@@ -59,10 +59,13 @@ type askEventMsg struct {
 }
 
 // askCallMsg is how a call into an open run went. text is the message a
-// send carried, given back to the field if the run would not take it.
+// send carried, given back to the field if the run would not take it;
+// shut marks a shut (askShut), whose failure is said whatever run is on
+// the screen by then.
 type askCallMsg struct {
 	id   int
 	text string
+	shut bool
 	err  error
 }
 
@@ -123,7 +126,9 @@ func (a *askTab) event(msg askEventMsg) tea.Cmd {
 	case "text":
 		a.text(ev)
 	case "tool":
-		a.say(askTool, "tool "+ev.Tool)
+		// Cleaned here as well as where it is drawn, so whatever an escape
+		// sequence left at either end of the name is trimmed.
+		a.say(askTool, "tool "+strings.TrimSpace(clean(ev.Tool)))
 	case "interrupted":
 		a.say(askNote, "interrupted")
 	case "idle":
@@ -186,6 +191,11 @@ func (a *askTab) ended(r *askRun, msg askEventMsg) tea.Cmd {
 		a.end(r, msg.end)
 	case r.stopping && errors.Is(err, context.Canceled):
 		a.say(askNote, "stopped")
+		// esc found no id and cancelled, and the stream read one just
+		// after: the run opened all the same, and is shut by it.
+		if id := r.seen(); r.input && id != "" {
+			return a.shut(r.id, id)
+		}
 	case errors.As(err, &no):
 		a.pieces, a.from = nil, 0
 		a.refusal = err.Error()
@@ -410,7 +420,7 @@ func (a *askTab) accountSays() []string {
 	num := "#" + strconv.Itoa(id)
 	var says []string
 	for _, acct := range a.e.list.Accounts {
-		if label := clean(cmp.Or(acct.Name, acct.Email)); acct.ID == id && label != "" {
+		if label := strings.TrimSpace(clean(cmp.Or(acct.Name, acct.Email))); acct.ID == id && label != "" {
 			says = append(says, num+" "+askCut(label, 16), num+" "+askCut(label, 10))
 		}
 	}
@@ -521,8 +531,7 @@ func askWrap(text string, w int, work *int) []string {
 // measure allows since it adds up its runes' widths: a long line costs what
 // its length does, not its length times its pieces.
 func askBreak(line string, w int, work *int) []string {
-	*work += len(line)
-	left := textWidth(line)
+	left := askMeasure(line, work)
 	var out []string
 	for left > w {
 		head, _ := textHead(line, w)
@@ -533,15 +542,20 @@ func askBreak(line string, w int, work *int) []string {
 			}
 		}
 		next := strings.TrimLeft(line[len(head):], " ")
-		used := line[:len(line)-len(next)]
-		*work += len(used)
-		left -= textWidth(used)
+		left -= askMeasure(line[:len(line)-len(next)], work)
 		out = append(out, strings.TrimRight(head, " "))
 		if line = next; line == "" {
 			return out
 		}
 	}
 	return append(out, line)
+}
+
+// askMeasure is textWidth, with the bytes it looked at added to work: every
+// width layout takes goes through it, so a measure taken again is counted.
+func askMeasure(s string, work *int) int {
+	*work += len(s)
+	return textWidth(s)
 }
 
 // askCut is s cut to at most n columns, with … where it was cut.
