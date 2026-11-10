@@ -177,7 +177,7 @@ func TestAttentionReachesTheBus(t *testing.T) {
 // as their own reasons; and a bell rung again within attnBell is said once
 // that window ends, not at once.
 func TestABellAndATitleReachTheBus(t *testing.T) {
-	p := attnWithHeld(t, nil)
+	p := attnWithHeld(t, []string{"FAKE_HOLDER_DROP_AT=1"})
 	id := p.start(nil)["id"].(string)
 	h := attnHeld(t, p.api, id)
 	forward := p.frozenClock()
@@ -201,6 +201,17 @@ func TestABellAndATitleReachTheBus(t *testing.T) {
 	got := attnAttend(t, p.api, id, p.api.now, "bell", "bell", "title")
 	if got[0].Text != "rang its bell" || got[2].Text != "is idle again" {
 		t.Errorf("the bell and the title were said as %q and %q", got[0].Text, got[2].Text)
+	}
+
+	// A link that drops and comes back opens with the State the holder has
+	// now, the bells and title above, not the one it started with.
+	tm.typeIn("count 3\r")
+	p.waitOffset(id, 3*len("line-0001\r\n"))
+	h.mu.Lock()
+	bells, title := h.bells, h.title
+	h.mu.Unlock()
+	if bells != 2 || title != "✳ Tidy" {
+		t.Errorf("after the link came back the session has %d bells and title %q", bells, title)
 	}
 }
 

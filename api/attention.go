@@ -33,8 +33,9 @@ import (
 // has said a status other than idle, which is when done can be said, speaks
 // for the title and for quiet as well. One that has only ever said idle, as
 // Claude Code 2.1.318's does, leaves the title to say that a turn ended,
-// after a permission as before one. While a registry waits, the title is
-// that wait's and says nothing of its own.
+// after a permission as before one. While a registry waits, the title and
+// quiet are that wait's and say nothing of their own; session.quiet is
+// still said.
 //
 // Each thing is said once. A daemon that takes up a running session starts
 // from what it finds, so a restart says nothing again. While somebody has
@@ -180,7 +181,7 @@ func (a *attention) step(in attnIn) (reason string, quiet bool) {
 		reason = "bell"
 	case title:
 		reason = "title"
-	case quiet && !a.works && !a.titled:
+	case quiet && !a.works && !a.titled && asked == "":
 		reason = "quiet"
 	}
 	if waiting {

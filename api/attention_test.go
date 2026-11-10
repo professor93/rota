@@ -225,6 +225,12 @@ func TestQuietAfterActivity(t *testing.T) {
 		{in: attnIn{Now: attnAt(29 * time.Second), LastActive: act, Registry: attnReg("idle", "")}},
 		{in: attnIn{Now: attnAt(30 * time.Second), LastActive: act, Registry: attnReg("idle", "")}, reason: "quiet", quiet: true},
 	})
+	attnRun(t, "quiet during the wait it asked for, with no title", []attnStep{
+		{in: attnIn{Now: attnAt(time.Second), LastActive: act, Registry: attnReg("idle", "permission")}, reason: "permission"},
+		{in: attnIn{Now: attnAt(29 * time.Second), LastActive: act, Registry: attnReg("idle", "permission")}},
+		{in: attnIn{Now: attnAt(30 * time.Second), LastActive: act, Registry: attnReg("idle", "permission")}, quiet: true},
+		{in: attnIn{Now: attnAt(time.Minute), LastActive: act, Registry: attnReg("idle", "")}},
+	})
 	attnRun(t, "a title that speaks", []attnStep{
 		{in: attnIn{Now: attnAt(29 * time.Second), LastActive: act, Title: "✳ Task"}},
 		{in: attnIn{Now: attnAt(30 * time.Second), LastActive: act, Title: "✳ Task"}, quiet: true},
@@ -369,7 +375,8 @@ func TestFocusAndMouseReportsAreNotTyping(t *testing.T) {
 		{"\x1b[<0;10;5M", true},
 		{"\x1b[<35;120;40m", true},
 		{"\x1b[<0;10;5M\x1b[<0;10;5m\x1b[O", true},
-		{"\x1b[32;10;5M", true}, // urxvt (1015)
+		{"\x1b[32;10;5M", true},  // urxvt (1015)
+		{"\x1b[32;10;5m", false}, // urxvt has no release form
 		{"a", false},
 		{"\x1b[A", false},
 		{"\x1b", false},
