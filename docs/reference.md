@@ -3492,8 +3492,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
   says nothing beyond the journal: the launch goes ahead on the login the home
   holds. A store that cannot be saved first presents nothing either, and the
   launch's own save after it then refuses the launch, as it always has. A lead
-  whose token went out and got nothing back — no answer, or an error in place
-  of a token — is not made again on that token: the account keeps the token's
+  that got no answer, or could not be sent — a provider not answering, or
+  answering with an error in place of a token, a network that is down — is not
+  made again on that token: the account keeps the token's
   fingerprint, never the token, as `lead_missed`, and the refresh then comes
   when it falls due, as before. A provider that takes the request and never
   answers holds up one launch for the HTTP client's thirty seconds, then, not
