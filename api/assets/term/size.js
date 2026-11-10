@@ -135,7 +135,8 @@ function termFitSession() {
   const back = () => { termView.resize(termCols, termRows); termScale(); renderTermStrip(); };
   if (!(c > 0) || !(r > 0)) { back(); termSay("this window has no room to fit the session to"); return; }
   const others = termViewers.length - 1;
-  if (others > 0 && !confirm(`Make ${termName(termInfo || { id: termId })} ${c}×${r} for the ${others} others watching it?`)) {
+  const whom = others === 1 ? "1 other" : `${others} others`;
+  if (others > 0 && !confirm(`Make ${termName(termInfo || { id: termId })} ${c}×${r} for the ${whom} watching it?`)) {
     back();
     return;
   }
