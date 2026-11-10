@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -22,3 +24,27 @@ func TestForegroundServeTakesAPrincipalCalledLocal(t *testing.T) {
 		t.Fatalf("the token is %q", got)
 	}
 }
+
+// A user who signs in by key alone is not among the users the server is
+// given, but is a person all the same: a daemon's file that calls one local
+// is refused, naming the entry, as one with a password would be.
+func TestADaemonRefusesAKeyOnlyUserCalledLocal(t *testing.T) {
+	conf := filepath.Join(t.TempDir(), "server.toml")
+	body := "[[users]]\nname = \"me\"\nrole = \"watch\"\nssh_keys = [\"" + keyOnlyLine + "\"]\n" +
+		"[[users]]\nname = \"local\"\nrole = \"control\"\nssh_keys = [\"" + keyOnlyLine2 + "\"]\n"
+	if err := os.WriteFile(conf, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, _, _, err := daemonConfig(conf, t.TempDir())
+	want := `[[users]] "local": the name "local" is reserved for the control socket's own principal; choose another`
+	if err == nil || err.Error() != want {
+		t.Fatalf("a daemon's key-only user called local answers %v, want %q", err, want)
+	}
+}
+
+// keyOnlyLine and keyOnlyLine2 are two ed25519 public keys as ssh_keys
+// lines: the bytes 0..31 and 32..63.
+const (
+	keyOnlyLine  = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4f"
+	keyOnlyLine2 = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/"
+)

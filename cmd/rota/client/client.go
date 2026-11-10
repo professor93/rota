@@ -58,7 +58,13 @@ const maxBody = 8 << 20
 // Client is a connection to one store's daemon. Each request opens a
 // connection of its own, so a client left idle holds nothing open.
 type Client struct {
-	sock string
+	// said is what a sentence calls what this client talks to: the rota
+	// daemon on its socket, or the one in this process.
+	said string
+	// dial opens one connection to whatever serves this client: the
+	// daemon's socket, or a handler in this process. Every request and
+	// every attach goes through it.
+	dial func(ctx context.Context) (net.Conn, error)
 	http *http.Client
 }
 
@@ -131,14 +137,22 @@ func dial(terminals string, wait time.Duration) (*Client, error) {
 }
 
 func newClient(sock string) *Client {
-	return &Client{sock: sock, http: &http.Client{
+	return dialledBy("the rota daemon on "+sock, func(ctx context.Context) (net.Conn, error) { return dialOwn(ctx, sock) })
+}
+
+// dialledBy is a client whose every connection is dial's, and which says
+// said where a sentence names what it is talking to.
+func dialledBy(said string, dial func(ctx context.Context) (net.Conn, error)) *Client {
+	c := &Client{said: said, dial: dial}
+	c.http = &http.Client{
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return dialOwn(ctx, sock)
+				return c.dial(ctx)
 			},
 		},
-	}}
+	}
+	return c
 }
 
 // owner is the user whose daemon a control socket must be: the one this
@@ -189,7 +203,7 @@ func (c *Client) Health() error {
 		return err
 	}
 	if !doc.OK {
-		return fmt.Errorf("the rota daemon on %s says it is not serving", c.sock)
+		return fmt.Errorf("%s says it is not serving", c.said)
 	}
 	return nil
 }
@@ -417,8 +431,11 @@ func ids(sessions []Session) string {
 }
 
 // Create is a session to start. Account 0 is the rotation's choice, made by
-// the daemon. Args go to the CLI after its own name. Cwd, Cols and Rows left
-// out are the daemon's defaults, and Label names the session.
+// the daemon. Kind "shell" is the person's login shell instead of a CLI,
+// which takes no account and which the server refuses unless its file
+// allows one; left out, it is an account's CLI. Args go to the CLI after its
+// own name. Cwd, Cols and Rows left out are the daemon's defaults, and Label
+// names the session.
 //
 // Env, when set, is the environment the session starts from in place of the
 // daemon's: the caller's own, from which the holder keeps whatever describes
@@ -429,6 +446,7 @@ func ids(sessions []Session) string {
 // takes both only over its control socket.
 type Create struct {
 	Account    int
+	Kind       string
 	Args       []string
 	Cwd        string
 	Cols, Rows uint16
@@ -447,6 +465,7 @@ type Create struct {
 // the name to give the session.
 type createDoc struct {
 	Account       int      `json:"account,omitempty"`
+	Kind          string   `json:"kind,omitempty"`
 	Args          []string `json:"args,omitempty"`
 	Cwd           string   `json:"cwd,omitempty"`
 	Cols          uint16   `json:"cols,omitempty"`
@@ -459,7 +478,7 @@ type createDoc struct {
 // Create starts a session and says what it is, once its holder is running
 // the CLI.
 func (c *Client) Create(r Create) (Session, error) {
-	in := createDoc{Account: r.Account, Args: r.Args, Cwd: r.Cwd, Cols: r.Cols, Rows: r.Rows, Label: r.Label, Env: r.Env}
+	in := createDoc{Account: r.Account, Kind: r.Kind, Args: r.Args, Cwd: r.Cwd, Cols: r.Cols, Rows: r.Rows, Label: r.Label, Env: r.Env}
 	switch {
 	case r.RemoteControlName != "":
 		in.RemoteControl = r.RemoteControlName
@@ -540,12 +559,12 @@ func (c *Client) doAs(caller, method, path string, in, out any) error {
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return fmt.Errorf("the rota daemon on %s: %w", c.sock, err)
+		return fmt.Errorf("%s: %w", c.said, err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
-		return fmt.Errorf("the rota daemon on %s: %w", c.sock, err)
+		return fmt.Errorf("%s: %w", c.said, err)
 	}
 	if resp.StatusCode/100 != 2 {
 		var e struct {

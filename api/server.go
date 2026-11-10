@@ -84,10 +84,11 @@ type Options struct {
 	Tokens []TokenPrincipal
 	// SessionTTL is how long a page sign-in lasts. Zero is twelve hours.
 	SessionTTL time.Duration
-	// LocalUser is which of Users the control socket's principal, local,
-	// counts as for the keyboard of a held session when more than one of
-	// them may control. Empty with exactly one control user is that user,
-	// and with more is local, a person of its own.
+	// LocalUser is the person the control socket's principal, local,
+	// counts as for the keyboard of a held session. It may name a person
+	// Users does not hold, one who signs in elsewhere, or be "local" itself,
+	// and when it is set it is the answer. Empty with exactly one control
+	// user is that user, and with more is local, a person of its own.
 	LocalUser string
 	// Terminal is everything about the terminals this server holds. It does
 	// nothing unless Routes.Terminal is on.
