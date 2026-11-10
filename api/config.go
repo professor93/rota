@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -521,14 +522,22 @@ var sshKeyTypes = []string{
 	"ssh-rsa",
 }
 
+// sshKeyTypeMax is the length of the longest name in sshKeyTypes.
+var sshKeyTypeMax = len(slices.MaxFunc(sshKeyTypes, func(a, b string) int { return len(a) - len(b) }))
+
 // parseSSHKey reads one ssh_keys line and gives the key's body, which is
 // what says whether two lines are one key. It checks the line's shape, its
-// type, and that the body names the type the line says, with the standard
-// library alone; the SSH server parses each key again, fully, when it
-// starts. No refusal repeats the key.
+// type, that the body names the type the line says, and an RSA key's size,
+// with the standard library alone; the SSH server parses each key again,
+// fully, when it starts. No refusal repeats the key.
 func parseSSHKey(line string) ([]byte, error) {
 	f := strings.Fields(line)
 	if strings.ContainsAny(line, "\r\n") || len(f) < 2 {
+		return nil, errors.New(`is not "<type> <base64> [comment]"`)
+	}
+	if len(f[0]) > sshKeyTypeMax {
+		// Longer than any type: a body with the type left off, most
+		// likely, which is not repeated back.
 		return nil, errors.New(`is not "<type> <base64> [comment]"`)
 	}
 	if !slices.Contains(sshKeyTypes, f[0]) {
@@ -553,7 +562,41 @@ func parseSSHKey(line string) ([]byte, error) {
 	if inner != f[0] {
 		return nil, fmt.Errorf("says it is %s and holds a %s key", f[0], inner)
 	}
+	if inner == "ssh-rsa" {
+		bits, ok := sshRSABits(blob)
+		if !ok {
+			return nil, errors.New("its base64 holds no key")
+		}
+		if bits < sshRSAMinBits {
+			return nil, fmt.Errorf("is an RSA key of %d bits; rota takes %d bits or more", bits, sshRSAMinBits)
+		}
+	}
 	return blob, nil
+}
+
+// sshRSAMinBits is the shortest RSA modulus taken.
+const sshRSAMinBits = 2048
+
+// sshRSABits is the length of an ssh-rsa key's modulus: the key is the
+// type, the exponent and the modulus, each a length-prefixed string, the
+// two numbers big-endian.
+func sshRSABits(blob []byte) (int, bool) {
+	var parts [3][]byte
+	for i := range parts {
+		if len(blob) < 4 {
+			return 0, false
+		}
+		n := binary.BigEndian.Uint32(blob)
+		if uint64(n) > uint64(len(blob)-4) {
+			return 0, false
+		}
+		parts[i], blob = blob[4:4+n], blob[4+n:]
+	}
+	e, mod := parts[1], parts[2]
+	if len(e) == 0 || len(mod) == 0 {
+		return 0, false
+	}
+	return new(big.Int).SetBytes(mod).BitLen(), true
 }
 
 // sshKeyName is the first string of a key's SSH wire form, which is its
@@ -592,23 +635,26 @@ func (c *Config) checkLocalUser() error {
 	return fmt.Errorf("auth.local_user names %q, who is not a [[users]] entry that may control", name)
 }
 
-// localUser is auth.local_user, or, when it is empty and the one user who
-// may control signs in by key alone, that user. The server is not given
-// such a user, so it cannot find them as the only controller by itself,
-// and the keyboard would not follow them from SSH to this machine's own
-// terminal.
+// localUser is the person this machine's own terminal types as, counted
+// over every [[users]] entry: auth.local_user, else the one user who may
+// control, else local when more than one may. The server is not given the
+// users who sign in by key alone, so it cannot count them by itself, and
+// the keyboard would not follow one person from SSH to this terminal.
 func (c *Config) localUser() string {
 	if c.Auth.LocalUser != "" {
 		return c.Auth.LocalUser
 	}
-	only, n := UserEntry{}, 0
+	only, n := "", 0
 	for _, u := range c.Users {
 		if Role(u.Role) == RoleControl {
-			only, n = u, n+1
+			only, n = u.Name, n+1
 		}
 	}
-	if n == 1 && only.Password == "" {
-		return only.Name
+	switch {
+	case n == 1:
+		return only
+	case n > 1:
+		return localName
 	}
 	return ""
 }

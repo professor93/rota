@@ -49,6 +49,19 @@ func keyUser(name, role, password string, keys ...string) string {
 	return b
 }
 
+// rsaBlob is the wire form of an ssh-rsa public key whose modulus is bits
+// long: the type, the exponent 65537, and the modulus, each length-prefixed.
+func rsaBlob(bits int) []byte {
+	n := make([]byte, (bits+7)/8)
+	for i := range n {
+		n[i] = 0x5a
+	}
+	n[0] = 0xff >> (len(n)*8 - bits) // the top bit set, so it is bits long
+	n = append([]byte{0}, n...)      // an mpint whose top bit is set leads with a zero
+	out := append(sshString([]byte("ssh-rsa")), sshString([]byte{1, 0, 1})...)
+	return append(out, sshString(n)...)
+}
+
 func quoteAll(ss []string) string {
 	q := make([]string, len(ss))
 	for i, s := range ss {
@@ -140,6 +153,7 @@ func TestKeyLinesAreChecked(t *testing.T) {
 	opts := `options before the key, such as from=, are not read; give the key alone`
 	for _, c := range []struct{ name, key, want string }{
 		{"a type alone", "ssh-ed25519", shape},
+		{"a body with no type", body + " laptop", shape},
 		{"nothing", "", shape},
 		{"two lines in one", good + "\n" + edKey(t, ""), shape},
 		{"a key from an era gone", "ssh-dss " + body, `"ssh-dss" ` + kind},
@@ -166,10 +180,38 @@ func TestKeyLinesAreChecked(t *testing.T) {
 	}
 	for _, typ := range []string{"ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
 		"sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com", "ssh-rsa"} {
-		line := typ + " " + base64.StdEncoding.EncodeToString(append(sshString([]byte(typ)), sshString([]byte("key"))...))
+		blob := append(sshString([]byte(typ)), sshString([]byte("key"))...)
+		if typ == "ssh-rsa" {
+			blob = rsaBlob(2048)
+		}
+		line := typ + " " + base64.StdEncoding.EncodeToString(blob)
 		if _, err := LoadConfig(write(t, keyUser("me", "control", "", line))); err != nil {
 			t.Errorf("a %s key is refused: %v", typ, err)
 		}
+	}
+
+	// An RSA key is at least 2048 bits, counted from its modulus, and one
+	// whose numbers cannot be read is no key.
+	for _, c := range []struct {
+		name string
+		blob []byte
+		want string
+	}{
+		{"1024 bits", rsaBlob(1024), "is an RSA key of 1024 bits; rota takes 2048 bits or more"},
+		{"2047 bits", rsaBlob(2047), "is an RSA key of 2047 bits; rota takes 2048 bits or more"},
+		{"no modulus", append(sshString([]byte("ssh-rsa")), sshString([]byte{1, 0, 1})...), "its base64 holds no key"},
+		{"a modulus cut short", rsaBlob(2048)[:200], "its base64 holds no key"},
+	} {
+		t.Run("rsa "+c.name, func(t *testing.T) {
+			line := "ssh-rsa " + base64.StdEncoding.EncodeToString(c.blob)
+			_, err := LoadConfig(write(t, keyUser("me", "control", "", line)))
+			if want := `[[users]] "me": ssh_keys #1: ` + c.want; err == nil || !strings.Contains(err.Error(), want) {
+				t.Fatalf("answers %v, want %q", err, want)
+			}
+		})
+	}
+	if _, err := LoadConfig(write(t, keyUser("me", "control", "", "ssh-rsa "+base64.StdEncoding.EncodeToString(rsaBlob(4096))))); err != nil {
+		t.Fatalf("a 4096-bit RSA key is refused: %v", err)
 	}
 
 	// The same key under two people is refused, however its comment reads.
@@ -303,6 +345,15 @@ func TestAKeyOnlyControlUserIsTheLocalPerson(t *testing.T) {
 		{"two controllers by key, nobody named", []UserEntry{
 			{Name: "me", Role: "control", SSHKeys: []string{edKey(t, "")}},
 			{Name: "you", Role: "control", SSHKeys: []string{edKey(t, "")}}}, "", "local"},
+		{"one by password, one by key, the key named", []UserEntry{
+			{Name: "driver", Role: "control", Password: cheapHash()},
+			{Name: "phone", Role: "control", SSHKeys: []string{edKey(t, "")}}}, "phone", "phone"},
+		{"one by password, one by key, nobody named", []UserEntry{
+			{Name: "driver", Role: "control", Password: cheapHash()},
+			{Name: "phone", Role: "control", SSHKeys: []string{edKey(t, "")}}}, "", "local"},
+		{"two by password, nobody named", []UserEntry{
+			{Name: "me", Role: "control", Password: cheapHash()},
+			{Name: "you", Role: "control", Password: cheapHash()}}, "", "local"},
 		{"the only controller, by password", []UserEntry{
 			{Name: "me", Role: "control", Password: cheapHash()}}, "", "me"},
 	} {
