@@ -42,8 +42,10 @@ const stopped = {
   ended: true, exit: 1, recording: false, account,
 };
 // A session another version of rota holds, which this one cannot attach to.
+// Listed from its record, it is never linked to: reachable is false.
 const foreign = {
-  id: '2123456789abcdef', kind: 'account', held: true, state: 'live', attachable: false, made_by: '1.4.0-beta.3',
+  id: '2123456789abcdef', kind: 'account', held: true, state: 'live', attachable: false, reachable: false,
+  made_by: '1.4.0-beta.3',
   label: '', name: 'theirs', title: '', status: 'running', waiting_for: '', cwd: '/src/x',
   started: ago(60000), cols: 80, rows: 24, holder: null, viewers: [], offset: 0, ended: false,
   recording: false, account,
@@ -140,7 +142,13 @@ const marked = Object.assign({}, live, { id: '3123456789abcdef', title: '<b>x</b
   await open(foreign.id);
   assert(said('Made by') === 'rota 1.4.0-beta.3', 'it says which rota holds it: ' + said('Made by'));
   assert(byId(panel(), 'term_kill') && byId(panel(), 'term_kill').textContent === 'Stop', 'and still offers Stop');
-  assert(!rows().includes('Link'), 'a link nobody said is down is not said to be');
+  assert(said('Link') === 'not reachable from this server; not tried again',
+    'a holder this rota cannot attach to is not said to be tried again: ' + said('Link'));
+  assert(!dd('Link').classList.contains('warn'), 'and is not a passing warning');
+  // A link nobody said is down is not said to be.
+  tp.termInfo = Object.assign({}, foreign, { reachable: undefined });
+  tp.renderTermInfo();
+  assert(!rows().includes('Link'), 'a link nobody said is down is not said to be: ' + JSON.stringify(rows()));
 
   // 5. A watcher gets no Stop.
   const me = tp.me;

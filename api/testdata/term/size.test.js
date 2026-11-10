@@ -149,11 +149,19 @@ const HELD = terminals[0].id, PLAIN = terminals[1].id;
   assert(s1.sent.length === from, 'a tap on it anyway sends nothing: ' + JSON.stringify(frames(s1, from)));
 
   s1.feed({ type: 'keyboard', holder: 'driver', holder_conn: 'c-1' });
-  s1.feed({ type: 'viewers', list: [{ name: 'driver', role: 'control' }, { name: 'alice', role: 'control' },
-    { name: 'bob', role: 'watch' }] });
   const before = lastSize();
   let asked = null;
   globalThis.confirm = q => { asked = q; return false; };
+  // One other watching is one other, not "1 others".
+  s1.feed({ type: 'viewers', list: [{ name: 'driver', role: 'control' }, { name: 'bob', role: 'watch' }] });
+  from = s1.sent.length;
+  click(fit());
+  page.fire();
+  assert(asked === 'Make fintech 90×28 for the 1 other watching it?', 'Fit asks the one other watching: ' + asked);
+  assert(s1.sent.length === from, 'a no sends nothing: ' + JSON.stringify(frames(s1, from)));
+  s1.feed({ type: 'viewers', list: [{ name: 'driver', role: 'control' }, { name: 'alice', role: 'control' },
+    { name: 'bob', role: 'watch' }] });
+  asked = null;
   from = s1.sent.length;
   click(fit());
   page.fire();

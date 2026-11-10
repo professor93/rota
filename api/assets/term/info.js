@@ -10,6 +10,13 @@ function renderTermInfo() {
       el("b", { text: "Nothing open" }), el("span", { text: "choose a terminal on the left" })]));
     return;
   }
+  // An id the server does not have has no description to draw, so nothing
+  // of a session is made up for it: the panel says what the screen says.
+  if (termMissing) {
+    host.replaceChildren(el("div", { class: "empty" }, [
+      el("b", { text: "No such session" }), el("span", { text: `no session ${termId} on this server` })]));
+    return;
+  }
   const d = termInfo || {};
   // A row's value is text, or a node that says it; either way nothing in it
   // is markup.
@@ -47,7 +54,7 @@ function renderTermInfo() {
     ended ? row("Ended", d.held ? termEnding(d)
       : d.lost ? (d.ending || "the sharing process went away") : "exited, code " + termEnded) : null,
     d.made_by ? row("Made by", "rota " + d.made_by) : null,
-    d.reachable === false && !ended ? row("Link", "not answering; tried again shortly", "warn") : null,
+    termLink(d, ended, row),
   ])];
   kids.push(el("h4", { text: "Watching" }));
   if (!termViewers.length) kids.push(el("p", { class: "help", text: "nobody else" }));
@@ -93,6 +100,15 @@ function termWorktree(path) {
         catch { termSay("this browser would not copy the path here"); }
       } }),
   ]);
+}
+
+// termLink is the daemon's link to a held session's holder, said only when
+// it is down. A holder this rota cannot attach to is never linked to, and
+// never tried again, so it is not said to be about to be.
+function termLink(d, ended, row) {
+  if (d.reachable !== false || ended) return null;
+  if (d.made_by || d.attachable === false) return row("Link", "not reachable from this server; not tried again");
+  return row("Link", "not answering; tried again shortly", "warn");
 }
 
 // termLapse is the one thing about a terminal nobody can see by looking at

@@ -144,6 +144,19 @@ const foreign = { id: 'h-foreign', kind: 'account', label: '', cwd: '/src', star
   assert(screen().textContent.includes('no session 0123456789abcdef on this server'),
     'the screen says there is no such session: ' + screen().textContent);
   assert(resumes().join() === '0,0,0,0,0', 'with nothing to do to it: ' + resumes());
+  // The panel makes nothing up for it: no rows, no Kill, and the same words.
+  const info = () => nodes['#tinfo'];
+  assert(!findAll(info(), e => e.tagName === 'DT').length, 'the panel has no rows for it: ' + info().textContent);
+  assert(!byId(info(), 'term_kill'), 'and nothing to kill');
+  assert(!info().textContent.includes('a plain shell') && !info().textContent.includes('running'),
+    'it is not said to be a running shell: ' + info().textContent);
+  assert(info().textContent.includes('no session 0123456789abcdef on this server'),
+    'the panel says what the screen says: ' + info().textContent);
+  // A poll does not bring the made-up panel back.
+  await tp.refreshTerminals();
+  await page.settle();
+  assert(!byId(info(), 'term_kill') && !findAll(info(), e => e.tagName === 'DT').length,
+    'not after a poll either: ' + info().textContent);
 
   // And a session that can be attached to still is, after all that, with
   // the stopped screen gone.
