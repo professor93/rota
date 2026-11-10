@@ -45,7 +45,7 @@ const (
 // requestWait bounds one request that the daemon answers from memory and
 // from the store's records. holderWait bounds the two that wait on a
 // holder: a create, which the daemon gives 30 seconds to answer, and a
-// send, which it gives 35 to type.
+// send, which it gives 35 to type. A change waits longer still, changeWait.
 const (
 	requestWait = 30 * time.Second
 	holderWait  = time.Minute
@@ -215,56 +215,92 @@ func (c *Client) Health() error {
 // and nil while it runs. Account, AccountLabel and Provider are empty for a
 // session that is not an account's CLI.
 //
+// ConversationCwd is the folder its conversation lives in, which for a
+// worktree session is not Cwd: where a resume or a move starts it again.
+// WaitingFor is what its CLI waits on its person for, and Holder who holds
+// its keyboard, "" for nobody; Viewers are who are attached to it. Cols
+// and Rows are the size it runs at, zero where the daemon does not say.
+// MadeBy is the rota that made a holder this one cannot speak to. Reachable
+// says the daemon's link to its holder is up now, and TokenUntil is when
+// the login inside lapses, zero where that is not known.
+//
 // As JSON it is the daemon's description document, the shape GET
 // /v1/terminals lists a session in — the account an object, ended a bool
 // with ended_at beside it — and a session read from one is written back as
 // the very document it was read from, so a command's --json and the API are
 // read alike.
 type Session struct {
-	ID           string
-	Name         string
-	Title        string
-	Label        string
-	Kind         string
-	State        string
-	Status       string
-	Provider     string
-	Account      int
-	AccountLabel string
-	Cwd          string
-	Conversation string
-	PID          int
-	Attachable   bool
-	Resumable    bool
-	Started      time.Time
-	Ended        *time.Time
-	Exit         *int
+	ID              string
+	Name            string
+	Title           string
+	Label           string
+	Kind            string
+	State           string
+	Status          string
+	Provider        string
+	Account         int
+	AccountLabel    string
+	Cwd             string
+	Conversation    string
+	ConversationCwd string
+	PID             int
+	Attachable      bool
+	Resumable       bool
+	Started         time.Time
+	Ended           *time.Time
+	Exit            *int
+
+	WaitingFor string
+	Holder     string
+	MadeBy     string
+	Reachable  bool
+	Viewers    []SessionViewer
+	Cols, Rows uint16
+	TokenUntil time.Time
 
 	// doc is the description this was read from, which is what it is
 	// written as.
 	doc json.RawMessage
 }
 
+// SessionViewer is one person attached to a session: who, with what role,
+// and since when — never from where.
+type SessionViewer struct {
+	Name  string    `json:"name"`
+	Role  string    `json:"role"`
+	Since time.Time `json:"since"`
+}
+
 // session is a description document as the daemon writes it: ended a bool,
-// with when beside it, and the account an object.
+// with when beside it, the account an object, and nobody at the keyboard
+// null.
 type session struct {
-	ID           string     `json:"id"`
-	Name         string     `json:"name"`
-	Title        string     `json:"title"`
-	Label        string     `json:"label"`
-	Kind         string     `json:"kind"`
-	State        string     `json:"state"`
-	Status       string     `json:"status"`
-	Cwd          string     `json:"cwd"`
-	Conversation string     `json:"conversation"`
-	PID          int        `json:"pid"`
-	Attachable   bool       `json:"attachable"`
-	Resumable    bool       `json:"resumable"`
-	Started      time.Time  `json:"started"`
-	Ended        bool       `json:"ended"`
-	EndedAt      *time.Time `json:"ended_at,omitempty"`
-	Exit         *int       `json:"exit,omitempty"`
-	Account      *account   `json:"account,omitempty"`
+	ID              string          `json:"id"`
+	Name            string          `json:"name"`
+	Title           string          `json:"title"`
+	Label           string          `json:"label"`
+	Kind            string          `json:"kind"`
+	State           string          `json:"state"`
+	Status          string          `json:"status"`
+	Cwd             string          `json:"cwd"`
+	Conversation    string          `json:"conversation"`
+	ConversationCwd string          `json:"conversation_cwd"`
+	PID             int             `json:"pid"`
+	Attachable      bool            `json:"attachable"`
+	Reachable       bool            `json:"reachable"`
+	Resumable       bool            `json:"resumable"`
+	Started         time.Time       `json:"started"`
+	Ended           bool            `json:"ended"`
+	EndedAt         *time.Time      `json:"ended_at,omitempty"`
+	Exit            *int            `json:"exit,omitempty"`
+	Account         *account        `json:"account,omitempty"`
+	WaitingFor      string          `json:"waiting_for,omitempty"`
+	Holder          *string         `json:"holder"`
+	Viewers         []SessionViewer `json:"viewers"`
+	MadeBy          string          `json:"made_by,omitempty"`
+	Cols            uint16          `json:"cols,omitempty"`
+	Rows            uint16          `json:"rows,omitempty"`
+	TokenUntil      time.Time       `json:"token_until,omitzero"`
 }
 
 type account struct {
@@ -276,8 +312,17 @@ type account struct {
 func (w *session) session() Session {
 	s := Session{
 		ID: w.ID, Name: w.Name, Title: w.Title, Label: w.Label, Kind: w.Kind, State: w.State, Status: w.Status,
-		Cwd: w.Cwd, Conversation: w.Conversation, PID: w.PID,
+		Cwd: w.Cwd, Conversation: w.Conversation, ConversationCwd: w.ConversationCwd, PID: w.PID,
 		Attachable: w.Attachable, Resumable: w.Resumable, Started: w.Started,
+		WaitingFor: w.WaitingFor, MadeBy: w.MadeBy, Reachable: w.Reachable,
+		Cols: w.Cols, Rows: w.Rows, TokenUntil: w.TokenUntil,
+	}
+	if w.Holder != nil {
+		s.Holder = *w.Holder
+	}
+	// Nobody watching is no viewers, however the document said it.
+	if len(w.Viewers) > 0 {
+		s.Viewers = w.Viewers
 	}
 	if a := w.Account; a != nil {
 		s.Account, s.AccountLabel, s.Provider = a.ID, a.Label, a.Provider
@@ -313,9 +358,18 @@ func (s Session) MarshalJSON() ([]byte, error) {
 	}
 	w := session{
 		ID: s.ID, Name: s.Name, Title: s.Title, Label: s.Label, Kind: s.Kind, State: s.State, Status: s.Status,
-		Cwd: s.Cwd, Conversation: s.Conversation, PID: s.PID,
+		Cwd: s.Cwd, Conversation: s.Conversation, ConversationCwd: s.ConversationCwd, PID: s.PID,
 		Attachable: s.Attachable, Resumable: s.Resumable, Started: s.Started,
 		Ended: s.Ended != nil, EndedAt: s.Ended, Exit: s.Exit,
+		WaitingFor: s.WaitingFor, MadeBy: s.MadeBy, Reachable: s.Reachable, Viewers: s.Viewers,
+		Cols: s.Cols, Rows: s.Rows, TokenUntil: s.TokenUntil,
+	}
+	if s.Holder != "" {
+		w.Holder = &s.Holder
+	}
+	if w.Viewers == nil {
+		// As the daemon writes nobody watching.
+		w.Viewers = []SessionViewer{}
 	}
 	if s.Account != 0 {
 		w.Account = &account{ID: s.Account, Label: s.AccountLabel, Provider: s.Provider}
@@ -441,6 +495,11 @@ func ids(sessions []Session) string {
 // account the daemon chooses: the daemon turns the account's setting on, as
 // `rota run --remote-control` does, and adds Claude Code's flag. The daemon
 // takes both only over its control socket.
+//
+// Resume, when set, is the Claude Code conversation the session starts on,
+// for a claude account only: the daemon brings its transcript to the
+// account's home and starts claude on it. With Account 0 the daemon starts
+// it on the account whose home holds it, where that account can start.
 type Create struct {
 	Account    int
 	Args       []string
@@ -448,6 +507,7 @@ type Create struct {
 	Cols, Rows uint16
 	Label      string
 	Env        []string
+	Resume     string
 
 	RemoteControl     bool
 	RemoteControlName string
@@ -467,13 +527,15 @@ type createDoc struct {
 	Rows          uint16   `json:"rows,omitempty"`
 	Label         string   `json:"label,omitempty"`
 	Env           []string `json:"env,omitempty"`
+	Resume        string   `json:"resume,omitempty"`
 	RemoteControl any      `json:"remote_control,omitempty"`
 }
 
 // Create starts a session and says what it is, once its holder is running
 // the CLI.
 func (c *Client) Create(r Create) (Session, error) {
-	in := createDoc{Account: r.Account, Args: r.Args, Cwd: r.Cwd, Cols: r.Cols, Rows: r.Rows, Label: r.Label, Env: r.Env}
+	in := createDoc{Account: r.Account, Args: r.Args, Cwd: r.Cwd, Cols: r.Cols, Rows: r.Rows, Label: r.Label, Env: r.Env,
+		Resume: r.Resume}
 	switch {
 	case r.RemoteControlName != "":
 		in.RemoteControl = r.RemoteControlName
@@ -481,7 +543,7 @@ func (c *Client) Create(r Create) (Session, error) {
 		in.RemoteControl = true
 	}
 	var s Session
-	if err := c.doAs(r.Caller, http.MethodPost, "/v1/terminals", in, &s); err != nil {
+	if err := c.doAs(r.Caller, holderWait, http.MethodPost, "/v1/terminals", in, &s); err != nil {
 		return Session{}, err
 	}
 	return s, nil
@@ -523,22 +585,26 @@ func (r *Refusal) Error() string { return r.Message }
 
 // do makes one request, with in as its JSON body when it is not nil, and
 // decodes the answer into out, which may be nil. An answer that is not a
-// success is a *Refusal. A request with a body is a create or a send, which
-// wait on a holder, so it is given holderWait rather than requestWait.
+// success is a *Refusal. A request with a body here is a send, which waits
+// on a holder, so it is given holderWait rather than requestWait.
 func (c *Client) do(method, path string, in, out any) error {
-	return c.doAs("", method, path, in, out)
+	wait := requestWait
+	if in != nil {
+		wait = holderWait
+	}
+	return c.doAs("", wait, method, path, in, out)
 }
 
-// doAs is do, naming the caller to the daemon when there is one.
-func (c *Client) doAs(caller, method, path string, in, out any) error {
+// doAs is do waiting as long as wait, and naming the caller to the daemon
+// when there is one.
+func (c *Client) doAs(caller string, wait time.Duration, method, path string, in, out any) error {
 	var body io.Reader
-	wait := requestWait
 	if in != nil {
 		raw, err := json.Marshal(in)
 		if err != nil {
 			return err
 		}
-		body, wait = bytes.NewReader(raw), holderWait
+		body = bytes.NewReader(raw)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
