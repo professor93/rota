@@ -41,6 +41,8 @@ func (a *accountsTab) View(width, height int) string {
 	}
 	th := a.e.th
 	switch {
+	case !a.seen && a.failed != nil:
+		return th.Over.Render(accountsViewLine("the accounts could not be read: "+clean(a.failed.Error()), width))
 	case !a.seen:
 		return th.Muted.Render(accountsViewLine("reading the accounts…", width))
 	case len(a.rows) == 0:
@@ -122,11 +124,8 @@ func (a *accountsTab) row(cols []col, acct wire.Account, selected bool, now time
 		case "reset":
 			rest = append(rest, accountsViewCell(resetStyle, a.resetOf(acct, c.W, now), c.W))
 		case "state":
-			long, short, style := accountsViewState(th, acct, now, a.e.control())
-			if textWidth(long) > c.W {
-				long = short
-			}
-			rest = append(rest, accountsViewCell(style, long, c.W))
+			words, style := accountsViewState(th, acct, now, a.e.control())
+			rest = append(rest, accountsViewCell(style, accountsViewWord(words, c.W), c.W))
 		}
 	}
 	gap := strings.Repeat(" ", ladderGap)
@@ -175,37 +174,50 @@ func accountsViewUsage(th Theme, acct wire.Account, name string, w int) string {
 }
 
 // accountsViewState is the state column: why the rotation passes the
-// account by, or what is about to need doing, else ok. long is said where
-// it fits, short where it does not.
-func accountsViewState(th Theme, acct wire.Account, now time.Time, control bool) (long, short string, style lipgloss.Style) {
+// account by, or what is about to need doing, else ok. words are the ways
+// to say it, the longest first: the cell says the first that fits
+// (accountsViewWord). The last fits in 8 columns, the narrowest the ladder
+// gives the state, so no state is ever cut.
+func accountsViewState(th Theme, acct wire.Account, now time.Time, control bool) (words []string, style lipgloss.Style) {
 	threshold := barsThreshold(acct.Threshold)
 	credit := barsTime(acct.NoCreditUntil)
 	switch {
 	case acct.Status == rota.StatusReauth:
 		if control {
-			return "dead: l signs in", "dead", th.Dead
+			return []string{"dead: l signs in", "dead"}, th.Dead
 		}
-		return "dead", "dead", th.Dead
+		return []string{"dead"}, th.Dead
 	case credit.After(now):
-		return "out of credit (" + accountsViewSpan(credit.Sub(now)) + ")", "no credit", th.Over
+		return []string{"no credit (" + accountsViewSpan(credit.Sub(now)) + ")", "no credit", "0 credit"}, th.Over
 	case acct.Status == rota.StatusLimited:
-		return "limited", "limited", th.Over
+		return []string{"limited"}, th.Over
 	case acct.Metered && acct.Percent >= float64(threshold):
-		return fmt.Sprintf("over its %d%%", threshold), fmt.Sprintf("over %d%%", threshold), th.Over
+		return []string{fmt.Sprintf("over its %d%%", threshold), fmt.Sprintf("over %d%%", threshold), "over"}, th.Over
 	}
 	if t := barsTime(acct.LoginUntil); !t.IsZero() {
 		switch left := t.Sub(now); {
 		case left <= 0:
-			return "login ended", "ended", th.Warn
+			return []string{"login ended", "ended"}, th.Warn
 		case left <= accountsViewSoon:
 			in := accountsViewSpan(left)
-			return "login ends in " + in, "ends " + in, th.Warn
+			return []string{"login ends in " + in, "ends in " + in, "ends " + in}, th.Warn
 		}
 	}
 	if acct.Order < 1 {
-		return "out of rotation", "out", th.Muted
+		return []string{"out of rotation", "out"}, th.Muted
 	}
-	return "ok", "ok", th.Good
+	return []string{"ok"}, th.Good
+}
+
+// accountsViewWord is the first of words that fits in w columns, or the
+// last cut to fit.
+func accountsViewWord(words []string, w int) string {
+	for _, s := range words {
+		if textWidth(s) <= w {
+			return s
+		}
+	}
+	return fit(words[len(words)-1], w)
 }
 
 // details are the selected account's every window and setting, at most
@@ -308,7 +320,7 @@ func (a *accountsTab) details(acct wire.Account, width, room int, now time.Time)
 			checked = accountsViewAgo(now.Sub(t))
 		}
 	}
-	if t := barsTime(acct.UsageWaitUntil); !t.IsZero() {
+	if t := barsTime(acct.UsageWaitUntil); t.After(now) {
 		checked += "; read again in " + resetText(t, now, loc, false) + ", as the provider asked"
 	}
 	add("checked", checked, readStyle)
@@ -323,6 +335,10 @@ func (a *accountsTab) details(acct wire.Account, width, room int, now time.Time)
 	add("remote control", remote, th.Text)
 	if acct.Note != "" {
 		add("note", acct.Note, th.Muted)
+	}
+	if len(out) > room && room > 1 {
+		more := len(out) - room + 1
+		out = append(out[:room-1], th.Muted.Render(accountsViewLine(pad+"… "+strconv.Itoa(more)+" more", width)))
 	}
 	if len(out) > room {
 		out = out[:room]
@@ -340,17 +356,9 @@ func accountsLabel(acct wire.Account) string {
 		}
 	}
 	if u := clean(acct.UUID); u != "" {
-		return accountsViewCut(u, 12)
+		return accountsViewLine(u, 12)
 	}
 	return "account-" + strconv.Itoa(acct.ID)
-}
-
-// accountsViewCut is s cut to at most n runes.
-func accountsViewCut(s string, n int) string {
-	if r := []rune(s); len(r) > n {
-		return string(r[:n])
-	}
-	return s
 }
 
 // accountsViewPlace is the account's place in the rotation, or "-" when it

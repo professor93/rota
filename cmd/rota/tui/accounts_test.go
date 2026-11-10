@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"slices"
 	"strings"
 	"sync"
@@ -107,8 +109,73 @@ func TestTheTableAtThreeSizes(t *testing.T) {
 			if n := strings.Count(view, "\n") + 1; n > sz[1] {
 				t.Errorf("the view has %d lines in %d rows", n, sz[1])
 			}
-			golden(t, fmt.Sprintf("accounts-%dx%d", sz[0], sz[1]), accountsPlain(view))
+			golden(t, accountsGolden(sz[0], sz[1]), accountsPlain(view))
+			// However few rows the tab is given, it draws no more.
+			for h := 1; h <= sz[1]; h++ {
+				if n := strings.Count(accountsOf(m).View(sz[0], h), "\n") + 1; n > h {
+					t.Errorf("the view has %d lines in %d rows", n, h)
+				}
+			}
 		})
+	}
+}
+
+// accountsGolden is the golden of the table at w×h in this run's East Asian
+// mode: where ambiguous characters are drawn wide (RUNEWIDTH_EASTASIAN=1)
+// a bar, the rule and a cut label are drawn otherwise, so each mode has its
+// own.
+func accountsGolden(w, h int) string {
+	name := fmt.Sprintf("accounts-%dx%d", w, h)
+	if textEastAsian() {
+		name += "-wide"
+	}
+	return name
+}
+
+// TestAccountsInBothEastAsianModes runs the Accounts tests again in the
+// mode this run is not in, as TestTextBothEastAsianModes does for the text:
+// so the table, the rule and the goldens hold where ambiguous characters
+// are drawn wide as well as narrow.
+func TestAccountsInBothEastAsianModes(t *testing.T) {
+	if os.Getenv(textModeVar) != "" {
+		t.Skip("a child run")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := "^(TestTextModeIsTheOneAsked|TestTheTableAtThreeSizes|TestALabelNeverEscapesItsCell|" +
+		"TestSelectionFollowsTheAccountNotTheRow|TestDetailsShowEveryWindowAndSetting|TestStaleReadingsFade|" +
+		"TestNoReflowWhenASessionStarts|TestKeysReachTheirActions|TestWatchSeesNoChangeKeys|TestManyAccountsScroll|" +
+		"TestAClickSelectsARowAndTheWheelScrolls|TestAccountsUpdateDoesNoIO|TestAccountsRingsTheBellAfterTheFirstListing|" +
+		"TestAccountsEmptyListingSaysHowToAdd|TestAccountsStateSaysWhy|TestAccountsStateIsNeverCut|" +
+		"TestAccountsSaysWhyTheAccountsCannotBeRead|TestAccountsTheSameOverlayOpensOnce|TestAccountsALabelFromAUUIDIsCutAsItIsDrawn)$"
+	mode := "wide"
+	if textEastAsian() {
+		mode = "narrow"
+	}
+	var env []string
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, "RUNEWIDTH_EASTASIAN=") && !strings.HasPrefix(kv, textModeVar+"=") && !strings.HasPrefix(kv, "PATH=") {
+			env = append(env, kv)
+		}
+	}
+	// The child is started by its own path, and PATH is the empty directory
+	// TestMain made.
+	env = append(env, textModeVar+"="+mode, "PATH="+os.Getenv("PATH"))
+	if mode == "wide" {
+		env = append(env, "RUNEWIDTH_EASTASIAN=1")
+	}
+	cmd := exec.Command(exe, "-test.run", tests, "-test.count=1", "-test.v", "-test.timeout=10m")
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("the %s run failed: %v\n%s", mode, err, out)
+	}
+	for _, name := range []string{"TestTextModeIsTheOneAsked", "TestTheTableAtThreeSizes", "TestALabelNeverEscapesItsCell"} {
+		if !strings.Contains(string(out), "--- PASS: "+name) {
+			t.Errorf("the %s run did not pass %s:\n%s", mode, name, out)
+		}
 	}
 }
 
@@ -136,7 +203,9 @@ func TestALabelNeverEscapesItsCell(t *testing.T) {
 	rows := accountsThree()
 	rows = append(rows, wire.Account{ID: 4, Provider: "claude\x1b[31m", Status: "reauth", Order: 4, Metered: true,
 		Cwd: "/srv/\x1b]52;c;ZXZpbA==\x07" + strings.Repeat("deep/", 30), Note: "quota\r\nnote\x1b[1m " + key,
-		DeadReason: "the server said: \x1b]0;title\x07refused " + key + "\n" + strings.Repeat("and more ", 20)},
+		DeadReason: "the server said: \x1b]0;title\x07refused " + key + "\n" + strings.Repeat("and more ", 20),
+		Windows: []wire.Window{{Name: "\x1b]0;x\a" + strings.Repeat("Claude Opus ", 6), Percent: 50,
+			ResetsAt: accountsAt(time.Hour), Scoped: true}}},
 		wire.Account{ID: 5, Provider: strings.Repeat("provider", 20), Status: "ok", Order: 5})
 	for i := range rows {
 		rows[i].Name = labels[i]
@@ -278,6 +347,24 @@ func TestSelectionFollowsTheAccountNotTheRow(t *testing.T) {
 	if a.sel != 1 || len(a.rows) != 3 {
 		t.Errorf("a failed read changed the table: %d selected, %d rows", a.sel, len(a.rows))
 	}
+	// An account asked for and not listed yet is forgotten once the person
+	// moves the selection, by a key or by a click.
+	later := func(id int) wire.Account {
+		return wire.Account{ID: id, Provider: "claude", Email: fmt.Sprintf("n%d@example.com", id), Status: "ok", Order: id}
+	}
+	run(t, m, selectMsg{Account: 8}, press("down")[0])
+	run(t, m, accountsListing(append(slices.Clone(rows), later(8))...))
+	if a.sel != 2 {
+		t.Errorf("an account asked for before a key took the selection to %d", a.sel)
+	}
+	run(t, m, selectMsg{Account: 10})
+	m.View()
+	top, _ := m.body()
+	run(t, m, tea.MouseClickMsg{X: 5, Y: top + 3, Button: tea.MouseLeft})
+	run(t, m, accountsListing(append(slices.Clone(rows), later(8), later(10))...))
+	if a.sel != 3 {
+		t.Errorf("an account asked for before a click took the selection to %d", a.sel)
+	}
 }
 
 func TestDetailsShowEveryWindowAndSetting(t *testing.T) {
@@ -351,7 +438,8 @@ func TestDetailsShowEveryWindowAndSetting(t *testing.T) {
 		}
 	}
 	// The defaults say what they are.
-	plainAcct := wire.Account{ID: 4, Provider: "claude", Email: "p@example.com", Status: "ok", Order: 0, Threshold: 100, Metered: true}
+	plainAcct := wire.Account{ID: 4, Provider: "claude", Email: "p@example.com", Status: "ok", Order: 0, Threshold: 100, Metered: true,
+		UsageWaitUntil: accountsAt(-time.Minute)}
 	keyAcct := wire.Account{ID: 5, Provider: "claude", Credential: "apikey", Status: "ok", Order: 1, Threshold: 100}
 	run(t, m, accountsListing(plainAcct, keyAcct))
 	view = accountsPlain(accountsOf(m).View(120, 40))
@@ -362,6 +450,9 @@ func TestDetailsShowEveryWindowAndSetting(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Errorf("the details of an account with nothing set lack %q:\n%s", want, view)
 		}
+	}
+	if strings.Contains(view, "read again") {
+		t.Errorf("a wait that is over is still said:\n%s", view)
 	}
 	run(t, m, press("down")...)
 	view = accountsPlain(accountsOf(m).View(120, 40))
@@ -402,6 +493,15 @@ func TestStaleReadingsFade(t *testing.T) {
 	if key := row("key"); strings.Contains(key, "\x1b[2m") {
 		t.Errorf("an API key row is drawn Faint: %q", key)
 	}
+	// The selected account's details fade as its row does.
+	run(t, m, press("down", "down")...)
+	lines = strings.Split(accountsOf(m).View(120, 40), "\n")
+	details := strings.Join(lines[accountsOf(m).shown+2:], "\n")
+	for _, faded := range []string{" 95%", "2h 0m (22:17)", "3h ago"} {
+		if !strings.Contains(details, th.Faint.Render(faded)) {
+			t.Errorf("the stale account's details do not fade %q:\n%q", faded, details)
+		}
+	}
 	// A provider asking rota to wait makes a fresh reading stale too.
 	rows[1].UsageWaitUntil = accountsAt(5 * time.Minute)
 	run(t, m, accountsListing(rows...))
@@ -432,12 +532,10 @@ func TestNoReflowWhenASessionStarts(t *testing.T) {
 	}
 }
 
-// accountsHooks puts a recorder in place of every action a key reaches, and
-// returns what they were called with.
-func accountsHooks(t *testing.T) func() []string {
-	t.Helper()
-	saved := accountsDo
-	t.Cleanup(func() { accountsDo = saved })
+// accountsHooks puts a recorder in place of every action a key reaches on
+// m's Accounts tab, and returns what they were called with.
+func accountsHooks(m *Model) func() []string {
+	do := &accountsOf(m).do
 	var mu sync.Mutex
 	var got []string
 	say := func(format string, a ...any) {
@@ -445,15 +543,15 @@ func accountsHooks(t *testing.T) func() []string {
 		defer mu.Unlock()
 		got = append(got, fmt.Sprintf(format, a...))
 	}
-	accountsDo.launch = func(_ *accountsTab, a wire.Account) tea.Cmd { say("launch(%d)", a.ID); return nil }
-	accountsDo.move = func(_ *accountsTab, a wire.Account, place string) tea.Cmd {
+	do.launch = func(_ *accountsTab, a wire.Account) tea.Cmd { say("launch(%d)", a.ID); return nil }
+	do.move = func(_ *accountsTab, a wire.Account, place string) tea.Cmd {
 		say("move(%d, %s)", a.ID, place)
 		return nil
 	}
-	accountsDo.nudge = func(_ *accountsTab, a wire.Account, d int) tea.Cmd { say("nudge(%d, %d)", a.ID, d); return nil }
-	accountsDo.typed = func(_ *accountsTab, a wire.Account) overlay { say("typed(%d)", a.ID); return overlayClosed() }
-	accountsDo.toggleOut = func(_ *accountsTab, a wire.Account) tea.Cmd { say("toggleOut(%d)", a.ID); return nil }
-	accountsDo.login = func(_ *env, again *wire.Account) asider {
+	do.nudge = func(_ *accountsTab, a wire.Account, d int) tea.Cmd { say("nudge(%d, %d)", a.ID, d); return nil }
+	do.typed = func(_ *accountsTab, a wire.Account) overlay { say("typed(%d)", a.ID); return overlayClosed() }
+	do.toggleOut = func(_ *accountsTab, a wire.Account) tea.Cmd { say("toggleOut(%d)", a.ID); return nil }
+	do.login = func(_ *env, again *wire.Account) asider {
 		if again == nil {
 			say("login(new)")
 		} else {
@@ -461,9 +559,9 @@ func accountsHooks(t *testing.T) func() []string {
 		}
 		return nil
 	}
-	accountsDo.edit = func(_ *env, a wire.Account) overlay { say("edit(%d)", a.ID); return &shellOverlay{} }
-	accountsDo.remove = func(_ *env, a wire.Account) overlay { say("remove(%d)", a.ID); return overlayClosed() }
-	accountsDo.crossed = func(_ *accountsTab, before, after []wire.Account) tea.Cmd {
+	do.edit = func(_ *env, a wire.Account) overlay { say("edit(%d)", a.ID); return &shellOverlay{} }
+	do.remove = func(_ *env, a wire.Account) overlay { say("remove(%d)", a.ID); return overlayClosed() }
+	do.crossed = func(_ *accountsTab, before, after []wire.Account) tea.Cmd {
 		say("crossed(%d, %d)", len(before), len(after))
 		return nil
 	}
@@ -475,8 +573,8 @@ func accountsHooks(t *testing.T) func() []string {
 }
 
 func TestKeysReachTheirActions(t *testing.T) {
-	got := accountsHooks(t)
 	m, b := accountsModel(t, accountsThree())
+	got := accountsHooks(m)
 	run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
 	a := accountsOf(m)
 	cases := []struct {
@@ -539,8 +637,8 @@ func TestKeysReachTheirActions(t *testing.T) {
 }
 
 func TestWatchSeesNoChangeKeys(t *testing.T) {
-	got := accountsHooks(t)
 	m, b := accountsModel(t, accountsThree())
+	got := accountsHooks(m)
 	accountsWatch(b)
 	run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
 	a := accountsOf(m)
@@ -614,11 +712,24 @@ func TestManyAccountsScroll(t *testing.T) {
 	if a := accountsOf(m); a.sel != 30 {
 		t.Errorf("down past the bottom selects %d", a.sel)
 	}
+	// The details are cut to the rows left, and say how much is not shown.
+	view := strings.Split(accountsPlain(accountsOf(m).View(80, 22)), "\n")
+	if last := view[len(view)-2]; last != "  … 2 more" {
+		t.Errorf("the cut details end with %q:\n%s", last, strings.Join(view, "\n"))
+	}
 	for i := 29; i >= 1; i-- {
 		run(t, m, press("up")...)
 		if !rowOf(i) {
 			t.Fatalf("selected %d on the way up, which is not shown:\n%s", i, plain(m))
 		}
+	}
+	// Scrolled to the bottom, a listing of three draws them, with the one
+	// now where the selected one was.
+	run(t, m, selectMsg{Account: 30})
+	m.View()
+	run(t, m, accountsListing(rows[:3]...))
+	if !rowOf(1) || !rowOf(3) || accountsOf(m).sel != 3 {
+		t.Errorf("after the listing shrank, %d is selected:\n%s", accountsOf(m).sel, plain(m))
 	}
 }
 
@@ -654,10 +765,10 @@ func TestAClickSelectsARowAndTheWheelScrolls(t *testing.T) {
 	if a.sel != 3 {
 		t.Errorf("a click on the third row selects %d", a.sel)
 	}
-	run(t, m, tea.MouseClickMsg{X: 10, Y: top, Button: tea.MouseLeft}, tea.MouseClickMsg{X: 10, Y: top + 6, Button: tea.MouseLeft},
-		tea.MouseClickMsg{X: 10, Y: top + 1, Button: tea.MouseRight})
+	run(t, m, tea.MouseClickMsg{X: 10, Y: top, Button: tea.MouseLeft}, tea.MouseClickMsg{X: 10, Y: top + 4, Button: tea.MouseLeft},
+		tea.MouseClickMsg{X: 10, Y: top + 6, Button: tea.MouseLeft}, tea.MouseClickMsg{X: 10, Y: top + 1, Button: tea.MouseRight})
 	if a.sel != 3 {
-		t.Errorf("a click on the header, the details or with the right button moved the selection to %d", a.sel)
+		t.Errorf("a click on the header, the rule, the details or with the right button moved the selection to %d", a.sel)
 	}
 	run(t, m, tea.MouseWheelMsg{X: 10, Y: top + 1, Button: tea.MouseWheelUp})
 	if a.sel != 2 {
@@ -682,15 +793,16 @@ func TestAClickSelectsARowAndTheWheelScrolls(t *testing.T) {
 	// beyond them.
 	run(t, m, selectMsg{Account: 1})
 	m.View()
-	run(t, m, tea.MouseClickMsg{X: 10, Y: top + a.shown + 3, Button: tea.MouseLeft})
+	run(t, m, tea.MouseClickMsg{X: 10, Y: top + a.shown + 1, Button: tea.MouseLeft},
+		tea.MouseClickMsg{X: 10, Y: top + a.shown + 3, Button: tea.MouseLeft})
 	if a.sel != 1 {
-		t.Errorf("a click in the details selects %d", a.sel)
+		t.Errorf("a click on the rule or in the details selects %d", a.sel)
 	}
 }
 
 func TestAccountsRingsTheBellAfterTheFirstListing(t *testing.T) {
-	got := accountsHooks(t)
 	m, _ := accountsModel(t, accountsThree())
+	got := accountsHooks(m)
 	run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
 	if g := got(); len(g) != 0 {
 		t.Errorf("the first listing asked %q", g)
@@ -724,34 +836,35 @@ func TestAccountsStateSaysWhy(t *testing.T) {
 	base := wire.Account{ID: 1, Provider: "claude", Status: "ok", Order: 1, Threshold: 75, Percent: 10, Metered: true}
 	with := func(f func(a *wire.Account)) wire.Account { a := base; f(&a); return a }
 	cases := []struct {
-		name        string
-		acct        wire.Account
-		control     bool
-		long, short string
+		name    string
+		acct    wire.Account
+		control bool
+		words   []string
 	}{
-		{"ok", base, true, "ok", "ok"},
-		{"dead", with(func(a *wire.Account) { a.Status = "reauth"; a.Percent = 99 }), true, "dead: l signs in", "dead"},
-		{"dead to watch", with(func(a *wire.Account) { a.Status = "reauth" }), false, "dead", "dead"},
+		{"ok", base, true, []string{"ok"}},
+		{"dead", with(func(a *wire.Account) { a.Status = "reauth"; a.Percent = 99 }), true, []string{"dead: l signs in", "dead"}},
+		{"dead to watch", with(func(a *wire.Account) { a.Status = "reauth" }), false, []string{"dead"}},
 		{"dead, and out of credit", with(func(a *wire.Account) {
 			a.Status, a.Credential, a.Metered, a.NoCreditUntil = "reauth", "apikey", false, accountsAt(time.Hour)
-		}), true, "dead: l signs in", "dead"},
+		}), true, []string{"dead: l signs in", "dead"}},
 		{"out of credit", with(func(a *wire.Account) {
 			a.Status, a.Credential, a.Metered, a.NoCreditUntil = "limited", "apikey", false, accountsAt(3*time.Hour+20*time.Minute)
-		}), true, "out of credit (3h)", "no credit"},
-		{"limited", with(func(a *wire.Account) { a.Status, a.Percent = "limited", 100 }), true, "limited", "limited"},
-		{"over", with(func(a *wire.Account) { a.Percent = 75 }), true, "over its 75%", "over 75%"},
-		{"under", with(func(a *wire.Account) { a.Percent = 74.9 }), true, "ok", "ok"},
-		{"an API key is never over", with(func(a *wire.Account) { a.Metered, a.Credential, a.Percent = false, "apikey", 100 }), true, "ok", "ok"},
-		{"login ends", with(func(a *wire.Account) { a.LoginUntil = accountsAt(2*24*time.Hour + 5*time.Hour) }), true, "login ends in 2d", "ends 2d"},
-		{"login ends soon", with(func(a *wire.Account) { a.LoginUntil = accountsAt(40 * time.Minute) }), true, "login ends in 40m", "ends 40m"},
-		{"login far off", with(func(a *wire.Account) { a.LoginUntil = accountsAt(4 * 24 * time.Hour) }), true, "ok", "ok"},
-		{"login ended", with(func(a *wire.Account) { a.LoginUntil = accountsAt(-time.Hour) }), true, "login ended", "ended"},
-		{"out of rotation", with(func(a *wire.Account) { a.Order = 0 }), true, "out of rotation", "out"},
+		}), true, []string{"no credit (3h)", "no credit", "0 credit"}},
+		{"limited", with(func(a *wire.Account) { a.Status, a.Percent = "limited", 100 }), true, []string{"limited"}},
+		{"over", with(func(a *wire.Account) { a.Percent = 75 }), true, []string{"over its 75%", "over 75%", "over"}},
+		{"under", with(func(a *wire.Account) { a.Percent = 74.9 }), true, []string{"ok"}},
+		{"an API key is never over", with(func(a *wire.Account) { a.Metered, a.Credential, a.Percent = false, "apikey", 100 }), true, []string{"ok"}},
+		{"login ends", with(func(a *wire.Account) { a.LoginUntil = accountsAt(2*24*time.Hour + 5*time.Hour) }), true,
+			[]string{"login ends in 2d", "ends in 2d", "ends 2d"}},
+		{"login ends soon", with(func(a *wire.Account) { a.LoginUntil = accountsAt(40 * time.Minute) }), true,
+			[]string{"login ends in 40m", "ends in 40m", "ends 40m"}},
+		{"login far off", with(func(a *wire.Account) { a.LoginUntil = accountsAt(4 * 24 * time.Hour) }), true, []string{"ok"}},
+		{"login ended", with(func(a *wire.Account) { a.LoginUntil = accountsAt(-time.Hour) }), true, []string{"login ended", "ended"}},
+		{"out of rotation", with(func(a *wire.Account) { a.Order = 0 }), true, []string{"out of rotation", "out"}},
 	}
 	for _, c := range cases {
-		long, short, _ := accountsViewState(th, c.acct, accountsNow, c.control)
-		if long != c.long || short != c.short {
-			t.Errorf("%s: %q / %q, not %q / %q", c.name, long, short, c.long, c.short)
+		if words, _ := accountsViewState(th, c.acct, accountsNow, c.control); !slices.Equal(words, c.words) {
+			t.Errorf("%s: %q, not %q", c.name, words, c.words)
 		}
 	}
 	// The usage cells say why there is no bar.
@@ -772,5 +885,206 @@ func TestAccountsStateSaysWhy(t *testing.T) {
 		if w := textWidth(cell); w != 23 {
 			t.Errorf("the usage cell %q is %d columns, not 23", cell, w)
 		}
+	}
+}
+
+// Every state is said whole at every width the screen draws at: the state
+// column is 8 to 16 columns wide, and the longest way to say a state that
+// fits is said, never one cut with "…" (m2).
+func TestAccountsStateIsNeverCut(t *testing.T) {
+	at := accountsAt
+	base := wire.Account{Provider: "claude", Status: "ok", Threshold: 75, Percent: 10, Metered: true}
+	type say struct {
+		from int // the narrowest state column it is said in
+		word string
+	}
+	states := []struct {
+		acct wire.Account
+		says []say // widest first
+	}{
+		{wire.Account{Status: "reauth"}, []say{{16, "dead: l signs in"}, {0, "dead"}}},
+		{wire.Account{Status: "limited", Credential: "apikey", NoCreditUntil: at(3 * time.Hour)}, []say{{14, "no credit (3h)"}, {9, "no credit"}, {0, "0 credit"}}},
+		{wire.Account{Status: "limited", Credential: "apikey", NoCreditUntil: at(23 * time.Hour)}, []say{{15, "no credit (23h)"}, {9, "no credit"}, {0, "0 credit"}}},
+		{wire.Account{Status: "limited", Percent: 100}, []say{{0, "limited"}}},
+		{wire.Account{Percent: 80}, []say{{12, "over its 75%"}, {0, "over 75%"}}},
+		{wire.Account{Threshold: 100, Percent: 100}, []say{{13, "over its 100%"}, {9, "over 100%"}, {0, "over"}}},
+		{wire.Account{LoginUntil: at(49 * time.Hour)}, []say{{16, "login ends in 2d"}, {10, "ends in 2d"}, {0, "ends 2d"}}},
+		{wire.Account{LoginUntil: at(23 * time.Hour)}, []say{{17, "login ends in 23h"}, {11, "ends in 23h"}, {0, "ends 23h"}}},
+		{wire.Account{LoginUntil: at(-time.Hour)}, []say{{11, "login ended"}, {0, "ended"}}},
+		{wire.Account{Order: -1}, []say{{15, "out of rotation"}, {0, "out"}}},
+		{wire.Account{}, []say{{0, "ok"}}},
+	}
+	var rows []wire.Account
+	for i, s := range states {
+		a := base
+		a.ID, a.Order, a.Email = i+1, i+1, fmt.Sprintf("s%d@example.com", i+1)
+		if s.acct.Status != "" {
+			a.Status = s.acct.Status
+		}
+		if s.acct.Credential != "" {
+			a.Credential, a.Metered = s.acct.Credential, false
+		}
+		if s.acct.Threshold != 0 {
+			a.Threshold = s.acct.Threshold
+		}
+		if s.acct.Percent != 0 {
+			a.Percent = s.acct.Percent
+		}
+		if s.acct.Order < 0 {
+			a.Order = 0
+		}
+		a.NoCreditUntil, a.LoginUntil = s.acct.NoCreditUntil, s.acct.LoginUntil
+		rows = append(rows, a)
+	}
+	m, _ := accountsModel(t, rows)
+	run(t, m, tea.BatchMsg{m.Init()}, size(124, 40))
+	widths := map[int]bool{}
+	for w := 60; w <= 124; w++ {
+		at := 0
+		state := 0
+		for _, c := range accountsLayout(w) {
+			if c.Key == "state" {
+				state = c.W
+				break
+			}
+			if c.Shown {
+				at += c.W + ladderGap
+			}
+		}
+		widths[state] = true
+		lines := strings.Split(ansi.Strip(accountsOf(m).View(w, 40)), "\n")
+		for i, s := range states {
+			_, rest, _ := accountsCut(lines[i+1], at)
+			cell, _, _ := accountsCut(rest, state)
+			want := ""
+			for _, say := range s.says {
+				if state >= say.from {
+					want = say.word
+					break
+				}
+			}
+			if got := strings.TrimRight(cell, " "); got != want || strings.Contains(cell, "…") {
+				t.Errorf("at %d columns (state %d) %s says %q, not %q", w, state, rows[i].Email, got, want)
+			}
+		}
+	}
+	for _, w := range []int{8, 15, 16} {
+		if !widths[w] {
+			t.Errorf("no width from 60 to 124 gives the state %d columns; the ladder moved, and this test with it", w)
+		}
+	}
+}
+
+// What the accounts could not be read for is said in place of the table
+// until a listing comes, and the next tick asks again.
+func TestAccountsSaysWhyTheAccountsCannotBeRead(t *testing.T) {
+	shellRegistry(t)
+	register(tabsAccounts, newAccounts)
+	var mu sync.Mutex
+	fail := true
+	failing := func(f bool) { mu.Lock(); fail = f; mu.Unlock() }
+	b := &fakeBackend{AccountsFn: func(context.Context, Refresh) (Listing, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if fail {
+			return Listing{}, errors.New("the store is\x1b[2J locked")
+		}
+		return Listing{Accounts: accountsThree()}, nil
+	}}
+	ticks := &fakeTicks{clock: accountsNow}
+	m := shellModel(t, b, ticks)
+	run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
+	const said = "the accounts could not be read: the store is[2J locked\n"
+	if got := accountsPlain(accountsOf(m).View(80, 20)); got != said {
+		t.Errorf("a failed first read says %q", got)
+	}
+	run(t, m, ticks.advance(15*time.Second)...)
+	if n := len(b.named("Accounts")); n < 2 {
+		t.Errorf("the accounts were asked %d times", n)
+	}
+	if got := accountsPlain(accountsOf(m).View(80, 20)); got != said {
+		t.Errorf("a second failed read says %q", got)
+	}
+	failing(false)
+	run(t, m, ticks.advance(15*time.Second)...)
+	if got := accountsPlain(accountsOf(m).View(80, 20)); !strings.Contains(got, "work@example") {
+		t.Errorf("a read that worked shows no table:\n%s", got)
+	}
+	// Once there is a table, a failed read keeps it.
+	failing(true)
+	run(t, m, ticks.advance(15*time.Second)...)
+	if got := accountsPlain(accountsOf(m).View(80, 20)); !strings.Contains(got, "work@example") {
+		t.Errorf("a failed read after a listing dropped the table:\n%s", got)
+	}
+}
+
+// accountsAbout is an overlay that says what it is about.
+type accountsAbout struct {
+	*shellOverlay
+	kind    string
+	account int
+}
+
+func (o accountsAbout) Update(msg tea.Msg) (overlay, tea.Cmd) {
+	o.shellOverlay.Update(msg)
+	return o, nil
+}
+
+func (o accountsAbout) About() (string, int) { return o.kind, o.account }
+
+// A key pressed twice before its overlay arrives opens it once: the shell
+// does not open an overlay about what the one on top is about (m4).
+func TestAccountsTheSameOverlayOpensOnce(t *testing.T) {
+	m, _ := accountsModel(t, accountsThree())
+	run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
+	a := accountsOf(m)
+	a.do.remove = func(_ *env, acct wire.Account) overlay { return accountsAbout{&shellOverlay{}, "remove", acct.ID} }
+	a.do.edit = func(_ *env, acct wire.Account) overlay { return accountsAbout{&shellOverlay{}, "edit", acct.ID} }
+	a.do.typed = func(*accountsTab, wire.Account) overlay { return &shellOverlay{} }
+	for _, c := range []struct {
+		keys []string
+		open int
+	}{
+		{[]string{"d", "d"}, 1},         // the same remove twice
+		{[]string{"e", "e", "e"}, 1},    // the same edit three times
+		{[]string{"d", "down", "d"}, 2}, // removes of two accounts
+		{[]string{"e", "d"}, 2},         // two kinds, one account
+		{[]string{"%", "%"}, 2},         // overlays that do not say
+	} {
+		// Every key reaches the tab before the first overlay is opened, as
+		// keys a terminal sends together do.
+		run(t, m, press(c.keys...)...)
+		if len(m.stack) != c.open {
+			t.Errorf("%q opened %d overlays, not %d", c.keys, len(m.stack), c.open)
+		}
+		for len(m.stack) > 0 {
+			run(t, m, press("esc")...)
+		}
+		run(t, m, selectMsg{Account: 1})
+	}
+}
+
+// A label made from a uuid is cut as it is drawn, after clean: never in the
+// middle of a character a terminal draws as one.
+func TestAccountsALabelFromAUUIDIsCutAsItIsDrawn(t *testing.T) {
+	for _, uuid := range []string{"aaaaaaaaaaa🇺🇸xyz", "0123456789abcdef-0123", "a\x1b[2Jbcdefghijklmnop"} {
+		got := accountsLabel(wire.Account{ID: 1, UUID: uuid})
+		if wc, gr := accountsWidths(got); wc != gr || wc > 12 {
+			t.Errorf("the label of %q is %q, %d columns rune by rune and %d by graphemes", uuid, got, wc, gr)
+		}
+		if !strings.HasSuffix(got, "…") || strings.ContainsRune(got, '\x1b') {
+			t.Errorf("the label of %q is %q", uuid, got)
+		}
+		for _, r := range got {
+			if r >= 0x1f1e6 && r <= 0x1f1ff {
+				t.Errorf("the label of %q keeps half a flag: %q", uuid, got)
+			}
+		}
+	}
+	if got := accountsLabel(wire.Account{ID: 1, UUID: "short"}); got != "short" {
+		t.Errorf("a short uuid is %q", got)
+	}
+	if got := accountsLabel(wire.Account{ID: 7}); got != "account-7" {
+		t.Errorf("an account with no name is %q", got)
 	}
 }

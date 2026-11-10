@@ -38,11 +38,11 @@ func accountsKeys() accountKeys {
 	}
 }
 
-// accountsDo is what each key reaches. The actions live in other tasks'
-// files (accounts_act.go, edit.go, login.go, launch.go), which replace
-// their stubs; a test puts recorders here instead, to see which action a
-// key reached whatever those files hold (F14).
-var accountsDo = struct {
+// accountsDoing is what each key reaches. The actions live in other
+// tasks' files (accounts_act.go, edit.go, login.go, launch.go), which
+// replace their stubs; a test puts recorders in a tab's own instead, to see
+// which action a key reached whatever those files hold (F14).
+type accountsDoing struct {
 	launch    func(a *accountsTab, acct wire.Account) tea.Cmd
 	move      func(a *accountsTab, acct wire.Account, place string) tea.Cmd
 	nudge     func(a *accountsTab, acct wire.Account, delta int) tea.Cmd
@@ -52,16 +52,6 @@ var accountsDo = struct {
 	login     func(e *env, again *wire.Account) asider
 	edit      func(e *env, acct wire.Account) overlay
 	remove    func(e *env, acct wire.Account) overlay
-}{
-	launch:    (*accountsTab).launch,
-	move:      (*accountsTab).move,
-	nudge:     (*accountsTab).nudge,
-	typed:     (*accountsTab).typedThreshold,
-	toggleOut: (*accountsTab).toggleOut,
-	crossed:   (*accountsTab).crossed,
-	login:     newLogin,
-	edit:      newEdit,
-	remove:    newRemove,
 }
 
 // accountsStep is how far +, = and - move a threshold (R36).
@@ -82,9 +72,25 @@ type accountsTab struct {
 	// top is the first row drawn, and shown how many rows the last View
 	// drew, which a click is read against.
 	top, shown int
+	// failed is why the accounts could not be read, until a listing comes.
+	failed error
+	// do is what each key reaches, the other tasks' actions.
+	do accountsDoing
 }
 
-func newAccounts(e *env) tab { return &accountsTab{e: e, keys: accountsKeys()} }
+func newAccounts(e *env) tab {
+	return &accountsTab{e: e, keys: accountsKeys(), do: accountsDoing{
+		launch:    (*accountsTab).launch,
+		move:      (*accountsTab).move,
+		nudge:     (*accountsTab).nudge,
+		typed:     (*accountsTab).typedThreshold,
+		toggleOut: (*accountsTab).toggleOut,
+		crossed:   (*accountsTab).crossed,
+		login:     newLogin,
+		edit:      newEdit,
+		remove:    newRemove,
+	}}
+}
 
 func (a *accountsTab) Title() string             { return "Accounts" }
 func (a *accountsTab) Typing() bool              { return false }
@@ -96,6 +102,9 @@ func (a *accountsTab) Update(msg tea.Msg) (tab, tea.Cmd) {
 	case listingMsg:
 		if msg.Err == nil {
 			return a, a.listed(msg.Listing.Accounts)
+		}
+		if !a.seen {
+			a.failed = msg.Err
 		}
 	case selectMsg:
 		a.pick(msg.Account)
@@ -124,7 +133,7 @@ func (a *accountsTab) Update(msg tea.Msg) (tab, tea.Cmd) {
 func (a *accountsTab) listed(rows []wire.Account) tea.Cmd {
 	before, first := a.rows, !a.seen
 	at := a.index()
-	a.rows, a.seen = slices.Clone(rows), true
+	a.rows, a.seen, a.failed = slices.Clone(rows), true, nil
 	switch {
 	case a.want != 0 && a.has(a.want):
 		a.sel, a.want = a.want, 0
@@ -139,7 +148,7 @@ func (a *accountsTab) listed(rows []wire.Account) tea.Cmd {
 	if first {
 		return nil
 	}
-	return accountsDo.crossed(a, before, a.rows)
+	return a.do.crossed(a, before, a.rows)
 }
 
 // pick selects id now when it is listed, and once it is when it is not yet:
@@ -229,7 +238,7 @@ func (a *accountsTab) key(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, k.Refresh):
 		return func() tea.Msg { return refreshMsg{How: RefreshForce} }
 	case key.Matches(msg, k.Add):
-		return accountsOpen(accountsDo.login(a.e, nil))
+		return accountsOpen(a.do.login(a.e, nil))
 	}
 	acct, ok := a.selected()
 	if !ok {
@@ -237,27 +246,27 @@ func (a *accountsTab) key(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	switch {
 	case key.Matches(msg, k.Run):
-		return accountsDo.launch(a, acct)
+		return a.do.launch(a, acct)
 	case key.Matches(msg, k.MoveUp):
-		return accountsDo.move(a, acct, "up")
+		return a.do.move(a, acct, "up")
 	case key.Matches(msg, k.MoveDown):
-		return accountsDo.move(a, acct, "down")
+		return a.do.move(a, acct, "down")
 	case key.Matches(msg, k.First):
-		return accountsDo.move(a, acct, "first")
+		return a.do.move(a, acct, "first")
 	case key.Matches(msg, k.More):
-		return accountsDo.nudge(a, acct, accountsStep)
+		return a.do.nudge(a, acct, accountsStep)
 	case key.Matches(msg, k.Less):
-		return accountsDo.nudge(a, acct, -accountsStep)
+		return a.do.nudge(a, acct, -accountsStep)
 	case key.Matches(msg, k.Typed):
-		return accountsOpen(accountsDo.typed(a, acct))
+		return accountsOpen(a.do.typed(a, acct))
 	case key.Matches(msg, k.Out):
-		return accountsDo.toggleOut(a, acct)
+		return a.do.toggleOut(a, acct)
 	case key.Matches(msg, k.Relogin):
-		return accountsOpen(accountsDo.login(a.e, &acct))
+		return accountsOpen(a.do.login(a.e, &acct))
 	case key.Matches(msg, k.Edit):
-		return accountsOpen(accountsDo.edit(a.e, acct))
+		return accountsOpen(a.do.edit(a.e, acct))
 	case key.Matches(msg, k.Remove):
-		return accountsOpen(accountsDo.remove(a.e, acct))
+		return accountsOpen(a.do.remove(a.e, acct))
 	}
 	return nil
 }
