@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -16,10 +17,21 @@ import (
 // is never taken as a command by the terminal, and is as wide to every
 // measure that lays the screen out as it is to the terminal that draws it.
 //
-//   - Every C0 control, DEL and every C1 control is dropped, ESC with them,
-//     so what follows an ESC shows as text. A newline, a tab and the other
-//     line breaks become a space. A byte that is not UTF-8 becomes "?": 0x9b
-//     alone is CSI to a terminal that reads 8 bits.
+//   - Every escape sequence goes whole, as a space: a CSI (ESC [, or the
+//     C1 CSI as a character or as the lone byte 0x9b) to its final byte, an
+//     OSC and the other string sequences to their BEL or ST, and any other
+//     ESC with what it takes (textEscapes). A key the sequence's parameters
+//     were glued to then stands as a word, a key a sequence split is read
+//     whole, and a key whose characters a sequence took is read with them
+//     put back (textRedact); each is taken out. What is not: a key with two
+//     sequences inside its "sk-ant-", one taking a character of it and the
+//     other putting characters of its own in, as x ESC s ESC [0m k-ant-….
+//     Whoever can place those can as well print the key without its
+//     prefix, which no redaction by shape stops; redaction is for a key
+//     echoed by accident, and no accident puts sequences inside a prefix.
+//   - Every C0 control, DEL and every C1 control left is dropped. A
+//     newline, a tab and the other line breaks become a space. A byte that
+//     is not UTF-8 becomes "?".
 //   - Format characters that are never drawn are dropped: the bidi controls a
 //     terminal may reorder a row by, the zero width space, the soft hyphen,
 //     the byte order mark. Only the joiners, ZWJ and ZWNJ, stay; they are
@@ -53,10 +65,15 @@ func textClean(s string) (out string, passes, scanned int) {
 	// A control stands between words as a space does, so a key just after
 	// one is taken out before the control goes, and a key that dropping
 	// controls joins up is taken out after.
-	s = wire.Unsecret(s)
+	s, seams, ate := textEscapes(wire.Unsecret(s))
 	var b strings.Builder
 	b.Grow(len(s))
+	kept := seams[:0] // where the spaces that stand for sequences are now
 	for i := 0; i < len(s); {
+		if len(seams) > 0 && seams[0] == i {
+			kept = append(kept, b.Len())
+			seams = seams[1:]
+		}
 		r, n := utf8.DecodeRuneInString(s[i:])
 		i += n
 		switch {
@@ -72,8 +89,214 @@ func textClean(s string) (out string, passes, scanned int) {
 			b.WriteRune(r)
 		}
 	}
-	out, passes, scanned = textSamePasses(textHangul(b.String()))
-	return wire.Unsecret(out), passes, scanned
+	red, looked := textRedact(b.String(), kept, ate)
+	out, passes, scanned = textSamePasses(textHangul(red))
+	return wire.Unsecret(out), passes, scanned + looked
+}
+
+// textKey is the start of an Anthropic credential: wire.Unsecret's shape,
+// which takes "sk-ant-" and at least 16 more of these characters as a key
+// when it stands as a word of its own.
+const textKey = "sk-ant-"
+
+// textKeyByte is a character a key is made of after its prefix.
+func textKeyByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '-'
+}
+
+// textRedact is s, in which each space at seams stands for an escape
+// sequence and ate[n] holds the key characters the n-th one took, with
+// every key taken out that either of two readings finds: the sequences
+// gone, so a key a sequence split shows as neither half, and each
+// sequence's key characters put back, so a key whose "s" or "-a" a
+// sequence took is found too. A key starts where s starts, after a
+// character that is not a letter or digit, after a seam or inside one, as
+// wire.Unsecret has it, so a key a sequence was glued to is taken out too.
+// Its replacement is wire.Unsecret's. The second result is how many bytes
+// of key bodies it read: each once, as a body is read only where a key
+// starts.
+func textRedact(s string, seams []int, ate []string) (string, int) {
+	if len(seams) == 0 {
+		return s, 0
+	}
+	looked := 0
+	seam := make(map[int]string, len(seams))
+	for n, i := range seams {
+		seam[i] = ate[n]
+	}
+	type span struct{ from, to int } // in s
+	var spans []span
+	// Two readings: the sequences gone, and each sequence's key bytes kept.
+	for _, keep := range []bool{false, true} {
+		var j strings.Builder
+		at := make([]int, 0, len(s))
+		var eaten []bool
+		for i := 0; i < len(s); i++ {
+			if k, ok := seam[i]; ok {
+				if keep {
+					for x := 0; x < len(k); x++ {
+						j.WriteByte(k[x])
+						at = append(at, i)
+						eaten = append(eaten, true)
+					}
+				}
+				continue
+			}
+			j.WriteByte(s[i])
+			at = append(at, i)
+			eaten = append(eaten, false)
+		}
+		js := j.String()
+		for k := 0; k < len(js); {
+			off := strings.Index(js[k:], textKey)
+			if off < 0 {
+				break
+			}
+			start := k + off
+			_, after := seam[at[start]-1]
+			word := start == 0 || eaten[start] || after || !(textKeyByte(js[start-1]) && js[start-1] != '_' && js[start-1] != '-')
+			if !word {
+				k = start + 1
+				continue
+			}
+			end := start + len(textKey)
+			for end < len(js) && textKeyByte(js[end]) {
+				end++
+			}
+			looked += end - start
+			if end-start-len(textKey) >= 16 {
+				spans = append(spans, span{at[start], at[end-1] + 1})
+				k = end
+				continue
+			}
+			k = start + 1
+		}
+	}
+	if len(spans) == 0 {
+		return s, looked
+	}
+	sort.Slice(spans, func(x, y int) bool { return spans[x].from < spans[y].from })
+	var b strings.Builder
+	done := 0
+	for _, sp := range spans {
+		if sp.to <= done {
+			continue
+		}
+		if sp.from < done {
+			sp.from = done
+		} else {
+			b.WriteString(s[done:sp.from])
+		}
+		b.WriteString(textKey + "[not repeated]")
+		done = sp.to
+	}
+	b.WriteString(s[done:])
+	return b.String(), looked
+}
+
+// textEscapes is s with each escape sequence in it replaced by a space, and
+// where in what it gives those spaces are, in order. ECMA-48 delimits the
+// sequences:
+//   - ESC [, or CSI (U+009B, or 0x9b alone, which a terminal reading eight
+//     bits takes as CSI): parameter bytes 0x30-0x3F, intermediate bytes
+//     0x20-0x2F, and the final byte 0x40-0x7E;
+//   - ESC ], P, X, ^ or _, or OSC, DCS, SOS, PM or APC as C1 characters:
+//     everything up to BEL or ST (ESC \ or U+009C);
+//   - ESC with intermediate bytes 0x20-0x2F and a final byte 0x30-0x7E.
+//
+// A sequence cut short goes as far as it got. Anything else, a lone ESC
+// among them, is left for clean's control pass to drop. The scan is linear.
+func textEscapes(s string) (string, []int, []string) {
+	const esc = 0x1b
+	var b strings.Builder
+	var seams []int
+	var ate []string
+	done := 0 // how much of s is in b; 0 while nothing was replaced
+	put := func(from, to int) {
+		b.WriteString(s[done:from])
+		seams = append(seams, b.Len())
+		var k []byte
+		for x := from; x < to; x++ {
+			if textKeyByte(s[x]) {
+				k = append(k, s[x])
+			}
+		}
+		ate = append(ate, string(k))
+		b.WriteByte(' ')
+		done = to
+	}
+	// csi is where the CSI whose parameters start at i ends.
+	csi := func(i int) int {
+		for i < len(s) && s[i] >= 0x30 && s[i] <= 0x3f {
+			i++
+		}
+		for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+			i++
+		}
+		if i < len(s) && s[i] >= 0x40 && s[i] <= 0x7e {
+			i++
+		}
+		return i
+	}
+	// str is where the string sequence whose text starts at i ends: past its
+	// BEL or ST, or at the end of s.
+	str := func(i int) int {
+		for i < len(s) {
+			switch {
+			case s[i] == 0x07:
+				return i + 1
+			case s[i] == esc && i+1 < len(s) && s[i+1] == '\\':
+				return i + 2
+			case strings.HasPrefix(s[i:], "\u009c"):
+				return i + 2
+			}
+			i++
+		}
+		return i
+	}
+	for i := 0; i < len(s); {
+		r, n := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case r == esc && i+1 < len(s):
+			switch c := s[i+1]; {
+			case c == '[':
+				end := csi(i + 2)
+				put(i, end)
+				i = end
+			case c == ']' || c == 'P' || c == 'X' || c == '^' || c == '_':
+				end := str(i + 2)
+				put(i, end)
+				i = end
+			case c >= 0x20 && c <= 0x7e:
+				end := i + 1
+				for end < len(s) && s[end] >= 0x20 && s[end] <= 0x2f {
+					end++
+				}
+				if end < len(s) && s[end] >= 0x30 && s[end] <= 0x7e {
+					end++
+				}
+				put(i, end)
+				i = end
+			default:
+				i++
+			}
+		case r == '\u009b' || r == utf8.RuneError && n == 1 && s[i] == 0x9b:
+			end := csi(i + n)
+			put(i, end)
+			i = end
+		case r == '\u009d' || r == '\u0090' || r == '\u0098' || r == '\u009e' || r == '\u009f':
+			end := str(i + n)
+			put(i, end)
+			i = end
+		default:
+			i += n
+		}
+	}
+	if done == 0 {
+		return s, nil, nil
+	}
+	b.WriteString(s[done:])
+	return b.String(), seams, ate
 }
 
 // textSame is s with every character the measures disagree on replaced by

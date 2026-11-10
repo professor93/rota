@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/professor93/rota/wire"
 )
 
 // textMeasures says how wide s is to each thing that measures it: Bubble
@@ -52,14 +53,28 @@ func textNFD(s string) string {
 
 func TestCleanDropsControlsAndKeys(t *testing.T) {
 	for in, want := range map[string]string{
-		"a\x1b[2Jb\nc\x07":                "a[2Jb c",
-		"tab\there":                       "tab here",
-		"crlf\r\nnext":                    "crlf next",
-		"del\x7fc1\u009bx":                "delc1x",
-		"nel\u0085line\u2028par\u2029end": "nel line par end",
+		// A whole escape sequence goes, as a space: a CSI, an SGR, an OSC
+		// to its BEL or ST, an ESC pair, and the C1 forms.
+		"a\x1b[2Jb\nc\x07":     "a b c",
+		"\x1b[1;31mred\x1b[0m": " red ",
+		// DCS (a sixel picture), SOS, PM and APC go to their ST or BEL.
+		"\x1bPq#0;2;0;0;0\x1b\\x":                   " x",
+		"\x1bXsos\x1b\\x":                           " x",
+		"\x1b^pm\x07x":                              " x",
+		"\x1b_apc\x1b\\x":                           " x",
+		"\x1b]0;title\x07x":                         " x",
+		"\x1b]8;;https://x\x1b\\link\x1b]8;;\x1b\\": " link ",
+		"\x1b7saved\x1b(B":                          " saved ",
+		"c1\u009b2Kx":                               "c1 x",
+		"c1\u009d2;t\u009cx":                        "c1 x",
+		"tab\there":                                 "tab here",
+		"crlf\r\nnext":                              "crlf next",
+		"del\x7fc1\u0080x":                          "delc1x",
+		"nel\u0085line\u2028par\u2029end":           "nel line par end",
 		// A byte that is not UTF-8: 0x9b alone is CSI to a terminal that
 		// reads 8 bits.
-		"bad\x9b[2J": "bad?[2J",
+		"bad\x9b2Jx": "bad x",
+		"bad\xff":    "bad?",
 		// Bidi overrides, a zero width space, a soft hyphen and a BOM are
 		// not drawn, and a terminal may reorder or hide by them.
 		"\u202eevil\u202c\u200b\u00ad\ufeff": "evil",
@@ -70,13 +85,38 @@ func TestCleanDropsControlsAndKeys(t *testing.T) {
 		}
 	}
 	key := "sk-ant-api03-" + strings.Repeat("A", 40)
-	for _, in := range []string{"x " + key, "x\n" + key, "x\x1b" + key + "\x07", "refused: " + key + "."} {
+	for _, in := range []string{"x " + key, "x\n" + key, "x\x07" + key + "\x07", "refused: " + key + "."} {
 		got := clean(in)
 		if strings.Contains(got, "AAAAAAAAAAAAAAAA") {
 			t.Errorf("clean(%q) = %q still shows the key", in, got)
 		}
 		if !strings.Contains(got, "sk-ant-[not repeated]") {
 			t.Errorf("clean(%q) = %q does not say a key was taken out", in, got)
+		}
+	}
+	// A key after an escape sequence is glued to its parameters until the
+	// sequence goes, so it is taken out after; and one a sequence splits
+	// shows as neither half.
+	// An ESC takes the letter after it as its sequence, as a terminal does:
+	// here the key's own "s", so no marker is left whole, and no key either.
+	if got := clean("x\x1b" + key); strings.Contains(got, "AAAAAAAAAAAAAAAA") {
+		t.Errorf("clean(x ESC key) = %q still shows the key", got)
+	}
+	for _, in := range []string{
+		"refused " + key[:21] + "\x1b[0m" + key[21:],
+		"x\x1b[1m" + key,
+		"x\x1b[1m" + key[:21] + "\x1b[0m" + key[21:],
+		"refused " + key[:21] + "\x1b]8;;u\x07" + key[21:],
+		"\x1b[2J" + key,
+		"\x1b[1m" + key + "\x1b[0m",
+		"\x1b]8;;https://example.com\x1b\\" + key + "\x1b]8;;\x1b\\",
+		"\x1b]8;;https://example.com\x07" + key + "\x1b]8;;\x07",
+		"\u009b2J" + key,
+		"\x9b2J" + key,
+	} {
+		got := clean(in)
+		if strings.Contains(got, "AAAAAAAAAAAAAAAA") || !strings.Contains(got, "sk-ant-[not repeated]") {
+			t.Errorf("clean(%q) = %q, want the key taken out", in, got)
 		}
 	}
 	// A key split by a character clean drops is whole only once it is
@@ -141,6 +181,7 @@ func TestTextRealWordsComeBack(t *testing.T) {
 		{"64,000 Hangul initials, one grapheme", strings.Repeat("\u1100", 64000), 1},
 		{"a Hangul initial before each of 32,000 syllables", strings.Repeat("\u1100가", 32000), 32000},
 		{"64,000 pictures joined by ZWJ, one grapheme", strings.Repeat("👨\u200d", 64000), 2},
+		{"an SGR, then 32,000 key prefixes glued to a letter", "\x1b[0m" + strings.Repeat("xsk-ant-", 32000), 32000},
 	} {
 		got, passes, looked := textClean(c.s)
 		if passes > 2 {
@@ -167,6 +208,126 @@ func TestTextRealWordsComeBack(t *testing.T) {
 	}
 	if p, h := best(plain), best(hostile); h > 50*p+200*time.Millisecond {
 		t.Errorf("64,000 hostile characters took %v to clean, 64,000 ASCII %v", h, p)
+	}
+}
+
+// textBody is 32 key characters no label holds by chance.
+const textBody = "Q7wZr9Lm2Xv8Kp4Tn6Yh3Jc5Bd1Fg0Hs"
+
+// textLeaks is whether out shows 12 or more of textBody's characters in a
+// row, once its spaces are taken out.
+func textLeaks(out string) bool {
+	flat := strings.ReplaceAll(out, " ", "")
+	for i := 0; i+12 <= len(textBody); i++ {
+		if strings.Contains(flat, textBody[i:i+12]) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestTextKeysInEveryArrangement: a key glued to a sequence, split by one,
+// with a character of its prefix taken by one, or carried inside one, never
+// shows its body.
+func TestTextKeysInEveryArrangement(t *testing.T) {
+	key := "sk-ant-api03-" + textBody
+	b1, b2 := key[:21], key[21:]
+	for _, c := range []struct{ name, in string }{
+		{"whole", "x " + key},
+		{"CSI glued", "\x1b[2J" + key},
+		{"split by CSI", "x " + b1 + "\x1b[0m" + b2},
+		{"split by BEL", "x " + b1 + "\x07" + b2},
+		{"split by ESC", "x " + b1 + "\x1b" + b2},
+		{"ESC takes the s, whole key", "x\x1b" + key},
+		{"ESC takes the s, split by BEL", "x\x1b" + b1 + "\x07" + b2},
+		{"ESC takes the s, split by CSI", "x\x1b" + b1 + "\x1b[0m" + b2},
+		{"ESC inside the prefix", "refused sk-\x1bant-api03-" + textBody},
+		{"ESC - a inside the prefix", "refused sk-ant\x1b-api03-" + textBody},
+		{"CSI final takes the s", "x\x1b[" + b1 + "\x07" + b2},
+		{"CSI intermediate takes - and a", "refused sk-ant\x1b[-api03-" + textBody},
+		{"C1 CSI takes the s, split", "x\u009b" + b1 + "\x07" + b2},
+		{"raw 0x9b takes the s, split", "x\x9b" + b1 + "\x07" + b2},
+		{"ESC in the prefix and CSI in the body", "refused sk-\x1bant-api03-" + textBody[:8] + "\x1b[1;2m" + textBody[8:]},
+		{"OSC nested in a CSI", "x " + b1 + "\x1b[\x1b]8;;u\x07m" + b2},
+		{"a sequence between every character", "x " + strings.Join(strings.Split(key, ""), "\x1b[0m")},
+		{"OSC without its end before the key", "x\x1b]8;;" + key},
+		{"OSC without its end inside the key", "x " + b1 + "\x1b]8;;" + b2},
+		{"a sequence longer than the text", "\x1b[" + strings.Repeat("1;", 200) + key},
+		{"the key as an OSC 8 link's text", "\x1b]8;;https://e.com\x1b\\" + key + "\x1b]8;;\x1b\\"},
+		{"the key in an OSC 8 link's URL", "\x1b]8;;https://e.com/?k=" + key + "\x1b\\link\x1b]8;;\x1b\\"},
+		{"DCS holding the key, ST as C1", "\u0090q" + key + "\u009cafter"},
+		{"ZWSP inside the prefix", "refused sk-​ant-api03-" + textBody},
+		{"VS16 inside the prefix", "refused sk-️ant-api03-" + textBody},
+	} {
+		if out := clean(c.in); textLeaks(out) {
+			t.Errorf("%s: clean(%q) = %q shows the key", c.name, c.in, out)
+		}
+	}
+}
+
+// TestTextKeyResidue pins what clean's comment says it does not stop: two
+// sequences inside "sk-ant-", one taking a character of it and the other
+// putting characters of its own in. Should these ever be taken out, change
+// the comment, then this test.
+func TestTextKeyResidue(t *testing.T) {
+	key := "sk-ant-api03-" + textBody
+	for _, in := range []string{
+		"x \x1b" + key[:1] + "\x1b[0m" + key[1:],
+		"x \x1b[" + key[:2] + "\x1b[1;2m" + key[2:],
+		"x \u009b" + key[:4] + "\x1b]8;;u\x07" + key[4:],
+	} {
+		if out := clean(in); !textLeaks(out) {
+			t.Errorf("clean(%q) = %q: the residue clean's comment names is taken out now", in, out)
+		}
+	}
+}
+
+// TestTextRedactIsWireUnsecret: textRedact's reading of a key is
+// wire.Unsecret's, on labels built at random with a fixed seed from what a
+// key and its edges are made of. Should wire's shape change, this fails.
+func TestTextRedactIsWireUnsecret(t *testing.T) {
+	alpha := []string{"s", "k", "-", "a", "n", "t", "_", "A", "z", "9", " ", ".", "é", "sk-ant-", "sk-ant-api03-", "AAAAAAAA", "/", "\t"}
+	r := rand.New(rand.NewPCG(7, 9))
+	for range 50000 {
+		var b strings.Builder
+		for n := r.IntN(14); n >= 0; n-- {
+			b.WriteString(alpha[r.IntN(len(alpha))])
+		}
+		s := b.String()
+		got, _ := textRedact(" "+s, []int{0}, []string{""})
+		if want := " " + wire.Unsecret(s); got != want {
+			t.Fatalf("textRedact(%q) = %q, wire.Unsecret gives %q", s, got, want)
+		}
+	}
+}
+
+// TestTextEscapesNeverLeaveAControl: labels built at random with a fixed
+// seed from escape sequences, their pieces, C1 controls, bytes that are not
+// UTF-8 and the characters that make measures disagree come out with no
+// control, clean already, and as wide to the renderer as by graphemes.
+func TestTextEscapesNeverLeaveAControl(t *testing.T) {
+	alpha := []string{"\x1b", "[", "]", "P", "X", "^", "_", "\\", "\x07", "\u009b", "\x9b", "\u009d", "\u009c", "\x9c", "\u0090",
+		"0", "1", ";", "?", " ", "-", "m", "s", "k", "a", "n", "t", "A", "sk-ant-", "api03-", "AAAAAAAA", "AAAAAAAAAAAAAAAA",
+		"é", "日", "‍", "️", "\xff", "\x00", "\n", "(", "B", "7", "ൎ", "ᄀ", "ᅡ", "👨"}
+	r := rand.New(rand.NewPCG(3, 4))
+	for range 50000 {
+		var b strings.Builder
+		for n := r.IntN(16); n >= 0; n-- {
+			b.WriteString(alpha[r.IntN(len(alpha))])
+		}
+		in := b.String()
+		out := clean(in)
+		for _, c := range out {
+			if c < 0x20 || c >= 0x7f && c < 0xa0 {
+				t.Fatalf("clean(%q) = %q keeps control %U", in, out, c)
+			}
+		}
+		if again := clean(out); again != out {
+			t.Fatalf("clean(%q) = %q, and clean of that is %q", in, out, again)
+		}
+		if wc, g := textMeasures(out); wc != g {
+			t.Fatalf("clean(%q) = %q is %d wide to the renderer and %d by graphemes", in, out, wc, g)
+		}
 	}
 }
 
@@ -514,7 +675,9 @@ func TestTextRandomLabelsMeasureOneWay(t *testing.T) {
 	joins := func(s string) int {
 		n := 0
 		for _, r := range s {
-			if r == 0x0d4e || r == 0x111c2 || r == 0x11a84 || r == 0x0600 {
+			// A joining letter, and an ESC, which takes what follows it as
+			// the rest of its sequence.
+			if r == 0x0d4e || r == 0x111c2 || r == 0x11a84 || r == 0x0600 || r == 0x1b {
 				n++
 			}
 		}
