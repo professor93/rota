@@ -1,13 +1,18 @@
-// The kit every terminal-page test runs on. It loads page.js and the files
+// The kit every terminal-page test runs on. It runs page.js and the files
 // terminal.html names under /assets/term/, in the order the page names
-// them, into one scope, the way a browser gives classic scripts one scope
-// between them; and around that scope it puts dom.js, a fake server, a fake
-// clock and, unless asked otherwise, a fake emulator.
+// them, as classic scripts sharing one scope, the way a browser runs them;
+// and around that scope it puts dom.js, a fake server, a fake clock and,
+// unless asked otherwise, a fake emulator. It loads one page per process.
 //
 //   const kit = require(process.env.T + '/term/kit.js');
 //   const page = await kit.load({ terminals: [], role: 'control', signedIn: true });
 //   page.tp.termSelect('t-1'); page.tp.termOffset; page.tp.termNow = () => 0;
+//
+// A route answers before the defaults, newest first: page.route(method,
+// prefix, (path, body) => ({status, doc})). A route that answers undefined
+// lets the next one, and then the defaults, answer.
 const fs = require('fs');
+const vm = require('vm');
 const T = process.env.T;
 
 const CLOCK = 1758000000000;
@@ -26,10 +31,14 @@ function termScripts() {
   return out;
 }
 
+let loaded = false;
+
 async function load(opts = {}) {
+  // The page's declarations are this process's globals now, and a second
+  // copy of them would be a redeclaration: one page per test file.
+  if (loaded) throw new Error('kit.load runs once in a process');
+  loaded = true;
   const o = Object.assign({ terminals: [], role: 'control', signedIn: true, coarse: false, hash: '', realView: false }, opts);
-  // A fresh DOM for every page: dom.js sets its globals when it is required.
-  delete require.cache[require.resolve(T + '/dom.js')];
   const { nodes, sockets } = require(T + '/dom.js');
   const schema = JSON.parse(fs.readFileSync(T + '/schema-terminal.json', 'utf8'));
   const accountsDoc = JSON.parse(fs.readFileSync(T + '/accounts.json', 'utf8'));
@@ -111,22 +120,27 @@ async function load(opts = {}) {
     return answer(got.status, got.doc);
   };
 
-  // The page: page.js and its own files, as one scope, with an accessor that
-  // reads and assigns its names through direct eval.
+  // The page: page.js and then each of its own files, as classic scripts of
+  // their own in this one context. Scripts in a context share their
+  // top-level let, const and function declarations exactly as a browser's
+  // do, and each runs in its own mode, so a file without "use strict" or a
+  // call before a later file has run fails here as it would there.
   const files = ['page.js', ...termScripts().map(f => 'assets/term/' + f)];
-  const src = files.map(f => fs.readFileSync(T + '/' + f, 'utf8')).join('\n');
-  const scope = new Function(src + '\n;return (__k, __set, __v) => __set ? eval(__k + " = __v") : eval(__k);')();
+  for (const f of files) vm.runInThisContext(fs.readFileSync(T + '/' + f, 'utf8'), { filename: f });
 
+  // tp reads and assigns the page's names through scripts of the same
+  // context, which see the same declarations the page's own files do.
   const ident = /^[A-Za-z_$][\w$]*$/;
   page.tp = new Proxy({}, {
     get(_, k) {
       if (typeof k !== 'string' || k === 'then' || !ident.test(k)) return undefined;
-      return scope(k, false);
+      return vm.runInThisContext(k);
     },
     set(_, k, v) {
       if (typeof k !== 'string' || !ident.test(k)) throw new Error('not a name: ' + String(k));
-      scope(k, false); // throws for a name the page does not have, rather than making a global
-      scope(k, true, v);
+      vm.runInThisContext(k); // throws for a name the page does not have, rather than making a global
+      globalThis.__kitValue = v;
+      try { vm.runInThisContext(k + ' = globalThis.__kitValue'); } finally { delete globalThis.__kitValue; }
       return true;
     },
   });
@@ -148,7 +162,14 @@ async function load(opts = {}) {
         onData(cb) { this.data = cb; },
         resize(c, r) { this.sizes.push([c, r]); },
         fit() { this.fits++; return page.fitSize; },
-        propose() { return page.proposeSize; },
+        // proposeSize is what fits at 13 px; at another font, proportionally
+        // more or fewer cells fit, as a real measurement would say.
+        propose() {
+          const p = page.proposeSize;
+          if (!p) return null;
+          const f = this.fonts.length ? this.fonts[this.fonts.length - 1] : 13;
+          return { cols: Math.floor(p.cols * 13 / f), rows: Math.floor(p.rows * 13 / f) };
+        },
         font(px) { this.fonts.push(px); },
         appCursor() { return this.cursorKeys; },
         dispose() { this.disposed = true; },
