@@ -37,14 +37,16 @@ Usage:
   rota "<prompt>"               ask, with no verb at all — the usual thing
   rota <id> "<prompt>"          ask that account instead
 
-  rota login [provider]         start a new account: prints a login id and a URL
+  rota login [provider]         start a new account: prints a URL and, on a
+                                terminal, waits for the code from it
   rota login --long             ...ask instead for a token that lasts a year
   rota login --key [--label name]   an account on a Claude Console API key,
                                 read hidden from the terminal or one line of
                                 stdin; it starts out of the rotation
   rota login <account-id> --token   a token from ` + "`claude setup-token`" + `,
                                 read the same way, as that account's long one
-  rota login <login-id> [code]  finish that login (no code for device flows)
+  rota login <login-id> [code]  finish that login elsewhere: off a terminal, or
+                                with --json (no code for device flows)
   rota login <account-id>       sign that account in again: a login only its
                                 approval finishes, or its own CLI's if that
                                 keeps its credentials
@@ -443,6 +445,9 @@ const loginUsage = `usage: rota login [provider]             start a new account
        rota login <account-id>           sign it in again; only that account's approval finishes it
        rota login <account-id> [options] one whose CLI keeps its own credentials, through that CLI
 
+On a terminal, a login started here waits for what finishes it; off one, and with --json,
+rota login <login-id> [code] finishes it.
+
 `
 
 // takeLong pulls --long out of the arguments, wherever it was written.
@@ -476,7 +481,7 @@ func (c *cli) begin(s *store.Store, provider string, long bool) error {
 		fmt.Fprintf(c.out, "Open this and approve as the %s account the token is for — it must already be in `rota list`:\n\n  %s\n\n", l.Provider, l.URL)
 		fmt.Fprintf(c.out, "Then: rota login %s <code>\n"+
 			"  — stores a token that lasts a year, so a window or a daemon outlives the 8-hour one.\n", l.ID)
-		return nil
+		return c.afterBegin(s, l)
 	}
 	fmt.Fprintf(c.out, "Open this and approve access as your %s account:\n\n  %s\n\n", l.Provider, l.URL)
 	c.thenFinish(l)
@@ -485,7 +490,7 @@ func (c *cli) begin(s *store.Store, provider string, long bool) error {
 			"  — registers the account and prints one command that signs %s in itself,\n"+
 			"    keeping its own credentials in a directory rota reserves for it.\n", l.ID, l.Provider)
 	}
-	return nil
+	return c.afterBegin(s, l)
 }
 
 // beginFor starts a login that only this account's approval can finish. Which
@@ -506,7 +511,7 @@ func (c *cli) beginFor(s *store.Store, a *rota.Account) error {
 	fmt.Fprintf(c.out, "Open this and approve access as %s, which is %s account %d; no other account's approval will finish it:\n\n  %s\n\n",
 		who, oneLine(a.Provider), a.ID, l.URL)
 	c.thenFinish(l)
-	return nil
+	return c.afterBegin(s, l)
 }
 
 // thenFinish says how a login of this kind is finished.
@@ -524,25 +529,43 @@ func (c *cli) thenFinish(l *rota.Login) {
 }
 
 func (c *cli) finish(s *store.Store, id, code string) error {
+	waiting, err := c.finishOnce(s, id, code)
+	if err != nil || !waiting {
+		return err
+	}
+	if c.json {
+		return c.emit(map[string]any{"id": id, "status": "pending"})
+	}
+	fmt.Fprintln(c.out, "Not approved yet. Approve in the browser, then run this again.")
+	return nil
+}
+
+// finishOnce asks once whether the login with this id is finished, and says
+// what became of the account when it is. waiting reports that the provider
+// has not been approved yet, and nothing is printed for that: what to do
+// next depends on who asked, a person running the command again or a wait
+// asking again by itself.
+func (c *cli) finishOnce(s *store.Store, id, code string) (waiting bool, err error) {
 	// What kind of login this is was settled when it began; the person
 	// finishing it says nothing but the code, so the answer they get has to
 	// be looked up rather than asked for.
 	pending, err := s.PendingLogin(id)
 	if err != nil {
-		return err
+		return false, err
 	}
 	long := pending != nil && pending.Long
 	a, added, err := s.FinishLogin(context.Background(), id, code)
 	if errors.Is(err, rota.ErrAuthPending) {
-		if c.json {
-			return c.emit(map[string]any{"id": id, "status": "pending"})
-		}
-		fmt.Fprintln(c.out, "Not approved yet. Approve in the browser, then run this again.")
-		return nil
+		return true, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
+	return false, c.finished(s, a, added, long)
+}
+
+// finished says what a finished login did to its account.
+func (c *cli) finished(s *store.Store, a *rota.Account, added, long bool) error {
 	if long {
 		if c.json {
 			return c.emit(map[string]any{"id": a.ID, "provider": a.Provider, "email": a.Email,

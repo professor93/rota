@@ -5,6 +5,7 @@ import (
 	"context"
 	"github.com/professor93/rota/internal/claudecode"
 	"github.com/professor93/rota/internal/fakecli"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -77,6 +78,10 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	os.Setenv("CLAUDE_CONFIG_DIR", dir)
+	// `go test` run from a terminal may hand this binary that terminal as
+	// its standard input, and a login would then wait there for a code. A
+	// test that wants the wait says so (typing).
+	loginTerminal = func(io.Reader) bool { return false }
 	code := m.Run()
 	os.RemoveAll(dir)
 	os.Exit(code)
