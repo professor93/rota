@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -54,7 +55,8 @@ import (
 //
 // A copy taken from a CLI that is running holds the records it had finished.
 // A target whose file was written to after it was read, by a CLI running on
-// it, is not appended to.
+// it, is not appended to. Two resumes take turns, across rota's processes too,
+// so neither sees the other's copy half made.
 func CopyForResume(st *store.Store, target *rota.Account, id string) error {
 	flavor := rota.Flavor(target.Provider)
 	if !readable(target.Provider) || id == "" {
@@ -64,6 +66,15 @@ func CopyForResume(st *store.Store, target *rota.Account, id string) error {
 	if targetHome == "" {
 		return nil
 	}
+	// One resume at a time, in this process and across rota's processes: a
+	// second waits for the first's copy to be whole before it looks.
+	handoffGuard.Lock()
+	defer handoffGuard.Unlock()
+	lock, err := lockFile(filepath.Join(filepath.Dir(st.Backend().HomeRoot()), handoffLock))
+	if err != nil {
+		return fmt.Errorf("resuming %s: %w", id, err)
+	}
+	defer lock.Close() // releases the lock
 	dst, held := locate(flavor, targetHome, id)
 	var mine handoffStamp
 	if held {
@@ -115,40 +126,51 @@ func CopyForResume(st *store.Store, target *rota.Account, id string) error {
 	})
 
 	if !held {
-		if len(copies) == 0 {
-			return nil
-		}
-		c := copies[0]
-		dst = filepath.Join(targetHome, c.rel)
-		if _, err := os.Lstat(dst); !errors.Is(err, fs.ErrNotExist) {
-			return nil // something the listing did not see is there: the CLI's to judge
-		}
-		if err := handoffCreate(c.path, dst); err != nil {
-			return fmt.Errorf("resuming %s from %s: %w", id, c.from, err)
+		// The newest copy that has anything finished to give: one whose CLI
+		// has not finished its first record yet gives nothing.
+		for _, c := range copies {
+			dst = filepath.Join(targetHome, c.rel)
+			if _, err := os.Lstat(dst); !errors.Is(err, fs.ErrNotExist) {
+				return nil // something the listing did not see is there: the CLI's to judge
+			}
+			wrote, err := handoffCreate(c.path, dst)
+			if err != nil {
+				return fmt.Errorf("resuming %s from %s: %w", id, c.from, err)
+			}
+			if wrote {
+				return nil
+			}
 		}
 		return nil
 	}
 
 	// A target cut short part-way through a record was being extended when
 	// the copy stopped; it is newer only for that, and is finished from
-	// whichever copy extends it.
+	// whichever copy extends it, though no file but a log is brought over
+	// one of its own then.
 	// (A home whose projects is still a stale link into the person's own
 	// folder is appended to there: that folder only gains turns.)
 	cut := handoffCutShort(dst)
+	info, err := os.Stat(dst)
+	if err != nil {
+		return nil
+	}
 	var fork *rota.Account
 	for _, c := range copies {
 		newer := c.stamp.newer(mine)
-		if !newer && !cut {
+		if !newer && !cut && !info.IsDir() {
 			break // and neither is any after it
 		}
-		did, apart, err := handoffExtend(c.path, dst)
+		// A folder is looked at against older copies too, for the files
+		// a copy cut short left out.
+		done, apart, err := handoffExtend(c.path, dst, newer || cut, newer)
 		if err != nil {
 			return fmt.Errorf("resuming %s from %s: %w", id, c.from, err)
 		}
 		if apart && newer && fork == nil {
 			fork = c.from
 		}
-		if did {
+		if done {
 			break
 		}
 	}
@@ -158,6 +180,13 @@ func CopyForResume(st *store.Store, target *rota.Account, id string) error {
 	}
 	return nil
 }
+
+// handoffLock is the file in the store's folder that rota's processes take
+// while one of them brings a conversation to an account; handoffGuard does
+// the same inside one process, where the file lock does not on every system.
+const handoffLock = "handoff.lock"
+
+var handoffGuard sync.Mutex
 
 // handoffStamp is how new a copy of a conversation is: when it was last
 // written, and how much it holds.
@@ -308,7 +337,8 @@ const (
 // handoffTail reads the log at newer against the target's log at older, once
 // each, and says how the two stand. When newer is ahead, tail is what it holds
 // past older's end, up to its last complete line, and was is older as it
-// stood when it was read.
+// stood when it was read. The tail is held whole, so that it is appended in
+// one write, which a CLI appending to the same file cannot split.
 func handoffTail(newer, older string) (tail []byte, was fs.FileInfo, how int) {
 	o, err := os.Open(older)
 	if err != nil {
@@ -356,21 +386,28 @@ func handoffTail(newer, older string) (tail []byte, was fs.FileInfo, how int) {
 }
 
 // handoffExtend gives the target's copy at older what the newer copy holds
-// past it. did says something was added; apart says the two have forked, and
-// nothing was.
-func handoffExtend(newer, older string) (did, apart bool, err error) {
+// past it. grow lets it add to the target's logs at all; replace lets a file
+// that is not a log be put over the target's own, which only a copy newer
+// than the target's may do. done says the target has been dealt with, so no
+// other copy need be looked at: it was extended, it was found being written
+// to and left alone, or its folder now has what a copy cut short left out.
+// apart says the two have forked, and nothing was written.
+func handoffExtend(newer, older string, grow, replace bool) (done, apart bool, err error) {
 	info, err := os.Stat(older)
 	if err != nil {
 		return false, false, nil
 	}
 	if !info.IsDir() {
+		if !grow {
+			return false, false, nil
+		}
 		tail, was, how := handoffTail(newer, older)
 		switch how {
 		case handoffApart:
 			return false, true, nil
 		case handoffAhead:
-			did, err := handoffAppend(older, was, tail)
-			return did, false, err
+			_, err := handoffAppend(older, was, tail)
+			return true, false, err
 		}
 		return false, false, nil
 	}
@@ -380,12 +417,12 @@ func handoffExtend(newer, older string) (did, apart bool, err error) {
 	if !ok || !ok2 {
 		return false, false, nil
 	}
-	type grow struct {
+	type growth struct {
 		rel  string
 		tail []byte
 		was  fs.FileInfo
 	}
-	var grows []grow
+	var grows []growth
 	ahead, behind := false, false
 	for _, rel := range slices.Sorted(maps.Keys(ours)) {
 		if !handoffLog(rel) {
@@ -405,7 +442,7 @@ func handoffExtend(newer, older string) (did, apart bool, err error) {
 			behind = true
 		case handoffAhead:
 			ahead = true
-			grows = append(grows, grow{rel, tail, was})
+			grows = append(grows, growth{rel, tail, was})
 		}
 	}
 	for rel := range theirs {
@@ -416,24 +453,45 @@ func handoffExtend(newer, older string) (did, apart bool, err error) {
 	switch {
 	case ahead && behind:
 		return false, true, nil
+	case behind:
+		return false, false, nil
 	case !ahead:
+		// The logs are the same: a copy cut short may have left out a
+		// file beside them, which is brought now, over nothing.
+		wrote, err := handoffBring(newer, older, theirs, ours, false)
+		return wrote, false, err
+	case !grow:
 		return false, false, nil
 	}
 	for _, g := range grows {
-		if _, err := handoffAppend(filepath.Join(older, g.rel), g.was, g.tail); err != nil {
-			return false, false, err
+		appended, err := handoffAppend(filepath.Join(older, g.rel), g.was, g.tail)
+		if err != nil {
+			return true, false, err
+		}
+		if !appended {
+			return true, false, nil // its CLI is writing to it: nothing more is brought
 		}
 	}
+	_, err = handoffBring(newer, older, theirs, ours, replace)
+	return true, false, err
+}
+
+// handoffBring puts into the target's folder at older the files of the newer
+// copy that are not logs the target has: a log only the newer copy has, and
+// every other file, over the target's own only when replace is set.
+func handoffBring(newer, older string, theirs, ours map[string]fs.FileInfo, replace bool) (wrote bool, err error) {
 	for _, rel := range slices.Sorted(maps.Keys(theirs)) {
 		_, there := ours[rel]
-		if there && handoffLog(rel) {
-			continue // appended to above
+		if there && (handoffLog(rel) || !replace) {
+			continue
 		}
-		if err := handoffPut(filepath.Join(newer, rel), filepath.Join(older, rel), there); err != nil {
-			return false, false, err
+		put, err := handoffPut(filepath.Join(newer, rel), filepath.Join(older, rel), there)
+		if err != nil {
+			return wrote, err
 		}
+		wrote = wrote || put
 	}
-	return true, false, nil
+	return wrote, nil
 }
 
 // handoffCopy writes copied bytes. Tests stand in for it to fail half-way.
@@ -467,25 +525,20 @@ func handoffAppend(path string, was fs.FileInfo, tail []byte) (bool, error) {
 }
 
 // handoffCreate copies a conversation the target does not hold to dst, a file
-// or a folder of them.
-func handoffCreate(src, dst string) error {
+// or a folder of them, and says whether anything was written.
+func handoffCreate(src, dst string) (bool, error) {
 	info, err := os.Stat(src)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !info.IsDir() {
 		return handoffPut(src, dst, false)
 	}
 	files, ok := handoffFiles(src)
 	if !ok {
-		return fmt.Errorf("%s could not be read through", src)
+		return false, fmt.Errorf("%s could not be read through", src)
 	}
-	for _, rel := range slices.Sorted(maps.Keys(files)) {
-		if err := handoffPut(filepath.Join(src, rel), filepath.Join(dst, rel), false); err != nil {
-			return err
-		}
-	}
-	return nil
+	return handoffBring(src, dst, files, nil, false)
 }
 
 // handoffPut writes src's bytes to dst, a log's to its last complete line,
@@ -495,73 +548,76 @@ func handoffCreate(src, dst string) error {
 // that does not replace one either. Only over, for a folder's file that is
 // not a log, replaces what is there. Everything lands 0600/0700: these are
 // homes that hold credentials, and the transcript inherits the same caution.
-func handoffPut(src, dst string, over bool) error {
+// wrote says dst now holds src's bytes because of this call.
+func handoffPut(src, dst string, over bool) (wrote bool, err error) {
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer in.Close()
 	info, err := in.Stat()
 	if err != nil {
-		return err
+		return false, err
 	}
 	size := info.Size()
 	if handoffLog(dst) {
 		if size, err = handoffComplete(in, size); err != nil || size == 0 {
-			return err // nothing finished to copy yet
+			return false, err // nothing finished to copy yet
 		}
 	}
 	dir := filepath.Dir(dst)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
+		return false, err
 	}
 	handoffSweep(dir)
 	// A name no CLI takes for a conversation: not a .jsonl, not a rollout.
 	tmp, err := os.CreateTemp(dir, ".rota-*.tmp")
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer os.Remove(tmp.Name()) // once linked, only a second name
 	defer tmp.Close()
 	n, err := handoffCopy(tmp, io.LimitReader(in, size))
 	if err != nil {
-		return err
+		return false, err
 	}
 	if n != size {
-		return fmt.Errorf("%s shrank while it was copied", src)
+		return false, fmt.Errorf("%s shrank while it was copied", src)
 	}
 	if err := tmp.Sync(); err != nil {
-		return err
+		return false, err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return false, err
 	}
 	if over {
-		return os.Rename(tmp.Name(), dst)
+		return true, os.Rename(tmp.Name(), dst)
 	}
 	err = handoffLink(tmp.Name(), dst)
 	switch {
-	case err == nil, errors.Is(err, fs.ErrExist):
-		return nil
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrExist):
+		return false, nil
 	case !handoffNoLinks(err):
-		return err
+		return false, err
 	}
 	// A filesystem without hard links: dst is made by a create that fails
 	// on a name already there, so it never replaces one either, and written
-	// directly. A write that fails takes it away again; a crash leaves it a
-	// start of src cut part-way through a record, which the next resume
-	// finishes.
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// directly, at its end, so a writer it races is added to, never written
+	// over. A write that fails takes it away again; a crash leaves it a start
+	// of src cut part-way through a record, which the next resume finishes.
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL|os.O_APPEND, 0o600)
 	if errors.Is(err, fs.ErrExist) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	if _, err := in.Seek(0, io.SeekStart); err != nil {
 		out.Close()
 		os.Remove(dst)
-		return err
+		return false, err
 	}
 	if n, err := handoffCopy(out, io.LimitReader(in, size)); err != nil || n != size {
 		out.Close()
@@ -569,14 +625,14 @@ func handoffPut(src, dst string, over bool) error {
 		if err == nil {
 			err = fmt.Errorf("%s shrank while it was copied", src)
 		}
-		return err
+		return false, err
 	}
 	if err := out.Sync(); err != nil {
 		out.Close()
 		os.Remove(dst)
-		return err
+		return false, err
 	}
-	return out.Close()
+	return true, out.Close()
 }
 
 // handoffLink links a copy into place. Tests stand in for it to be on a

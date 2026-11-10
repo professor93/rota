@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -969,40 +970,71 @@ func TestAForkedGrokCopyIsLeftAsItWas(t *testing.T) {
 }
 
 // A grok log written to by the target's CLI after it was read is left as the
-// CLI left it, while the rest of the folder is extended.
+// CLI left it, whether it grew, or only its time moved, or it grew and its
+// time was put back. Nothing more is brought then: the log appended to before
+// it keeps its turns, and the summary stays the target's own.
 func TestATargetWrittenSinceItWasReadIsLeftAlone(t *testing.T) {
-	id := "01a00000-0000-7000-8000-0000000009fc"
-	s, target, sibling := handoffGrokPair(t, id)
-	now := time.Now()
-	handoffGrokWrite(t, target, now.Add(-time.Hour), map[string][]string{
-		"summary.json":       handoffSummary(id, "2026-08-28T14:30:48.935066Z"),
-		"chat_history.jsonl": {`{"role":"user"}`},
-		"events.jsonl":       {`{"event":"one"}`},
-	})
-	handoffGrokWrite(t, sibling, now, map[string][]string{
-		"summary.json":       handoffSummary(id, "2026-08-29T09:12:03.120500Z"),
-		"chat_history.jsonl": {`{"role":"user"}`, `{"role":"assistant"}`},
-		"events.jsonl":       {`{"event":"one"}`, `{"event":"two"}`},
-	})
-	events := filepath.Join(target, "events.jsonl")
-	once := false
-	handoffCopy = func(w io.Writer, r io.Reader) (int64, error) {
-		if !once {
-			once = true
-			handoffAdd(t, events, `{"event":"the CLI's"}`)
-		}
-		return io.Copy(w, r)
-	}
-	t.Cleanup(func() { handoffCopy = io.Copy })
+	one, cli := `{"event":"one"}`, `{"event":"the CLI's"}`
+	for name, c := range map[string]struct {
+		write func(t *testing.T, events string)
+		left  string
+	}{
+		"a line added": {
+			write: func(t *testing.T, events string) { handoffAdd(t, events, cli) },
+			left:  one + "\n" + cli + "\n",
+		},
+		"only its time moved": {
+			write: func(t *testing.T, events string) { handoffAt(t, events, time.Now().Add(time.Hour)) },
+			left:  one + "\n",
+		},
+		"grown, its time put back": {
+			write: func(t *testing.T, events string) {
+				at := handoffStat(t, events).ModTime()
+				handoffAdd(t, events, cli)
+				if err := os.Chtimes(events, at, at); err != nil {
+					t.Fatal(err)
+				}
+			},
+			left: one + "\n" + cli + "\n",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			id := "01a00000-0000-7000-8000-0000000009fc"
+			s, target, sibling := handoffGrokPair(t, id)
+			now := time.Now()
+			handoffGrokWrite(t, target, now.Add(-time.Hour), map[string][]string{
+				"summary.json":       handoffSummary(id, "2026-08-28T14:30:48.935066Z"),
+				"chat_history.jsonl": {`{"role":"user"}`},
+				"events.jsonl":       {one},
+			})
+			handoffGrokWrite(t, sibling, now, map[string][]string{
+				"summary.json":       handoffSummary(id, "2026-08-29T09:12:03.120500Z"),
+				"chat_history.jsonl": {`{"role":"user"}`, `{"role":"assistant"}`},
+				"events.jsonl":       {one, `{"event":"two"}`},
+			})
+			events, summary := filepath.Join(target, "events.jsonl"), filepath.Join(target, "summary.json")
+			before, body := handoffStat(t, summary), handoffRead(t, summary)
+			once := false
+			handoffCopy = func(w io.Writer, r io.Reader) (int64, error) {
+				if !once {
+					once = true
+					c.write(t, events)
+				}
+				return io.Copy(w, r)
+			}
+			t.Cleanup(func() { handoffCopy = io.Copy })
 
-	if err := CopyForResume(s, s.Find(9), id); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := handoffRead(t, filepath.Join(target, "chat_history.jsonl")), handoffRead(t, filepath.Join(sibling, "chat_history.jsonl")); got != want {
-		t.Fatalf("the history must be extended:\n%s", got)
-	}
-	if got, want := handoffRead(t, events), `{"event":"one"}`+"\n"+`{"event":"the CLI's"}`+"\n"; got != want {
-		t.Fatalf("the log the CLI wrote to must be left as it left it:\n%s", got)
+			if err := CopyForResume(s, s.Find(9), id); err != nil {
+				t.Fatal(err)
+			}
+			if got, want := handoffRead(t, filepath.Join(target, "chat_history.jsonl")), handoffRead(t, filepath.Join(sibling, "chat_history.jsonl")); got != want {
+				t.Fatalf("the history appended to first keeps its turns:\n%s", got)
+			}
+			if got := handoffRead(t, events); got != c.left {
+				t.Fatalf("the log the CLI wrote to must be left as it left it:\n%s", got)
+			}
+			handoffUntouched(t, summary, before, body)
+		})
 	}
 }
 
@@ -1119,5 +1151,293 @@ func TestALongTranscriptIsComparedToItsEnd(t *testing.T) {
 	write(newer, long+more)
 	if _, _, how := handoffTail(newer, older); how != handoffBehind {
 		t.Fatalf("an older copy that runs on past the newer one's end is ahead of it, got %d", how)
+	}
+}
+
+// A grok folder a full disk left without its summary, after its log was
+// linked into place, gets it on the next resume, though its log is already
+// the same as the copy's and newer.
+func TestAGrokFolderLeftUnfinishedIsFinishedNextTime(t *testing.T) {
+	id := "01a00000-0000-7000-8000-0000000009f8"
+	s, target, sibling := handoffGrokPair(t, id)
+	handoffGrokWrite(t, sibling, time.Now().Add(-time.Hour), map[string][]string{
+		"summary.json":       handoffSummary(id, "2026-08-29T09:12:03.120500Z"),
+		"chat_history.jsonl": {`{"role":"user"}`, `{"role":"assistant"}`},
+	})
+	calls := 0
+	handoffCopy = func(w io.Writer, r io.Reader) (int64, error) {
+		if calls++; calls == 2 {
+			return 0, &os.PathError{Op: "write", Path: "summary.json", Err: syscall.ENOSPC}
+		}
+		return io.Copy(w, r)
+	}
+	t.Cleanup(func() { handoffCopy = io.Copy })
+
+	if err := CopyForResume(s, s.Find(9), id); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("a full disk is an error, got %v", err)
+	}
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "chat_history.jsonl" {
+		t.Fatalf("the folder holds %v, want the log alone", entries)
+	}
+	history := handoffStat(t, filepath.Join(target, "chat_history.jsonl"))
+
+	handoffCopy = io.Copy
+	if err := CopyForResume(s, s.Find(9), id); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := handoffRead(t, filepath.Join(target, "summary.json")), handoffRead(t, filepath.Join(sibling, "summary.json")); got != want {
+		t.Fatalf("the summary must be brought now:\n%s", got)
+	}
+	handoffUntouched(t, filepath.Join(target, "chat_history.jsonl"), history, handoffRead(t, filepath.Join(sibling, "chat_history.jsonl")))
+}
+
+// An older grok copy that extends the target's folder leaves it alone, as an
+// older transcript does: the target's folder is looked at against older
+// copies only for files a copy cut short left out.
+func TestAnOlderGrokCopyLeavesTheTargetsAlone(t *testing.T) {
+	id := "01a00000-0000-7000-8000-0000000009f3"
+	s, target, sibling := handoffGrokPair(t, id)
+	now := time.Now()
+	handoffGrokWrite(t, target, now, map[string][]string{
+		"summary.json":       handoffSummary(id, "2026-08-29T12:00:00.000000Z"),
+		"chat_history.jsonl": {`{"role":"user"}`},
+	})
+	handoffGrokWrite(t, sibling, now.Add(-time.Hour), map[string][]string{
+		"summary.json":       handoffSummary(id, "2026-08-29T10:00:00.000000Z"),
+		"chat_history.jsonl": {`{"role":"user"}`, `{"role":"assistant"}`},
+	})
+	history := filepath.Join(target, "chat_history.jsonl")
+	before, body := handoffStat(t, history), handoffRead(t, history)
+
+	if err := CopyForResume(s, s.Find(9), id); err != nil {
+		t.Fatal(err)
+	}
+	handoffUntouched(t, history, before, body)
+}
+
+// A copy whose logs are the same as the target's brings only what the target
+// lacks, never a file over one of its own, however new it is.
+func TestTheSameLogsBringNothingOverTheTargetsFiles(t *testing.T) {
+	id := "01a00000-0000-7000-8000-0000000009f4"
+	s, target, sibling := handoffGrokPair(t, id)
+	now := time.Now()
+	handoffGrokWrite(t, target, now.Add(-time.Hour), map[string][]string{
+		"summary.json":       handoffSummary(id, "2026-08-29T10:00:00.000000Z"),
+		"chat_history.jsonl": {`{"role":"user"}`},
+	})
+	handoffGrokWrite(t, sibling, now, map[string][]string{
+		"summary.json":       handoffSummary(id, "2026-08-29T12:00:00.000000Z"),
+		"chat_history.jsonl": {`{"role":"user"}`},
+		"plan.md":            {"# plan"},
+	})
+	summary := filepath.Join(target, "summary.json")
+	before, body := handoffStat(t, summary), handoffRead(t, summary)
+
+	if err := CopyForResume(s, s.Find(9), id); err != nil {
+		t.Fatal(err)
+	}
+	handoffUntouched(t, summary, before, body)
+	if got := handoffRead(t, filepath.Join(target, "plan.md")); got != "# plan\n" {
+		t.Fatalf("a file the target lacked must be brought, holds %q", got)
+	}
+}
+
+// A target cut short part-way through a record is finished from an older copy
+// that extends it, but that copy's other files are not put over the target's
+// own, which are newer: only a file the target lacks is brought.
+func TestACutShortGrokTargetKeepsItsOwnFiles(t *testing.T) {
+	id := "01a00000-0000-7000-8000-0000000009f7"
+	s, target, sibling := handoffGrokPair(t, id)
+	now := time.Now()
+	handoffGrokWrite(t, target, now, map[string][]string{
+		"summary.json": handoffSummary(id, "2026-08-29T12:00:00.000000Z"),
+		"plan.md":      {"newer plan, written on the target"},
+	})
+	history := filepath.Join(target, "chat_history.jsonl")
+	if err := os.WriteFile(history, []byte(`{"role":"user"}`+"\n"+`{"role":"assistant","content":"lo`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handoffGrokWrite(t, sibling, now.Add(-time.Hour), map[string][]string{
+		"summary.json":       handoffSummary(id, "2026-08-29T10:00:00.000000Z"),
+		"plan.md":            {"older plan, on the sibling"},
+		"notes.md":           {"from the sibling"},
+		"chat_history.jsonl": {`{"role":"user"}`, `{"role":"assistant","content":"long answer"}`},
+	})
+	kept := map[string]os.FileInfo{}
+	bodies := map[string]string{}
+	for _, f := range []string{"summary.json", "plan.md"} {
+		kept[f], bodies[f] = handoffStat(t, filepath.Join(target, f)), handoffRead(t, filepath.Join(target, f))
+	}
+
+	if err := CopyForResume(s, s.Find(9), id); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := handoffRead(t, history), handoffRead(t, filepath.Join(sibling, "chat_history.jsonl")); got != want {
+		t.Fatalf("the history must be finished:\n%s", got)
+	}
+	for f, before := range kept {
+		handoffUntouched(t, filepath.Join(target, f), before, bodies[f])
+	}
+	if got := handoffRead(t, filepath.Join(target, "notes.md")); got != "from the sibling\n" {
+		t.Fatalf("a file the target lacked must be brought, holds %q", got)
+	}
+}
+
+// Two resumes of one conversation at once take turns. On a filesystem without
+// hard links the copy is written at its own path, and the second resume, whose
+// CLI may write the moment it returns, waits until the first copy is whole, so
+// no turn that CLI writes is written over.
+func TestTwoResumesAtOnceTakeTurns(t *testing.T) {
+	s, dir := seedStore(t, handoffPair)
+	id := "01a00000-0000-7000-8000-00000000f5f5"
+	a, b := handoffClaude(dir, 1, id), handoffClaude(dir, 2, id)
+	first, second, cli := `{"type":"user","message":{"content":"one"}}`, `{"type":"assistant","message":{"content":"two"}}`, `{"type":"user","message":{"content":"the CLI's"}}`
+	writeLines(t, b, first, second)
+	handoffLink = func(old, new string) error {
+		return &os.LinkError{Op: "link", Old: old, New: new, Err: syscall.ENOTSUP}
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	var calls atomic.Int32
+	handoffCopy = func(w io.Writer, r io.Reader) (int64, error) {
+		if calls.Add(1) != 2 { // the second is the first resume's write of A itself
+			return io.Copy(w, r)
+		}
+		n, err := io.CopyN(w, r, 5)
+		if err != nil {
+			return n, err
+		}
+		close(started)
+		<-release
+		m, err := io.Copy(w, r)
+		return n + m, err
+	}
+	t.Cleanup(func() { handoffLink, handoffCopy = os.Link, io.Copy })
+
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- CopyForResume(s, s.Find(1), id) }()
+	select {
+	case <-started:
+	case err := <-firstDone:
+		t.Fatalf("the first resume never wrote A at its own path: %v", err)
+	}
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- CopyForResume(s, s.Find(1), id) }()
+	select {
+	case err := <-secondDone:
+		close(release)
+		<-firstDone
+		t.Fatalf("a second resume went on while the first was copying: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	handoffAdd(t, a, cli)
+	if got, want := handoffRead(t, a), first+"\n"+second+"\n"+cli+"\n"; got != want {
+		t.Fatalf("A holds:\n%s\nwant\n%s", got, want)
+	}
+}
+
+// A copy that forked and is older than the target's is not said: the target
+// holds the newer work, and the warning is for a resume on the other account.
+func TestAnOlderForkIsNotSaid(t *testing.T) {
+	id := "01a00000-0000-7000-8000-0000000009f6"
+	s, target, sibling := handoffGrokPair(t, id)
+	warned := handoffWarnings(s)
+	now := time.Now()
+	handoffGrokWrite(t, target, now, map[string][]string{
+		"summary.json":       handoffSummary(id, "2026-08-29T12:00:00.000000Z"),
+		"chat_history.jsonl": {`{"role":"user"}`, `{"role":"user","content":"here"}`},
+	})
+	handoffGrokWrite(t, sibling, now.Add(-time.Hour), map[string][]string{
+		"summary.json":       handoffSummary(id, "2026-08-29T10:00:00.000000Z"),
+		"chat_history.jsonl": {`{"role":"user"}`, `{"role":"user","content":"there, and at more length"}`},
+	})
+	history := filepath.Join(target, "chat_history.jsonl")
+	before, body := handoffStat(t, history), handoffRead(t, history)
+
+	if err := CopyForResume(s, s.Find(9), id); err != nil {
+		t.Fatal(err)
+	}
+	handoffUntouched(t, history, before, body)
+	handoffNoWarning(t, warned)
+}
+
+// A copy that comes up short of what it was to hold is an error, and leaves
+// nothing at the target's path.
+func TestACopyThatComesUpShortIsAnError(t *testing.T) {
+	s, dir := seedStore(t, handoffPair)
+	id := "01a00000-0000-7000-8000-00000000f6f6"
+	a := handoffClaude(dir, 1, id)
+	writeLines(t, handoffClaude(dir, 2, id), `{"type":"user","message":{"content":"one"}}`)
+	handoffCopy = func(w io.Writer, r io.Reader) (int64, error) { return io.CopyN(w, r, 5) }
+	t.Cleanup(func() { handoffCopy = io.Copy })
+
+	if err := CopyForResume(s, s.Find(1), id); err == nil || !strings.Contains(err.Error(), "shrank") {
+		t.Fatalf("a copy that comes up short is an error, got %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(a))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("nothing may be left, found %v", entries)
+	}
+}
+
+// An append to a grok log that fails is an error, and nothing more is brought
+// after it: the summary stays the target's own.
+func TestAGrokAppendThatFailsIsAnError(t *testing.T) {
+	id := "01a00000-0000-7000-8000-0000000009f5"
+	s, target, sibling := handoffGrokPair(t, id)
+	now := time.Now()
+	handoffGrokWrite(t, target, now.Add(-time.Hour), map[string][]string{
+		"summary.json":       handoffSummary(id, "2026-08-28T14:30:48.935066Z"),
+		"chat_history.jsonl": {`{"role":"user"}`},
+	})
+	handoffGrokWrite(t, sibling, now, map[string][]string{
+		"summary.json":       handoffSummary(id, "2026-08-29T09:12:03.120500Z"),
+		"chat_history.jsonl": {`{"role":"user"}`, `{"role":"assistant"}`},
+	})
+	summary := filepath.Join(target, "summary.json")
+	before, body := handoffStat(t, summary), handoffRead(t, summary)
+	full := &os.PathError{Op: "write", Path: "chat_history.jsonl", Err: syscall.ENOSPC}
+	handoffCopy = func(w io.Writer, r io.Reader) (int64, error) { return 0, full }
+	t.Cleanup(func() { handoffCopy = io.Copy })
+
+	if err := CopyForResume(s, s.Find(9), id); !errors.Is(err, syscall.ENOSPC) {
+		t.Fatalf("a failed append is an error, got %v", err)
+	}
+	handoffUntouched(t, summary, before, body)
+}
+
+// When the newest copy has not finished its first record, an older one that
+// has is brought instead.
+func TestANewestCopyWithNothingFinishedIsPassedOver(t *testing.T) {
+	s, dir := seedStore(t, handoffClaudes(3))
+	id := "01a00000-0000-7000-8000-00000000f7f7"
+	older, newest := handoffClaude(dir, 1, id), handoffClaude(dir, 2, id)
+	writeLines(t, older, `{"type":"user","message":{"content":"one"}}`)
+	writeLines(t, newest)
+	if err := os.WriteFile(newest, []byte(`{"type":"user","mess`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	handoffAt(t, older, now.Add(-time.Hour))
+	handoffAt(t, newest, now)
+
+	if err := CopyForResume(s, s.Find(3), id); err != nil {
+		t.Fatal(err)
+	}
+	if got := handoffRead(t, handoffClaude(dir, 3, id)); got != handoffRead(t, older) {
+		t.Fatalf("3 must take the older copy's finished records, holds:\n%s", got)
 	}
 }
