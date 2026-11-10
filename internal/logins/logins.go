@@ -17,6 +17,12 @@ import (
 // waiting on somebody to approve one can say how long is left.
 const TTL = 15 * time.Minute
 
+// ErrDamagedBindings is the store finding the file that says which parked
+// logins were begun for an account unreadable. Nothing finishes until it is
+// put right, which is the operator's to do, so a server answers it with its
+// words rather than as an internal error.
+var ErrDamagedBindings = errors.New("the record of which logins were begun for an account is damaged")
+
 // MarkUnfinishable marks a refusal of a login as one no approval can finish,
 // which Unfinishable then reports. It is otherwise the refusal it carries, the
 // rota.ErrInvalidRequest beneath it and all.

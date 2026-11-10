@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/professor93/rota/internal/logins"
 	rota "github.com/professor93/rota/lib"
@@ -114,7 +115,7 @@ func TestBeginLoginForKeepsTheAccountBesideTheLogin(t *testing.T) {
 		t.Fatalf("%+v", w.login)
 	}
 	b, err := w.s.loadBound()
-	if err != nil || b[w.login.ID] != w.named.ID {
+	if err != nil || b[w.login.ID].Account != w.named.ID {
 		t.Fatalf("not bound to account %d: %v %v", w.named.ID, b, err)
 	}
 	raw, _ := os.ReadFile(w.s.pendingPath())
@@ -132,7 +133,7 @@ func TestBeginLoginForKeepsTheAccountBesideTheLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := w.s.loadBound(); len(b) != 1 || b[l.ID] != 0 {
+	if b, _ := w.s.loadBound(); len(b) != 1 || b[l.ID].Account != 0 {
 		t.Fatalf("an ordinary login is bound to nobody: %v", b)
 	}
 
@@ -176,14 +177,90 @@ func TestABindingThatCannotBeReadLetsNothingFinish(t *testing.T) {
 	before := w.saved(t)
 	w.p.identity = &rota.Identity{UUID: "u-new", Email: "stranger@x"}
 	_, added, err := w.s.FinishLogin(context.Background(), w.login.ID, "CODE")
-	if err == nil || added || !strings.Contains(err.Error(), "pending-for.json") {
+	if err == nil || added || !strings.Contains(err.Error(), "pending-for.json") || !strings.Contains(err.Error(), "remove it") {
 		t.Fatalf("added=%v err=%v", added, err)
+	}
+	if !errors.Is(err, logins.ErrDamagedBindings) {
+		t.Fatalf("not said to be the bindings' damage, which a server answers with its words: %v", err)
 	}
 	if !bytes.Equal(before, w.saved(t)) || len(w.s.Accounts) != 2 {
 		t.Fatalf("written: %s", w.saved(t))
 	}
-	if _, err := w.s.BeginLoginFor(context.Background(), w.named.ID); err == nil {
-		t.Fatal("a binding written over one that cannot be read")
+	if _, err := w.s.BeginLoginFor(context.Background(), w.named.ID); !errors.Is(err, logins.ErrDamagedBindings) {
+		t.Fatalf("a binding written over one that cannot be read: %v", err)
+	}
+}
+
+// Every finish, bound or not, lets go of the bindings of logins that are no
+// longer parked, and a binding is kept no longer than a login is.
+func TestEveryFinishLetsGoOfBindingsWhoseLoginsAreGone(t *testing.T) {
+	w := newBoundWorld(t, "t-bound-orphan")
+	// The bound login runs out, and takes no part in what follows.
+	m, _ := w.s.loadPendings()
+	m[w.login.ID].CreatedAt = time.Now().Add(-pendingTTL - time.Minute).UnixMilli()
+	if err := w.s.savePendings(m); err != nil {
+		t.Fatal(err)
+	}
+	// An ordinary login, begun and finished.
+	l, err := w.s.BeginLogin(context.Background(), "t-bound-orphan")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.p.identity = &rota.Identity{UUID: "u-other", Email: "other@x"}
+	if _, _, err := w.s.FinishLogin(context.Background(), l.ID, "OTHER"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(w.s.boundPath()); !os.IsNotExist(err) {
+		raw, _ := os.ReadFile(w.s.boundPath())
+		t.Fatalf("the binding of a login that ran out is still kept: %s", raw)
+	}
+}
+
+func TestABindingIsKeptNoLongerThanALogin(t *testing.T) {
+	w := newBoundWorld(t, "t-bound-old")
+	b, err := w.s.loadBound()
+	if err != nil || b[w.login.ID].CreatedAt <= 0 {
+		t.Fatalf("a binding says when it was made: %v %v", b, err)
+	}
+	old := b[w.login.ID]
+	old.CreatedAt = time.Now().Add(-pendingTTL - time.Minute).UnixMilli()
+	b[w.login.ID] = old
+	raw, _ := rota.EncodeIndent(b)
+	if err := os.WriteFile(w.s.boundPath(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if b, err := w.s.loadBound(); err != nil || len(b) != 0 {
+		t.Fatalf("a binding older than a login can be is still read: %v %v", b, err)
+	}
+}
+
+// A finish that succeeded has succeeded, even if the bindings cannot be
+// written afterwards: a binding left behind names a login that is gone, and
+// the next finish lets go of it. It is said, not returned.
+func TestABindingNotRewrittenAfterAFinishIsAWarning(t *testing.T) {
+	w := newBoundWorld(t, "t-bound-unwritten")
+	// A second login bound, so that the bindings are rewritten rather than
+	// removed once the first is finished.
+	if _, err := w.s.BeginLoginFor(context.Background(), w.other.ID); err != nil {
+		t.Fatal(err)
+	}
+	var said []string
+	w.s.Warn = func(msg string) { said = append(said, msg) }
+	was := renameFile
+	renameFile = func(from, to string) error {
+		if filepath.Base(to) == "pending-for.json" {
+			return errors.New("disk full")
+		}
+		return was(from, to)
+	}
+	t.Cleanup(func() { renameFile = was })
+	w.p.identity = &rota.Identity{UUID: "u-named", Email: "named@x"}
+	a, _, err := w.s.FinishLogin(context.Background(), w.login.ID, "NEW")
+	if err != nil || a != w.named || a.Dead {
+		t.Fatalf("a=%+v err=%v", a, err)
+	}
+	if len(said) != 1 || !strings.Contains(said[0], "disk full") {
+		t.Fatalf("said: %q", said)
 	}
 }
 
@@ -418,7 +495,7 @@ func TestTheOlderCopyRemedyBeginsALogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b, _ := w.s.loadBound(); b[l.ID] != w.named.ID {
+	if b, _ := w.s.loadBound(); b[l.ID].Account != w.named.ID {
 		t.Fatalf("not begun for account %d: %v", w.named.ID, b)
 	}
 }

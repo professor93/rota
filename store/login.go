@@ -105,7 +105,7 @@ func (s *Store) keep(l *rota.Login, account int) error {
 		if err != nil {
 			return err
 		}
-		b[l.ID] = account
+		b[l.ID] = binding{Account: account, CreatedAt: l.CreatedAt}
 		if err := s.saveBound(b, m, l.ID); err != nil {
 			return err
 		}
@@ -152,7 +152,7 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 	if err != nil {
 		return nil, false, err
 	}
-	account := bound[id]
+	account := bound[id].Account
 	tok, err := l.Complete(ctx, code)
 	if err != nil {
 		return nil, false, err
@@ -163,7 +163,11 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 			return nil, false, err
 		}
 		delete(m, id)
-		return a, false, s.savePendings(m)
+		if err := s.savePendings(m); err != nil {
+			return a, false, err
+		}
+		s.letGo(bound, m)
+		return a, false, nil
 	}
 	a = rota.MatchIdentity(s.Accounts, l.Provider, tok.Identity)
 	if a, err = s.boundAccount(l, account, tok, a); err != nil {
@@ -187,10 +191,25 @@ func (s *Store) FinishLogin(ctx context.Context, id, code string) (a *rota.Accou
 		return nil, false, err
 	}
 	delete(m, id)
-	if err := s.savePendings(m); err != nil || account == 0 {
+	if err := s.savePendings(m); err != nil {
 		return a, added, err
 	}
-	return a, added, s.saveBound(bound, m, "")
+	s.letGo(bound, m)
+	return a, added, nil
+}
+
+// letGo rewrites the bindings after a finish, bound or not, without those
+// whose logins are no longer parked: the one just finished, and any an older
+// rota finished or that ran out. The finish has happened whatever this does,
+// so a failure to write is said rather than returned: a binding left behind
+// names a login that is gone, and the next finish tries again.
+func (s *Store) letGo(bound map[string]binding, pending map[string]*rota.Login) {
+	if len(bound) == 0 {
+		return
+	}
+	if err := s.saveBound(bound, pending, ""); err != nil {
+		s.say(fmt.Sprintf("the record of which logins were begun for an account could not be tidied, which is harmless: %v", err))
+	}
 }
 
 // boundAccount is the account a finished login signs in, given the account it
@@ -420,11 +439,19 @@ func (s *Store) boundPath() string {
 	return filepath.Join(s.homeRoot, "pending-for.json")
 }
 
-// loadBound reads the bindings. Unlike pending.json, a file here that cannot
-// be read is an error rather than nothing: taken as empty, it would let a
-// login begun for one account be finished by any other.
-func (s *Store) loadBound() (map[string]int, error) {
-	m := map[string]int{}
+// binding is one parked login's account, and when the login was begun, so
+// that a binding is never kept longer than its login could be.
+type binding struct {
+	Account   int   `json:"account"`
+	CreatedAt int64 `json:"createdAt"`
+}
+
+// loadBound reads the bindings, dropping any older than a login is kept.
+// Unlike pending.json, a file here that cannot be read is an error rather
+// than nothing: taken as empty, it would let a login begun for one account be
+// finished by any other.
+func (s *Store) loadBound() (map[string]binding, error) {
+	m := map[string]binding{}
 	raw, err := os.ReadFile(s.boundPath())
 	if os.IsNotExist(err) {
 		return m, nil
@@ -433,8 +460,13 @@ func (s *Store) loadBound() (map[string]int, error) {
 		err = rota.UnmarshalLenient(raw, &m)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s cannot be read, so whether a login was begun for an account cannot be told (%v); "+
-			"remove it and pending.json beside it, then begin the login again", s.boundPath(), err)
+		return nil, fmt.Errorf("%w: %s cannot be read, so whether a login was begun for an account cannot be told (%v); "+
+			"remove it and pending.json beside it, then begin the login again", logins.ErrDamagedBindings, s.boundPath(), err)
+	}
+	for id, b := range m {
+		if time.Since(time.UnixMilli(b.CreatedAt)) > pendingTTL {
+			delete(m, id)
+		}
 	}
 	return m, nil
 }
@@ -442,7 +474,7 @@ func (s *Store) loadBound() (map[string]int, error) {
 // saveBound writes the bindings, keeping only those of logins still parked in
 // pending (and keep, which is about to be). A binding outlives its login only
 // until the next one is written.
-func (s *Store) saveBound(b map[string]int, pending map[string]*rota.Login, keep string) error {
+func (s *Store) saveBound(b map[string]binding, pending map[string]*rota.Login, keep string) error {
 	for id := range b {
 		if pending[id] == nil && id != keep {
 			delete(b, id)

@@ -3,8 +3,6 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -77,8 +75,11 @@ func (c *cli) afterBegin(s *store.Store, l *rota.Login, account int) error {
 	if !c.waits(l) {
 		return nil
 	}
-	before := signedIn(s, l.Provider, account)
-	dir, _ := store.DefaultDir()
+	before := grantsOf(s, l.Provider, account)
+	dir := "" // where the store is, from the store itself; none: nothing can be told
+	if fb, ok := s.Backend().(*store.FileBackend); ok {
+		dir = fb.Dir
+	}
 	_ = s.Release()
 	return c.await(l, account, before, dir)
 }
@@ -87,7 +88,7 @@ func (c *cli) afterBegin(s *store.Store, l *rota.Login, account int) error {
 type waitFor struct {
 	l       *rota.Login
 	account int               // the one it was begun for, zero for none
-	before  map[int]string    // signedIn as the wait began
+	before  map[int]grant     // grantsOf as the wait began
 	dir     string            // the store's directory, never made by a look
 	ends    time.Time         // when the login runs out
 	runOut  *time.Timer       // fires then
@@ -110,7 +111,7 @@ type waitFor struct {
 // The end of the input, or an interrupt, ends the wait and not the login: it
 // stays parked, and the command that finishes it later is said. A login that
 // has run out is not offered to be finished later, since it cannot be.
-func (c *cli) await(l *rota.Login, account int, before map[int]string, dir string) error {
+func (c *cli) await(l *rota.Login, account int, before map[int]grant, dir string) error {
 	ctx, stop := interrupted()
 	defer stop()
 	if awaitBegun != nil {
@@ -285,10 +286,14 @@ func (w *waitFor) lookSoon() {
 }
 
 // look reports whether the login is still parked, and if it is not, whether
-// an account it could sign in was signed in meanwhile. A store directory that
-// is gone is not made again by looking; one that cannot be opened says
-// nothing either way, and the wait goes on.
+// an account it could sign in got a new grant meanwhile. A store directory
+// that is gone is not made again by looking; one that cannot be opened, or a
+// store with no directory to look in, says nothing either way, and the wait
+// goes on.
 func (w *waitFor) look() lookedResult {
+	if w.dir == "" {
+		return lookedResult{parked: true}
+	}
 	if _, err := os.Stat(w.dir); os.IsNotExist(err) {
 		return lookedResult{}
 	} else if err != nil {
@@ -302,32 +307,53 @@ func (w *waitFor) look() lookedResult {
 	if l, err := s.PendingLogin(w.l.ID); err != nil || l != nil {
 		return lookedResult{parked: true}
 	}
-	now := signedIn(s, w.l.Provider, w.account)
-	for id, sig := range now {
-		if before, ok := w.before[id]; !ok || before != sig {
+	for id, now := range grantsOf(s, w.l.Provider, w.account) {
+		before, ok := w.before[id]
+		if !ok || now.newer(before) {
 			return lookedResult{signedIn: true}
 		}
 	}
 	return lookedResult{}
 }
 
-// signedIn is, for each account a login can sign in, a digest of the logins it
-// holds: the one account it was begun for, or every account of its provider.
-// A login finished anywhere changes one of them, or adds one; the tokens
-// themselves are never kept or shown.
-func signedIn(s *store.Store, provider string, account int) map[int]string {
-	m := map[int]string{}
+// grantEnd is where a claude account keeps its grant's own end, which lib
+// writes at sign-in and no refresh ever changes (lib/claude.go,
+// claudeRefreshUntil): a different one is a different grant.
+const grantEnd = "refresh_token_expires_at"
+
+// grant is what tells one sign-in of an account from another, as against a
+// refresh of the same one: the grant's own end, the long-lived token's
+// expiry, which only a long login sets, and whether the account is dead,
+// which a refresh never undoes and a new grant always does.
+type grant struct {
+	until string
+	long  int64
+	dead  bool
+}
+
+// newer reports whether g is a sign-in that was not there when before was
+// taken. A refresh changes none of the three.
+func (g grant) newer(before grant) bool {
+	return (g.until != "" && g.until != before.until) ||
+		(g.long != 0 && g.long != before.long) ||
+		(before.dead && !g.dead)
+}
+
+// grantsOf is, for each account a login can sign in, what its present grant
+// is: the one account it was begun for, or every account of its provider. A
+// login finished anywhere gives one of them a new grant, or adds one. Nothing
+// secret is in it.
+func grantsOf(s *store.Store, provider string, account int) map[int]grant {
+	m := map[int]grant{}
 	for _, a := range s.Accounts {
 		if a.Provider != provider || (account != 0 && a.ID != account) {
 			continue
 		}
-		h := sha256.New()
-		io.WriteString(h, a.Token.Access)
-		h.Write([]byte{0})
+		g := grant{until: a.Extra[grantEnd], dead: a.Dead}
 		if a.Long != nil {
-			io.WriteString(h, a.Long.Access)
+			g.long = a.Long.ExpiresAt
 		}
-		m[a.ID] = hex.EncodeToString(h.Sum(nil))
+		m[a.ID] = g
 	}
 	return m
 }

@@ -103,13 +103,15 @@ func parked(t *testing.T, home string) string {
 // begun for, zero for none.
 func boundTo(t *testing.T, home, id string) int {
 	t.Helper()
-	m := map[string]int{}
+	var m map[string]struct {
+		Account int `json:"account"`
+	}
 	if raw, err := os.ReadFile(filepath.Join(home, "homes", "pending-for.json")); err == nil {
 		if err := json.Unmarshal(raw, &m); err != nil {
 			t.Fatalf("the bindings: %v %s", err, raw)
 		}
 	}
-	return m[id]
+	return m[id].Account
 }
 
 func TestLoginByAccountIDStartsALoginBoundToIt(t *testing.T) {

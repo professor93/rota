@@ -60,7 +60,11 @@ func approvalsByCode(t *testing.T, who map[string]approver) {
 			json.NewEncoder(w).Encode(map[string]string{"error": "invalid_grant", "error_description": "Invalid authorization code"})
 			return
 		}
-		doc := map[string]any{"access_token": "NEW-" + a.uuid, "refresh_token": "R-" + a.uuid, "expires_in": 3600}
+		access := "NEW-" + a.uuid
+		if code == "SAME12" {
+			access = "OLD-12" // a new login that happens to keep the access token it had
+		}
+		doc := map[string]any{"access_token": access, "refresh_token": "R-" + a.uuid, "expires_in": 3600}
 		if a.uuid != "" {
 			doc["account"] = map[string]string{"uuid": a.uuid, "email_address": a.email}
 		}
@@ -84,7 +88,7 @@ func duringWait(t *testing.T, f func(ctx context.Context)) {
 
 var known = map[string]approver{
 	"AS12": {"u12", "a@b.c"}, "AS13": {"u13", "d@e.f"}, "STRANGER": {"u-new", "new@x.y"},
-	"NOBODY": {}, "RECREATED": {"u-recreated", "a@b.c"},
+	"NOBODY": {}, "RECREATED": {"u-recreated", "a@b.c"}, "SAME12": {"u12", "a@b.c"},
 }
 
 func TestLoginOnATerminalWaitsForTheCodeAndTakesAnotherAfterAWrongOne(t *testing.T) {
@@ -359,6 +363,57 @@ func TestAnUnboundLoginFinishedByAnotherRotaIsSaidToBe(t *testing.T) {
 // A login gone from the store with no account signed in by it was not
 // finished, whatever took it: it says so, exits 1, and the account it was for
 // is as it was. A store somebody removed is not made again by looking.
+// What makes a login finished elsewhere is a new grant on an account it could
+// sign in: not the access token, which a new login may keep and a refresh
+// changes. A bound login that kept its access token is still finished; an
+// unbound one gone while another account of its provider was only refreshed
+// is not.
+func TestFinishedElsewhereMeansANewGrant(t *testing.T) {
+	t.Run("a new login that kept the access token", func(t *testing.T) {
+		home := seedTwoClaude(t)
+		approvalsByCode(t, known)
+		typing(t, "")
+		was := pendingCheck
+		pendingCheck = 20 * time.Millisecond
+		t.Cleanup(func() { pendingCheck = was })
+		duringWait(t, func(context.Context) {
+			if out, errOut, code := call(t, "login", parkedID(t, home), "SAME12"); code != 0 {
+				t.Errorf("the other shell: %d %q %q", code, out, errOut)
+			}
+		})
+		out, errOut, code := call(t, "login", "12")
+		if code != 0 || !strings.Contains(errOut, "another rota finished it") {
+			t.Fatalf("%d\n%s\n%s", code, out, errOut)
+		}
+		if a := readAccounts(t, home).Accounts[0]; a.Dead || a.Token.Access != "OLD-12" {
+			t.Fatalf("the other shell's login: %+v", a)
+		}
+	})
+	t.Run("another account only refreshed", func(t *testing.T) {
+		home := seedTwoClaude(t)
+		typing(t, "")
+		was := pendingCheck
+		pendingCheck = 20 * time.Millisecond
+		t.Cleanup(func() { pendingCheck = was })
+		duringWait(t, func(context.Context) {
+			// Account 13 refreshed, as `rota list -r` would: a new access token
+			// on the same grant. And the parked login torn by something else.
+			raw, _ := os.ReadFile(filepath.Join(home, "accounts.json"))
+			if err := os.WriteFile(filepath.Join(home, "accounts.json"),
+				bytes.Replace(raw, []byte("OLD-13"), []byte("REFRESHED-13"), 1), 0o600); err != nil {
+				t.Error(err)
+			}
+			if err := os.WriteFile(filepath.Join(home, "homes", "pending.json"), []byte("{not json"), 0o600); err != nil {
+				t.Error(err)
+			}
+		})
+		out, errOut, code := call(t, "login")
+		if code != 1 || !strings.Contains(errOut, "no account was signed in by it") {
+			t.Fatalf("%d\n%s\n%s", code, out, errOut)
+		}
+	})
+}
+
 func TestALoginThatVanishedUnfinishedIsNotSaidToBeFinished(t *testing.T) {
 	for _, c := range []struct {
 		name   string

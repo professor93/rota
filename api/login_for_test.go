@@ -57,15 +57,49 @@ func TestBeginningALoginOverHTTPKeepsItsStateToItself(t *testing.T) {
 // boundIn is which parked logins the store says were begun for an account.
 func boundIn(t *testing.T, dir string) map[string]int {
 	t.Helper()
-	m := map[string]int{}
+	var kept map[string]struct {
+		Account int `json:"account"`
+	}
 	raw, err := os.ReadFile(filepath.Join(dir, "homes", "pending-for.json"))
 	if err == nil {
-		err = json.Unmarshal(raw, &m)
+		err = json.Unmarshal(raw, &kept)
 	}
 	if err != nil {
 		t.Fatalf("the bindings: %v %s", err, raw)
 	}
+	m := map[string]int{}
+	for id, b := range kept {
+		m[id] = b.Account
+	}
 	return m
+}
+
+// A server whose bindings file is damaged says so, and what to do, to whoever
+// asked: it is the operator's to put right, and the log is not where a client
+// looks.
+func TestDamagedBindingsAreSaidOverHTTP(t *testing.T) {
+	h := newHarness(t, Options{})
+	seedUUID(t, h.dir, 1, "u1")
+	resp, raw := h.do("POST", "/v1/login", map[string]any{"account": 1})
+	id, _ := beginReply(t, raw)["id"].(string)
+	if resp.StatusCode != 200 || id == "" {
+		t.Fatalf("%d %s", resp.StatusCode, raw)
+	}
+	if err := os.WriteFile(filepath.Join(h.dir, "homes", "pending-for.json"), []byte("{torn"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		path string
+		body map[string]any
+	}{
+		{"/v1/login/" + id, map[string]any{"code": "CODE"}},
+		{"/v1/login", map[string]any{"account": 1}},
+	} {
+		resp, raw := h.do("POST", c.path, c.body)
+		if resp.StatusCode != 409 || !strings.Contains(string(raw), "pending-for.json") || !strings.Contains(string(raw), "remove it") {
+			t.Errorf("%s: %d %s", c.path, resp.StatusCode, raw)
+		}
+	}
 }
 
 // addAccounts puts these accounts in the harness's store beside the ones it

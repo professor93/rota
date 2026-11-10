@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/professor93/rota/internal/logins"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
 	"github.com/professor93/rota/rotation"
@@ -701,6 +702,11 @@ func statusFor(err error) int {
 		// Conflict rather than 503: the account is in a state this request
 		// cannot have, and waiting for the server will not change it. Naming
 		// another account, or the same one later, will.
+		return http.StatusConflict
+	case errors.Is(err, logins.ErrDamagedBindings):
+		// The same, for the server's own record of which logins were begun
+		// for an account: nothing finishes until the operator puts it right,
+		// and the answer says how.
 		return http.StatusConflict
 	case errors.Is(err, rota.ErrNoAccount), errors.Is(err, rota.ErrNoLogin):
 		return http.StatusNotFound
