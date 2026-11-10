@@ -423,8 +423,8 @@ func (r *runner) dial() {
 	r.dialling = true
 	gen, src, redial, id, watch := r.gen, r.src, r.o.Redial, r.id, r.o.Watch
 	go func() {
-		defer r.guard()
 		op := runOpened{gen: gen, src: src, at: time.Now()}
+		defer r.guardOpen(&op)
 		c, err := redial()
 		if err != nil {
 			op.err = err

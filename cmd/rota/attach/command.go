@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/muesli/cancelreader"
 
@@ -191,9 +193,17 @@ type commandTerm struct {
 	pumped chan struct{} // closed once pump has stopped
 	done   chan struct{}
 	once   sync.Once
+	inErr  atomic.Value // error: why the pump stopped, when it panicked
 
 	mu         sync.Mutex
 	cols, rows int // the last good size
+}
+
+// inputErr is why Input was closed, when it was not stdin's own end: the
+// pump's panic. Nil otherwise.
+func (w *commandTerm) inputErr() error {
+	err, _ := w.inErr.Load().(error)
+	return err
 }
 
 // commandWrap makes the Terminal of in, out and the window, and, for a
@@ -212,7 +222,7 @@ func commandWrap(in io.Reader, out io.Writer, size func() (int, int), resized <-
 		w.from = in.Input()
 		close(w.pumped)
 	case *os.File:
-		r, err := cancelreader.NewReader(in)
+		r, err := commandNewReader(in)
 		if err != nil {
 			r = commandPlain{in}
 		}
@@ -224,14 +234,22 @@ func commandWrap(in io.Reader, out io.Writer, size func() (int, int), resized <-
 	return w, nil
 }
 
+// commandNewReader is cancelreader.NewReader, and a variable only so that a
+// test can give the pump a read that panics.
+var commandNewReader = cancelreader.NewReader
+
 // pump reads stdin and hands each chunk to Input, until the read fails or
 // stop cancels it. Input is closed as it stops, a panic in the read
-// included: the attach then ends as an input that ended, rather than the
-// process with the attach's terminal as the session left it.
+// included, which inputErr then says: the attach ends Lost with it, rather
+// than the process with the attach's terminal as the session left it.
 func (w *commandTerm) pump() {
 	defer close(w.pumped)
 	defer close(w.input)
-	defer func() { _ = recover() }()
+	defer func() {
+		if p := recover(); p != nil {
+			w.inErr.Store(fmt.Errorf("input: panic: %v", p))
+		}
+	}()
 	buf := make([]byte, 4096)
 	for {
 		n, err := w.reader.Read(buf)

@@ -206,6 +206,20 @@ func run(ctx context.Context, t Terminal, src source, id string, o Options) Resu
 		said:   map[string]time.Time{},
 	}
 	defer close(r.done)
+	// A panic on the loop's own goroutine still ends the attach as every
+	// end does, before it goes on to the caller: the links closed, so the
+	// daemon lets go of the viewer, the queues stopped, and the terminal
+	// reset, for a caller that recovers (a TUI) as for one that dies.
+	defer func() {
+		if p := recover(); p != nil {
+			r.end(Lost, 0, fmt.Errorf("attach: panic: %v", p))
+			func() {
+				defer func() { _ = recover() }()
+				r.finish()
+			}()
+			panic(p)
+		}
+	}()
 	if !o.Settle || r.settle() {
 		r.write([]byte("\x1b[H\x1b[2J"))
 		r.start(id)
@@ -238,12 +252,27 @@ func (r *runner) next(gen int, l link) {
 func (r *runner) start(id string) {
 	gen, src, watch := r.gen, r.src, r.o.Watch
 	go func() {
-		defer r.guard()
 		op := runOpened{gen: gen, src: src, at: time.Now()}
+		defer r.guardOpen(&op)
 		op.ln, op.err = src.open(id, watch)
 		op.sess = runFind(src, id)
 		r.deliver(op)
 	}()
+}
+
+// guardOpen is guard for a goroutine that opens a link: a link it opened
+// and had not yet handed to the loop, which so would close it nowhere, is
+// closed before the panic ends the attach, so the daemon lets go of it.
+func (r *runner) guardOpen(op *runOpened) {
+	if p := recover(); p != nil {
+		if op.ln != nil {
+			func() {
+				defer func() { _ = recover() }()
+				_ = op.ln.Close()
+			}()
+		}
+		r.fail(p)
+	}
 }
 
 // guard is deferred by every goroutine an attach starts but its loop: a
@@ -251,7 +280,8 @@ func (r *runner) start(id string) {
 // loop still runs finish and the terminal is put back. Unrecovered, a panic
 // off the loop's goroutine would end the process with the terminal as the
 // session left it, raw and on the session's screen. A panic on the loop's
-// own goroutine unwinds to Run's caller, whose defers put the terminal back.
+// own goroutine is run's: it runs finish, then lets the panic go on to
+// Run's caller, whose defers give back the terminal's settings.
 func (r *runner) guard() {
 	if p := recover(); p != nil {
 		r.fail(p)
@@ -265,6 +295,18 @@ func (r *runner) fail(p any) {
 	case r.failed <- fmt.Errorf("attach: panic: %v", p):
 	case <-r.done:
 	}
+}
+
+// runInputEnd is why t's Input was closed: what went wrong reading it, when
+// t is one of this package's own and knows (its pump panicked), and
+// otherwise io.EOF.
+func runInputEnd(t Terminal) error {
+	if f, ok := t.(interface{ inputErr() error }); ok {
+		if err := f.inputErr(); err != nil {
+			return err
+		}
+	}
+	return io.EOF
 }
 
 // deliver hands op to the loop, or closes what it opened once the attach is
@@ -318,7 +360,7 @@ func (r *runner) step() {
 	case p, ok := <-input:
 		if !ok {
 			r.inEnded = true
-			r.onInput(nil, io.EOF, time.Now())
+			r.onInput(nil, runInputEnd(r.t), time.Now())
 			break
 		}
 		r.onInput(p, nil, time.Now())
@@ -525,9 +567,12 @@ func (r *runner) finish() Result {
 	for _, h := range r.held {
 		h.work.stop()
 	}
-	if r.view != nil {
-		r.view.close()
+	if v := r.view; v != nil {
+		// Let go of it first: if this close panics, the second finish that
+		// run's recover makes does not try it again, and goes on to the
+		// reset.
 		r.view = nil
+		v.close()
 	}
 	// Written past a failed write too: a terminal that failed once may yet
 	// take the reset.

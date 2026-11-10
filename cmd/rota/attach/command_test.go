@@ -14,9 +14,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/muesli/cancelreader"
+
 	"github.com/professor93/rota/api"
 	"github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/internal/fakecli"
+	"github.com/professor93/rota/internal/vtscan"
 )
 
 // commandExec is what bubbletea's tea.Exec runs, spelt out here so that
@@ -364,5 +367,153 @@ func TestCommandTakesAPump(t *testing.T) {
 	case feed.ch <- []byte("z"):
 		t.Fatal("something received from the pump after Run returned")
 	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// commandFns are the functions an attach's goroutines run, Cmd's own and
+// the daemon's for the viewer among them.
+var commandFns = append([]string{"attach.(*localTerm).pump", "attach.(*localTerm).follow",
+	"attach.(*commandTerm).pump", "api.(*Server).serveTerminal"}, runAttachFns...)
+
+// commandPanics runs x, whose Run must panic, and gives the panic.
+func commandPanics(t *testing.T, x *Cmd) any {
+	t.Helper()
+	got := make(chan any, 1)
+	go func() {
+		defer func() { got <- recover() }()
+		_ = x.Run()
+	}()
+	select {
+	case p := <-got:
+		return p
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run never ended")
+	}
+	return nil
+}
+
+// A panic on the attach's loop, here in Teach, goes on to Cmd.Run's caller,
+// which a TUI recovers from, only once the attach has ended as every end
+// does, on this process's own terminal and on streams alike: the reset
+// written (and on the terminal the cursor put below it and the settings
+// given back), the link closed, and no goroutine of the attach left, on
+// this side or the daemon's.
+func TestAPanicInACommandGivesEverythingBack(t *testing.T) {
+	teach := Options{Teach: func(string) bool { panic("boom in Teach") }}
+
+	t.Run("this terminal", func(t *testing.T) {
+		c, id := commandRig(t, 80, 24)
+		master, slave := localPair(t, 80, 24)
+		before := localMustTermios(t, slave)
+		var screen, errb commandBuf
+		go func() { _, _ = io.Copy(&screen, master) }()
+		left := runLeft(commandFns...)
+		x := Command(c, id, teach)
+		x.SetStdin(slave)
+		x.SetStdout(slave)
+		x.SetStderr(&errb)
+		if p := commandPanics(t, x); p != "boom in Teach" {
+			t.Fatalf("Run's caller got %v, want the panic boom in Teach", p)
+		}
+		now := localMustTermios(t, slave)
+		if now.Iflag != before.Iflag || now.Oflag != before.Oflag || now.Lflag != before.Lflag || now.Cflag != before.Cflag {
+			t.Fatalf("after a panic the terminal's settings were %+v and are left %+v", before, now)
+		}
+		want := string(vtscan.ResetAll()) + "\x1b[0m\x1b[r\x1b[24;1H\r\n"
+		screen.wait(t, want)
+		runNoneLeft(t, left, commandFns...)
+	})
+
+	t.Run("streams", func(t *testing.T) {
+		c, id := commandRig(t, 80, 24)
+		in, typing, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { in.Close(); typing.Close() })
+		var out, errb commandBuf
+		left := runLeft(commandFns...)
+		x := Command(c, id, teach)
+		x.SetStdin(in)
+		x.SetStdout(&out)
+		x.SetStderr(&errb)
+		x.SetWindow(func() (int, int) { return 80, 24 }, nil)
+		if p := commandPanics(t, x); p != "boom in Teach" {
+			t.Fatalf("Run's caller got %v, want the panic boom in Teach", p)
+		}
+		if !strings.HasSuffix(out.String(), runReset(24)) {
+			t.Fatalf("after a panic the screen does not end with the reset: %q", out.String())
+		}
+		runNoneLeft(t, left, commandFns...)
+	})
+}
+
+// commandPanicReader is a reader for a pump whose every read panics.
+type commandPanicReader struct{}
+
+func (commandPanicReader) Read([]byte) (int, error) { panic("boom in Read") }
+func (commandPanicReader) Cancel() bool             { return true }
+func (commandPanicReader) Close() error             { return nil }
+
+// commandPanicky has the next pumps made by newReader read with
+// commandPanicReader.
+func commandPanicky(t *testing.T, newReader *func(io.Reader) (cancelreader.CancelReader, error)) {
+	t.Helper()
+	was := *newReader
+	*newReader = func(io.Reader) (cancelreader.CancelReader, error) { return commandPanicReader{}, nil }
+	t.Cleanup(func() { *newReader = was })
+}
+
+// Local's pump that panics closes Input and says why, and restore still
+// gives the terminal back: the attach ends with the panic, where it would
+// have ended the process.
+func TestALocalPumpThatPanicsEndsTheInput(t *testing.T) {
+	commandPanicky(t, &localNewReader)
+	_, slave := localPair(t, 80, 24)
+	before := localMustTermios(t, slave)
+	term, restore, err := Local(slave, slave)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restore()
+	select {
+	case _, ok := <-term.Input():
+		if ok {
+			t.Fatal("a pump that panics sent something")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Input was not closed after the pump panicked")
+	}
+	if err := runInputEnd(term); err == nil || err.Error() != "input: panic: boom in Read" {
+		t.Fatalf("the input ended with %v, want the pump's panic", err)
+	}
+	restore()
+	if now := localMustTermios(t, slave); now.Lflag != before.Lflag || now.Iflag != before.Iflag {
+		t.Fatalf("restore after the pump's panic left %+v, was %+v", now, before)
+	}
+}
+
+// Cmd's pump that panics ends the attach Lost, and the line says the input
+// failed and how, not that it ended.
+func TestACommandPumpThatPanicsIsSaid(t *testing.T) {
+	commandPanicky(t, &commandNewReader)
+	c, id := commandRig(t, 80, 24)
+	in, typing, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { in.Close(); typing.Close() })
+	var out, errb commandBuf
+	x := Command(c, id, Options{})
+	x.SetStdin(in)
+	x.SetStdout(&out)
+	x.SetStderr(&errb)
+	x.SetWindow(func() (int, int) { return 80, 24 }, nil)
+	err = commandEnd(t, commandRun(x))
+	if err == nil || x.Result().Why != Lost || err.Error() != "input: panic: boom in Read" {
+		t.Fatalf("Run with a pump that panics: %v, Result %+v; want Lost with the panic", err, x.Result())
+	}
+	if want := "rota: lost " + id + ": input: panic: boom in Read; "; !strings.HasPrefix(errb.String(), want) {
+		t.Fatalf("stderr %q, want it to begin %q", errb.String(), want)
 	}
 }
