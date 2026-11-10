@@ -3,6 +3,7 @@
 package store
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -48,6 +49,7 @@ func TestWhatTakesTheLocksPlaceNeverHoldsUpItsRelease(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			t.Cleanup(l.release) // its beat must not outlive a test that failed
 			path := filepath.Join(home, claudeRefreshLock)
 			if err := os.Remove(path); err != nil {
 				t.Fatal(err)
@@ -119,4 +121,19 @@ func TestOnlyTheDirectoryRotaMadeIsOpened(t *testing.T) {
 		t.Fatal(err)
 	}
 	d.close()
+}
+
+// The directory rota held open while it held the lock is closed once it lets
+// go: one left open for every lock would run a long-lived rota out of
+// descriptors, and then no lock could be taken and nothing refreshed.
+func TestLettingGoOfTheLockClosesItsDirectory(t *testing.T) {
+	l, err := takeRefreshLock(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(l.release)
+	l.release()
+	if _, err := l.dir.f.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("the lock's directory is still open after the release: %v", err)
+	}
 }

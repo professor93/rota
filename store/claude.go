@@ -875,7 +875,7 @@ func takeRefreshLock(home string) (*refreshLock, error) {
 	// first time it is asked: asked now, that is the directory just made.
 	_ = os.SameFile(fi, fi)
 	l := &refreshLock{path: path, held: fi, stop: make(chan struct{}), done: make(chan struct{})}
-	if l.dir, err = openLockDir(path, fi); err != nil {
+	if l.dir, err = openTakenLock(path, fi); err != nil {
 		if l.ours() {
 			_ = os.Remove(path) // made a moment ago, and not to be left in Claude Code's way
 		}
@@ -885,6 +885,10 @@ func takeRefreshLock(home string) (*refreshLock, error) {
 	go l.beat()
 	return l, nil
 }
+
+// openTakenLock opens the lock takeRefreshLock has just made. A variable so
+// a test can make the open fail, or put something else at the name first.
+var openTakenLock = openLockDir
 
 func (l *refreshLock) beat() {
 	defer close(l.done)

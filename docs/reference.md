@@ -3596,14 +3596,16 @@ Code blanked: see *Stranded* and *Blanked*, below.
   dead, and the next look tries again; a run that needs a fresh token in its
   environment — a run on a token, a hermetic run — is told to try again in a
   moment. A lock that cannot be made at all, in a home rota may not write in or
-  on a full disk, is never taken for somebody's: the look says so, as for a
-  home that cannot be read, and refreshes nothing there. A lock somebody took
-  meanwhile is theirs. On Linux and macOS rota keeps the directory it made
-  open while it holds the lock and touches only that one, so a lock made in
-  its place is never touched; on Windows a beat that comes at that very
-  moment can touch it once. Either way no beat takes it for rota's, and rota lets go by
-  looking at the lock just before removing it, so only a lock made in the
-  instant between the two can be removed.
+  on a full disk, or opened once made, with no file descriptor free or
+  something else at its name, is never taken for somebody's: the look says
+  so, as for a home that cannot be read, leaves no lock of its own behind, and
+  refreshes nothing there. A lock somebody took meanwhile is theirs. On Linux
+  and macOS rota keeps the directory it made open while it holds the lock and
+  touches only that one, so a lock made in its place is never touched; on
+  Windows a beat that comes at that very moment can touch it once. Either way
+  no beat takes it for rota's, and rota lets go by looking at the lock just
+  before removing it, so only a lock made in the instant between the two can
+  be removed.
 - **The journal.** Every refresh rota's store makes, for any provider, leaves
   two lines in `refresh.log` in the store's directory — one as the token goes
   out, one for what came of it — and every change a look at a claude home
@@ -3663,9 +3665,10 @@ Code blanked: see *Stranded* and *Blanked*, below.
     rescue rota would not make, see *Blanked*), `caller-left` (whoever asked
     went away before the token went out), `lock-held` (Claude Code holds its
     refresh lock in the home: the look leaves the login to it), or, for a lock
-    that could not be made at all, `lock-denied`, `lock-read-only`,
-    `lock-no-space` or `lock-failed`. A lock line carries the path of the look
-    it stopped: `seed` and `uncover` for the writes a look owed the home;
+    that could not be made at all, or opened once made, `lock-denied`,
+    `lock-read-only`, `lock-no-space` or `lock-failed`. A lock line carries
+    the path of the look it stopped: `seed` and `uncover` for the writes a
+    look owed the home;
   - `exp_before` and `exp_after`, when the access token expires; a rescue,
     which presents its copy as expired whatever it says, still writes when
     the copy truly expires;

@@ -4,6 +4,7 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"syscall"
@@ -24,9 +25,14 @@ func openLockDir(path string, made fs.FileInfo) (lockDir, error) {
 	if err != nil {
 		return lockDir{}, err
 	}
-	if fi, err := f.Stat(); err != nil || !os.SameFile(fi, made) {
+	fi, err := f.Stat()
+	switch {
+	case err != nil:
 		_ = f.Close()
-		return lockDir{}, errors.Join(errors.New("another directory took its place"), err)
+		return lockDir{}, fmt.Errorf("could not be read back: %w", err)
+	case !os.SameFile(fi, made):
+		_ = f.Close()
+		return lockDir{}, errors.New("another directory took its place")
 	}
 	return lockDir{f}, nil
 }
