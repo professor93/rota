@@ -50,7 +50,9 @@ import (
 //     Tamil, Malayalam) its first consonant, its vowel signs and conjuncts
 //     dropped, as F9 rules. No other way keeps such a word one width to
 //     both the renderer and a terminal counting graphemes.
-//   - Whatever is shaped like an Anthropic key is taken out (wire.Unsecret).
+//   - Whatever is shaped like an Anthropic key is taken out, as
+//     wire.Unsecret has it, but only in the cleaned text: a key a dropped
+//     character split is whole there, and goes whole.
 //
 // clean of what clean gave is the same text.
 func clean(s string) string {
@@ -61,13 +63,15 @@ func clean(s string) string {
 // textClean is clean, with the passes and the bytes looked at again that
 // textSamePasses and textRedact report: work a test holds linear in s.
 func textClean(s string) (out string, passes, scanned int) {
-	// A control stands between words as a space does, so a key just after
-	// one is taken out before the control goes, and a key that dropping
-	// controls joins up is taken out after.
-	s, seams := textEscapes(wire.Unsecret(s))
+	// Keys are looked for only in the cleaned text, never in s as it came:
+	// a key a dropped control split is whole there, and is taken out whole.
+	// A character dropped here leaves a seam, as a sequence does, so a key
+	// right after it still starts a word.
+	s, seams := textEscapes(s)
 	var b strings.Builder
 	b.Grow(len(s))
-	kept := seams[:0] // the seams, at where they are now
+	kept := make([]textSeam, 0, len(seams)) // the seams, at where they are now
+	dropped := func() { kept = append(kept, textSeam{at: b.Len()}) }
 	for i := 0; i < len(s); {
 		for len(seams) > 0 && seams[0].at == i {
 			sm := seams[0]
@@ -83,9 +87,11 @@ func textClean(s string) (out string, passes, scanned int) {
 		case r == '\n' || r == '\t' || r == '\u0085' || r == '\u2028' || r == '\u2029':
 			b.WriteByte(' ')
 		case r < 0x20 || r >= 0x7f && r < 0xa0:
+			dropped()
 		case r == '\u200c' || r == '\u200d':
 			b.WriteRune(r)
 		case unicode.Is(unicode.Cf, r), r == '\ufe0e' || r == '\ufe0f':
+			dropped()
 		default:
 			b.WriteRune(r)
 		}

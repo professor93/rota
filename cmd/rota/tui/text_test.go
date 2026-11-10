@@ -245,6 +245,11 @@ func TestTextKeysInEveryArrangement(t *testing.T) {
 	b1, b2 := key[:21], key[21:]
 	for _, c := range []struct{ name, in string }{
 		{"whole", "x " + key},
+		// A key a dropped control splits is read whole, not taken out up
+		// to the control with the rest left showing.
+		{"split by BEL past 16 body characters", "\x07" + key[:28] + "\x07" + key[28:]},
+		{"split twice, by ZWSP and BEL", "x " + key[:23] + "\u200b" + key[23:33] + "\x07" + key[33:]},
+		{"split twice, by VS16 and DEL", "x " + key[:20] + "\ufe0f" + key[20:30] + "\x7f" + key[30:]},
 		// A sequence that leaves no space still stands between words, so a
 		// key right after it starts there, and one sequence inside the
 		// prefix after it is read through.
@@ -290,7 +295,7 @@ func TestTextKeysInEveryArrangement(t *testing.T) {
 
 // TestTextKeyFuzzLeaksNothingNew: of 20,000 random arrangements of a key
 // (textKeyFuzz, a fixed seed), none shows its body that clean at da8b9bb
-// took out. testdata/text-key-fuzz-da8b9bb.txt lists the ones that showed
+// took out, and none shows 12 of its body characters after a marker. testdata/text-key-fuzz-da8b9bb.txt lists the ones that showed
 // there: a key glued to a letter, which wire.Unsecret leaves by design, a
 // key split before a control after enough of it to be taken out by
 // itself, and the residue clean's comment names.
@@ -303,15 +308,33 @@ func TestTextKeyFuzzLeaksNothingNew(t *testing.T) {
 	for _, f := range strings.Fields(string(data)) {
 		before[f] = true
 	}
+	const marker = "sk-ant-[not repeated]"
+	leaks := 0
 	for i, in := range textKeyFuzz(20000) {
 		out := clean(in)
-		if textLeaks(out) && !before[strconv.Itoa(i)] {
-			t.Errorf("arrangement %d, %q, shows the key: %q", i, in, out)
+		if textLeaks(out) {
+			leaks++
+			if !before[strconv.Itoa(i)] {
+				t.Errorf("arrangement %d, %q, shows the key: %q", i, in, out)
+			}
+		}
+		// What a key was taken out of never shows the rest of it after
+		// the marker.
+		for rest := out; strings.Contains(rest, marker); {
+			rest = rest[strings.Index(rest, marker)+len(marker):]
+			if textLeaks(rest) {
+				t.Errorf("arrangement %d, %q, shows the key after its marker: %q", i, in, out)
+				break
+			}
 		}
 		if again := clean(out); again != out {
 			t.Errorf("arrangement %d: clean(%q) = %q, and clean of that is %q", i, in, out, again)
 		}
 	}
+	if leaks > len(before) {
+		t.Errorf("%d arrangements show the key, %d did at da8b9bb", leaks, len(before))
+	}
+	t.Logf("%d of 20,000 arrangements show the key; %d did at da8b9bb", leaks, len(before))
 }
 
 // textKeyFuzz is n random arrangements of a key, from a fixed seed: up to
