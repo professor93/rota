@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -45,6 +46,19 @@ func gone(pid int) bool {
 	return false
 }
 
+// logEnd logs, once the test is over, what a start's run ended with, if its
+// outcome was not taken: a start that fakecli.Up gave up on, or failed the
+// test for, is otherwise gone with the error that says why it never ran.
+func logEnd[O any](t testing.TB, done <-chan O) {
+	t.Cleanup(func() {
+		select {
+		case o := <-done:
+			t.Logf("a run ended with: %+v", o)
+		default:
+		}
+	})
+}
+
 func fakeRun(ctx context.Context, bin string) (*Result, error) {
 	a := &Account{ID: 1, Provider: "claude"}
 	a.Token.Access = "tok"
@@ -71,6 +85,7 @@ func TestACancelledRunLetsItsCLIStopByItself(t *testing.T) {
 	fakecli.Up(t, func(ready string) <-chan struct{} {
 		bin := fakecli.Install(t, t.TempDir(), "polite-cli", fakecli.Spec{Term: "exit", TermTouch: stopped, Ready: ready, Sleep: "30s"})
 		done = make(chan outcome, 1)
+		logEnd(t, done)
 		ended := make(chan struct{})
 		go func(done chan outcome) {
 			res, err := fakeRun(ctx, bin)
@@ -118,6 +133,7 @@ func TestACancelledRunKillsACLIThatIgnoresTheAsking(t *testing.T) {
 	pid := fakecli.Up(t, func(ready string) <-chan struct{} {
 		bin := fakecli.Install(t, t.TempDir(), "deaf-cli", fakecli.Spec{Term: "ignore", Ready: ready, Sleep: "30s"})
 		done = make(chan error, 1)
+		logEnd(t, done)
 		ended := make(chan struct{})
 		go func(done chan error) {
 			_, err := fakeRun(ctx, bin)
@@ -162,6 +178,7 @@ func TestAStopReachesTheHelpersInTheGroup(t *testing.T) {
 	fakecli.Up(t, func(ready string) <-chan struct{} {
 		bin := fakecli.Install(t, t.TempDir(), "parent-cli", fakecli.Spec{Term: "exit", TermTouch: filepath.Join(dir, "parent"), Ready: ready, Sleep: "30s", Spawn: deaf})
 		done = make(chan error, 1)
+		logEnd(t, done)
 		ended := make(chan struct{})
 		go func(done chan error) {
 			_, err := fakeRun(ctx, bin)
@@ -206,6 +223,7 @@ func TestAStopEndsAsSoonAsTheGroupHasGone(t *testing.T) {
 		bin := fakecli.Install(t, t.TempDir(), "parent-cli", fakecli.Spec{Term: "exit", TermTouch: filepath.Join(dir, "parent"),
 			Ready: ready, Sleep: "30s", Spawn: helper})
 		done = make(chan error, 1)
+		logEnd(t, done)
 		ended := make(chan struct{})
 		go func(done chan error) {
 			_, err := fakeRun(ctx, bin)
@@ -259,22 +277,34 @@ func TestAStopAsksOnceAndCannotHoldUpWait(t *testing.T) {
 	var bin string
 	var c *exec.Cmd
 	var halt *stopper
-	var done chan struct{}
 	fakecli.Up(t, func(ready string) <-chan struct{} {
 		bin = fakecli.Install(t, t.TempDir(), "deaf-cli", fakecli.Spec{Term: "ignore", Ready: ready, Sleep: "30s"})
-		c = exec.CommandContext(context.Background(), bin)
-		setPgid(c)
-		halt = newStopper(c)
-		if err := c.Start(); err != nil {
+		cmd := exec.CommandContext(context.Background(), bin)
+		setPgid(cmd)
+		halt = newStopper(cmd)
+		// Its standard output says when the CLI has gone without anybody
+		// waiting for it, so the stops below still come before Wait, as a
+		// run's do: a stop must return while nobody has waited yet.
+		r, w, err := os.Pipe()
+		if err != nil {
 			t.Fatal(err)
 		}
-		done = make(chan struct{})
-		go func(c *exec.Cmd, halt *stopper, done chan struct{}) {
-			_ = c.Wait()
-			halt.settle()
-			close(done)
-		}(c, halt, done)
-		return done
+		cmd.Stdout = w
+		if err := cmd.Start(); err != nil {
+			t.Fatal(err)
+		}
+		w.Close()
+		// A start given up on is not left running. For the last one Wait has
+		// been called by then, and this does nothing.
+		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+		c = cmd
+		ended := make(chan struct{})
+		go func() {
+			_, _ = io.Copy(io.Discard, r)
+			r.Close()
+			close(ended)
+		}()
+		return ended
 	})
 	halt.stop()
 	armed := halt.kill
@@ -282,6 +312,12 @@ func TestAStopAsksOnceAndCannotHoldUpWait(t *testing.T) {
 	if halt.kill != armed {
 		t.Fatal("one kill, however often it is asked for")
 	}
+	done := make(chan struct{})
+	go func() {
+		_ = c.Wait()
+		halt.settle()
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
@@ -310,6 +346,7 @@ func TestARunThatHitsABoundEndsEvenIfItsCLIIgnoresTheAsking(t *testing.T) {
 			Stdout: []string{strings.Repeat("x", 4096), "{{sleep:30s}}"}})
 		var out bytes.Buffer
 		done = make(chan error, 1)
+		logEnd(t, done)
 		ended := make(chan struct{})
 		go func(done chan error) {
 			_, err := Run(context.Background(), a, "", &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}},

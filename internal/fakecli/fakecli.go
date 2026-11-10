@@ -259,9 +259,9 @@ func Up(t testing.TB, start func(ready string) (ended <-chan struct{})) int {
 		case ran:
 			t.Fatalf("the fake ran but its run ended before it said it was up at %s", ready)
 		case try == startTries:
-			t.Fatalf("the fake never ran a line, %d times in a row (macOS killing it inside exec is the usual cause)", startTries)
+			t.Fatalf("the fake never ran a line, %d times in a row: macOS killing it inside exec, or the code under test never starting it (what each run ended with is in the log, where the test logs it)", startTries)
 		}
-		t.Logf("start %d: the fake never ran a line (macOS killing it inside exec is the usual cause); starting it again", try)
+		t.Logf("start %d: the fake never ran a line (macOS killing it inside exec, or the code under test never starting it); starting it again", try)
 	}
 }
 

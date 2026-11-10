@@ -206,6 +206,15 @@ func TestAnAnswerClearsOnlyTheVerdictItStartedUnder(t *testing.T) {
 		s := openDir(t, dir)
 		a := s.Find(1)
 		done = make(chan error, 1)
+		// A start given up on is otherwise gone with the error that says why
+		// it never ran.
+		t.Cleanup(func() {
+			select {
+			case err := <-done:
+				t.Logf("a run ended with: %v", err)
+			default:
+			}
+		})
 		ended := make(chan struct{})
 		go func(done chan error) {
 			_, err := s.Run(context.Background(), a, rota.Spec{Prompt: "hi"}, nil, nil)

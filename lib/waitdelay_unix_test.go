@@ -72,6 +72,7 @@ func TestARunEndsWhenItsDeadlineDoesEvenIfAHelperKeepsThePipes(t *testing.T) {
 
 		d = newTestDeadline()
 		done = make(chan outcome, 1)
+		logEnd(t, done)
 		ended = make(chan struct{})
 		go func(d *testDeadline, done chan outcome, ended chan struct{}) {
 			res, err := Run(d, a, "", given, Spec{Prompt: "p", flavorOverride: "claude"}, nil, io.Discard)
@@ -93,7 +94,7 @@ func TestARunEndsWhenItsDeadlineDoesEvenIfAHelperKeepsThePipes(t *testing.T) {
 		if time.Now().After(limit) {
 			d.pass()
 			<-done
-			t.Fatalf("the CLI never finished (%v)", touched(finished))
+			t.Fatalf("the CLI never finished, and its helper, pid %d, is up", pid)
 		}
 	}
 	select {

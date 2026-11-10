@@ -86,6 +86,7 @@ func runStopCase(t *testing.T, dir string, i int, c stopCase) (*Result, error) {
 		bin := fakecli.Install(t, dir, name, fake)
 		var ctx context.Context
 		ctx, cancel = context.WithCancel(context.Background())
+		t.Cleanup(cancel)
 		a := &Account{ID: 1, Provider: "claude"}
 		a.Token.Access = "tok"
 		spec := c.spec
@@ -95,6 +96,7 @@ func runStopCase(t *testing.T, dir string, i int, c stopCase) (*Result, error) {
 			events = &bytes.Buffer{}
 		}
 		done = make(chan outcome, 1)
+		logEnd(t, done)
 		ended := make(chan struct{})
 		go func(done chan outcome) {
 			res, err := Run(ctx, a, "", &Command{Bin: bin, BaseEnv: []string{"PATH=/usr/bin:/bin"}}, spec, c.lim, events)
@@ -109,11 +111,9 @@ func runStopCase(t *testing.T, dir string, i int, c stopCase) (*Result, error) {
 		// started again should macOS kill it on its way in: one that never
 		// ran has nothing to be stopped.
 		fakecli.Up(t, start)
-		defer cancel()
 		cancel()
 	} else {
 		start("")
-		defer cancel()
 	}
 	o := <-done
 	return o.res, o.err
