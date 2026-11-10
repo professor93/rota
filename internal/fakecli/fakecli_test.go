@@ -201,12 +201,15 @@ func TestTheFakeWritesItsStartAsClaudeCodeDoesHere(t *testing.T) {
 		}
 		return f
 	}
+	// This run is a test binary of its own (inZones), so the first file the
+	// fake makes in it is this one.
+	before := time.Now().Truncate(time.Millisecond)
 	first := write("registry idle")
 	if first.ProcStart != want || first.PidDomain != domain {
 		t.Fatalf("procStart %q and pidDomain %q, want %q and %q, as Claude Code writes them here", first.ProcStart, first.PidDomain, want, domain)
 	}
-	if made := time.UnixMilli(first.StartedAt); made.Before(started.Add(-2*time.Second)) || made.After(time.Now()) {
-		t.Fatalf("startedAt %v is not a moment since this process started at %v", made, started)
+	if made := time.UnixMilli(first.StartedAt); made.Before(before) || made.After(time.Now()) {
+		t.Fatalf("startedAt %v is not the moment the file was first made, after %v", made, before)
 	}
 	time.Sleep(5 * time.Millisecond)
 	if again := write("registry waiting permission"); again != first {
@@ -224,9 +227,12 @@ const zoneRun = "ROTA_TEST_ZONE"
 // inZones runs the calling test again in a test binary of its own under each
 // of zones, as TZ names them, and says whether this run is one of those, the
 // only kind that goes on to test. A zone the machine has no data for is
-// skipped.
+// skipped, and so is the test on Windows, where no zone can be set.
 func inZones(t *testing.T) bool {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Go reads TZ only on Unix, so a run on Windows cannot be put in another zone")
+	}
 	if z := os.Getenv(zoneRun); z != "" {
 		if _, off := time.Date(2026, time.November, 10, 12, 0, 0, 0, time.UTC).In(time.Local).Zone(); off == 0 {
 			t.Fatalf("TZ=%s gave a local zone at UTC's offset", z)

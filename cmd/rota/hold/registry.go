@@ -32,9 +32,11 @@ type registryFile struct {
 	// ticks since boot. Each is zero when the file gave none in its form.
 	ProcStart time.Time
 	ProcTicks int64
-	// PidDomain is the pid space the writer says it ran in, empty when the
-	// file names none.
-	PidDomain string
+	// PidDomain is the pid space the writer says it ran in, and NamesDomain
+	// whether the file has a pidDomain at all: one that is there but not a
+	// string, or longer than maxField, is named and empty.
+	PidDomain   string
+	NamesDomain bool
 }
 
 // registrySlack is how far a macOS file's procStart may be from the
@@ -108,7 +110,8 @@ func parseRegistry(b []byte) (registryFile, error) {
 	} else if t, err := time.Parse(time.ANSIC, start); err == nil {
 		f.ProcStart = t
 	}
-	f.PidDomain = str(m["pidDomain"])
+	domain, named := m["pidDomain"]
+	f.PidDomain, f.NamesDomain = str(domain), named
 	return f, nil
 }
 
@@ -118,11 +121,18 @@ func parseRegistry(b []byte) (registryFile, error) {
 // Claude Code writes on this system, on Linux the very tick and on macOS a
 // time within registrySlack. A start in the other system's form, or none,
 // is never the child's: a session that cannot tell its file for its own
-// learns nothing from it, never another session's conversation. A file
-// that names no pid space, as one from a build older than the field does,
-// is judged by its start alone.
+// learns nothing from it, never another session's conversation. As in
+// Claude Code's own rule, any pidDomain the file gives that is not this
+// machine's, one that cannot be read included, is another pid space's, and
+// only a file with no pidDomain at all, as from a build older than the
+// field, is judged by its start alone. A known limit, Claude Code's too: on
+// Linux a file left behind before a reboot whose pid and tick happen to be
+// the child's matches, until the child writes its own as it starts.
 func (f registryFile) belongsTo(pid int, start time.Time, ticks int64) bool {
-	if (f.PID != 0 && f.PID != pid) || (f.PidDomain != "" && f.PidDomain != ourPidDomain()) {
+	if f.PID != 0 && f.PID != pid {
+		return false
+	}
+	if f.NamesDomain && (f.PidDomain == "" || f.PidDomain != ourPidDomain()) {
 		return false
 	}
 	if startsInTicks {

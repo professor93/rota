@@ -51,9 +51,12 @@ const zoneRun = "ROTA_TEST_ZONE"
 // inZones runs the calling test again in a test binary of its own under each
 // of zones, as TZ names them, and says whether this run is one of those, the
 // only kind that goes on to test. A zone the machine has no data for is
-// skipped.
+// skipped, and so is the test on Windows, where no zone can be set.
 func inZones(t *testing.T) bool {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("Go reads TZ only on Unix, so a run on Windows cannot be put in another zone")
+	}
 	if z := os.Getenv(zoneRun); z != "" {
 		if _, off := time.Date(2026, time.November, 10, 12, 0, 0, 0, time.UTC).In(time.Local).Zone(); off == 0 {
 			t.Fatalf("TZ=%s gave a local zone at UTC's offset", z)
@@ -202,22 +205,30 @@ func TestTheRegistryShapeIsRead(t *testing.T) {
 		t.Fatalf("a procStart that is a number, not the digits Claude Code writes: tick %d, %v", got.ProcTicks, err)
 	}
 
-	// pidDomain, which this file does not name, is read as written, and is
-	// empty for anything but a string.
+	// pidDomain, which this file does not name, is read as written; one
+	// that is there but is not a string, or is longer than maxField, is
+	// named and empty, and only a file without the key names none.
+	if full.NamesDomain {
+		t.Fatal("a file with no pidDomain names one")
+	}
 	for _, c := range []struct {
-		v    any
-		want string
+		v     any
+		want  string
+		named bool
 	}{
-		{"darwin", "darwin"},
-		{"linux:5f0c:pid:[4026531836]", "linux:5f0c:pid:[4026531836]"},
-		{map[string]any{"x": 1}, ""},
-		{7, ""},
-		{absent, ""},
+		{"darwin", "darwin", true},
+		{"linux:5f0c:pid:[4026531836]", "linux:5f0c:pid:[4026531836]", true},
+		{"", "", true},
+		{nil, "", true},
+		{map[string]any{"x": 1}, "", true},
+		{7, "", true},
+		{strings.Repeat("x", maxField+1), "", true},
+		{absent, "", false},
 	} {
 		want := full
-		want.PidDomain = c.want
+		want.PidDomain, want.NamesDomain = c.want, c.named
 		if got, err := parseRegistry(fixtureWith(t, "pidDomain", c.v)); err != nil || !sameFile(got, want) {
-			t.Fatalf("pidDomain %#v: %+v, %v; want %q", c.v, got, err, c.want)
+			t.Fatalf("pidDomain %.40v: %+v, %v; want %q, named %v", c.v, got, err, c.want, c.named)
 		}
 	}
 	if got, err := parseRegistry(fixtureWith(t, "updatedAt", 1793956500981.75)); err != nil || got.UpdatedAt != 1793956500981 {
@@ -239,7 +250,18 @@ func TestTheRegistryShapeIsRead(t *testing.T) {
 
 func sameFile(a, b registryFile) bool {
 	return a.Registry == b.Registry && a.PID == b.PID && a.ProcStart.Equal(b.ProcStart) &&
-		a.ProcTicks == b.ProcTicks && a.PidDomain == b.PidDomain
+		a.ProcTicks == b.ProcTicks && a.PidDomain == b.PidDomain && a.NamesDomain == b.NamesDomain
+}
+
+// unreadableDomains are pidDomains a file may give that name no pid space
+// anybody can read: Claude Code takes each for another's, and so does the
+// holder.
+var unreadableDomains = map[string]any{
+	"an empty pid space":            "",
+	"a null pid space":              nil,
+	"a pid space that is a number":  7,
+	"a pid space that is an object": map[string]any{"x": 1},
+	"a pid space too long to read":  linuxDomain + strings.Repeat("x", maxField),
 }
 
 // The two pid spaces the tests play: a macOS one, and a Linux one as
@@ -306,7 +328,7 @@ func TestRegistryStartsAreTicksOnLinuxAlone(t *testing.T) {
 // clock moves: the file is the child's when it gives the very tick the child
 // started at, names no other pid and no other pid space. A start in the form
 // macOS writes, the child's own included, is never the child's, nor is the
-// child's tick in another pid space.
+// child's tick in another pid space or one that cannot be read.
 func TestOnLinuxARegistryIsTheChildsByTheTickItStarted(t *testing.T) {
 	onLinux(t)
 	const pid, ticks = 48213, 48273615
@@ -324,7 +346,6 @@ func TestOnLinuxARegistryIsTheChildsByTheTickItStarted(t *testing.T) {
 		{"its own tick on another machine", "48273615", "linux:0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a:pid:[4026531836]", false},
 		{"its own tick in another pid namespace", "48273615", "linux:5f0c2a1e7b3d4e8a9c612d4f8a0b3e17:pid:[4026532001]", false},
 		{"its own tick, from a Mac", "48273615", macDomain, false},
-		{"its own tick, with an empty pid space", "48273615", "", true},
 		{"its own start as macOS writes it", start.Format(time.ANSIC), linuxDomain, false},
 		{"its own start as macOS writes it, no pid space", start.Format(time.ANSIC), absent, false},
 		{"tick zero", "0", linuxDomain, false},
@@ -336,15 +357,24 @@ func TestOnLinuxARegistryIsTheChildsByTheTickItStarted(t *testing.T) {
 			t.Errorf("%s: %v, want %v", c.name, got, c.ok)
 		}
 	}
+	for name, domain := range unreadableDomains {
+		if written(t, pid, "48273615", domain).belongsTo(pid, start, ticks) {
+			t.Errorf("its own tick, with %s, counted", name)
+		}
+	}
 	own := written(t, pid, "48273615", linuxDomain)
 	if own.belongsTo(pid+1, start, ticks) {
 		t.Error("a file naming another pid counted")
 	}
-	if own.belongsTo(pid, start, 0) {
-		t.Error("a child whose start in ticks is unknown matched")
-	}
 	if !written(t, 0, "48273615", linuxDomain).belongsTo(pid, start, ticks) {
 		t.Error("a file naming no pid is judged by its start alone")
+	}
+	// A child whose start in ticks is unknown is matched by nothing: not by
+	// a tick, and not by a file that gives no tick either.
+	for _, procStart := range []any{"48273615", absent, start.Format(time.ANSIC), "0"} {
+		if written(t, pid, procStart, linuxDomain).belongsTo(pid, start, 0) {
+			t.Errorf("a child whose start in ticks is unknown matched a file whose procStart is %v", procStart)
+		}
 	}
 }
 
@@ -352,7 +382,7 @@ func TestOnLinuxARegistryIsTheChildsByTheTickItStarted(t *testing.T) {
 // LC_ALL=C TZ=UTC: the file is the child's when it gives a time within a
 // second of the child's start and names no other pid space. A start in the
 // form Linux writes, the child's own tick included, is never the child's,
-// nor is a Linux pid space.
+// nor is a Linux pid space or one that cannot be read.
 func TestOnMacARegistryIsTheChildsByTheTimeItStarted(t *testing.T) {
 	onMac(t)
 	const pid, ticks = 48213, 48273615
@@ -374,6 +404,28 @@ func TestOnMacARegistryIsTheChildsByTheTimeItStarted(t *testing.T) {
 		if got := written(t, pid, c.procStart, c.domain).belongsTo(pid, start, ticks); got != c.ok {
 			t.Errorf("%s: %v, want %v", c.name, got, c.ok)
 		}
+	}
+	for name, domain := range unreadableDomains {
+		if written(t, pid, start.Format(time.ANSIC), domain).belongsTo(pid, start, ticks) {
+			t.Errorf("its own start, with %s, counted", name)
+		}
+	}
+	// A child whose start is unknown is matched by nothing: not by a time,
+	// and not by a file that gives no time either.
+	for _, procStart := range []any{start.Format(time.ANSIC), absent, "48273615"} {
+		if written(t, pid, procStart, macDomain).belongsTo(pid, time.Time{}, 0) {
+			t.Errorf("a child whose start is unknown matched a file whose procStart is %v", procStart)
+		}
+	}
+
+	// Where rota knows no pid space of its own, a file that names one, an
+	// empty one included, is still another's.
+	seam(t, &ourPidDomain, func() string { return "" })
+	if written(t, pid, start.Format(time.ANSIC), "").belongsTo(pid, start, ticks) {
+		t.Error("an empty pid space counted where none is known")
+	}
+	if !written(t, pid, start.Format(time.ANSIC), absent).belongsTo(pid, start, ticks) {
+		t.Error("a file naming no pid space is judged by its start alone where none is known")
 	}
 }
 
