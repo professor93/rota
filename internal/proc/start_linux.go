@@ -19,6 +19,9 @@ func StartTime(pid int) (time.Time, error) { return kernel.StartTime(pid) }
 // no setting of the clock moves: field 22 of /proc/<pid>/stat.
 func StartTicks(pid int) (int64, error) { return kernel.StartTicks(pid) }
 
+// Cmdline is a process's arguments: /proc/<pid>/cmdline.
+func Cmdline(pid int) ([]string, error) { return kernel.Cmdline(pid) }
+
 // Parent is a process's parent: field 4 of /proc/<pid>/stat.
 func Parent(pid int) (int, error) { return kernel.Parent(pid) }
 

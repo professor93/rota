@@ -79,6 +79,24 @@ func (p Procfs) Parent(pid int) (int, error) {
 	return ppid, nil
 }
 
+// Cmdline is the arguments a process was started with, or has since given
+// itself: /proc/<pid>/cmdline, split at its NULs. A process with none, a
+// kernel thread or a zombie, gives an empty list.
+func (p Procfs) Cmdline(pid int) ([]string, error) {
+	if pid <= 0 {
+		return nil, fmt.Errorf("proc: no process %d", pid)
+	}
+	raw, err := p.Read("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	if err != nil {
+		return nil, err
+	}
+	raw = bytes.TrimRight(raw, "\x00")
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	return strings.Split(string(raw), "\x00"), nil
+}
+
 // stat is /proc/<pid>/stat's fields from the third on. The second is the
 // command's name in parentheses, which may itself hold spaces and
 // parentheses, so the count starts after the last closing one: what follows

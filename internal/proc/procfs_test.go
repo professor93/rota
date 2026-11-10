@@ -86,3 +86,28 @@ func TestProcfsRefusesWhatItCannotRead(t *testing.T) {
 		t.Error("a start that is not a number is read")
 	}
 }
+
+// A command line is the NUL-separated arguments of /proc/<pid>/cmdline,
+// the trailing NUL dropped; a process with none, as a kernel thread or a
+// zombie has, gives none, and one that cannot be read is an error.
+func TestACommandLineIsItsArgumentsAtTheirNuls(t *testing.T) {
+	files := map[string]string{
+		"/proc/10/cmdline": "/home/me/.local/bin/claude\x00--resume\x00a b\x00",
+		"/proc/11/cmdline": "",
+	}
+	p := Procfs{Read: func(name string) ([]byte, error) {
+		if body, ok := files[name]; ok {
+			return []byte(body), nil
+		}
+		return nil, fs.ErrNotExist
+	}}
+	if args, err := p.Cmdline(10); err != nil || len(args) != 3 || args[0] != "/home/me/.local/bin/claude" || args[2] != "a b" {
+		t.Fatalf("cmdline %q, %v", args, err)
+	}
+	if args, err := p.Cmdline(11); err != nil || len(args) != 0 {
+		t.Fatalf("no arguments: %q, %v", args, err)
+	}
+	if _, err := p.Cmdline(12); err == nil {
+		t.Fatal("a process that is not there has a command line")
+	}
+}

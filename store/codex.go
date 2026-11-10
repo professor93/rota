@@ -56,12 +56,12 @@ func codexDaemon(home string) (string, bool) {
 		if errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		pid, _, ok := readRecord(raw, err)
+		rec, ok := readRecord(raw, err)
 		switch {
 		case !ok:
 			return name + " (unreadable)", true
-		case proc.Alive(pid):
-			return "codex daemon " + strconv.Itoa(pid), true
+		case proc.Alive(rec.pid):
+			return "codex daemon " + strconv.Itoa(rec.pid), true
 		}
 	}
 	return "", false
