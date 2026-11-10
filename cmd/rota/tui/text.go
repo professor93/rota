@@ -3,7 +3,6 @@ package tui
 import (
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -25,6 +24,9 @@ import (
 //     terminal may reorder a row by, the zero width space, the soft hyphen,
 //     the byte order mark. Only the joiners, ZWJ and ZWNJ, stay; they are
 //     part of what they join.
+//   - The variation selectors VS15 and VS16 are dropped: every emoji takes
+//     the presentation it has by default, so it is as wide to rota's
+//     tables as to x/ansi whatever follows it.
 //   - Hangul spelled out letter by letter, as macOS writes Korean file
 //     names, is put back together into its syllables (textHangul), which
 //     loses nothing.
@@ -40,6 +42,14 @@ import (
 //
 // clean of what clean gave is the same text.
 func clean(s string) string {
+	s, _, _ = textClean(s)
+	return s
+}
+
+// textClean is clean, with the passes textSame took over it and the bytes
+// it looked at again to place joined letters: the work a test holds to
+// linear in s, which a clock under load could not.
+func textClean(s string) (out string, passes, scanned int) {
 	// A control stands between words as a space does, so a key just after
 	// one is taken out before the control goes, and a key that dropping
 	// controls joins up is taken out after.
@@ -57,12 +67,13 @@ func clean(s string) string {
 		case r < 0x20 || r >= 0x7f && r < 0xa0:
 		case r == '\u200c' || r == '\u200d':
 			b.WriteRune(r)
-		case unicode.Is(unicode.Cf, r):
+		case unicode.Is(unicode.Cf, r), r == '\ufe0e' || r == '\ufe0f':
 		default:
 			b.WriteRune(r)
 		}
 	}
-	return wire.Unsecret(textSame(textHangul(b.String())))
+	out, passes, scanned = textSamePasses(textHangul(b.String()))
+	return wire.Unsecret(out), passes, scanned
 }
 
 // textSame is s with every character the measures disagree on replaced by
@@ -83,36 +94,40 @@ func clean(s string) string {
 // joins nothing is dropped, and a rune whose width terminals do not agree
 // on is "?" (textUnsure).
 //
-// A mark with nothing to sit on, at the start or after a character that
-// takes none, is dropped: drawn, it would sit on whatever is left of the
-// cell. A first letter that would join what follows it into a new grapheme
-// (a Prepend letter, a Hangul initial) is "?" instead, which joins nothing,
-// so one pass leaves text a second pass does not change, and the work is
-// linear in s. The second pass is the proof, and a guard.
+// A mark or a joiner with nothing to sit on, at the start or after a
+// character that takes none, is dropped: drawn, a mark would sit on
+// whatever is left of the cell. A first letter that would join what follows
+// it into a new grapheme (a Prepend letter, a Hangul initial) is "?"
+// instead, which joins nothing, so one pass leaves text a second pass does
+// not change, and the work is linear in s. The second pass is the proof,
+// and a guard.
 func textSame(s string) string {
-	s, _ = textSamePasses(s)
+	s, _, _ = textSamePasses(s)
 	return s
 }
 
-// textScanned counts the bytes textSame hands the grapheme segmenter to
-// decide where a joined letter would go (textAlone): the work a test holds
-// to linear in the text, which a clock under load could not.
-var textScanned atomic.Int64
-
-// textSamePasses is textSame and how many passes it took: 1 when s was
-// already clean, 2 when it was not.
-func textSamePasses(s string) (string, int) {
-	for n := 1; ; n++ {
-		t := textPass(s)
+// textSamePasses is textSame, how many passes it took (1 when s was
+// already clean, 2 when it was not), and how many bytes it looked at again
+// to place joined letters (textAlone).
+func textSamePasses(s string) (out string, passes, scanned int) {
+	for passes = 1; ; passes++ {
+		t, n := textPass(s)
+		scanned += n
 		if t == s {
-			return s, n
+			return s, passes, scanned
 		}
 		s = t
 	}
 }
 
-// textPass is one pass of textSame.
-func textPass(s string) string {
+// textPass is one pass of textSame, and the bytes textAlone looked at.
+func textPass(s string) (string, int) {
+	scanned := 0
+	alone := func(c, rest string) bool {
+		ok, n := textAlone(c, rest)
+		scanned += n
+		return ok
+	}
 	var b strings.Builder
 	b.Grow(len(s))
 	for rest := s; rest != ""; {
@@ -124,31 +139,30 @@ func textPass(s string) string {
 		c = strings.TrimRight(c, "\u200d")
 		r, _ := utf8.DecodeRuneInString(c)
 		switch one := string(r); {
-		case c == "" || unicode.Is(unicode.M, r):
-		case textAgreed(c) && (len(c) == whole || textAlone(c, rest)):
+		case c == "" || unicode.Is(unicode.M, r) || r == '\u200c' || r == '\u200d':
+		case textAgreed(c) && (len(c) == whole || alone(c, rest)):
 			b.WriteString(c)
-		case textAgreed(one) && textAlone(one, rest):
+		case textAgreed(one) && alone(one, rest):
 			b.WriteString(one)
 		default:
 			b.WriteByte('?')
 		}
 	}
-	return b.String()
+	return b.String(), scanned
 }
 
 // textAlone is whether c, written where a longer grapheme stood, stays a
-// grapheme of its own before rest rather than joining its start. Only
-// rest's first grapheme is looked at, so the check costs what that one
-// does.
-func textAlone(c, rest string) bool {
+// grapheme of its own before rest rather than joining its start, and how
+// many bytes it looked at to say. Only rest's first grapheme is looked at,
+// so the check costs what that one does.
+func textAlone(c, rest string) (bool, int) {
 	if rest == "" {
-		return true
+		return true, 0
 	}
 	next, _ := ansi.FirstGraphemeCluster(rest, ansi.GraphemeWidth)
 	look := c + next
-	textScanned.Add(int64(len(look)))
 	joined, _ := ansi.FirstGraphemeCluster(look, ansi.GraphemeWidth)
-	return joined == c
+	return joined == c, len(look)
 }
 
 // textHangul is s with each Hangul syllable spelled out in conjoining

@@ -1,11 +1,18 @@
 package tui
 
 import (
+	"bytes"
+	"go/ast"
+	"go/parser"
+	"go/printer"
+	"go/token"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
@@ -106,7 +113,15 @@ func TestTextRealWordsComeBack(t *testing.T) {
 		// "?", and the text after it stays.
 		"\U000111c2refused: the server said no": "?efused: the server said no",
 		"\u0d4eabc def ghi":                     "?bc def ghi",
-		"\u1100가나다라 마바사":                        "?나다라 마바사",
+		// A ZWJ trimmed from the end of a grapheme leaves a letter that
+		// would join what follows: "?" too, and the text stays.
+		"\u0d4e\u200dabc": "?abc",
+		// The edges of what composes: an initial past U+1112, a vowel past
+		// U+1175 and a final past U+11C2 spell no syllable.
+		"\u1113\u1161":   "\u1113",
+		"\u1100\u1176":   "\u1100",
+		"가\u11c3":        "가",
+		"\u1100가나다라 마바사": "?나다라 마바사",
 		// These come through whole.
 		"Tiếng Việt, Ελληνικά, русский, ไทย, ע\u05b4ב\u05b0ר\u05b4ית": "Tiếng Việt, Ελληνικά, русский, ไทย, ע\u05b4ב\u05b0ר\u05b4ית",
 	} {
@@ -127,12 +142,11 @@ func TestTextRealWordsComeBack(t *testing.T) {
 		{"a Hangul initial before each of 32,000 syllables", strings.Repeat("\u1100가", 32000), 32000},
 		{"64,000 pictures joined by ZWJ, one grapheme", strings.Repeat("👨\u200d", 64000), 2},
 	} {
-		before := textScanned.Load()
-		got, passes := textSamePasses(textHangul(c.s))
+		got, passes, looked := textClean(c.s)
 		if passes > 2 {
 			t.Errorf("%s: %d passes", c.name, passes)
 		}
-		if looked := textScanned.Load() - before; looked > 4*int64(len(c.s)) {
+		if looked > 4*len(c.s) {
 			t.Errorf("%s: %d bytes of %d looked at again to place joined letters", c.name, looked, len(c.s))
 		}
 		if textWidth(got) < c.kept {
@@ -173,7 +187,7 @@ var textWide = []struct {
 	{"ZWJ rainbow flag", "🏳\ufe0f\u200d🌈", "🏳", 1},
 	{"ZWJ with a tone", "👩\U0001f3fd\u200d💻 dev", "👩 dev", 6},
 	{"VS16 heart", "❤\ufe0f x", "❤ x", 3},
-	{"VS16 keycap", "1\ufe0f\u20e3", "1", 1},
+	{"VS16 keycap", "1\ufe0f\u20e3", "1\u20e3", 1},
 	{"VS16 on text", "a\ufe0f", "a", 1},
 	{"VS16 sun", "☀\ufe0f", "☀", 1},
 	{"skin tone", "👍\U0001f3fd", "👍", 2},
@@ -350,10 +364,10 @@ func TestTextTimeLeftCountsUp(t *testing.T) {
 const textModeVar = "ROTA_TUI_TEXT_MODE"
 
 // TestTextBothEastAsianModes runs the width tests again in a test binary of
-// their own, once with RUNEWIDTH_EASTASIAN=1, the supported setting for a
-// terminal that draws ambiguous characters wide, and once without it: x/ansi
-// reads the variable as the binary starts, so only a new process changes
-// the measure. The child is this binary, started by its own path, with PATH
+// their own, in the mode this run is not: with RUNEWIDTH_EASTASIAN=1, the
+// supported setting for a terminal that draws ambiguous characters wide, or
+// without it. x/ansi reads the variable as the binary starts, so only a new
+// process changes the measure, and this run covers its own mode. The child is this binary, started by its own path, with PATH
 // still the empty directory TestMain made, so it finds no CLI.
 func TestTextBothEastAsianModes(t *testing.T) {
 	if os.Getenv(textModeVar) != "" {
@@ -363,8 +377,14 @@ func TestTextBothEastAsianModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tests := "^(TestTextModeIsTheOneAsked|TestFitCountsColumnsNotBytes|TestTheBarTicksAtTheThreshold|TestCleanDropsControlsAndKeys|TestTextRealWordsComeBack|TestTextWrapKeepsEveryLineInItsWidth|TestTextEveryCharacterMeasuresOneWayAfterClean)$"
-	for _, mode := range []string{"narrow", "wide"} {
+	tests := "^(TestTextModeIsTheOneAsked|TestTextRandomLabelsMeasureOneWay|TestFitCountsColumnsNotBytes|TestTheBarTicksAtTheThreshold|TestCleanDropsControlsAndKeys|TestTextRealWordsComeBack|TestTextWrapKeepsEveryLineInItsWidth|TestTextEveryCharacterMeasuresOneWayAfterClean)$"
+	// This run measures in one mode already; the child measures in the
+	// other.
+	mode := "wide"
+	if textEastAsian() {
+		mode = "narrow"
+	}
+	{
 		var env []string
 		for _, kv := range os.Environ() {
 			if !strings.HasPrefix(kv, "RUNEWIDTH_EASTASIAN=") && !strings.HasPrefix(kv, textModeVar+"=") && !strings.HasPrefix(kv, "PATH=") {
@@ -379,8 +399,7 @@ func TestTextBothEastAsianModes(t *testing.T) {
 		cmd.Env = env
 		out, err := cmd.CombinedOutput()
 		if err != nil {
-			t.Errorf("the %s run failed: %v\n%s", mode, err, out)
-			continue
+			t.Fatalf("the %s run failed: %v\n%s", mode, err, out)
 		}
 		if !strings.Contains(string(out), "--- PASS: TestTextModeIsTheOneAsked") {
 			t.Errorf("the %s run did not measure in its mode:\n%s", mode, out)
@@ -403,4 +422,287 @@ func TestTextModeIsTheOneAsked(t *testing.T) {
 			t.Fatal("asked for ambiguous characters narrow, and … is two columns")
 		}
 	}
+}
+
+// TestTextWidthGoIsCopied: the copy of width.go's measure at the end of this
+// file is width.go's, declaration for declaration, but for its names and
+// comments.
+func TestTextWidthGoIsCopied(t *testing.T) {
+	decls := func(path string, keep func(string) bool, rename func(string) string) map[string]string {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names := map[string]bool{}
+		for _, d := range f.Decls {
+			switch d := d.(type) {
+			case *ast.FuncDecl:
+				if keep(d.Name.Name) {
+					names[d.Name.Name] = true
+				}
+			case *ast.GenDecl:
+				for _, sp := range d.Specs {
+					if v, ok := sp.(*ast.ValueSpec); ok && keep(v.Names[0].Name) {
+						names[v.Names[0].Name] = true
+					}
+				}
+			}
+		}
+		out := map[string]string{}
+		for _, d := range f.Decls {
+			name := ""
+			switch d := d.(type) {
+			case *ast.FuncDecl:
+				name = d.Name.Name
+				d.Doc = nil
+			case *ast.GenDecl:
+				if v, ok := d.Specs[0].(*ast.ValueSpec); ok {
+					name = v.Names[0].Name
+				}
+				d.Doc = nil
+			}
+			if !names[name] {
+				continue
+			}
+			ast.Inspect(d, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && names[id.Name] {
+					id.Name = rename(id.Name)
+				}
+				return true
+			})
+			var b bytes.Buffer
+			if err := printer.Fprint(&b, token.NewFileSet(), d); err != nil {
+				t.Fatal(err)
+			}
+			out[rename(name)] = b.String()
+		}
+		return out
+	}
+	measure := map[string]bool{"screenWidth": true, "char": true, "regional": true, "tone": true,
+		"picture": true, "pictograph": true, "runeWidth": true, "jamo": true, "wide": true}
+	theirs := decls("../width.go", func(n string) bool { return measure[n] },
+		func(n string) string { return "textGo" + strings.ToUpper(n[:1]) + n[1:] })
+	ours := decls("text_test.go", func(n string) bool { return strings.HasPrefix(n, "textGo") },
+		func(n string) string { return n })
+	if len(theirs) != len(measure) {
+		t.Fatalf("width.go has %d of the measure's %d declarations", len(theirs), len(measure))
+	}
+	for name, src := range theirs {
+		if ours[name] != src {
+			t.Errorf("%s differs from width.go's:\n%s\nwant:\n%s", name, ours[name], src)
+		}
+	}
+	if len(ours) != len(theirs) {
+		t.Errorf("the copy has %d declarations, width.go's measure %d", len(ours), len(theirs))
+	}
+}
+
+// TestTextRandomLabelsMeasureOneWay builds labels at random, with a fixed
+// seed, from the characters that make measures disagree: Prepend letters,
+// conjoining jamo and their edges, the joiners and variation selectors,
+// emoji, flags, skin tones, a keycap, marks, Devanagari, halfwidth kana,
+// controls, CJK and unassigned code points. Whatever clean makes of each is
+// clean already, as wide to the renderer as by graphemes and as to rota's
+// own tables, valid UTF-8, done in at most two passes, and loses no ASCII
+// letter but the one a joining letter before it takes.
+func TestTextRandomLabelsMeasureOneWay(t *testing.T) {
+	alpha := []string{"a", "b", " ", "x", "\u0d4e", "\U000111c2", "\U00011a84", "\u1100", "\u1112", "\u1161",
+		"\u1175", "\u11a8", "\u11a7", "\u11c2", "가", "한", "\u200d", "\u200c", "\ufe0f", "\ufe0e", "👨", "👩", "❤", "🏳",
+		"🌈", "\U0001f3fd", "\U0001f1ef", "\U0001f1f5", "\u20e3", "1", "\u0301", "\u0308", "न", "\u094d", "\u093f",
+		"द", "\u0940", "ｶ", "\uff9e", "\x1b", "\u200b", "\u0600", "日", "\u2630", "\u0378", "\u3099", "か"}
+	joins := func(s string) int {
+		n := 0
+		for _, r := range s {
+			if r == 0x0d4e || r == 0x111c2 || r == 0x11a84 || r == 0x0600 {
+				n++
+			}
+		}
+		return n
+	}
+	letters := func(s string) int { return strings.Count(s, "a") + strings.Count(s, "b") + strings.Count(s, "x") }
+	r := rand.New(rand.NewPCG(1, 2))
+	for range 50000 {
+		var b strings.Builder
+		for range 1 + r.IntN(12) {
+			b.WriteString(alpha[r.IntN(len(alpha))])
+		}
+		in := b.String()
+		out, passes, _ := textClean(in)
+		wc, g := textMeasures(out)
+		switch {
+		case clean(out) != out:
+			t.Fatalf("clean(%q) = %q, and clean of that is %q", in, out, clean(out))
+		case wc != g:
+			t.Fatalf("clean(%q) = %q is %d wide to the renderer and %d by graphemes", in, out, wc, g)
+		case !textEastAsian() && wc != textGoScreenWidth(out):
+			t.Fatalf("clean(%q) = %q is %d wide to the renderer and %d to rota's tables", in, out, wc, textGoScreenWidth(out))
+		case passes > 2:
+			t.Fatalf("clean(%q) took %d passes", in, passes)
+		case !utf8.ValidString(out):
+			t.Fatalf("clean(%q) = %q is not UTF-8", in, out)
+		case letters(out) < letters(in)-joins(in):
+			t.Fatalf("clean(%q) = %q lost letters", in, out)
+		}
+	}
+}
+
+// What follows is cmd/rota/width.go's measure, the one rota's tables use,
+// copied with its names given this file's stem: package main cannot be
+// imported. TestTextWidthGoIsCopied fails the moment the two differ.
+
+func textGoScreenWidth(s string) int {
+	r := []rune(s)
+	n := 0
+	for i := 0; i < len(r); {
+		end, w := textGoChar(r, i)
+		n, i = n+w, end
+	}
+	return n
+}
+
+func textGoChar(r []rune, i int) (end, w int) {
+	w = textGoRuneWidth(r[i])
+	flag := textGoRegional(r[i])
+	for end = i + 1; end < len(r); end++ {
+		c := r[end]
+		switch {
+		case flag && textGoRegional(c):
+			flag, w = false, 2
+		case c == '\ufe0f':
+			if w == 1 && textGoPicture(r[i]) {
+				w = 2
+			}
+		case textGoTone(c) && textGoPictograph(r[i]):
+			w = 2
+		case r[end-1] == '\u200d' && textGoPictograph(c) && textGoPictograph(r[i]):
+			w = 2
+		case textGoRuneWidth(c) == 0:
+		default:
+			return end, w
+		}
+	}
+	return end, w
+}
+
+func textGoRegional(r rune) bool { return r >= 0x1f1e6 && r <= 0x1f1ff }
+
+func textGoTone(r rune) bool { return r >= 0x1f3fb && r <= 0x1f3ff }
+
+func textGoPicture(r rune) bool {
+	return textGoPictograph(r) || strings.ContainsRune("#*0123456789©®‼⁉", r)
+}
+
+func textGoPictograph(r rune) bool {
+	return r >= 0x2100 && r < 0x2c00 || r >= 0x1f000 && r < 0x20000
+}
+
+func textGoRuneWidth(r rune) int {
+	switch {
+	case r < 0x300:
+		return 1
+	case unicode.In(r, unicode.Mn, unicode.Me, unicode.Cf, textGoJamo):
+		return 0
+	case unicode.Is(textGoWide, r):
+		return 2
+	}
+	return 1
+}
+
+var textGoJamo = &unicode.RangeTable{
+	R16: []unicode.Range16{
+		{Lo: 0x1160, Hi: 0x11ff, Stride: 1},
+		{Lo: 0xd7b0, Hi: 0xd7ff, Stride: 1},
+	},
+}
+
+var textGoWide = &unicode.RangeTable{
+	R16: []unicode.Range16{
+		{Lo: 0x1100, Hi: 0x115f, Stride: 1},
+		{Lo: 0x231a, Hi: 0x231b, Stride: 1},
+		{Lo: 0x2329, Hi: 0x232a, Stride: 1},
+		{Lo: 0x23e9, Hi: 0x23ec, Stride: 1},
+		{Lo: 0x23f0, Hi: 0x23f0, Stride: 1},
+		{Lo: 0x23f3, Hi: 0x23f3, Stride: 1},
+		{Lo: 0x25fd, Hi: 0x25fe, Stride: 1},
+		{Lo: 0x2614, Hi: 0x2615, Stride: 1},
+		{Lo: 0x2648, Hi: 0x2653, Stride: 1},
+		{Lo: 0x267f, Hi: 0x267f, Stride: 1},
+		{Lo: 0x2693, Hi: 0x2693, Stride: 1},
+		{Lo: 0x26a1, Hi: 0x26a1, Stride: 1},
+		{Lo: 0x26aa, Hi: 0x26ab, Stride: 1},
+		{Lo: 0x26bd, Hi: 0x26be, Stride: 1},
+		{Lo: 0x26c4, Hi: 0x26c5, Stride: 1},
+		{Lo: 0x26ce, Hi: 0x26ce, Stride: 1},
+		{Lo: 0x26d4, Hi: 0x26d4, Stride: 1},
+		{Lo: 0x26ea, Hi: 0x26ea, Stride: 1},
+		{Lo: 0x26f2, Hi: 0x26f3, Stride: 1},
+		{Lo: 0x26f5, Hi: 0x26f5, Stride: 1},
+		{Lo: 0x26fa, Hi: 0x26fa, Stride: 1},
+		{Lo: 0x26fd, Hi: 0x26fd, Stride: 1},
+		{Lo: 0x2705, Hi: 0x2705, Stride: 1},
+		{Lo: 0x270a, Hi: 0x270b, Stride: 1},
+		{Lo: 0x2728, Hi: 0x2728, Stride: 1},
+		{Lo: 0x274c, Hi: 0x274c, Stride: 1},
+		{Lo: 0x274e, Hi: 0x274e, Stride: 1},
+		{Lo: 0x2753, Hi: 0x2755, Stride: 1},
+		{Lo: 0x2757, Hi: 0x2757, Stride: 1},
+		{Lo: 0x2795, Hi: 0x2797, Stride: 1},
+		{Lo: 0x27b0, Hi: 0x27b0, Stride: 1},
+		{Lo: 0x27bf, Hi: 0x27bf, Stride: 1},
+		{Lo: 0x2b1b, Hi: 0x2b1c, Stride: 1},
+		{Lo: 0x2b50, Hi: 0x2b50, Stride: 1},
+		{Lo: 0x2b55, Hi: 0x2b55, Stride: 1},
+		{Lo: 0x2e80, Hi: 0x303e, Stride: 1},
+		{Lo: 0x3041, Hi: 0x3247, Stride: 1},
+		{Lo: 0x3250, Hi: 0xa4cf, Stride: 1},
+		{Lo: 0xa960, Hi: 0xa97f, Stride: 1},
+		{Lo: 0xac00, Hi: 0xd7a3, Stride: 1},
+		{Lo: 0xf900, Hi: 0xfaff, Stride: 1},
+		{Lo: 0xfe10, Hi: 0xfe19, Stride: 1},
+		{Lo: 0xfe30, Hi: 0xfe6f, Stride: 1},
+		{Lo: 0xff00, Hi: 0xff60, Stride: 1},
+		{Lo: 0xffe0, Hi: 0xffe6, Stride: 1},
+	},
+	R32: []unicode.Range32{
+		{Lo: 0x16fe0, Hi: 0x18d7f, Stride: 1},
+		{Lo: 0x1aff0, Hi: 0x1b2ff, Stride: 1},
+		{Lo: 0x1f004, Hi: 0x1f004, Stride: 1},
+		{Lo: 0x1f0cf, Hi: 0x1f0cf, Stride: 1},
+		{Lo: 0x1f18e, Hi: 0x1f18e, Stride: 1},
+		{Lo: 0x1f191, Hi: 0x1f19a, Stride: 1},
+		{Lo: 0x1f200, Hi: 0x1f2ff, Stride: 1},
+		{Lo: 0x1f300, Hi: 0x1f320, Stride: 1},
+		{Lo: 0x1f32d, Hi: 0x1f335, Stride: 1},
+		{Lo: 0x1f337, Hi: 0x1f37c, Stride: 1},
+		{Lo: 0x1f37e, Hi: 0x1f393, Stride: 1},
+		{Lo: 0x1f3a0, Hi: 0x1f3ca, Stride: 1},
+		{Lo: 0x1f3cf, Hi: 0x1f3d3, Stride: 1},
+		{Lo: 0x1f3e0, Hi: 0x1f3f0, Stride: 1},
+		{Lo: 0x1f3f4, Hi: 0x1f3f4, Stride: 1},
+		{Lo: 0x1f3f8, Hi: 0x1f43e, Stride: 1},
+		{Lo: 0x1f440, Hi: 0x1f440, Stride: 1},
+		{Lo: 0x1f442, Hi: 0x1f4fc, Stride: 1},
+		{Lo: 0x1f4ff, Hi: 0x1f53d, Stride: 1},
+		{Lo: 0x1f54b, Hi: 0x1f54e, Stride: 1},
+		{Lo: 0x1f550, Hi: 0x1f567, Stride: 1},
+		{Lo: 0x1f57a, Hi: 0x1f57a, Stride: 1},
+		{Lo: 0x1f595, Hi: 0x1f596, Stride: 1},
+		{Lo: 0x1f5a4, Hi: 0x1f5a4, Stride: 1},
+		{Lo: 0x1f5fb, Hi: 0x1f64f, Stride: 1},
+		{Lo: 0x1f680, Hi: 0x1f6c5, Stride: 1},
+		{Lo: 0x1f6cc, Hi: 0x1f6cc, Stride: 1},
+		{Lo: 0x1f6d0, Hi: 0x1f6d2, Stride: 1},
+		{Lo: 0x1f6d5, Hi: 0x1f6df, Stride: 1},
+		{Lo: 0x1f6eb, Hi: 0x1f6ef, Stride: 1},
+		{Lo: 0x1f6f4, Hi: 0x1f6ff, Stride: 1},
+		{Lo: 0x1f7e0, Hi: 0x1f7eb, Stride: 1},
+		{Lo: 0x1f7f0, Hi: 0x1f7f0, Stride: 1},
+		{Lo: 0x1f90c, Hi: 0x1f93a, Stride: 1},
+		{Lo: 0x1f93c, Hi: 0x1f945, Stride: 1},
+		{Lo: 0x1f947, Hi: 0x1f9ff, Stride: 1},
+		{Lo: 0x1fa70, Hi: 0x1faff, Stride: 1},
+		{Lo: 0x20000, Hi: 0x2fffd, Stride: 1},
+		{Lo: 0x30000, Hi: 0x3fffd, Stride: 1},
+	},
 }

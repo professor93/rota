@@ -10,10 +10,12 @@ import (
 	"github.com/professor93/rota/wire"
 )
 
-// barsAs is a bar drawn in blocks as this binary draws it: the same, or in
-// ASCII where ambiguous characters are measured wide (barsDrawn).
+// barsAs is a bar written in R33's blocks as this binary must draw it: the
+// same where ambiguous characters are measured narrow, and in ASCII where
+// they are measured wide. The mode is read from the measure, not from the
+// function under test.
 func barsAs(s string) string {
-	if barsDrawn() == barsBlocks {
+	if !textEastAsian() {
 		return s
 	}
 	return strings.NewReplacer("▕", "[", "█", "#", "░", "-", "│", "|", "▏", "]").Replace(s)
