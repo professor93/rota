@@ -25,6 +25,9 @@ var vendored = map[string]string{
 	"addon-fit.js":          "bdaefa370b1bfc42ee88d46fe6072400902a4d4b2d45cd93438dda9b23c97089",
 	"LICENSE-xterm.txt":     "b569f629d00f2626a8100df2a1798210535621e42164dfd426a6fe5aac7b0ccd",
 	"LICENSE-addon-fit.txt": "e256f01188af527e4d06d21d06fbf785ae9c50d4b328bf03cbe0ba7f0aa4228f",
+	"addon-unicode11.js":    "b0c3be540a9984713aea996966c24ed1a639d11f60d44986b22661e3a8a148d0",
+	// The same MIT text as addon-fit's, word for word, so the same sum.
+	"LICENSE-addon-unicode11.txt": "e256f01188af527e4d06d21d06fbf785ae9c50d4b328bf03cbe0ba7f0aa4228f",
 	// The README is provenance, not code: it changes whenever the versions
 	// above do, so it is checked for being there rather than for its bytes.
 	"README": "",
@@ -85,6 +88,8 @@ func TestTheEmulatorIsServedBesideTheTerminalPage(t *testing.T) {
 		{"xterm/addon-fit.js", "text/javascript; charset=utf-8"},
 		{"xterm/LICENSE-xterm.txt", "text/plain; charset=utf-8"},
 		{"xterm/LICENSE-addon-fit.txt", "text/plain; charset=utf-8"},
+		{"xterm/addon-unicode11.js", "text/javascript; charset=utf-8"},
+		{"xterm/LICENSE-addon-unicode11.txt", "text/plain; charset=utf-8"},
 		{"page.css", "text/css; charset=utf-8"},
 		{"page.js", "text/javascript; charset=utf-8"},
 	} {
@@ -125,7 +130,8 @@ func TestTheEmulatorIsServedBesideTheTerminalPage(t *testing.T) {
 // goes; the two shared files stay for as long as either page is served.
 func TestTheEmulatorIsGoneWithTheTerminalPage(t *testing.T) {
 	h := newHarness(t, Options{})
-	for _, file := range []string{"xterm/xterm.js", "xterm/xterm.css", "xterm/addon-fit.js"} {
+	for _, file := range []string{"xterm/xterm.js", "xterm/xterm.css", "xterm/addon-fit.js",
+		"xterm/addon-unicode11.js", "xterm/LICENSE-addon-unicode11.txt"} {
 		if resp, _ := h.do("GET", "/assets/"+file, nil); resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("GET /assets/%s answered %d with no terminal, want 404", file, resp.StatusCode)
 		}

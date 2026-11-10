@@ -133,11 +133,15 @@ func TestThePagesAreSelfContained(t *testing.T) {
 	if n := strings.Count(term, "new FitAddon"); n != 1 {
 		t.Errorf("the fit addon is made in %d places, want one", n)
 	}
+	if n := strings.Count(term, "new Unicode11Addon"); n != 1 {
+		t.Errorf("the Unicode 11 addon is made in %d places, want one", n)
+	}
 	view, err := assetFS.ReadFile("assets/term/view.js")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(view), "new Terminal(") || !strings.Contains(string(view), "new FitAddon") {
+	if !strings.Contains(string(view), "new Terminal(") || !strings.Contains(string(view), "new FitAddon") ||
+		!strings.Contains(string(view), "new Unicode11Addon") {
 		t.Error("xterm is not constructed in view.js")
 	}
 	// Nothing the terminal page shows is parsed as markup: every node is

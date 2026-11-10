@@ -37,13 +37,15 @@ var assetFS embed.FS
 // list, so a file that lands in that directory is not reachable until
 // somebody says here that it should be.
 var assetTypes = map[string]string{
-	"page.css":                    "text/css; charset=utf-8",
-	"page.js":                     "text/javascript; charset=utf-8",
-	"xterm/xterm.js":              "text/javascript; charset=utf-8",
-	"xterm/xterm.css":             "text/css; charset=utf-8",
-	"xterm/addon-fit.js":          "text/javascript; charset=utf-8",
-	"xterm/LICENSE-xterm.txt":     "text/plain; charset=utf-8",
-	"xterm/LICENSE-addon-fit.txt": "text/plain; charset=utf-8",
+	"page.css":                          "text/css; charset=utf-8",
+	"page.js":                           "text/javascript; charset=utf-8",
+	"xterm/xterm.js":                    "text/javascript; charset=utf-8",
+	"xterm/xterm.css":                   "text/css; charset=utf-8",
+	"xterm/addon-fit.js":                "text/javascript; charset=utf-8",
+	"xterm/LICENSE-xterm.txt":           "text/plain; charset=utf-8",
+	"xterm/LICENSE-addon-fit.txt":       "text/plain; charset=utf-8",
+	"xterm/addon-unicode11.js":          "text/javascript; charset=utf-8",
+	"xterm/LICENSE-addon-unicode11.txt": "text/plain; charset=utf-8",
 	// Where all of that came from, readable from the server that serves it.
 	"xterm/README": "text/plain; charset=utf-8",
 	// The terminal page's own script and styles, in the order it loads them.
