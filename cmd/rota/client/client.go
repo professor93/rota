@@ -59,6 +59,10 @@ const maxBody = 8 << 20
 // connection of its own, so a client left idle holds nothing open.
 type Client struct {
 	sock string
+	// dial opens one connection to whatever serves this client: the
+	// daemon's socket, or a handler in this process. Every request and
+	// every attach goes through it.
+	dial func(ctx context.Context) (net.Conn, error)
 	http *http.Client
 }
 
@@ -131,14 +135,16 @@ func dial(terminals string, wait time.Duration) (*Client, error) {
 }
 
 func newClient(sock string) *Client {
-	return &Client{sock: sock, http: &http.Client{
+	c := &Client{sock: sock, dial: func(ctx context.Context) (net.Conn, error) { return dialOwn(ctx, sock) }}
+	c.http = &http.Client{
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
-				return dialOwn(ctx, sock)
+				return c.dial(ctx)
 			},
 		},
-	}}
+	}
+	return c
 }
 
 // owner is the user whose daemon a control socket must be: the one this
