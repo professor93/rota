@@ -192,6 +192,13 @@ var (
 	// is gone there is no other copy of what stood beside the login.
 	seedTries = 3
 	seedPause = 100 * time.Millisecond
+	// launchLead is how long before its access token expires a launch into a
+	// quiet home refreshes the login first (see lead); 0 is never. Half an
+	// hour: six times Claude Code's own five-minute window, so a run started
+	// inside it — a burst of headless runs above all — does not meet that
+	// window before it ends, and a sixteenth of the eight hours a token lasts,
+	// which is all a lead can give up of one.
+	launchLead = 30 * time.Minute
 )
 
 // errKeychain marks a keychain that could not be read, which is not the
@@ -1731,7 +1738,7 @@ func (h *claudeHome) renew(ctx context.Context) (bool, error) {
 	if !h.renewable() {
 		return changed, nil
 	}
-	did, err := h.renewHeld(ctx)
+	did, err := h.renewHeld(ctx, h.refresh)
 	return changed || did, err
 }
 
@@ -1744,8 +1751,9 @@ func (h *claudeHome) renewable() bool {
 }
 
 // renewHeld is renew once the lock is held and the home read under it: the
-// login written in, saved, refreshed, saved again and written in.
-func (h *claudeHome) renewHeld(ctx context.Context) (bool, error) {
+// login written in, saved, refreshed — by refresh, or by refreshEarly for a
+// lead — saved again and written in.
+func (h *claudeHome) renewHeld(ctx context.Context, refresh func(context.Context) (bool, error)) (bool, error) {
 	a := h.a
 	if err := h.writeDue(ctx); err != nil {
 		return true, err
@@ -1753,7 +1761,7 @@ func (h *claudeHome) renewHeld(ctx context.Context) (bool, error) {
 	if err := h.s.Save(); err != nil {
 		return true, fmt.Errorf("refusing to go on: not refreshed, the store could not be saved: %w", err)
 	}
-	changed, err := h.refresh(ctx)
+	changed, err := refresh(ctx)
 	if err != nil || !changed || a.Dead || h.hold != "" {
 		return changed, err
 	}
@@ -1769,6 +1777,95 @@ func (h *claudeHome) renewHeld(ctx context.Context) (bool, error) {
 		return true, errors.Join(err, h.writeRefreshed(ctx, false))
 	}
 	return true, h.writeRefreshed(ctx, true)
+}
+
+// lead refreshes the login a launch is about to start Claude Code on, before it
+// is due, when the home is quiet and its access token expires within launchLead
+// (leading). Claude Code refreshes in the last five minutes of a token, and every
+// process it runs in a home that reaches that window together, a burst of
+// headless runs above all, is one more chance to lose the login; a Claude Code
+// started on a fresh token reaches it hours later, if at all. Nothing else
+// leads: a listing, a rescue or maintenance refresh only what is due.
+//
+// It is renew in every other way, made through renewHeld: under Claude Code's
+// refresh lock, with the home read again once that is held and the question
+// asked again, the store saved before the token goes out and after it, and the
+// new login in the home before the lock goes. The journal names it <caller>.lead.
+//
+// A lead that leaves the account as it was — a lock somebody holds, a lock that
+// cannot be made, a store that cannot be saved before, a provider that fails or
+// does not answer — is the lead's alone, and the launch goes on as it would have,
+// on the login the home holds; the next launch inside the lead tries again. Only
+// whoever asked going away, and what a refresh that answered leaves — a refusal,
+// a login the store or the home could not keep — are the launch's, exactly as for
+// a renew.
+func (h *claudeHome) lead(ctx context.Context) error {
+	if !h.leading() {
+		return nil
+	}
+	renewing := h.via
+	h.via = callerOr(ctx, "launch") + ".lead"
+	defer func() { h.via = renewing }()
+	lock, _, _ := h.lockAndRead(ctx, h.via)
+	if lock == nil {
+		return nil // the lock was not to be had, which the journal says, or the home not read again: nothing went out
+	}
+	defer lock.release()
+	if !h.leading() {
+		return nil
+	}
+	before := h.mark()
+	_, err := h.renewHeld(ctx, h.refreshEarly)
+	if h.mark() == before && !Left(err) {
+		return nil
+	}
+	return err
+}
+
+// leading reports whether a launch leads, as the home was last read: launchLead
+// is set, and the account's access token expires within it and has not yet
+// come within ExpiryBuffer, where renew takes over; the account is alive, its
+// login kept in its home, out of the hold, not blanked, the home holding exactly
+// the account's current login, and nothing at all alive there. The login must
+// also end, when its end is known, after the token does: a lead presents only a
+// token a refresh due in the last minutes of its access token would present, so
+// none past the login's end (rota.Refresh says so too) and none of a login that
+// ends first, which no refresh renews before its end.
+func (h *claudeHome) leading() bool {
+	a := h.a
+	if launchLead <= 0 || a.Dead || a.Expired() || a.Token.ExpiresAt == 0 || !rota.StoresLogin(a, h.home) {
+		return false
+	}
+	expires := time.UnixMilli(a.Token.ExpiresAt)
+	if rota.Now().Add(launchLead).Before(expires) {
+		return false
+	}
+	if end := a.LoginUntil(); !end.IsZero() && !end.After(expires) {
+		return false
+	}
+	return h.hold == "" && !h.blanked && h.usable && !h.spent && a.StagedCurrent() && h.quiet()
+}
+
+// refreshEarly is refresh for a login that is not due yet, which rota.Refresh
+// presents only once it is: its expiry is put in the past for the length of the
+// one refresh, as a rescue's is, and put back when the refresh did not replace
+// it. Meanwhile what judges a file in the home, and the journal, go by when it
+// truly expires (copyExpires).
+func (h *claudeHome) refreshEarly(ctx context.Context) (bool, error) {
+	a := h.a
+	if a.Expired() {
+		return h.refresh(ctx)
+	}
+	expires := a.Token.ExpiresAt
+	a.Token.ExpiresAt = rota.NowMS() - 1
+	forced := a.Token.ExpiresAt
+	h.copyExpires = expires
+	changed, err := h.refresh(ctx)
+	h.copyExpires = 0
+	if a.Token.ExpiresAt == forced {
+		a.Token.ExpiresAt = expires
+	}
+	return changed, err
 }
 
 // writeDue makes the home hold the account's current login, which is due for a
@@ -2354,8 +2451,14 @@ func (h *claudeHome) launchStored(ctx context.Context) (*rota.Command, error) {
 		return h.launchBeside(ctx)
 	}
 	// A lock somebody holds is Claude Code refreshing the login there, and the
-	// launch joins the home as it is: whatever starts there waits for it.
-	if _, err := h.renew(ctx); unlessHeld(err) != nil {
+	// launch joins the home as it is: whatever starts there waits for it. A
+	// login not yet due may be refreshed ahead of the launch (lead), and what
+	// comes of that is dealt with as what comes of a renew.
+	_, err := h.renew(ctx)
+	if err == nil {
+		err = h.lead(ctx)
+	}
+	if unlessHeld(err) != nil {
 		// A login that died just now is dead like any other, with the one
 		// exception mayLaunch allows: a long-lived token owes it nothing.
 		if !a.Dead || !a.LongValid() {
