@@ -21,12 +21,20 @@ import (
 // wait fifteen seconds to see one.
 var heartbeat = 15 * time.Second
 
-// keepEnded is how long a finished run stays addressable. A reader that
-// reattaches a moment too late should be given the tail of the stream and the
-// event that closed it, rather than a 404 it cannot tell from a wrong id.
-// Ended terminals stay as long. It is a variable so a test about what comes
-// after it need not wait five minutes.
-var keepEnded = 5 * time.Minute
+// keepEndedDefault is how long a finished run stays addressable. A reader
+// that reattaches a moment too late should be given the tail of the stream
+// and the event that closed it, rather than a 404 it cannot tell from a wrong
+// id. Ended terminals stay as long. Options.keepEnded replaces it, so a test
+// about what comes after it need not wait five minutes.
+const keepEndedDefault = 5 * time.Minute
+
+// keepEnded is how long this server keeps what has ended.
+func (s *Server) keepEnded() time.Duration {
+	if s.opts.keepEnded > 0 {
+		return s.opts.keepEnded
+	}
+	return keepEndedDefault
+}
 
 // liveRun is one run that stays open, and everything the endpoints need to
 // reach it.

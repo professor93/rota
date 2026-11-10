@@ -100,6 +100,12 @@ type Options struct {
 	// terminals instead of ending them. Nil runs every terminal in this
 	// process, as a server always has.
 	HoldCommand func() *exec.Cmd
+
+	// keepEnded is how long a finished run or terminal stays addressable
+	// (default keepEndedDefault). It is a field of the server's own, set
+	// before the server exists, so a test that shortens it shares it with
+	// no other server.
+	keepEnded time.Duration
 }
 
 // Terminal configures the terminals a server may hold: how many, how much of

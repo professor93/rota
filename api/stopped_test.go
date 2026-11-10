@@ -200,10 +200,7 @@ func TestAStaleSockIsClearedOnlyWhenUnlocked(t *testing.T) {
 // An ended session is still described after this server has stopped
 // keeping it, from its record: its state and its exit (Review Focus 5).
 func TestAnEndedSessionStaysListed(t *testing.T) {
-	was := keepEnded
-	keepEnded = 100 * time.Millisecond
-	t.Cleanup(func() { keepEnded = was })
-	p := withHeld(t, nil)
+	p := withHeld(t, nil, func(o *Options) { o.keepEnded = 100 * time.Millisecond })
 	id := p.start(nil)["id"].(string)
 	tm := p.attach(id, p.alice, "")
 	tm.waitType("hello")
@@ -227,6 +224,35 @@ func TestAnEndedSessionStaysListed(t *testing.T) {
 	})
 	if _, ok := p.list()[id]; !ok {
 		t.Fatal("the ended session is not in the listing")
+	}
+}
+
+// How long an ended terminal is kept is the server's own, so one that keeps
+// it for a moment and one that keeps it for the default run side by side.
+// Moving a package variable for this once raced with every terminal an
+// earlier test had left to finish.
+func TestEachServerKeepsWhatEndedForItsOwnTime(t *testing.T) {
+	brief := withTerminals(t, func(o *Options) { o.keepEnded = 100 * time.Millisecond })
+	usual := withTerminals(t)
+	ids := map[*terms]string{}
+	for _, p := range []*terms{brief, usual} {
+		id := p.start(nil)["id"].(string)
+		ids[p] = id
+		tm := p.attach(id, p.alice, "")
+		tm.waitOut("ready ")
+		if resp, raw := p.as(p.alice, "DELETE", "/v1/terminals/"+id, nil); resp.StatusCode != 200 {
+			t.Fatalf("deleting: %d %s", resp.StatusCode, raw)
+		}
+		tm.waitType("exit")
+		p.waitEnded(id)
+	}
+	for deadline := time.Now().Add(3 * time.Second); brief.api.findTerminal(ids[brief]) != nil; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the server told to keep an ended terminal for 100ms never let go of it")
+		}
+	}
+	if usual.api.findTerminal(ids[usual]) == nil {
+		t.Fatal("the other server let go of its ended terminal at the first server's time")
 	}
 }
 
