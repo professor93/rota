@@ -3444,9 +3444,10 @@ Code blanked: see *Stranded* and *Blanked*, below.
   Claude Code that is not signed in.
 - **Refreshing.** Usage is read with the token the account has, while Claude
   Code runs or not; a 401 is read as a rotation and the home is read again
-  before one more try. Only an expired token needs rota to refresh, and that
-  waits for a quiet home out of the hold; until then the account keeps its
-  last reading. *Stranded* and *Blanked* come first, at every look, and have
+  before one more try. Only an expired token needs rota to refresh — a launch
+  refreshes one a little sooner, see *The lead* — and that waits for a quiet
+  home out of the hold; until then the account keeps its last reading.
+  *Stranded* and *Blanked* come first, at every look, and have
   nothing to do with readings: a reading still fresh, or `--short`, does not
   put them off. A refresh the provider refuses as dead is not believed until
   the home has been read again — a sibling may have refreshed first, and its
@@ -3471,6 +3472,30 @@ Code blanked: see *Stranded* and *Blanked*, below.
   reading and wait again, and afterwards writes its reading, or the wait the
   provider asked for, into the store under the lock taken again for that one
   write, and nothing else of the account.
+- **The lead.** Claude Code refreshes a login in the last five minutes of its
+  access token, and every process it runs in a home that reaches those minutes
+  together — a burst of headless runs started at once, say — is one more chance
+  to lose the login. So a launch into a home where nothing runs, holding exactly
+  the account's current login, refreshes that login first when its access token
+  expires within thirty minutes, and Claude Code starts on a token good for
+  about eight hours. It is a refresh like any other of rota's: under Claude
+  Code's refresh lock, with the home read again once the lock is held and the
+  question asked again, the store saved before the token goes out and after,
+  and the new login in the home before the lock goes. Only a launch leads; a
+  listing, a rescue, maintenance and a run without the home refresh what has
+  expired, as ever. One lead is enough: the launch after it finds a fresh
+  token, and one that starts while a run holds the account finds the home
+  busy. A lead presents nothing a refresh in the last minutes would not: no
+  login past its end, nor one that ends before its access token runs out. One
+  that does not get through — Claude Code holding its refresh lock, a lock that
+  cannot be made, a store that cannot be saved first, a provider that fails or
+  does not answer — changes nothing and says nothing beyond the journal: the
+  launch goes ahead on the login the home holds, and the next launch within the
+  thirty minutes tries again. A refusal is a refusal, as for a token that ran
+  out: the home is read again, and otherwise the account is dead and the
+  launch is refused, unless the account holds a long-lived token, which it then
+  runs on. Of each token's eight hours a lead gives up at most the half hour it
+  comes ahead.
 - **Stranded.** Claude Code's daemon refreshes the login itself, and now and
   then the refresh fails, on a plain `~/.claude` as much as in a home of
   rota's. When the access token has run out by then, the daemon writes
@@ -3577,11 +3602,12 @@ Code blanked: see *Stranded* and *Blanked*, below.
   `refresh_every` says.
   No watcher has yet been seen rescuing a home under a live Claude Code.
 - **The refresh lock.** Every refresh rota makes of a login kept in a home — a
-  launch's, a listing's, maintenance's, a run's on a token, and the rescues
-  above — holds Claude Code's own refresh lock (`.oauth_refresh.lock` in the
-  home), from reading the home again until the login is in it, and touches it
-  every five seconds as Claude Code's own holders do, because Claude Code takes
-  a lock for dead after a minute untouched. The rescues take it one account at
+  launch's, its lead included, a listing's, maintenance's, a run's on a token,
+  and the rescues above — holds Claude Code's own refresh lock
+  (`.oauth_refresh.lock` in the home), from reading the home again until the
+  login is in it, and touches it every five seconds as Claude Code's own
+  holders do, because Claude Code takes a lock for dead after a minute
+  untouched. The rescues take it one account at
   a time. A listing takes the lock of each account it is going to refresh as it
   plans that refresh, and lets go of each once that account's login is in its
   home, so it may hold several homes' locks at once; it reads usage with the
@@ -3625,7 +3651,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
     `choose` (the rotation choosing an account: `rota run` with no id, an API
     run or terminal with no id), `api` (the server's `?refresh=1`), the name a
     program gives the store with `store.WithCaller`, or `refresh` when it
-    gives none; `rescue.blank` and `rescue.stranded` for the two exceptions;
+    gives none; `<who>.lead` for the refresh a launch makes ahead of time
+    (*The lead*), `<who>` as for its renew; `rescue.blank` and
+    `rescue.stranded` for the two exceptions;
     `token.env` for a claude login rota alone holds, on a token in the
     environment; `adopt` for a change a look found in the home; `seed` and
     `uncover` for a login rota wrote there;
@@ -3661,9 +3689,9 @@ Code blanked: see *Stranded* and *Blanked*, below.
     that could not be made at all, `lock-denied`, `lock-read-only`,
     `lock-no-space` or `lock-failed`. A lock line carries the path of the look
     it stopped: `seed` and `uncover` for the writes a look owed the home;
-  - `exp_before` and `exp_after`, when the access token expires; a rescue,
-    which presents its copy as expired whatever it says, still writes when
-    the copy truly expires;
+  - `exp_before` and `exp_after`, when the access token expires; a rescue or
+    a lead, which presents its copy as expired whatever it says, still writes
+    in `exp_before` when the copy truly expires;
   - `presented_at`, on a refresh's two lines, when the token went out.
 
   It is rota's own record: nothing is written into a home for it, and nothing
@@ -4015,13 +4043,15 @@ Measured, not assumed — from live accounts:
 rota refreshes a token within five minutes of expiry, and only while running
 a command — and a claude login kept in its home only while nothing of Claude
 Code's runs there, because then Claude Code refreshes it itself, unless that
-home is stranded or blanked; and a codex login only while no daemon of
-Codex's is alive in its home, for the same reason. An account rota holds a
-refresh token for and no access token counts as expired, whatever its expiry
-says, and is refreshed by those same rules before anything uses it; until then
-no credential file is written for it. A refresh is never retried within one
-look: if the reply was lost, the retry would reuse a rotated token and kill the
-lineage. Nor is one given up on halfway. A refresh rota has sent goes on to
+home is stranded or blanked, and within thirty minutes when a launch is about
+to start Claude Code there (*The lead*, under *A login of its own*); and a
+codex login only while no daemon of Codex's is alive in its home, for the same
+reason. An account rota holds a refresh token for and no access token counts
+as expired, whatever its expiry says, and is refreshed by those same rules
+before anything uses it; until then no credential file is written for it. A
+refresh is never retried within one look: if the reply was lost, the retry
+would reuse a rotated token and kill the lineage. Nor is one given up on
+halfway. A refresh rota has sent goes on to
 the provider's answer, the save and the write into the home even when whoever
 asked has gone — a client hanging up on `?refresh=1` or on a run, a server
 stopping, a cancelled context, an interrupt or a closed terminal during `rota
