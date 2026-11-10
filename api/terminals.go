@@ -109,6 +109,18 @@ const (
 	// themselves, and a --settings rota cannot read, which might.
 	remoteArgsLocal = "--remote-control and the remote-control subcommand are taken only over the control socket, as remote_control is"
 	settingsLocal   = "--settings that rota cannot read is taken only over the control socket, since it could turn Remote Control on"
+	// managedLocal, managedUnread and managedReenables are for Claude Code's
+	// --managed-settings, the policy tier: refused from anybody but this
+	// machine's own user whatever it says, refused from that user when it is
+	// not one JSON object, and when it would lift the guard.
+	managedLocal     = "--managed-settings is taken only over the control socket: it is the policy tier, which ranks above everything else a session is given"
+	managedUnread    = "--managed-settings is not one JSON object, so the session is not started"
+	managedReenables = "--managed-settings turns disableRemoteControl off above the guard that keeps Remote Control off in this session, so it is not started; " +
+		"turn the account's remote control setting on for a session with Remote Control"
+	// guardUnread is a session launched behind the guard against Remote
+	// Control whose own last --settings cannot be folded into it.
+	guardUnread = "--settings that rota cannot read leaves no way to keep Remote Control off in this session, so it is not started; " +
+		"name a settings file rota can read, or give the settings inline"
 )
 
 // localPrincipal reports whether a request is this machine's own user's:
@@ -134,9 +146,16 @@ func remoteArgs(r *http.Request, a *rota.Account, args []string, cwd string) (bo
 		return false, nil
 	}
 	asks, err := holdwire.AsksRemoteControl(args, cwd)
+	managed := holdwire.ReadManaged(args)
 	switch {
+	case localPrincipal(r) && managed.Err != nil:
+		// Claude Code would ignore it, and rota would be guessing at what
+		// a parent meant by it: refused rather than launched on a guess.
+		return false, refuse(http.StatusBadRequest, managedUnread)
 	case localPrincipal(r):
 		return asks, nil
+	case managed.Present:
+		return false, refuse(http.StatusForbidden, managedLocal)
 	case asks:
 		return false, refuse(http.StatusForbidden, remoteArgsLocal)
 	case err != nil:
@@ -618,6 +637,17 @@ func (s *Server) chooseTerminal(r *http.Request, kind string, id int) (*store.St
 // account is readied as remote_control readies it (readyRemoteControl). cwd
 // is the directory the CLI starts in, which a relative --settings is read
 // from.
+//
+// Every terminal this server starts is one somebody other than the person at
+// this machine's own terminal can type into: a page's user, an SSH user, or
+// whoever attaches to a held session. So a claude account whose remote
+// control setting is off is launched behind Claude Code's own guard against
+// Remote Control (holdwire.GuardRemoteControl). It is first among its
+// arguments, with a --settings of theirs folded in, so Remote Control cannot
+// be started in that session under the identity a shared .claude.json names:
+// not from /remote-control, nor auto-started by a remoteControlAtStartup
+// that /config wrote into the settings every account shares. An account
+// whose setting is on has its own identity and is left as it is.
 func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req *termRequest, cwd string) ([]string, error) {
 	args := slices.Clone(req.Args)
 	rc := req.RemoteControl
@@ -625,20 +655,30 @@ func (s *Server) argsFor(r *http.Request, st *store.Store, a *rota.Account, req 
 	if err != nil {
 		return nil, err
 	}
-	if !rc.on && !asks {
+	if rc.on || asks {
+		if err := s.readyRemoteControl(r, st, a); err != nil {
+			return nil, err
+		}
+	}
+	if rc.on {
+		args = append(args, "--remote-control")
+		if rc.name != "" {
+			args = append(args, rc.name)
+		}
+	}
+	if rota.Flavor(a.Provider) != "claude" || a.RemoteControl {
 		return args, nil
 	}
-	if err := s.readyRemoteControl(r, st, a); err != nil {
-		return nil, err
+	// The policy tier ranks above --settings, so one that turns
+	// disableRemoteControl off would lift the guard from above it.
+	if holdwire.ReadManaged(args).Reenables {
+		return nil, refuse(http.StatusBadRequest, managedReenables)
 	}
-	if !rc.on {
-		return args, nil
+	guarded, err := holdwire.GuardRemoteControl(args, cwd)
+	if err != nil {
+		return nil, refuse(http.StatusBadRequest, guardUnread)
 	}
-	args = append(args, "--remote-control")
-	if rc.name != "" {
-		args = append(args, rc.name)
-	}
-	return args, nil
+	return guarded, nil
 }
 
 // readyRemoteControl readies an account for a session or a run with Remote

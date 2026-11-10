@@ -28,6 +28,10 @@ func TestRemoteControlInTheCLIsOwnArgsIsRefusedInsideAHeldSession(t *testing.T) 
 		{"run", "1", "--", "--rc"},
 		{"run", "1", "-i", "remote-control"},
 		{"run", "1", "--", "--settings", `{"remoteControlAtStartup":true}`},
+		// One rota cannot read counts as asking there, with the directory
+		// readable.
+		{"run", "1", "--", "--settings", "missing.json"},
+		{"run", "1", "--", "--managed-settings", `{"remoteControlAtStartup":true}`},
 	} {
 		_, errOut, code := call(t, args...)
 		if code == 0 || !strings.Contains(errOut, want) || len(*handedTo) != 0 {
@@ -44,6 +48,27 @@ func TestRemoteControlInTheCLIsOwnArgsIsRefusedInsideAHeldSession(t *testing.T) 
 	}
 	if storedAccount(t, rotaHome)["remoteControl"] == true {
 		t.Fatal("the person's own --rc turned the account's setting on")
+	}
+}
+
+// A foreground rota run at this machine's own terminal is the person's, so
+// it is handed over as it always was: nobody else can type into it, and no
+// guard against Remote Control is added, with the account's setting off.
+func TestAForegroundRunCarriesNoGuard(t *testing.T) {
+	rotaHome, _ := seedLiving(t, "")
+	handedTo := handover(t)
+	for _, args := range [][]string{{"run", "1"}, {"run", "1", "--", "--model", "opus"}, {"run", "1", "-i"}} {
+		if _, errOut, code := call(t, args...); code != 0 {
+			t.Fatalf("rota %s: exit %d %q", strings.Join(args, " "), code, errOut)
+		}
+		for _, a := range *handedTo {
+			if strings.Contains(a, "disableRemoteControl") || a == "--settings" {
+				t.Fatalf("rota %s handed %q, want no guard", strings.Join(args, " "), *handedTo)
+			}
+		}
+	}
+	if storedAccount(t, rotaHome)["remoteControl"] == true {
+		t.Fatal("the account's setting was turned on")
 	}
 }
 

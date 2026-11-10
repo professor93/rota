@@ -21,6 +21,7 @@ import (
 const (
 	wantArgsLocal     = "--remote-control and the remote-control subcommand are taken only over the control socket, as remote_control is"
 	wantSettingsLocal = "--settings that rota cannot read is taken only over the control socket, since it could turn Remote Control on"
+	wantManagedLocal  = "--managed-settings is taken only over the control socket: it is the policy tier, which ranks above everything else a session is given"
 )
 
 // remoteSpellings is a sample of the spellings that ask for Remote Control, the
@@ -52,6 +53,20 @@ var remoteSpellings = [][]string{
 	{"--add-dir", "--", "--rc"},
 	// A --settings that cannot be read does not hide a later one.
 	{"--settings", "missing.json", "--settings", `{"remoteControlAtStartup":true}`},
+	// The policy tier's document, which over TCP is refused whatever it says.
+	{"--managed-settings", `{"remoteControlAtStartup":true}`},
+	{"--model", "--", `--managed-settings={"remoteControlAtStartup":true}`},
+}
+
+// tcpRefusal is the sentence a caller over TCP is refused args in: a
+// --managed-settings is refused as itself, whatever it says.
+func tcpRefusal(args []string) string {
+	for _, a := range args {
+		if name, _, _ := strings.Cut(a, "="); name == "--managed-settings" {
+			return wantManagedLocal
+		}
+	}
+	return wantArgsLocal
 }
 
 // plainArgs carry no Remote Control, however close they come: a flag's
@@ -168,8 +183,8 @@ func TestARunsArgsCarryingRemoteControl(t *testing.T) {
 		return resp.StatusCode, string(raw)
 	}
 	for _, args := range remoteSpellings {
-		if code, raw := run(h, 1, map[string]any{"args": args}); code != http.StatusForbidden || errorOf(raw) != wantArgsLocal {
-			t.Errorf("a token running with args %q answers %d %s, want 403 %q", args, code, raw, wantArgsLocal)
+		if code, raw := run(h, 1, map[string]any{"args": args}); code != http.StatusForbidden || errorOf(raw) != tcpRefusal(args) {
+			t.Errorf("a token running with args %q answers %d %s, want 403 %q", args, code, raw, tcpRefusal(args))
 		}
 	}
 	missing := filepath.Join(t.TempDir(), "missing.json")

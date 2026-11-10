@@ -80,6 +80,11 @@ func TestAsksRemoteControlReadsWhatClaudeCodeTakes(t *testing.T) {
 		// A value is a document only when it is one, "{" to "}", as Claude
 		// Code tells them apart; otherwise it is a file.
 		{"--settings", "{rc.json"},
+		// --managed-settings is the policy tier's document, the first source
+		// Claude Code reads remoteControlAtStartup from, read the same way.
+		{"--managed-settings", `{"remoteControlAtStartup":true}`},
+		{`--managed-settings={"remoteControlAtStartup":true}`},
+		{"--model", "--", "--managed-settings", ` {"remoteControlAtStartup":true} `},
 	}
 	for _, args := range asks {
 		if got, _ := AsksRemoteControl(args, dir); !got {
@@ -118,23 +123,66 @@ func TestAsksRemoteControlReadsWhatClaudeCodeTakes(t *testing.T) {
 		{"--settings", `{"remoteControlAtStartup":false}`},
 		{"--settings", off},
 		{"--settings"},
+		{"--managed-settings", `{"model":"x"}`},
 	}
 	for _, args := range plain {
 		if got, err := AsksRemoteControl(args, dir); got || err != nil {
 			t.Errorf("%q: %v %v, want it to ask for nothing", args, got, err)
 		}
 	}
-	// What cannot be read cannot be said to ask for nothing.
-	for _, args := range [][]string{
-		{"--settings", filepath.Join(dir, "missing.json")},
-		{"--settings", broken},
-		{"--settings", `{"remoteControlAtStartup":`},
-		{"--settings="},
-		{"--settings", dir},
+	// A settings value is a value: the word after --settings or
+	// --managed-settings is never read as Claude Code's command, though it
+	// is an error as a settings value.
+	for _, args := range [][]string{{"--settings", "rc"}, {"--managed-settings", "rc"}, {"--settings", "remote-control"}} {
+		if got, _ := AsksRemoteControl(args, dir); got {
+			t.Errorf("%q: the value is read as the command", args)
+		}
+	}
+	// What cannot be read cannot be said to ask for nothing. A
+	// --managed-settings takes no file, so its value is a document or wrong.
+	for _, c := range []struct {
+		args []string
+		flag string
+	}{
+		{[]string{"--settings", filepath.Join(dir, "missing.json")}, "--settings"},
+		{[]string{"--settings", broken}, "--settings"},
+		{[]string{"--settings", `{"remoteControlAtStartup":`}, "--settings"},
+		{[]string{"--settings="}, "--settings"},
+		{[]string{"--settings", dir}, "--settings"},
+		{[]string{"--managed-settings", on}, "--managed-settings"},
+		{[]string{"--managed-settings", "[true]"}, "--managed-settings"},
+		{[]string{"--managed-settings="}, "--managed-settings"},
 	} {
-		got, err := AsksRemoteControl(args, dir)
-		if got || err == nil || !strings.Contains(err.Error(), "--settings") {
-			t.Errorf("%q: %v %v, want an error that names --settings", args, got, err)
+		got, err := AsksRemoteControl(c.args, dir)
+		if got || err == nil || !strings.Contains(err.Error(), c.flag) {
+			t.Errorf("%q: %v %v, want an error that names %s", c.args, got, err, c.flag)
+		}
+	}
+}
+
+// What a session's --managed-settings say, wherever they stand: whether
+// there is one at all, which is all a caller over TCP needs to refuse it;
+// whether one turns remoteControlAtStartup on; and whether one turns
+// disableRemoteControl off, which would lift the guard, since the policy
+// tier ranks above --settings.
+func TestReadManagedSettings(t *testing.T) {
+	for _, c := range []struct {
+		args                   []string
+		present, on, reenables bool
+		bad                    bool
+	}{
+		{nil, false, false, false, false},
+		{[]string{"--settings", `{"remoteControlAtStartup":true}`}, false, false, false, false},
+		{[]string{"--managed-settings", `{"model":"x"}`}, true, false, false, false},
+		{[]string{"--", "--managed-settings=" + `{"remoteControlAtStartup":true}`}, true, true, false, false},
+		{[]string{"--managed-settings", `{"disableRemoteControl":false}`}, true, false, true, false},
+		{[]string{"--managed-settings", `{"disableRemoteControl":true}`}, true, false, false, false},
+		{[]string{"--managed-settings", "not json"}, true, false, false, true},
+		{[]string{"--managed-settings"}, false, false, false, false},
+	} {
+		m := ReadManaged(c.args)
+		if m.Present != c.present || m.AtStartup != c.on || m.Reenables != c.reenables || (m.Err != nil) != c.bad {
+			t.Errorf("%q: %+v, want present %v, at startup %v, reenables %v, bad %v", c.args, m, c.present, c.on, c.reenables, c.bad)
 		}
 	}
 }

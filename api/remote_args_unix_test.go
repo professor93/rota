@@ -3,10 +3,15 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
+
+	"github.com/professor93/rota/internal/holdwire"
 )
 
 // A terminal whose claude account's arguments ask for Remote Control, in any
@@ -28,8 +33,8 @@ func TestArgsCarryingRemoteControlAreReadied(t *testing.T) {
 				return resp.StatusCode, string(raw)
 			}
 			for _, args := range remoteSpellings {
-				if code, raw := start(p.harness, map[string]any{"account": 1, "args": args}); code != http.StatusForbidden || errorOf(raw) != wantArgsLocal {
-					t.Errorf("a token with args %q answers %d %s, want 403 %q", args, code, raw, wantArgsLocal)
+				if code, raw := start(p.harness, map[string]any{"account": 1, "args": args}); code != http.StatusForbidden || errorOf(raw) != tcpRefusal(args) {
+					t.Errorf("a token with args %q answers %d %s, want 403 %q", args, code, raw, tcpRefusal(args))
 				}
 			}
 			missing := filepath.Join(t.TempDir(), "missing.json")
@@ -72,5 +77,64 @@ func TestArgsCarryingRemoteControlAreReadied(t *testing.T) {
 				t.Errorf("a token with --settings naming a file that turns it on answers %d %s, want 403", code, raw)
 			}
 		})
+	}
+}
+
+// A held session is handed its guard through the holder's request when the
+// account's remote control setting is off, and nothing when it is on,
+// however it was asked for: from a token, or over the control socket as
+// rota run --detach asks.
+func TestAHeldSessionIsHandedTheGuardOnlyWithRemoteControlOff(t *testing.T) {
+	log := filepath.Join(t.TempDir(), "request.json")
+	p := withHeld(t, []string{"FAKE_HOLDER_LOG=" + log})
+	handed := func() []string {
+		t.Helper()
+		raw, err := os.ReadFile(log)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var seen struct {
+			Request holdwire.Request `json:"request"`
+		}
+		if err := json.Unmarshal(raw, &seen); err != nil {
+			t.Fatal(err)
+		}
+		return seen.Request.Args
+	}
+	local := p.door(&localControl)
+	for name, h := range map[string]*harness{"a token": p.harness, "the socket": local.harness} {
+		if resp, raw := h.do("POST", "/v1/terminals", map[string]any{"account": 1, "args": []string{"--model", "opus"}}); resp.StatusCode != http.StatusCreated {
+			t.Fatalf("%s: %d %s", name, resp.StatusCode, raw)
+		}
+		if got := handed(); guardDoc(t, got) == nil || !slices.Equal(got[2:], []string{"--model", "opus"}) {
+			t.Errorf("%s, remote control off: the holder was handed %q, want the guard first", name, got)
+		}
+	}
+	raw, err := os.ReadFile(filepath.Join(p.dir, "accounts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	accounts, _ := doc["accounts"].([]any)
+	for _, a := range accounts {
+		if a := a.(map[string]any); a["id"] == 3.0 {
+			a["remoteControl"] = true
+		}
+	}
+	on, _ := json.Marshal(doc)
+	if !strings.Contains(string(on), `"remoteControl":true`) {
+		t.Fatal("account 3 is not in the store as this test expects")
+	}
+	if err := os.WriteFile(filepath.Join(p.dir, "accounts.json"), on, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if resp, raw := local.do("POST", "/v1/terminals", map[string]any{"account": 3, "args": []string{"--model", "opus"}}); resp.StatusCode != http.StatusCreated {
+		t.Fatalf("remote control on: %d %s", resp.StatusCode, raw)
+	}
+	if got := handed(); !slices.Equal(got, []string{"--model", "opus"}) {
+		t.Errorf("remote control on: the holder was handed %q, want the arguments as they were", got)
 	}
 }

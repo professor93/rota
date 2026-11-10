@@ -317,7 +317,9 @@ func TestAHeldSessionSaysWhoItIsAndHowItIs(t *testing.T) {
 
 // The holder is told what to run on its standard input, with the store it
 // belongs to in its environment, in a session of its own — and never a
-// credential: it prepares the account itself.
+// credential: it prepares the account itself. Its arguments are the
+// request's, behind Claude Code's own guard against Remote Control for an
+// account whose remote control setting is off.
 func TestTheHolderIsToldWhatToRunAndNoSecret(t *testing.T) {
 	log := filepath.Join(t.TempDir(), "request.json")
 	p := withHeld(t, []string{"FAKE_HOLDER_LOG=" + log})
@@ -338,7 +340,8 @@ func TestTheHolderIsToldWhatToRunAndNoSecret(t *testing.T) {
 	}
 	r := seen.Request
 	if r.ID != doc["id"] || r.Kind != "account" || r.Account != 1 || r.Name != "x" ||
-		r.Cols != 100 || r.Rows != 30 || strings.Join(r.Args, " ") != "--model opus" || r.Scrollback <= 0 {
+		r.Cols != 100 || r.Rows != 30 || r.Scrollback <= 0 ||
+		strings.Join(r.Args, " ") != `--settings {"disableRemoteControl":true} --model opus` {
 		t.Errorf("the request is %+v", r)
 	}
 	if seen.RotaHome != p.dir || !filepath.IsAbs(seen.RotaHome) {

@@ -174,7 +174,14 @@ func (s *Store) sayRiskySettings(a *rota.Account, env []string, cwd string, sour
 		said = append(said, "Claude Code will use the proxy or the certificates its settings name, which rota otherwise "+
 			"keeps out of an account's environment; nothing is wrong if they are your network's: "+strings.Join(routes, "; "))
 	}
-	if interactive && !a.RemoteControl {
+	if dir := configDirOf(env); interactive && a.RemoteControl && a.Email != "" && dir != "" {
+		config := filepath.Join(dir, claudeConfigFile)
+		if who, at := signedInAs(config); who != "" && !strings.EqualFold(who, a.Email) {
+			said = append(said, fmt.Sprintf("Remote Control will register under the claude.ai identity %s, which %s names, "+
+				"not this account's %s", who, at, a.Email))
+		}
+	}
+	if interactive && !a.RemoteControl && s.couldHaveRemoteControl(a) {
 		var user, config string
 		if dir := configDirOf(env); dir != "" {
 			config = filepath.Join(dir, ".claude.json")
@@ -198,6 +205,42 @@ func (s *Store) sayRiskySettings(a *rota.Account, env []string, cwd string, sour
 	if len(said) > 0 {
 		s.Warn(fmt.Sprintf("%s: %s", a, strings.Join(said, ". ")))
 	}
+}
+
+// couldHaveRemoteControl reports whether a could have its remote control
+// setting turned on and have it work: what `rota set --remote-control on`
+// takes (CheckRemoteControl) on an account on its own stored login, the
+// gate RemoteControlNow applies. An account on an API key or in a directory
+// the person chose cannot, and Claude Code refuses it Remote Control anyway.
+func (s *Store) couldHaveRemoteControl(a *rota.Account) bool {
+	on := *a
+	on.RemoteControl = true
+	return s.CheckRemoteControl(&on) == nil && s.keepsLogin(a)
+}
+
+// signedInAs is the e-mail the .claude.json at path names as the claude.ai
+// identity Claude Code is signed in as (oauthAccount.emailAddress), which is
+// whoever Remote Control registers as, and the file it was read from, links
+// resolved. "" when the file names nobody or cannot be read as one JSON
+// object.
+func signedInAs(path string) (who, at string) {
+	f, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", ""
+	}
+	raw, ok := readSmallFile(f, maxConfigFile)
+	if !ok {
+		return "", ""
+	}
+	var doc struct {
+		OAuthAccount struct {
+			EmailAddress string `json:"emailAddress"`
+		} `json:"oauthAccount"`
+	}
+	if rota.UnmarshalLenient(settingsText(raw), &doc) != nil {
+		return "", ""
+	}
+	return strings.TrimSpace(doc.OAuthAccount.EmailAddress), f
 }
 
 // maxConfigFile bounds what is read of a .claude.json for its
