@@ -71,8 +71,10 @@ var (
 	// for all rota can tell. A look that does not end in namesWait could be
 	// one; what it was waiting on is left to finish on its own.
 	looksLikeClaude = func(pid int) bool {
-		got := make(chan bool, 1)
-		go func() { got <- claudeIn(namesOf(pid)) }()
+		// The look is taken from namesOf here, not in the goroutine, which
+		// may outlive this call.
+		got, names := make(chan bool, 1), namesOf
+		go func() { got <- claudeIn(names(pid)) }()
 		select {
 		case c := <-got:
 			return c
