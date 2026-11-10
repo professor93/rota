@@ -31,13 +31,23 @@ func (l *stampLog) Handle(_ context.Context, r slog.Record) error {
 func (l *stampLog) WithAttrs([]slog.Attr) slog.Handler { return l }
 func (l *stampLog) WithGroup(string) slog.Handler      { return l }
 
+type diagRow struct {
+	i     int
+	per   bool
+	code  int
+	took  time.Duration
+	mark  string
+	start time.Time
+	lines *[]string
+}
+
 func TestZZDiagTimeout(t *testing.T) {
-	var report []string
-	for i := 0; i < 25; i++ {
+	var rows []diagRow
+	for i := 0; i < 60; i++ {
 		for _, per := range []bool{false, true} {
 			mark := t.TempDir()
-			var lines []string
-			lg := &stampLog{lines: &lines}
+			lines := &[]string{}
+			lg := &stampLog{lines: lines}
 			opts := Options{Timeout: time.Second, Log: slog.New(lg)}
 			body := map[string]any{"prompt": "p"}
 			if per {
@@ -50,31 +60,31 @@ func TestZZDiagTimeout(t *testing.T) {
 			start := time.Now()
 			lg.start = start
 			code, _, _ := h.run(1, body)
-			took := time.Since(start)
-			var spawned string
-			slept := false
-			ents, _ := os.ReadDir(mark)
-			for _, e := range ents {
-				raw, _ := os.ReadFile(filepath.Join(mark, e.Name()))
-				at, _ := time.Parse(time.RFC3339Nano, string(raw))
-				if strings.HasPrefix(e.Name(), "start-") {
-					spawned = at.Sub(start).Round(time.Millisecond).String()
-				}
-			}
-			// Was the child still alive to finish its sleep?
-			time.Sleep(3 * time.Second)
-			ents, _ = os.ReadDir(mark)
-			for _, e := range ents {
-				if strings.HasPrefix(e.Name(), "slept-") {
-					slept = true
-				}
-			}
-			mu := &lg.mu
-			mu.Lock()
-			report = append(report, fmt.Sprintf("i=%d per=%v code=%d took=%v child-started-at=+%s child-finished-sleep=%v log=%q",
-				i, per, code, took.Round(time.Millisecond), spawned, slept, lines))
-			mu.Unlock()
+			rows = append(rows, diagRow{i, per, code, time.Since(start), mark, start, lines})
 		}
 	}
-	t.Errorf("diagnostic, always fails to show its log:\n%s", strings.Join(report, "\n"))
+	time.Sleep(4 * time.Second)
+	var report []string
+	slow := 0
+	for _, r := range rows {
+		var spawned []string
+		slept := 0
+		ents, _ := os.ReadDir(r.mark)
+		for _, e := range ents {
+			raw, _ := os.ReadFile(filepath.Join(r.mark, e.Name()))
+			at, _ := time.Parse(time.RFC3339Nano, string(raw))
+			if strings.HasPrefix(e.Name(), "start-") {
+				spawned = append(spawned, at.Sub(r.start).Round(time.Millisecond).String())
+			}
+			if strings.HasPrefix(e.Name(), "slept-") {
+				slept++
+			}
+		}
+		if r.took > 1500*time.Millisecond || slept > 0 || r.code != 504 {
+			slow++
+		}
+		report = append(report, fmt.Sprintf("i=%d per=%v code=%d took=%v child-started-at=%v slept=%d log=%q",
+			r.i, r.per, r.code, r.took.Round(time.Millisecond), spawned, slept, *r.lines))
+	}
+	t.Errorf("diagnostic, always fails to show its log; %d odd rows:\n%s", slow, strings.Join(report, "\n"))
 }
