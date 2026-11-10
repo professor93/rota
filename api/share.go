@@ -185,6 +185,9 @@ func (s *Server) takeShare(conn net.Conn) {
 	c.Clear()
 	ts.audit("terminal shared", "account", hello.Account, "label", ts.name,
 		"pid", hello.PID, "mode", ts.shareMode())
+	// Offered by whoever sits at it, on this machine: nobody this server
+	// can name.
+	s.sessionStarted(ts, "", "", "")
 	go ts.run()
 }
 

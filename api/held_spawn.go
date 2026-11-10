@@ -117,7 +117,11 @@ func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd s
 	ts := &termSession{
 		s: s, id: hreq.ID, log: s.log.Info,
 		kind: kind, account: hreq.Account, label: label, provider: provider,
-		name: hreq.Name, cwd: cwd, started: s.now(), tokenUntil: ready.TokenUntil,
+		name: hreq.Name, cwd: cwd, started: s.now(),
+		// What it runs on is read from the account as it was chosen, before
+		// its holder prepared it: a refresh there moves a token's end, not
+		// the login's.
+		tokenUntil: ready.TokenUntil, onToken: onTokenFor(a, ready.TokenUntil),
 		back: h, cols: cols, rows: rows, ring: ring.NewAt(s.opts.Terminal.Scrollback, w.Oldest),
 	}
 	ts.idleAt = ts.started
@@ -135,6 +139,7 @@ func (s *Server) startHeld(r *http.Request, kind string, req *termRequest, cwd s
 			"this server is stopping; session "+ts.id+" was started and goes on running, for the next rota daemon to take up")
 	}
 	ts.audit("terminal created", "kind", kind, "account", hreq.Account, "by", who(r).Name, "pid", h.pid)
+	s.sessionStarted(ts, who(r).Name, req.why, "")
 	go ts.run()
 	return ts, nil
 }

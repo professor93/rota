@@ -60,6 +60,11 @@ type termRequest struct {
 	// Claude Code's flag added last. It changes the account, so it too is
 	// taken only on the control socket.
 	RemoteControl remoteControl `json:"remote_control"`
+
+	// why is why this session starts, which its session.started says:
+	// whyResumed or whyMoved, set by the path that resumes or moves one, and
+	// "" for a request. No client sets it.
+	why string
 }
 
 // remoteControl is a request's remote_control: true, or the name to give
@@ -391,6 +396,7 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 		kind: kind, account: plan.account, label: plan.label, provider: plan.provider,
 		name: strings.TrimSpace(req.Label), cwd: cwd, started: s.now(),
 		tokenUntil: plan.tokenUntil,
+		onToken:    plan.onToken,
 		back:       &localTerm{master: master, cmd: cmd, proc: cmd.Process},
 		release:    plan.release,
 		cols:       cols, rows: rows, ring: ring.New(s.opts.Terminal.Scrollback),
@@ -401,6 +407,7 @@ func (s *Server) startTerminal(r *http.Request, req *termRequest) (*termSession,
 		return nil, refuse(http.StatusServiceUnavailable, termStopping)
 	}
 	ts.audit("terminal created", "kind", kind, "account", plan.account, "by", who(r).Name)
+	s.sessionStarted(ts, who(r).Name, req.why, "")
 	running = true
 	go ts.run()
 	return ts, nil
@@ -476,6 +483,7 @@ type termPlan struct {
 	label      string
 	provider   string
 	tokenUntil time.Time
+	onToken    bool
 }
 
 // planTerminal builds that, which for an account means the whole of the CLI
@@ -515,9 +523,10 @@ func (s *Server) planTerminal(r *http.Request, kind string, req *termRequest, cw
 	// Everything the store had to say is on disk; let go of its lock before
 	// a process that may run for hours starts, exactly as the handover does.
 	_ = st.Close()
+	until := holdwire.LoginUntil(a, env)
 	plan := &termPlan{
 		path: path, args: args, env: termenv.Env(env), release: release,
-		account: a.ID, label: a.Label(), provider: a.Provider, tokenUntil: holdwire.LoginUntil(a, env),
+		account: a.ID, label: a.Label(), provider: a.Provider, tokenUntil: until, onToken: onTokenFor(a, until),
 	}
 	handed = true
 	return plan, nil
