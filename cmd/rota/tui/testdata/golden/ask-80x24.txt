@@ -1,0 +1,24 @@
+> what is 2+2? check it in a shell
+Let me check.
+· tool Bash
+2 + 2 is four.
+
+    four = 2 + 2
+#1 · 4.2s · $0.0371 · exit 0
+{
+  "tools": {
+    "Bash": 1
+  }
+}
+
+
+
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────
+> a question; enter asks, alt+enter starts a new line, esc leaves               
+                                                                                
+                                                                                
+account: auto (now #1 work@exam…)  with: … [ ] quota [x] tools …  keep open: off
