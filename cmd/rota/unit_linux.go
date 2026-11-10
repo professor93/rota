@@ -8,7 +8,11 @@ import (
 	"io/fs"
 	"os"
 	"os/user"
+	"path"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 )
 
 func unitDir() (string, error) {
@@ -32,9 +36,70 @@ func unitFile(store string) (string, error) {
 	return filepath.Join(dir, name), nil
 }
 
-// systemctl asks the user's systemd, one argv as launchctl is asked.
+// systemctl asks the user's systemd, one argv as launchctl is asked. From
+// sudo -u, su or cron there is no XDG_RUNTIME_DIR of this user's — none,
+// or the invoker's — and systemctl --user then finds no bus; so where this
+// user's manager listens on its private socket in its own runtime
+// directory, systemctl is given that directory, which it reaches the
+// manager through with no bus at all. It is the one manager of this uid,
+// user@<uid>.service, which the unit was installed with. Only a setup that
+// runs a second manager at a runtime directory of its own would differ.
 func systemctl(args ...string) error {
-	return unitRun("systemctl", append([]string{"--user"}, args...)...)
+	argv := append([]string{"--user"}, args...)
+	if dir := managerRuntimeDir(); dir != "" {
+		return unitRun("XDG_RUNTIME_DIR="+dir, append([]string{"systemctl"}, argv...)...)
+	}
+	return unitRun("systemctl", argv...)
+}
+
+// runtimeBase is where logind makes each user's runtime directory. A
+// variable so a test can point it elsewhere.
+var runtimeBase = "/run/user"
+
+// managerRuntimeDir is the runtime directory systemctl is to be given, or
+// "" when it is to be left as it is: XDG_RUNTIME_DIR already names one of
+// this user's, or runtimeBase/<uid> is not this user's own directory with
+// this user's own socket at systemd/private.
+func managerRuntimeDir() string {
+	uid := os.Getuid()
+	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" && ownedBy(d, uid, fs.ModeDir) {
+		return ""
+	}
+	dir := filepath.Join(runtimeBase, strconv.Itoa(uid))
+	if !ownedBy(dir, uid, fs.ModeDir) || !ownedBy(filepath.Join(dir, "systemd", "private"), uid, fs.ModeSocket) {
+		return ""
+	}
+	return dir
+}
+
+// ownedBy says whether path is of that kind and uid's.
+func ownedBy(path string, uid int, kind fs.FileMode) bool {
+	fi, err := os.Stat(path)
+	if err != nil || fi.Mode().Type() != kind {
+		return false
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	return ok && int(st.Uid) == uid
+}
+
+// daemonUnderUnit says whether the daemon whose pid this is is the one the
+// store's unit started. A variable so a test can say either.
+var daemonUnderUnit = underUnit
+
+// underUnit says whether pid's cgroup, on either layout, is the store's
+// unit's, as /proc says. One that cannot be read is not taken for it.
+func underUnit(store string, pid int) bool {
+	raw, err := os.ReadFile(filepath.Join(procDir, strconv.Itoa(pid), "cgroup"))
+	if err != nil {
+		return false
+	}
+	name, _ := unitName(store)
+	for _, line := range strings.Split(string(raw), "\n") {
+		if f := strings.SplitN(line, ":", 3); len(f) == 3 && path.Base(f[2]) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // writeUnit writes the unit and has systemd enable and start it. again says
@@ -99,14 +164,24 @@ func deleteUnit(store string, reload bool) error {
 	return errors.Join(lerr, rerr, systemctl("daemon-reload"))
 }
 
-// keptWhy is why a unit whose daemon is still running keeps its file, and
-// keptFrom where uninstall can reach systemd instead. As measured: systemd,
-// reloading a unit whose file is gone, loads it with no KillMode=process,
-// and the daemon then stopping ends every session in the unit.
-const (
-	keptWhy  = "with it gone, systemd would end the unit's sessions when the daemon stops"
-	keptFrom = "a login that has a user bus"
-)
+// keptWhy is why a unit whose daemon is still running keeps its file. As
+// measured: systemd, reloading a unit whose file is gone, loads it with no
+// KillMode=process, and the daemon then stopping ends every session in the
+// unit.
+const keptWhy = "with it gone, systemd would end the unit's sessions when the daemon stops"
+
+// againFrom is what to do, after a unit was kept because systemctl failed
+// saying serr: where systemctl could not reach the manager, uninstall
+// again from a login of the person's own, which has the manager's runtime
+// directory, or from where systemctl is given it; otherwise once systemctl
+// can do what it was asked.
+func againFrom(serr error) string {
+	if s := serr.Error(); strings.Contains(s, "Failed to connect to") && strings.Contains(s, "bus") {
+		return fmt.Sprintf("run rota serve uninstall again from an ssh or console login of yours, or from sudo -u, su or cron while your user manager listens at %s",
+			filepath.Join(runtimeBase, strconv.Itoa(os.Getuid()), "systemd", "private"))
+	}
+	return "run rota serve uninstall again once systemctl --user can stop the unit"
+}
 
 // Where a user manager shows itself without the bus. Variables so a test
 // can point them elsewhere.
@@ -115,13 +190,12 @@ var (
 	cgroupDir = "/sys/fs/cgroup"
 )
 
-// restartUnknown is why, with the bus not to be reached, a unit whose
+// restartUnknown is why, with systemd not to be asked, a unit whose own
 // daemon is not running keeps its file: after a daemon fails, systemd waits
 // RestartSec, 5 seconds, and starts the unit again from what it loaded, and
-// whether it is waiting so is known to systemd alone: the timer is in its
-// memory, not in a file under /run or the cgroup tree, where a unit that
-// stopped for good looks the same. A daemon started then, under a unit
-// whose file is gone, is the one the next reload strips of KillMode=process.
+// whether it is waiting to, only systemd can say, over its bus. A daemon
+// started then, under a unit whose file is gone, is the one the next reload
+// strips of KillMode=process.
 const restartUnknown = "systemd may be about to start one again, as it does 5 seconds after one fails, which only systemd can tell"
 
 // restartMayCome says why systemd may yet start the unit's daemon again

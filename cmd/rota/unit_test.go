@@ -166,7 +166,8 @@ func TestAnotherStoreGetsAnotherUnit(t *testing.T) {
 // /proc — a process of this user's whose argv is systemd --user — and in
 // the cgroup tree, where user@UID.service is its cgroup on either layout.
 // Only when neither shows one is it taken to be gone; a /proc that cannot
-// be read could be hiding one.
+// be read, or that does not show this process — empty, or not mounted —
+// could be hiding one.
 func TestAUserManagerIsLookedForWithoutTheBus(t *testing.T) {
 	const uid = 1000
 	proc := func(t *testing.T, root string, pid, uid int, argv ...string) {
@@ -190,18 +191,23 @@ func TestAUserManagerIsLookedForWithoutTheBus(t *testing.T) {
 		runs bool
 	}{
 		{"nothing", func(*testing.T, string, string) {}, false},
+		{"an empty /proc", func(t *testing.T, p, _ string) {
+			if err := os.Remove(filepath.Join(p, "self")); err != nil {
+				t.Fatal(err)
+			}
+		}, true},
 		{"this user's manager", func(t *testing.T, p, _ string) {
 			proc(t, p, 1, 0, "/sbin/init")
 			proc(t, p, 812, uid, "/usr/lib/systemd/systemd", "--user")
 		}, true},
 		{"another user's manager", func(t *testing.T, p, _ string) { proc(t, p, 812, uid+1, "/usr/lib/systemd/systemd", "--user") }, false},
+		{"a manager whose uid begins with this one's", func(t *testing.T, p, _ string) {
+			proc(t, p, 812, uid*10, "/usr/lib/systemd/systemd", "--user")
+		}, false},
 		{"this user's other programs", func(t *testing.T, p, _ string) {
 			proc(t, p, 900, uid, "/usr/lib/systemd/systemd-logind")
 			proc(t, p, 901, uid, "/usr/bin/sleep", "--user")
 			proc(t, p, 902, uid, "systemd")
-			if err := os.MkdirAll(filepath.Join(p, "self"), 0o755); err != nil {
-				t.Fatal(err)
-			}
 			if err := os.MkdirAll(filepath.Join(p, "903"), 0o755); err != nil { // gone meanwhile
 				t.Fatal(err)
 			}
@@ -217,7 +223,7 @@ func TestAUserManagerIsLookedForWithoutTheBus(t *testing.T) {
 			}
 		}, true},
 		{"no /proc to read", func(t *testing.T, p, _ string) {
-			if err := os.Remove(p); err != nil {
+			if err := os.RemoveAll(p); err != nil {
 				t.Fatal(err)
 			}
 		}, true},
@@ -225,7 +231,7 @@ func TestAUserManagerIsLookedForWithoutTheBus(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			root := t.TempDir()
 			p, cg := filepath.Join(root, "proc"), filepath.Join(root, "cgroup")
-			for _, d := range []string{p, cg} {
+			for _, d := range []string{p, filepath.Join(p, "self"), cg} {
 				if err := os.Mkdir(d, 0o755); err != nil {
 					t.Fatal(err)
 				}

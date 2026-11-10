@@ -33,13 +33,24 @@ var unitRun = runSupervisor
 // command and says what the supervisor said, not only its exit status: of
 // several that failed, each is told apart. The command, which names a unit
 // file, is said on one line and what the supervisor said on as many as it
-// took, each with a space for a control character (see printable).
+// took, each with a space for a control character (see printable). As
+// env(1) takes them, leading NAME=VALUE words are set in its environment,
+// over what it inherits, and are said with it.
 func runSupervisor(name string, args ...string) error {
-	out, err := exec.Command(name, args...).CombinedOutput()
+	words := append([]string{name}, args...)
+	argv := words
+	for len(argv) > 1 && strings.Contains(argv[0], "=") {
+		argv = argv[1:]
+	}
+	c := exec.Command(argv[0], argv[1:]...)
+	if env := words[:len(words)-len(argv)]; len(env) > 0 {
+		c.Env = append(os.Environ(), env...)
+	}
+	out, err := c.CombinedOutput()
 	if err == nil {
 		return nil
 	}
-	cmd := oneLine(strings.Join(append([]string{name}, args...), " "))
+	cmd := oneLine(strings.Join(words, " "))
 	if m := strings.TrimSpace(string(out)); m != "" {
 		return fmt.Errorf("%s: %w: %s", cmd, err, printable(m))
 	}
@@ -151,13 +162,17 @@ func systemdUnit(exe, store string, env []string) string {
 // --user, under procDir, and its cgroup is user@uid.service, under
 // cgroupDir on the unified layout or in its systemd tree on the legacy one.
 // Only when neither shows one is it taken to be gone; a procDir that cannot
-// be read may be hiding one.
+// be read may be hiding one, and so may one with no self in it, which is
+// not a /proc that shows even this process: an empty mount point, say.
 func userManagerRuns(procDir, cgroupDir string, uid int) bool {
 	slice := fmt.Sprintf("user.slice/user-%d.slice/user@%d.service", uid, uid)
 	for _, p := range []string{filepath.Join(cgroupDir, slice), filepath.Join(cgroupDir, "systemd", slice)} {
 		if _, err := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) {
 			return true
 		}
+	}
+	if _, err := os.Lstat(filepath.Join(procDir, "self")); err != nil {
+		return true
 	}
 	entries, err := os.ReadDir(procDir)
 	if err != nil {

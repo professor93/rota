@@ -117,18 +117,21 @@ func (c *cli) uninstallDaemon() error {
 	switch {
 	case errors.As(err, &kept) && kept.restart != "":
 		who := "no rota daemon is running"
-		if kept.daemon != nil {
+		switch {
+		case kept.stopped:
+			who = fmt.Sprintf("the rota daemon%s was stopped as rota serve stop stops one, and %s %s running", pidOf(kept.daemon), sessionsN(n), verb)
+		case kept.daemon != nil:
 			who = "the rota daemon" + pidOf(kept.daemon) + " is no longer running"
 		}
-		return fmt.Errorf("%w; %s, but %s, so %s is kept: %s; run rota serve uninstall again from %s",
-			kept.supervisor, who, kept.restart, oneLine(path), keptWhy, keptFrom)
+		return fmt.Errorf("%w; %s, but %s, so %s is kept: %s; %s",
+			kept.supervisor, who, kept.restart, oneLine(path), keptWhy, againFrom(kept.supervisor))
 	case errors.As(err, &kept):
 		who := "a rota daemon"
 		if kept.daemon != nil {
 			who = "the rota daemon" + pidOf(kept.daemon)
 		}
-		return fmt.Errorf("%w; %s is still running and could not be stopped (%s), so %s is kept: %s; run rota serve uninstall again from %s",
-			kept.supervisor, who, oneLine(kept.why.Error()), oneLine(path), keptWhy, keptFrom)
+		return fmt.Errorf("%w; %s is still running and could not be stopped (%s), so %s is kept: %s; %s",
+			kept.supervisor, who, oneLine(kept.why.Error()), oneLine(path), keptWhy, againFrom(kept.supervisor))
 	case err != nil:
 		_, lerr := os.Lstat(path)
 		removed := errors.Is(lerr, fs.ErrNotExist)
@@ -213,16 +216,18 @@ type daemonFate struct {
 // it is gone, while the unit is still loaded as it was written: it lets go
 // of the store before it has finished serving, and a reload by anybody in
 // between would catch it on its way out. One started by hand is stopped
-// too: without the supervisor the two cannot be told apart. The supervisor
-// is then not asked to reload; it forgets the stopped unit at its next
-// reload.
+// too, as one the unit started is. The supervisor is then not asked to
+// reload; it forgets the stopped unit at its next reload.
 //
-// With no daemon running — none to begin with, or one that went on its own
-// before it was signalled — there is nothing to end, but there may be one
-// to come: systemd starts the unit again a few seconds after its daemon
-// fails, from the unit as it has it loaded, and only systemd knows whether
-// it is about to. So the file goes only when restartMayCome says no
-// supervisor could; nobody is asked to reload, since nobody would hear.
+// With no daemon of the unit's running — none to begin with, one that went
+// on its own before it was signalled, or one started by hand, which
+// daemonUnderUnit tells apart — there may be one to come: systemd starts
+// the unit again a few seconds after its daemon fails, from the unit as it
+// has it loaded, and only systemd can say whether it is about to; stopping
+// a daemon started by hand cancels no such restart. So the file goes only
+// when restartMayCome says no supervisor could; nobody is asked to reload,
+// since nobody would hear. While the unit's own daemon runs, no restart is
+// pending.
 //
 // A daemon that cannot be stopped, or whose process outlives
 // daemonExitWait, or one the supervisor may yet start, keeps the unit's
@@ -241,6 +246,8 @@ func removeUnit(home, terminals string) (*daemonFate, error) {
 		}
 		return nil, errors.Join(serr, deleteUnit(home, false))
 	}
+	// Asked before the signal: once the daemon has gone, so has its cgroup.
+	under := daemonUnderUnit(home, seen.PID)
 	signalled, err := signalTheDaemon(terminals)
 	var unnamed unnamedDaemon
 	switch {
@@ -259,24 +266,31 @@ func removeUnit(home, terminals string) (*daemonFate, error) {
 		return nil, unitKept{supervisor: serr, daemon: d,
 			why: fmt.Errorf("it let go of the store but has not exited within %s", daemonExitWait)}
 	}
+	if signalled != nil && (!under || signalled.PID != seen.PID) {
+		if why := restartMayCome(); why != "" {
+			return nil, unitKept{supervisor: serr, daemon: d, stopped: true, restart: why}
+		}
+	}
 	return &daemonFate{daemon: d, signalled: signalled != nil}, errors.Join(serr, deleteUnit(home, false))
 }
 
 // unitKept is a unit whose file uninstall kept, because the supervisor
 // could not be asked to stop it and either its daemon could not be stopped,
-// for why, or none was running and the supervisor may start one again, for
-// restart. daemon is nil for one daemon.pid names no process for, and, with
-// restart, for none running to begin with; with restart it is one that went
-// on its own.
+// for why, or none of the unit's is running and the supervisor may start
+// one again, for restart. daemon is nil for one daemon.pid names no process
+// for, and, with restart, for none running to begin with; with restart it
+// is one that went on its own, or, stopped, one uninstall stopped that was
+// not the unit's.
 type unitKept struct {
 	supervisor, why error
 	daemon          *holdwire.Daemon
 	restart         string
+	stopped         bool
 }
 
 func (k unitKept) Error() string {
 	if k.restart != "" {
-		return fmt.Sprintf("%v; no rota daemon is running, but %s", k.supervisor, k.restart)
+		return fmt.Sprintf("%v; no daemon of the unit's is running, but %s", k.supervisor, k.restart)
 	}
 	return fmt.Sprintf("%v; the rota daemon could not be stopped: %v", k.supervisor, k.why)
 }

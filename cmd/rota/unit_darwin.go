@@ -92,12 +92,18 @@ func deleteUnit(store string, _ bool) error {
 	return nil
 }
 
-// keptWhy is why an agent whose daemon is still running keeps its file, and
-// keptFrom where uninstall can reach launchd instead.
-const (
-	keptWhy  = "launchd still has the agent loaded"
-	keptFrom = "a login in the Mac's GUI session"
-)
+// keptWhy is why an agent whose daemon is still running keeps its file.
+const keptWhy = "launchd still has the agent loaded"
+
+// againFrom is what to do after an agent was kept: uninstall again from
+// where launchctl reaches the agent's domain.
+func againFrom(error) string {
+	return "run rota serve uninstall again from a login in the Mac's GUI session"
+}
+
+// daemonUnderUnit is true here: launchd keeps what it loaded whatever
+// becomes of the plist, so whose daemon was stopped changes nothing.
+var daemonUnderUnit = func(string, int) bool { return true }
 
 // restartMayCome is "" here: launchd reads a plist only to load the agent,
 // and one it starts again goes on as it was loaded, AbandonProcessGroup and

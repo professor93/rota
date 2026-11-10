@@ -201,8 +201,8 @@ func TestAnUninstallKeepsTheUnitWhileARestartMayCome(t *testing.T) {
 			}
 			out, errb, code := call(t, "serve", "uninstall")
 			want := fmt.Sprintf("error: %s: exit status 1: Failed to connect to user scope bus via local transport: "+
-				"$DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined; %s, but %s, so %s is kept: %s; run rota serve uninstall again from %s\n",
-				r.want.uninstall[0], who, why, r.want.path, keptWhy, keptFrom)
+				"$DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined; %s, but %s, so %s is kept: %s; %s\n",
+				r.want.uninstall[0], who, why, r.want.path, keptWhy, againFrom(errors.New(noBus)))
 			if code != 1 || out != "" || errb != want {
 				t.Fatalf("uninstall while a restart may come: exit %d %q\n%q\nwant %q", code, out, errb, want)
 			}
@@ -230,6 +230,27 @@ func TestASupervisorsComplaintIsKept(t *testing.T) {
 	err = runSupervisor("ls", absent+"\x1b[2J")
 	if err == nil || !strings.HasPrefix(err.Error(), "ls "+absent+" [2J: exit status ") || strings.ContainsRune(err.Error(), 0x1b) {
 		t.Fatalf("a command named with an escape: %q", err)
+	}
+}
+
+// A supervisor command may start with NAME=VALUE words, as env(1) takes
+// them: each is set in its environment, over what it inherits, and the
+// command is named with them when it fails.
+func TestASupervisorCommandTakesTheEnvironmentItIsGiven(t *testing.T) {
+	probe := fakecli.Install(t, t.TempDir(), "probe", fakecli.Spec{Stderr: []string{"runtime {{env:XDG_RUNTIME_DIR|unset}}"}, Exit: 1})
+	t.Setenv("XDG_RUNTIME_DIR", "/inherited")
+	for _, c := range []struct {
+		argv  []string
+		named string
+		saw   string
+	}{
+		{[]string{probe, "x"}, probe + " x", "runtime /inherited"},
+		{[]string{"XDG_RUNTIME_DIR=/run/user/7", probe, "x"}, "XDG_RUNTIME_DIR=/run/user/7 " + probe + " x", "runtime /run/user/7"},
+	} {
+		err := runSupervisor(c.argv[0], c.argv[1:]...)
+		if err == nil || !strings.HasPrefix(err.Error(), c.named+": exit status 1: ") || !strings.HasSuffix(err.Error(), c.saw) {
+			t.Fatalf("%q: %v, want it named %q and %q said", c.argv, err, c.named, c.saw)
+		}
 	}
 }
 
@@ -516,6 +537,18 @@ func daemonByTheTestThen(t *testing.T, terminals string, onTerm func() (letGo bo
 	return termed
 }
 
+// noBus is what systemctl --user says with no user bus to reach.
+const noBus = "Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined"
+
+// daemonUnderUnitAs has daemonUnderUnit say under, until the test ends:
+// whether the daemon running is the one the unit started.
+func daemonUnderUnitAs(t *testing.T, under bool) {
+	t.Helper()
+	old := daemonUnderUnit
+	daemonUnderUnit = func(string, int) bool { return under }
+	t.Cleanup(func() { daemonUnderUnit = old })
+}
+
 // unreachableSupervisor puts a supervisor on PATH that fails every command
 // as systemctl --user does with no user bus to reach, and has rota run the
 // real one it finds there: a fake built from this test binary, not a script.
@@ -524,7 +557,7 @@ func unreachableSupervisor(t *testing.T) {
 	name := map[string]string{"linux": "systemctl", "darwin": "launchctl"}[runtime.GOOS]
 	bin := t.TempDir()
 	fakecli.Install(t, bin, name, fakecli.Spec{
-		Stderr: []string{"Failed to connect to user scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined"},
+		Stderr: []string{noBus},
 		Exit:   1,
 	})
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -564,6 +597,10 @@ func TestAnUninstallTheSupervisorRefusesStopsTheDaemonFirst(t *testing.T) {
 	}
 	link := wantsLink(t, r.want.path)
 	unreachableSupervisor(t)
+	// The unit's own daemon: while it runs, no restart of the unit can be
+	// pending, so whether one may come is not asked.
+	daemonUnderUnitAs(t, true)
+	restartMayComeAs(t, "never asked")
 	fileAtTerm := make(chan bool, 1)
 	termed := daemonByTheTestThen(t, r.terminals, func() bool {
 		_, err := os.Lstat(r.want.path)
@@ -609,6 +646,38 @@ func TestAnUninstallTheSupervisorRefusesStopsTheDaemonFirst(t *testing.T) {
 	}
 }
 
+// A daemon running that is not the unit's — one started by hand, as rota
+// run --detach starts one, while the unit waits out its restart after its
+// own crashed — is stopped as any is, and then the unit is kept while the
+// supervisor may start its daemon again: stopping this one cancelled no
+// restart. The line says the daemon was stopped, and why the file stays.
+func TestAnUninstallKeepsTheUnitAfterStoppingADaemonNotTheUnits(t *testing.T) {
+	r := newUnitRig(t)
+	if _, errb, code := call(t, "serve", "install"); code != 0 {
+		t.Fatalf("install: exit %d %q", code, errb)
+	}
+	link := wantsLink(t, r.want.path)
+	unreachableSupervisor(t)
+	daemonUnderUnitAs(t, false)
+	const why = "the supervisor may be about to start one again"
+	restartMayComeAs(t, why)
+	termed := daemonByTheTest(t, r.terminals)
+	playExit(t, func(time.Duration) bool { return true })
+	out, errb, code := call(t, "serve", "uninstall")
+	want := fmt.Sprintf("error: %s: exit status 1: %s; the rota daemon (pid %d) was stopped as rota serve stop stops one, and 0 sessions keep running, "+
+		"but %s, so %s is kept: %s; %s\n",
+		r.want.uninstall[0], noBus, os.Getpid(), why, r.want.path, keptWhy, againFrom(errors.New(noBus)))
+	if code != 1 || out != "" || errb != want {
+		t.Fatalf("uninstall over a daemon not the unit's: exit %d %q\n%q\nwant %q", code, out, errb, want)
+	}
+	<-termed
+	for _, p := range []string{r.want.path, link} {
+		if _, err := os.Lstat(p); p != "" && err != nil {
+			t.Fatalf("%s was taken away: %v", p, err)
+		}
+	}
+}
+
 // playExit stands in for the wait for the daemon's process to exit, which
 // for a daemon that is this test process would never end: exited is asked
 // instead, once for each look, until it says yes.
@@ -641,6 +710,7 @@ func TestAnUninstallWaitsForTheDaemonsProcessToExit(t *testing.T) {
 		t.Fatalf("daemon.pid says %+v, want pid %d", d, pid)
 	}
 	unreachableSupervisor(t)
+	daemonUnderUnitAs(t, true)
 	out, errb, code := call(t, "serve", "uninstall")
 	want := fmt.Sprintf("; the rota daemon (pid %d) was stopped as rota serve stop stops one, and 0 sessions keep running", pid)
 	if code != 1 || out != "" || !strings.Contains(errb, path+" is removed, but ") || !strings.Contains(errb, want) {
@@ -680,8 +750,8 @@ func TestAnUninstallKeepsTheUnitWhileTheDaemonsProcessLingers(t *testing.T) {
 	t.Cleanup(func() { daemonExitWait = old })
 	termed := daemonByTheTest(t, r.terminals)
 	out, errb, code := call(t, "serve", "uninstall")
-	want := fmt.Sprintf("; the rota daemon (pid %d) is still running and could not be stopped (it let go of the store but has not exited within 300ms), so %s is kept: %s; run rota serve uninstall again from %s",
-		os.Getpid(), r.want.path, keptWhy, keptFrom)
+	want := fmt.Sprintf("; the rota daemon (pid %d) is still running and could not be stopped (it let go of the store but has not exited within 300ms), so %s is kept: %s; %s",
+		os.Getpid(), r.want.path, keptWhy, againFrom(errors.New(noBus)))
 	if code != 1 || out != "" || !strings.Contains(errb, want) {
 		t.Fatalf("uninstall while the daemon lingers: exit %d %q %q, want %q", code, out, errb, want)
 	}
@@ -710,6 +780,7 @@ func TestAnUninstallThatCannotDeleteTheFileSaysTheDaemonStopped(t *testing.T) {
 		t.Fatalf("install: exit %d %q", code, errb)
 	}
 	unreachableSupervisor(t)
+	daemonUnderUnitAs(t, true)
 	termed := daemonByTheTest(t, r.terminals)
 	playExit(t, func(time.Duration) bool { return true })
 	dir := filepath.Dir(r.want.path)
@@ -852,8 +923,8 @@ func TestAnUninstallThatCannotStopTheDaemonKeepsTheUnit(t *testing.T) {
 	want := fmt.Sprintf("%s: exit status 1: Failed to connect to user scope bus via local transport: "+
 		"$DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined; "+
 		"the rota daemon (pid %d) is still running and could not be stopped (the rota daemon (pid %d) has not stopped within 300ms), "+
-		"so %s is kept: %s; run rota serve uninstall again from %s",
-		r.want.uninstall[0], pid, pid, r.want.path, keptWhy, keptFrom)
+		"so %s is kept: %s; %s",
+		r.want.uninstall[0], pid, pid, r.want.path, keptWhy, againFrom(errors.New(noBus)))
 	if code != 1 || out != "" || strings.TrimSpace(errb) != "error: "+want {
 		t.Fatalf("uninstall that cannot stop the daemon: exit %d %q\n%q\nwant %q", code, out, errb, want)
 	}
