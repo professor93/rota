@@ -76,8 +76,11 @@ func textRedact(s string, seams []textSeam) (string, int) {
 				break
 			}
 			start := k + off
+			// Right after what a sequence took is right after its seam:
+			// at the seam's place when it left no space (seamHere), past
+			// its space when it did.
 			_, seamHere := ateAt[at[start]]
-			word := start == 0 || eaten[start] || eaten[start-1] || seamHere || space[at[start]-1] || !(textKeyByte(js[start-1]) && js[start-1] != '_' && js[start-1] != '-')
+			word := start == 0 || eaten[start] || seamHere || space[at[start]-1] || !(textKeyByte(js[start-1]) && js[start-1] != '_' && js[start-1] != '-')
 			if !word {
 				k = start + 1
 				continue
