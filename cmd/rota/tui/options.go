@@ -39,7 +39,9 @@ type Options struct {
 	Host, Cwd string
 
 	// Daemon says whether a daemon runs and which sessions it holds. The
-	// header asks every 5 s. Nil: nobody asks, and none runs.
+	// header asks every 5 s. Nil: nobody asks, and none runs. A call must
+	// end once its context does: one that does not is taken for a daemon
+	// that does not run, and is not asked again until it has returned.
 	Daemon func(ctx context.Context) Daemon
 
 	// Exec is this rota with args, run on the terminal the TUI hands over.

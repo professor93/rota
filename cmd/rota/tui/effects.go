@@ -59,9 +59,15 @@ func (m *Model) effect(msg tea.Msg) (tea.Cmd, bool) {
 	switch msg := msg.(type) {
 	case handOffMsg:
 		// Nothing to hand the terminal to (an Attach that answered nil, nil)
-		// is ignored: Bubble Tea would panic on it and end the program.
+		// never reaches Bubble Tea, which would panic on it and end the
+		// program. Done still hears of it, with an error, so whatever the
+		// caller releases or says at the end still happens.
 		if msg.Cmd == nil {
-			return nil, true
+			if msg.Done == nil {
+				return nil, true
+			}
+			done := msg.Done
+			return func() tea.Msg { return done(errors.New("there was nothing to hand the terminal to")) }, true
 		}
 		return tea.Exec(msg.Cmd, msg.Done), true
 	case clipboardMsg:

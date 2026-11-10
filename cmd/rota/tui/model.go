@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -113,6 +114,13 @@ type Model struct {
 	whoKnown bool
 	whoAsked bool
 	daemonAt bool // a daemon call in flight
+	// parkedWho, parkedList and parkedDaemon count the calls of each kind
+	// that were answered for (env.callOr) and are still running. A timer
+	// sends its kind again only at zero, so one that ignores its context
+	// leaves at most one goroutine behind, while the failure is said at
+	// once.
+	parkedWho, parkedDaemon atomic.Int32
+	parkedList              [3]atomic.Int32
 }
 
 // New makes the TUI's model for o, with every registered tab, and fills
@@ -504,7 +512,7 @@ func (m *Model) askWho() tea.Cmd {
 	return m.e.callOr(envCallTimeout, func(ctx context.Context) tea.Msg {
 		p, err := b.Who(ctx)
 		return modelWhoMsg{Who: p, Err: err}
-	}, func(err error) tea.Msg { return modelWhoMsg{Err: err} })
+	}, func(err error) tea.Msg { return modelWhoMsg{Err: err} }, &m.parkedWho)
 }
 
 // askAccounts reads the listing. A read that refreshes usage has
@@ -521,7 +529,7 @@ func (m *Model) askAccounts(how Refresh) tea.Cmd {
 	return m.e.callOr(d, func(ctx context.Context) tea.Msg {
 		l, err := b.Accounts(ctx, how)
 		return listingMsg{Listing: l, Err: err, How: how}
-	}, func(err error) tea.Msg { return listingMsg{Err: err, How: how} })
+	}, func(err error) tea.Msg { return listingMsg{Err: err, How: how} }, &m.parkedList[how])
 }
 
 // askDaemon asks Options.Daemon. One that panics or does not answer is a
@@ -531,31 +539,31 @@ func (m *Model) askDaemon() tea.Cmd {
 	ask := m.e.o.Daemon
 	return m.e.callOr(envCallTimeout, func(ctx context.Context) tea.Msg {
 		return daemonMsg{Daemon: ask(ctx)}
-	}, func(err error) tea.Msg { return daemonMsg{Daemon: Daemon{Err: err.Error()}} })
+	}, func(err error) tea.Msg { return daemonMsg{Daemon: Daemon{Err: err.Error()}} }, &m.parkedDaemon)
 }
 
 func (m *Model) pollIn(p modelPoll) tea.Cmd {
 	return m.e.tick(modelPollEvery[p], func(time.Time) tea.Msg { return modelPollMsg{Poll: p} })
 }
 
-// poll is a timer's firing: its call, unless one of its kind is still out,
-// and the timer set again.
+// poll is a timer's firing: its call, unless one of its kind is still out
+// or still running after it was answered for, and the timer set again.
 func (m *Model) poll(p modelPoll) tea.Cmd {
 	cmds := []tea.Cmd{m.pollIn(p)}
 	switch p {
 	case modelPollList:
-		if !m.whoKnown && !m.whoAsked {
+		if !m.whoKnown && !m.whoAsked && m.parkedWho.Load() == 0 {
 			cmds = append(cmds, m.askWho())
 		}
-		if m.listing[RefreshNone] == 0 {
+		if m.listing[RefreshNone] == 0 && m.parkedList[RefreshNone].Load() == 0 {
 			cmds = append(cmds, m.askAccounts(RefreshNone))
 		}
 	case modelPollStale:
-		if m.listing[RefreshStale] == 0 {
+		if m.listing[RefreshStale] == 0 && m.parkedList[RefreshStale].Load() == 0 {
 			cmds = append(cmds, m.askAccounts(RefreshStale))
 		}
 	case modelPollDaemon:
-		if m.e.o.Daemon != nil && !m.daemonAt {
+		if m.e.o.Daemon != nil && !m.daemonAt && m.parkedDaemon.Load() == 0 {
 			cmds = append(cmds, m.askDaemon())
 		}
 	}

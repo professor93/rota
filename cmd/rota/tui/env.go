@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"charm.land/bubbles/v2/key"
@@ -71,19 +72,28 @@ func (e *env) gate(bs ...*key.Binding) {
 // call is a command that runs f under a deadline of d from now, and under
 // the program's life, and returns what f returns. A d of zero or less sets
 // no deadline but the program's. A failure f cannot answer for itself, a
-// panic or a deadline it ignored, is a levelErr toast; callOr says what it
-// is instead.
+// panic or a deadline it ignored, is a levelErr toast and nothing else: a
+// caller that keeps the call marked in flight until its own message comes
+// uses callOr, or that mark never clears.
 func (e *env) call(d time.Duration, f func(ctx context.Context) tea.Msg) tea.Cmd {
 	return e.callOr(d, f, func(err error) tea.Msg {
 		return toastMsg{Text: err.Error(), Level: levelErr}
-	})
+	}, nil)
 }
 
 // callOr is call, with failed making the message for a call that panicked,
 // or that had not returned envCallGrace after its context ended. Such a
 // callee is left to finish by itself and what it returns goes nowhere, so
 // a kind of call kept in flight until its answer comes is never stuck there.
-func (e *env) callOr(d time.Duration, f func(ctx context.Context) tea.Msg, failed func(error) tea.Msg) tea.Cmd {
+//
+// parked, when not nil, counts the callees of one kind answered for and
+// still running: one more when callOr answers for it, one fewer when it
+// does return. A caller that sends that kind again only at zero leaves at
+// most one such callee running, however long it takes.
+//
+// A panic is said in one line, with no stack: the TUI has no log to put
+// one in yet.
+func (e *env) callOr(d time.Duration, f func(ctx context.Context) tea.Msg, failed func(error) tea.Msg, parked *atomic.Int32) tea.Cmd {
 	parent := e.ctx
 	return func() tea.Msg {
 		var (
@@ -96,14 +106,22 @@ func (e *env) callOr(d time.Duration, f func(ctx context.Context) tea.Msg, faile
 			ctx, cancel = context.WithCancel(parent)
 		}
 		defer cancel()
+		// state is envRunning until f returns (envReturned) or callOr
+		// answers for it (envAnswered), whichever comes first.
+		var state atomic.Int32
 		got := make(chan tea.Msg, 1)
 		go func() {
+			var msg tea.Msg
 			defer func() {
 				if r := recover(); r != nil {
-					got <- failed(fmt.Errorf("the call failed: %v", r))
+					msg = failed(fmt.Errorf("the call failed: %v", r))
 				}
+				if !state.CompareAndSwap(envRunning, envReturned) && parked != nil {
+					parked.Add(-1)
+				}
+				got <- msg
 			}()
-			got <- f(ctx)
+			msg = f(ctx)
 		}()
 		select {
 		case msg := <-got:
@@ -116,10 +134,27 @@ func (e *env) callOr(d time.Duration, f func(ctx context.Context) tea.Msg, faile
 		case msg := <-got:
 			return msg
 		case <-grace.C:
-			return failed(fmt.Errorf("no answer: %w", ctx.Err()))
 		}
+		if parked != nil {
+			parked.Add(1)
+		}
+		if !state.CompareAndSwap(envRunning, envAnswered) {
+			// f returned just now: its own answer stands.
+			if parked != nil {
+				parked.Add(-1)
+			}
+			return <-got
+		}
+		return failed(fmt.Errorf("no answer: %w", ctx.Err()))
 	}
 }
+
+// What callOr knows of its callee.
+const (
+	envRunning int32 = iota
+	envReturned
+	envAnswered
+)
 
 // window is the terminal's size for an attach that holds it (Options.Attach):
 // size answers the latest, resized has a value each time it changes, and
