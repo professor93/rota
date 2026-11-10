@@ -3598,7 +3598,12 @@ Code blanked: see *Stranded* and *Blanked*, below.
   moment. A lock that cannot be made at all, in a home rota may not write in or
   on a full disk, is never taken for somebody's: the look says so, as for a
   home that cannot be read, and refreshes nothing there. A lock somebody took
-  meanwhile is theirs, and is neither touched nor removed.
+  meanwhile is theirs. On Linux and macOS rota keeps the directory it made
+  open while it holds the lock and touches only that one, so a lock made in
+  its place is never touched; on Windows a beat that comes at that very
+  moment can touch it once. Either way no beat takes it for rota's, and rota lets go by
+  looking at the lock just before removing it, so only a lock made in the
+  instant between the two can be removed.
 - **The journal.** Every refresh rota's store makes, for any provider, leaves
   two lines in `refresh.log` in the store's directory — one as the token goes
   out, one for what came of it — and every change a look at a claude home

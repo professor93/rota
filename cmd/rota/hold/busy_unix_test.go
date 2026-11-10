@@ -11,7 +11,10 @@ import (
 // busy is the CPU time the process has had so far, all its threads
 // together: what a test counts when it bounds how long its code takes, so
 // that a machine too busy to give the test a CPU does not count against it.
-// Waiting for a CPU is the machine's doing; only work is the code's.
+// Waiting for a CPU is the machine's doing; only work is the code's. It counts
+// every goroutine's work, so the tests that time with it rely on the package's
+// tests running one at a time (no t.Parallel), and keep a loose bound on the
+// clock (lingers) for a wait CPU time cannot see.
 func busy(t *testing.T) time.Duration {
 	t.Helper()
 	var u syscall.Rusage

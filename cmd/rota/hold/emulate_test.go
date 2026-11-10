@@ -83,7 +83,7 @@ func TestABatchOfRepeatsHoldsTheScreenBriefly(t *testing.T) {
 	sh, _ := p.caughtUp(1, int64(len(in)))
 	asked := busy(t) - worked
 	answered(answers.String())
-	if took, limit := busy(t)-worked, slow*200*time.Millisecond; asked > limit || took > limit {
+	if took, limit := busy(t)-worked, slow*200*time.Millisecond; asked > limit || took > limit || time.Since(start) > lingers {
 		t.Errorf("%d bytes at %dx%d: the Screen came after %v of work, the cursor answers after %v (%v on the clock)",
 			len(in), w, h, asked, took, time.Since(start))
 	}

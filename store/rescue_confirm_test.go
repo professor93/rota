@@ -1189,7 +1189,7 @@ func TestALoginSignedInWithinTheMinuteBesideABlankedItem(t *testing.T) {
 					w.p.mu.Unlock()
 				}
 				login := map[string]any{"accessToken": "AL", "refreshToken": "RL", "expiresAt": expires,
-					"refreshTokenExpiresAt": 1999999979000, "scopes": []string{"user:inference"}} // 20 s before the grant's end
+					"refreshTokenExpiresAt": int64(1999999979000), "scopes": []string{"user:inference"}} // 20 s before the grant's end
 				if c.who != "" {
 					login["tokenAccount"] = map[string]string{"uuid": c.who}
 				}

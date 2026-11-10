@@ -10,6 +10,12 @@ import (
 	"github.com/professor93/rota/internal/vtscan"
 )
 
+// lingers is how long on the clock a timed piece of code may take whatever
+// its CPU time (busy): far above what a loaded machine adds, far below the
+// seconds a regression of the screen's budget takes, so that a wait CPU time
+// cannot see is still caught.
+const lingers = 10 * time.Second
+
 // guarded is a Screen fed in through Write.
 func guarded(t *testing.T, cols, rows int, in ...string) *Screen {
 	t.Helper()
@@ -112,10 +118,10 @@ func TestHugeCountsTakeNoTime(t *testing.T) {
 		{"CBT", "\x1b[3;70H\x1b[99999999Zx", "\x1b[3;70H\x1b[80Zx"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			start := busy(t)
+			start, clock := busy(t), time.Now()
 			s := guarded(t, 80, 24, c.in)
-			if took := busy(t) - start; took > time.Second {
-				t.Fatalf("%q took %v of work", c.in, took)
+			if took, waited := busy(t)-start, time.Since(clock); took > time.Second || waited > lingers {
+				t.Fatalf("%q took %v of work, %v on the clock", c.in, took, waited)
 			}
 			if !s.OK() {
 				t.Fatal("the screen retired")
@@ -269,10 +275,10 @@ func TestAWriteOfRepeatsTakesNoTime(t *testing.T) {
 	const rep = "\x1b[99999999b"
 	quick := func(t *testing.T, in string) *Screen {
 		t.Helper()
-		start := busy(t)
+		start, clock := busy(t), time.Now()
 		s := guarded(t, w, h, in)
-		if took := busy(t) - start; took > slow*200*time.Millisecond {
-			t.Errorf("%d bytes took %v of work", len(in), took)
+		if took, waited := busy(t)-start, time.Since(clock); took > slow*200*time.Millisecond || waited > lingers {
+			t.Errorf("%d bytes took %v of work, %v on the clock", len(in), took, waited)
 		}
 		if !s.OK() {
 			t.Fatal("the screen retired")
@@ -307,14 +313,14 @@ func TestAWriteOfRepeatsTakesNoTime(t *testing.T) {
 		// which the next batch gets afresh.
 		unit := "x" + rep + "\x1b[6n"
 		k := size / len(unit)
-		start := busy(t)
+		start, clock := busy(t), time.Now()
 		s := NewScreen(w, h)
 		t.Cleanup(s.Close)
 		for range k {
 			s.Write([]byte(unit))
 		}
-		if took := busy(t) - start; took > slow*200*time.Millisecond {
-			t.Errorf("%d pieces took %v of work", k, took)
+		if took, waited := busy(t)-start, time.Since(clock); took > slow*200*time.Millisecond || waited > lingers {
+			t.Errorf("%d pieces took %v of work, %v on the clock", k, took, waited)
 		}
 		s.Refill()
 		s.Write([]byte(unit))

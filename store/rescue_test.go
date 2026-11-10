@@ -429,6 +429,8 @@ func TestTheRefreshLockIsKeptFreshForAsLongAsItIsHeld(t *testing.T) {
 // the lock that replaced rota's, so the test waits on the beat, not the clock;
 // a beat that went by the lock's name touched theirs there, kept it as rota's,
 // and removed it at release, which a loaded machine made happen between beats.
+// On Windows a beat still goes by the name, and the test asks only that the
+// lock is not taken for rota's, so it stays.
 func TestALockSomebodyElseTookIsNotRotas(t *testing.T) {
 	for _, c := range []struct {
 		what    string
@@ -438,9 +440,8 @@ func TestALockSomebodyElseTookIsNotRotas(t *testing.T) {
 		{"in the middle of a beat", true},
 	} {
 		t.Run(c.what, func(t *testing.T) {
-			if c.midBeat && runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
-				t.Skip("here a beat reaches the lock by its name, and touches a lock made there in the middle of it once")
-			}
+			// Nothing here runs a CLI; were anything to try, it finds none.
+			t.Setenv("PATH", t.TempDir())
 			storedRouteHere(t)
 			claudeWorld(t)
 			old := refreshLockBeat
@@ -466,7 +467,7 @@ func TestALockSomebodyElseTookIsNotRotas(t *testing.T) {
 			var taken atomic.Bool
 			stoodDown := make(chan struct{})
 			var once sync.Once
-			refreshLockBeating = func(ours bool) {
+			refreshLockLooked = func(ours bool) {
 				switch {
 				case ours && c.midBeat && taken.CompareAndSwap(false, true):
 					take()
@@ -474,7 +475,7 @@ func TestALockSomebodyElseTookIsNotRotas(t *testing.T) {
 					once.Do(func() { close(stoodDown) })
 				}
 			}
-			t.Cleanup(func() { refreshLockBeating = nil })
+			t.Cleanup(func() { refreshLockLooked = nil })
 			f.set(func(f *anthropic) {
 				inner := refreshesTo("A-new", "R-new")
 				f.refresh = func() (int, any) {
@@ -498,7 +499,10 @@ func TestALockSomebodyElseTookIsNotRotas(t *testing.T) {
 			if err != nil {
 				t.Fatalf("the lock that replaced rota's stays: %v", err)
 			}
-			if !fi.ModTime().Equal(theirs) {
+			// Elsewhere a beat touches by the name, so a lock made in the
+			// middle of one is touched once; it still stays, above.
+			byName := runtime.GOOS != "linux" && runtime.GOOS != "darwin"
+			if !fi.ModTime().Equal(theirs) && !(c.midBeat && byName) {
 				t.Fatalf("and rota did not touch it: %v, want %v", fi.ModTime(), theirs)
 			}
 		})

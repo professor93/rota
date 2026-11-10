@@ -824,12 +824,16 @@ func (h *claudeHome) uncover() error {
 // A holder that stalled past that, a laptop going to sleep say, may find
 // somebody else has taken it. Ownership is told the way Claude Code's own holders
 // tell it, by the directory and the mtime last given it: a lock that is not what
-// rota left is not rota's, and from then on is neither touched nor removed.
+// rota left is not rota's, and from then on is neither touched nor removed (but
+// see lockDir for Windows and release for the instant of the removal).
 type refreshLock struct {
 	path string
 	// held is the directory as rota last left it. Only the beat reads and writes
 	// it until the beat has ended, and only release after.
 	held fs.FileInfo
+	// dir is the directory rota made, open from the take until the release on
+	// Linux and macOS: what every beat touches and reads back (lockDir).
+	dir  lockDir
 	stop chan struct{}
 	done chan struct{}
 	once sync.Once
@@ -867,7 +871,16 @@ func takeRefreshLock(home string) (*refreshLock, error) {
 		_ = os.Remove(path) // made a moment ago, and not to be left in Claude Code's way
 		return nil, fmt.Errorf("Claude Code's refresh lock in its home could not be read back, so nothing there is refreshed: %w", err)
 	}
+	// On Windows os.SameFile learns a directory's identity by its name the
+	// first time it is asked: asked now, that is the directory just made.
+	_ = os.SameFile(fi, fi)
 	l := &refreshLock{path: path, held: fi, stop: make(chan struct{}), done: make(chan struct{})}
+	if l.dir, err = openLockDir(path, fi); err != nil {
+		if l.ours() {
+			_ = os.Remove(path) // made a moment ago, and not to be left in Claude Code's way
+		}
+		return nil, fmt.Errorf("Claude Code's refresh lock in its home could not be opened, so nothing there is refreshed: %w", err)
+	}
 	heldLocks.Store(path, true)
 	go l.beat()
 	return l, nil
@@ -889,39 +902,28 @@ func (l *refreshLock) beat() {
 	}
 }
 
-// refreshLockBeating, when set, hears each beat's look at the lock: whether
+// refreshLockLooked, when set, hears each beat's look at the lock: whether
 // it was still rota's, before any touch. A test waits on it, and makes the
 // lock somebody else's there, rather than on the clock.
-var refreshLockBeating func(ours bool)
+var refreshLockLooked func(ours bool)
 
 // touch gives the lock a new mtime while it is still rota's, and reports
-// whether it is. The look, the touch and the reading back are made through
-// the one directory found at the lock's name (lockDir), so a lock somebody
-// made there in between is neither touched nor taken for rota's after: a
-// beat that went by the name each time could touch such a lock, keep what it
-// read back as its own, and remove it at release.
+// whether it is. The touch and the reading back go through the directory
+// rota made (lockDir), so a lock somebody made at the name after the look is
+// not touched, and is never taken for rota's after: a beat that went by the
+// name could touch such a lock, keep what it read back as its own, and
+// remove it at release. While that directory is open no other can take its
+// identity, so the look by name is not fooled either.
 func (l *refreshLock) touch() bool {
-	d, err := openLockDir(l.path)
-	if err != nil {
-		// Nothing to touch through: a miss, made up for at the next beat,
-		// while the lock is rota's.
-		ours := l.ours()
-		if refreshLockBeating != nil {
-			refreshLockBeating(ours)
-		}
-		return ours
-	}
-	defer d.close()
-	fi, err := d.stat()
-	ours := err == nil && os.SameFile(fi, l.held) && fi.ModTime().Equal(l.held.ModTime())
-	if refreshLockBeating != nil {
-		refreshLockBeating(ours)
+	ours := l.ours()
+	if refreshLockLooked != nil {
+		refreshLockLooked(ours)
 	}
 	if !ours {
 		return false
 	}
-	_ = d.touch(time.Now()) // a miss is made up for at the next beat
-	if fi, err := d.stat(); err == nil && os.SameFile(fi, l.held) {
+	_ = l.dir.touch(time.Now()) // a miss is made up for at the next beat
+	if fi, err := l.dir.stat(); err == nil && os.SameFile(fi, l.held) {
 		l.held = fi
 	}
 	return true
@@ -935,6 +937,11 @@ func (l *refreshLock) ours() bool {
 
 // release ends the beat and removes the lock, if it is still rota's. It is safe
 // to call more than once.
+//
+// The look and the removal both go by the name, as there is no removing a
+// directory through a handle: a lock somebody makes in its place between the
+// two is removed. Only a holder rota's own stall let judge the lock dead can
+// do that, at that instant.
 func (l *refreshLock) release() {
 	l.once.Do(func() {
 		heldLocks.Delete(l.path)
@@ -943,6 +950,7 @@ func (l *refreshLock) release() {
 		if l.ours() {
 			_ = os.Remove(l.path)
 		}
+		l.dir.close()
 		if l.onRelease != nil {
 			l.onRelease()
 		}

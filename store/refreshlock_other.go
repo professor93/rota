@@ -8,17 +8,14 @@ import (
 	"time"
 )
 
-// lockDir is Claude Code's refresh lock as rota found it at a beat. Here it
-// is reached by its name each time, as before: a lock somebody makes at that
-// name between rota's look and its touch can still be touched, and on
-// Windows, where os.SameFile reads a directory's identity by its name when
-// first asked, taken for rota's after.
+// lockDir is the refresh lock rota made, reached here by its name at every
+// beat: a lock somebody makes at that name between a beat's look and its
+// touch is touched, once. It is still never taken for rota's, as the beat
+// keeps what it reads back only while that is the directory rota made
+// (os.SameFile), so it is not removed by the release either.
 type lockDir struct{ path string }
 
-func openLockDir(path string) (lockDir, error) {
-	_, err := os.Lstat(path)
-	return lockDir{path}, err
-}
+func openLockDir(path string, _ fs.FileInfo) (lockDir, error) { return lockDir{path}, nil }
 
 func (d lockDir) stat() (fs.FileInfo, error) { return os.Lstat(d.path) }
 
