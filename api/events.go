@@ -125,11 +125,8 @@ func (ts *termSession) eventName() string {
 	if n := strings.TrimSpace(ts.name); n != "" {
 		return n
 	}
-	if ts.cwd != "" {
-		base := filepath.Base(filepath.Clean(ts.cwd))
-		if base != "." && base != string(filepath.Separator) && base != "/" {
-			return base
-		}
+	if f := ts.folder(); f != "" {
+		return f
 	}
 	return ts.id
 }
