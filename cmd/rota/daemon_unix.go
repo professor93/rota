@@ -24,6 +24,7 @@ import (
 	"github.com/professor93/rota/api"
 	rotaclient "github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/cmd/rota/hold"
+	"github.com/professor93/rota/cmd/rota/sshd"
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/wire"
 )
@@ -58,6 +59,9 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 	line := fmt.Sprintf("rota daemon started for %s (pid %d); control socket %s", oneLine(r.home), r.started.PID, oneLine(r.sock))
 	if r.started.HTTP != "" {
 		line += "; http on " + oneLine(r.started.HTTP)
+	}
+	if r.started.SSH != "" {
+		line += "; ssh on " + oneLine(r.started.SSH)
 	}
 	fmt.Fprintln(c.out, line)
 	return nil
@@ -212,12 +216,13 @@ func daemonOf(terminals string) (*holdwire.Daemon, bool) {
 //
 // It claims the store (api.New, for a server with HoldCommand) — and exits
 // 0, saying so in the log, when another daemon already has — opens a TCP
-// port only where server.toml asks and --ctl-only does not forbid, and
-// serves ctl.sock until SIGTERM or an interrupt. A hangup is not a stop. On
-// the way out, all within serveGrace, both listeners close, then Stop ends
-// their WebSockets and lets go of every session, still running, for the
-// next daemon to take up, and of the claim last; then the WebSockets' goodbyes
-// are waited for.
+// port, and the SSH server, only where server.toml asks and --ctl-only does
+// not forbid, and serves ctl.sock until SIGTERM or an interrupt. A hangup is
+// not a stop. On the way out, all within serveGrace, the SSH server closes
+// first, ending each attach over it with its line; then both listeners
+// close, then Stop ends their WebSockets and lets go of every session, still
+// running, for the next daemon to take up, and of the claim last; then the
+// WebSockets' goodbyes are waited for.
 func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 	home, terminals, err := daemonStore()
 	if err != nil {
@@ -306,8 +311,30 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 			log.Info(note)
 		}
 	}
+	// The SSH server only where the file turns it on, and never for a
+	// daemon a session started by itself: bound, and its host key read,
+	// before the daemon says it has started, as the port is.
+	var sshSrv *sshd.Server
+	if cfg.SSH.Enabled && !ctlOnly {
+		if sshSrv, err = sshwireListen(cfg, home, terminals, srv, log); err != nil {
+			if port != nil {
+				port.ln.Close()
+			}
+			srv.Stop()
+			return failed(err)
+		}
+		if err := holdwire.Update(terminals, func(d *holdwire.Daemon) {
+			d.SSH, d.SSHHostKey = sshSrv.Addr(), sshSrv.Fingerprint()
+		}); err != nil {
+			log.Warn("daemon.pid could not say where this daemon serves ssh", "err", err)
+		}
+		log.Info("rota daemon serves ssh", "addr", sshSrv.Addr(), "fingerprint", sshSrv.Fingerprint())
+	}
 	stopCtl, err := listenCtl(srv, terminals, log, requests)
 	if err != nil {
+		if sshSrv != nil {
+			sshSrv.Close()
+		}
 		if port != nil {
 			port.ln.Close()
 		}
@@ -320,12 +347,18 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 		go func() { served <- port.serve() }()
 		said = append(said, "http", port.addr)
 	}
+	sshServed := make(chan error, 1)
+	if sshSrv != nil {
+		go func() { sshServed <- sshSrv.Serve() }()
+		said = append(said, "ssh", sshSrv.Addr())
+	}
 	log.Info("rota daemon started", said...)
 
-	var portErr error
+	var portErr, sshErr error
 	select {
 	case <-ctx.Done():
 	case portErr = <-served:
+	case sshErr = <-sshServed:
 	}
 	stop()
 	began := time.Now()
@@ -334,7 +367,12 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 	// for a foreground serve; Stop, below, waits for any refresh still under
 	// way before this process is gone.
 	srv.StopRefreshing()
-	// The listeners first, together: neither takes another connection, and
+	// SSH first: each attach over it is told the daemon is going and ends
+	// lost, saying so, while the session it showed goes on.
+	if sshSrv != nil {
+		sshSrv.Close()
+	}
+	// Then the listeners, together: neither takes another connection, and
 	// what each is serving has serveGrace, less the goodbye, to finish. The
 	// control socket goes while this daemon still holds the claim, so no
 	// successor finds it answering there.
@@ -361,6 +399,10 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 	}
 	if portErr != nil && !errors.Is(portErr, nethttp.ErrServerClosed) {
 		log.Error("rota daemon stopped: its port did", "err", unsecret(portErr.Error()))
+		return exitCode(1)
+	}
+	if sshErr != nil {
+		log.Error("rota daemon stopped: its SSH server did", "err", unsecret(sshErr.Error()))
 		return exitCode(1)
 	}
 	log.Info("rota daemon stopped")
@@ -628,6 +670,9 @@ func (c *cli) daemonStatus() error {
 	}
 	if d.HTTP != "" {
 		doc.HTTP = &d.HTTP
+	}
+	if d.SSH != "" {
+		doc.SSH = &statusSSH{Addr: d.SSH, HostKey: d.SSHHostKey}
 	}
 	for _, s := range all {
 		if s.Ended == nil {

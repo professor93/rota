@@ -41,6 +41,8 @@ type daemonRig struct {
 	// env is what every rota the test starts runs with: acting as rota,
 	// with the fake claude first on PATH.
 	env []string
+	// ssh is where the last start said its daemon serves SSH, if it did.
+	ssh string
 }
 
 func newDaemonRig(t *testing.T) *daemonRig {
@@ -100,7 +102,7 @@ func (r *daemonRig) rota(args ...string) (stdout, stderr string, code int) {
 	return r.run(r.cmd(args...))
 }
 
-var startedLine = regexp.MustCompile(`^rota daemon started for (\S+) \(pid (\d+)\); control socket (\S+?)(?:; http on (\S+))?\n$`)
+var startedLine = regexp.MustCompile(`^rota daemon started for (\S+) \(pid (\d+)\); control socket (\S+?)(?:; http on (\S+?))?(?:; ssh on (\S+))?\n$`)
 
 // start is `rota serve start` with args, which must say it started a daemon
 // for this store on its control socket; the daemon's pid, and its http
@@ -121,6 +123,7 @@ func (r *daemonRig) startWith(cmd *exec.Cmd) (pid int, http string) {
 	if d, ok := holdwire.RunningDaemon(r.terminals); !ok || d.PID != pid {
 		r.t.Fatalf("serve start said pid %d, and daemon.pid says %+v", pid, d)
 	}
+	r.ssh = m[5]
 	return pid, m[4]
 }
 
@@ -211,13 +214,17 @@ func (r *daemonRig) reap() {
 // statusJSON is serve status --json as a consumer reads it, keys spelt out
 // here rather than borrowed from the command's own type.
 type statusJSON struct {
-	Running  bool       `json:"running"`
-	PID      int        `json:"pid"`
-	Version  string     `json:"version"`
-	Started  *time.Time `json:"started"`
-	Store    string     `json:"store"`
-	Ctl      string     `json:"ctl"`
-	HTTP     *string    `json:"http"`
+	Running bool       `json:"running"`
+	PID     int        `json:"pid"`
+	Version string     `json:"version"`
+	Started *time.Time `json:"started"`
+	Store   string     `json:"store"`
+	Ctl     string     `json:"ctl"`
+	HTTP    *string    `json:"http"`
+	SSH     *struct {
+		Addr    string `json:"addr"`
+		HostKey string `json:"host_key"`
+	} `json:"ssh"`
 	Sessions struct {
 		Live    int `json:"live"`
 		Stopped int `json:"stopped"`

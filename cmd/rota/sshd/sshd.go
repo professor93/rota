@@ -26,6 +26,7 @@ import (
 	"runtime/debug"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -147,6 +148,16 @@ const (
 	maxAttachesPerConn = 2
 )
 
+// sshdCloseWait is how long Close gives the commands running, told by their
+// context, to end and say so on their channels, an attach its last line and
+// every command its exit-status, before each connection is closed under
+// them. A test knob.
+var sshdCloseWait = time.Second
+
+// sshdStopping is why a command's context ends when the server stops, which
+// an attach says in its last line.
+var sshdStopping = errors.New("the SSH server is stopping")
+
 // sshdIdleWait is how long a signed-in connection may sit with no command
 // running before it is closed: answering keepalives, or holding a channel
 // that never asks for anything, is not using a place. A test knob.
@@ -206,9 +217,11 @@ type Server struct {
 	every    time.Duration      // keepaliveEvery when it started
 	idle     time.Duration      // sshdIdleWait when it started
 	refusing time.Duration      // limitsRefusedEvery when it started
+	closing  time.Duration      // sshdCloseWait when it started
 	peer     func(net.Addr) string
 	ctx      context.Context
-	cancel   context.CancelFunc
+	cancel   context.CancelCauseFunc
+	busy     atomic.Int64 // commands running, on every connection
 
 	mu       sync.Mutex
 	closed   bool
@@ -259,11 +272,11 @@ func Listen(o Options) (*Server, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	return &Server{
 		o: o, log: log, ln: ln, key: key, fp: ssh.FingerprintSHA256(key.PublicKey()),
 		known: known, commands: maps.Clone(commands),
-		wait: handshakeWait, every: keepaliveEvery, idle: sshdIdleWait, refusing: limitsRefusedEvery,
+		wait: handshakeWait, every: keepaliveEvery, idle: sshdIdleWait, refusing: limitsRefusedEvery, closing: sshdCloseWait,
 		peer: sshdPeer, ctx: ctx, cancel: cancel,
 		conns: map[net.Conn]struct{}{}, peers: map[string]int{}, limits: limitsNew(),
 	}, nil
@@ -312,18 +325,27 @@ func (s *Server) Serve() error {
 	}
 }
 
-// Close stops listening, closes every connection, and returns once every
-// connection's goroutines have. A command is told by its context.
+// Close stops listening, tells every command by its context that the
+// server is stopping, and gives them up to sshdCloseWait to end and say so
+// on their channels: an attach ends lost, with its line. Then it closes
+// every connection, and returns once every connection's goroutines have.
 func (s *Server) Close() error {
 	s.mu.Lock()
-	var err error
-	if !s.closed {
-		s.closed = true
-		err = s.ln.Close()
-		for nc := range s.conns {
-			nc.Close()
-		}
-		s.cancel()
+	if s.closed {
+		s.mu.Unlock()
+		s.wg.Wait()
+		return nil
+	}
+	s.closed = true
+	err := s.ln.Close()
+	s.cancel(sshdStopping)
+	s.mu.Unlock()
+	for until := time.Now().Add(s.closing); s.busy.Load() > 0 && time.Now().Before(until); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	s.mu.Lock()
+	for nc := range s.conns {
+		nc.Close()
 	}
 	s.mu.Unlock()
 	s.wg.Wait()
@@ -504,8 +526,10 @@ func (c *sshdConn) sshdShut() {
 	c.channels--
 }
 
-// sshdBusy counts a command started, which stops the idle clock.
+// sshdBusy counts a command started, which stops the idle clock, and which
+// a closing server waits for.
 func (c *sshdConn) sshdBusy() {
+	c.s.busy.Add(1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.running++
@@ -515,6 +539,7 @@ func (c *sshdConn) sshdBusy() {
 // sshdRest counts a command ended, and starts the idle clock when it was
 // the last running, unless the connection has ended meanwhile.
 func (c *sshdConn) sshdRest() {
+	defer c.s.busy.Add(-1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.running--; c.running == 0 && !c.ended {

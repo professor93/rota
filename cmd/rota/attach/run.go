@@ -355,7 +355,9 @@ func (r *runner) step() {
 			r.end(Detached, 0, nil)
 			return
 		}
-		r.end(Lost, 0, r.ctx.Err())
+		// Why it ended, where whoever ended it said: a stopping SSH
+		// server does.
+		r.end(Lost, 0, context.Cause(r.ctx))
 		return
 	case p, ok := <-input:
 		if !ok {

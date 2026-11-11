@@ -238,3 +238,72 @@ func TestAnAttachEndsWithItsConnection(t *testing.T) {
 	}
 	attachGivenBack(t, r)
 }
+
+// A server that stops tells each attach first: it ends lost, says why on
+// its channel with its exit-status, and gives the terminal back, and only
+// then does the connection go. The session goes on.
+func TestAStoppingServerSaysWhyToEachAttach(t *testing.T) {
+	r := commandsStart(t, commandsTty)
+	s := r.open(t, "api")
+	a := attachOpen(t, r.signIn(r.me), "attach api", 80, 24)
+	a.wait(0, "ready 80x24")
+	began := time.Now()
+	if err := r.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(began); took > 2*time.Second {
+		t.Errorf("Close took %s with an attach open", took)
+	}
+	if code := a.end(); code != 1 {
+		t.Errorf("a stopping server's attach exited %d, want 1", code)
+	}
+	if got, want := a.err.String(), "rota: lost api: the SSH server is stopping; attach api tries again\r\n"; got != want {
+		t.Errorf("stderr %q, want %q", got, want)
+	}
+	if out := a.out.String(); !strings.HasSuffix(out, attachReset(24)) {
+		t.Errorf("the screen does not end with the reset and a newline: %q", attachTail(out))
+	}
+	if got, err := r.c.Get(s.ID); err != nil || got.Ended != nil {
+		t.Errorf("the session did not go on: %v %+v", err, got)
+	}
+	attachGivenBack(t, r)
+}
+
+// A command that does not end when it is told is not waited for beyond
+// sshdCloseWait: the connection is closed under it, with no exit-status.
+func TestCloseWaitsOnlySoLongForACommand(t *testing.T) {
+	sshdKnob(t, &sshdCloseWait, 200*time.Millisecond)
+	stuck := make(chan struct{})
+	commands["stuck"] = func(context.Context, *Channel, []string) int {
+		<-stuck
+		return 0
+	}
+	t.Cleanup(func() { delete(commands, "stuck") })
+	r := sshdStart(t)
+	sess, err := r.signIn(r.me).NewSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.Start("stuck"); err != nil {
+		t.Fatal(err)
+	}
+	waited := make(chan error, 1)
+	go func() { waited <- sess.Wait() }()
+	closed := make(chan error, 1)
+	go func() { closed <- r.s.Close() }()
+	select {
+	case err := <-waited:
+		var exit *ssh.ExitError
+		if errors.As(err, &exit) {
+			t.Errorf("a command that never ended said exit %d", exit.ExitStatus())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the client never saw its channel end")
+	}
+	close(stuck)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return")
+	}
+}

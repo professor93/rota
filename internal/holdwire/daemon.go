@@ -19,6 +19,9 @@ import (
 // before a reboot names some other program. ProcStartTicks is Linux's alone.
 // HTTP is the TCP address it serves its API on besides its control socket,
 // once it has said so with RecordHTTP; empty for a daemon on ctl.sock alone.
+// SSH is the address its SSH server listens on and SSHHostKey that server's
+// host key, by its SHA256 fingerprint, once it has said so with Update; both
+// empty for a daemon that serves no SSH.
 type Daemon struct {
 	PID            int       `json:"pid"`
 	Version        string    `json:"version"`
@@ -27,6 +30,8 @@ type Daemon struct {
 	ProcStartTicks int64     `json:"proc_start_ticks,omitempty"`
 	BootID         string    `json:"boot_id"`
 	HTTP           string    `json:"http,omitempty"`
+	SSH            string    `json:"ssh,omitempty"`
+	SSHHostKey     string    `json:"ssh_host_key,omitempty"`
 }
 
 // DaemonRunning is a claim refused because another daemon holds the store
@@ -80,10 +85,16 @@ func ClaimDaemon(terminals, version string) (release func(), err error) {
 
 // RecordHTTP adds to daemon.pid the TCP address the daemon serves its API on
 // besides ctl.sock, so that whoever asks which daemon runs is also told
-// where else it can be reached. Only the daemon itself may: a daemon.pid
-// that does not name this process, or whose lock nobody holds, is not this
-// process's claim, and nothing is written.
+// where else it can be reached. Only the daemon itself may (see Update).
 func RecordHTTP(terminals, addr string) error {
+	return Update(terminals, func(d *Daemon) { d.HTTP = addr })
+}
+
+// Update changes daemon.pid by change, which is handed what it says now:
+// where else the daemon serves, once it does. Only the daemon itself may: a
+// daemon.pid that does not name this process, or whose lock nobody holds,
+// is not this process's claim, and nothing is written.
+func Update(terminals string, change func(*Daemon)) error {
 	d, err := readDaemon(terminals)
 	if err != nil {
 		return err
@@ -91,7 +102,7 @@ func RecordHTTP(terminals, addr string) error {
 	if d.PID != os.Getpid() || !Locked(DaemonLock(terminals)) {
 		return fmt.Errorf("holdwire: %s is not this process's claim", DaemonPIDFile(terminals))
 	}
-	d.HTTP = addr
+	change(d)
 	raw, err := rota.EncodeIndent(d)
 	if err != nil {
 		return err

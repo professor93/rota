@@ -422,7 +422,8 @@ func logTail(path string, from int64, n int) []string {
 }
 
 // statusDoc is `rota serve status --json`. Started and HTTP are null when
-// there is no daemon, or no port.
+// there is no daemon, or no port. SSH is left out altogether where no SSH
+// server runs, so that a store with no [ssh] says what it always said.
 type statusDoc struct {
 	Running  bool       `json:"running"`
 	PID      int        `json:"pid"`
@@ -431,10 +432,18 @@ type statusDoc struct {
 	Store    string     `json:"store"`
 	Ctl      string     `json:"ctl"`
 	HTTP     *string    `json:"http"`
+	SSH      *statusSSH `json:"ssh,omitempty"`
 	Sessions struct {
 		Live    int `json:"live"`
 		Stopped int `json:"stopped"`
 	} `json:"sessions"`
+}
+
+// statusSSH is where the daemon's SSH server listens, and its host key's
+// SHA256 fingerprint, which a client asked to trust it is compared with.
+type statusSSH struct {
+	Addr    string `json:"addr"`
+	HostKey string `json:"host_key"`
 }
 
 // sayStatus prints a status, as JSON or as lines a person reads. In the
@@ -465,6 +474,9 @@ func (c *cli) sayStatus(doc *statusDoc) error {
 		fmt.Fprintf(c.out, "\ncontrol socket %s\n", oneLine(doc.Ctl))
 		if doc.HTTP != nil {
 			fmt.Fprintf(c.out, "http on %s\n", oneLine(*doc.HTTP))
+		}
+		if doc.SSH != nil {
+			fmt.Fprintf(c.out, "ssh on %s, host key %s\n", oneLine(doc.SSH.Addr), oneLine(doc.SSH.HostKey))
 		}
 	}
 	if s := doc.Sessions; s.Live+s.Stopped > 0 || doc.Running {
