@@ -770,6 +770,11 @@ func TestThePageURLIsCopiedNotLogged(t *testing.T) {
 	loginPageReal(t)
 	loginPageOffer(t, nil, loginPageLo)
 	m, host, ticks := loginPageSetup(t, &fakeBackend{}, loginPageCode(&loginPageField{}))
+	// A paste while an address is being chosen says nothing, and shows
+	// nothing of itself.
+	if _, got := run(t, m, tea.PasteMsg{Content: "PASTED-CODE-12345"}); len(loginPageToasts(got)) != 0 || strings.Contains(plain(m), "PASTED") {
+		t.Errorf("a paste while choosing said %q, or is drawn:\n%s", loginPageToasts(got), plain(m))
+	}
 	var seen []tea.Msg
 	_, got := run(t, m, press("enter")...)
 	seen = append(seen, got...)
@@ -786,6 +791,9 @@ func TestThePageURLIsCopiedNotLogged(t *testing.T) {
 	_, got = run(t, m, tea.PasteMsg{Content: "PASTED-CODE-12345"})
 	if toasts := loginPageToasts(got); len(toasts) != 1 || !strings.Contains(toasts[0], "paste it there") || strings.Contains(toasts[0], "PASTED") {
 		t.Errorf("a paste while the page is up said %q", toasts)
+	}
+	if p := plain(m); strings.Contains(p, "PASTED") || !strings.Contains(p, "paste it there") {
+		t.Errorf("the screen shows the paste, or not what was said of it:\n%s", p)
 	}
 	_, got = run(t, m, press("c")...)
 	seen = append(seen, got...)
