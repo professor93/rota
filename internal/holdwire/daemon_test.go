@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -202,5 +203,90 @@ func TestSameProcessIsAboutThisProcess(t *testing.T) {
 	}
 	if SameProcess(pid, time.Time{}, 0, boot) || SameProcess(0, start, ticks, boot) || SameProcess(pid, start, ticks, "") {
 		t.Fatal("a record with something missing is trusted")
+	}
+}
+
+// Update changes the daemon's own record and nothing else of it: where it
+// serves SSH and its host key go beside what was there, and a record with
+// no SSH says nothing about it. Before its claim, or after it is let go
+// of, nothing is written.
+func TestOnlyTheClaimUpdatesItsRecord(t *testing.T) {
+	terminals := t.TempDir()
+	ssh := func(d *Daemon) { d.SSH, d.SSHHostKey = "127.0.0.1:2222", "SHA256:abc" }
+	if err := Update(terminals, ssh); err == nil {
+		t.Fatal("a record was updated with no claim")
+	}
+	release, err := ClaimDaemon(terminals, "1.4.0-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(DaemonPIDFile(terminals))
+	if err != nil || strings.Contains(string(raw), `"ssh`) {
+		t.Fatalf("a new claim names SSH: %s %v", raw, err)
+	}
+	if err := RecordHTTP(terminals, "127.0.0.1:8787"); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := RunningDaemon(terminals)
+	if err := Update(terminals, ssh); err != nil {
+		t.Fatal(err)
+	}
+	d, ok := RunningDaemon(terminals)
+	if want := *before; !ok || d.SSH != "127.0.0.1:2222" || d.SSHHostKey != "SHA256:abc" || d.HTTP != "127.0.0.1:8787" ||
+		d.PID != want.PID || d.Version != want.Version || !d.Started.Equal(want.Started) ||
+		!d.ProcStart.Equal(want.ProcStart) || d.BootID != want.BootID {
+		t.Fatalf("daemon.pid became %+v from %+v", d, before)
+	}
+	raw, _ = os.ReadFile(DaemonPIDFile(terminals))
+	for _, key := range []string{`"ssh": "127.0.0.1:2222"`, `"ssh_host_key": "SHA256:abc"`} {
+		if !strings.Contains(string(raw), key) {
+			t.Fatalf("daemon.pid does not say %s:\n%s", key, raw)
+		}
+	}
+	if fi, err := os.Stat(DaemonPIDFile(terminals)); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("daemon.pid: %v %v", fi, err)
+	}
+	release()
+	if err := Update(terminals, ssh); err == nil {
+		t.Fatal("a record was updated after the claim was let go of")
+	}
+	if _, err := os.Stat(DaemonPIDFile(terminals)); !os.IsNotExist(err) {
+		t.Fatalf("a refused update wrote daemon.pid: %v", err)
+	}
+
+	// A record somebody else's: one naming another process while the lock
+	// is held, and one naming this process with nobody holding the lock, as
+	// a daemon that died leaves it. Neither is touched.
+	for _, tc := range []struct {
+		name string
+		pid  int
+		lock bool
+	}{
+		{"another process's", os.Getpid() + 1, true},
+		{"this process's, with the lock free", os.Getpid(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			terminals := t.TempDir()
+			if tc.lock {
+				release, err := ClaimDaemon(terminals, "1.4.0-test")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer release()
+			}
+			raw, err := rota.EncodeIndent(&Daemon{PID: tc.pid, Version: "1.4.0-test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(DaemonPIDFile(terminals), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := Update(terminals, ssh); err == nil {
+				t.Fatal("the record was updated")
+			}
+			if now, err := os.ReadFile(DaemonPIDFile(terminals)); err != nil || string(now) != string(raw) {
+				t.Fatalf("a refused update changed daemon.pid to %s (%v)", now, err)
+			}
+		})
 	}
 }

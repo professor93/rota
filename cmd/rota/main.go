@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/professor93/rota/api"
+	"github.com/professor93/rota/cmd/rota/sshd"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
 	"github.com/professor93/rota/rotation"
@@ -2390,6 +2391,9 @@ func (c *cli) serve(args []string) (err error) {
 	if err != nil {
 		return usageErr("%v", err)
 	}
+	if cfg.SSH.Enabled && !opts.Routes.Terminal {
+		return usageErr("[ssh] enabled needs [routes] terminal in rota serve: SSH reaches the terminals and nothing else; rota serve start serves held sessions without it")
+	}
 	// Everything the server says from here on goes to out, through say for
 	// its own plain lines: stderr, exactly as it always was, or the log
 	// file, and then nothing reaches the terminal. In the file each plain
@@ -2443,6 +2447,20 @@ func (c *cli) serve(args []string) (err error) {
 	for _, note := range serveNotes(&opts, listener, false) {
 		say(note)
 	}
+	// The SSH server, where the file turns it on, reaches this server's own
+	// terminals, and goes before them on the way out: each attach over it
+	// is told the server is stopping, and says so.
+	var sshSrv *sshd.Server
+	sshErrs := make(chan error, 1)
+	if cfg.SSH.Enabled {
+		if sshSrv, err = sshwireServe(cfg, opts.Dir, srv, logger); err != nil {
+			srv.Stop()
+			return err
+		}
+		defer sshSrv.Close()
+		go func() { sshErrs <- sshSrv.Serve() }()
+		say(fmt.Sprintf("rota %s serving ssh on %s (host key %s)", wire.Version, sshSrv.Addr(), sshSrv.Fingerprint()))
+	}
 	server := newHTTPServer(listener.Addr, srv.Handler(), logger)
 
 	// Shut down on the first signal and wait for work in flight; a second
@@ -2463,6 +2481,16 @@ func (c *cli) serve(args []string) (err error) {
 			return nil
 		}
 		return err
+	case err := <-sshErrs:
+		// Serve ends by itself only when its listener fails under it. The
+		// SSH server is then gone, and so is this server, saying why, as
+		// it does for its port.
+		_ = server.Close()
+		srv.Stop()
+		if err == nil {
+			err = errors.New("its listener closed")
+		}
+		return fmt.Errorf("the SSH server stopped: %w", err)
 	case <-ctx.Done():
 		stop()
 		say("\nrota: shutting down; waiting for runs in flight (interrupt again to stop now)")
@@ -2470,6 +2498,9 @@ func (c *cli) serve(args []string) (err error) {
 		defer cancel()
 		// No sweep starts while the runs in flight are waited for.
 		srv.StopRefreshing()
+		if sshSrv != nil {
+			sshSrv.Close()
+		}
 		err := server.Shutdown(shutdown)
 		// Shutdown waits for handlers but cannot cancel them, and each
 		// vendor CLI is in its own process group. Stop ends the runs, so

@@ -34,10 +34,13 @@ takes up the ones a daemon before it left; linux and macOS only:
   rota serve stop [--all] [--yes]                 stop it; its sessions go on
   rota serve status                               whether it runs; 3 if not
 
-It listens on <store>/terminals/ctl.sock, which only you can reach, and on a
-TCP port only where server.toml sets [server] listen and --ctl-only is not
-given. It logs to <store>/daemon.log, or to [server] log_file. stop --all ends
-every session too, and asks first; off a terminal it needs --yes.
+It listens on <store>/terminals/ctl.sock, which only you can reach; on a TCP
+port only where server.toml sets [server] listen; and runs the SSH server only
+where it sets [ssh] enabled. --ctl-only forbids both, and a daemon started by
+itself, as rota run --detach starts one, is always --ctl-only: serve stop and
+serve start to have the file's port and SSH. It logs to <store>/daemon.log,
+or to [server] log_file. stop --all ends every session too, and asks first;
+off a terminal it needs --yes.
 
   rota serve install     make it a systemd user unit or a launchd agent
   rota serve uninstall   take that away; its sessions go on
@@ -103,7 +106,7 @@ func (f *inFlight) wait(until time.Time) bool {
 func (c *cli) serveStart(args []string) error {
 	fs := flag.NewFlagSet("serve start", flag.ContinueOnError)
 	foreground := fs.Bool("foreground", false, "be the daemon in this process, as a supervisor runs it")
-	ctlOnly := fs.Bool("ctl-only", false, "serve the control socket alone, whatever server.toml says about a port")
+	ctlOnly := fs.Bool("ctl-only", false, "serve the control socket alone: no port, no SSH, whatever the file says")
 	conf := fs.String("config", "", "read this file, not <store dir>/server.toml")
 	if ok, err := c.daemonFlags(fs, args); !ok {
 		return err
@@ -422,7 +425,8 @@ func logTail(path string, from int64, n int) []string {
 }
 
 // statusDoc is `rota serve status --json`. Started and HTTP are null when
-// there is no daemon, or no port.
+// there is no daemon, or no port. SSH is left out altogether where no SSH
+// server runs, so that a store with no [ssh] says what it always said.
 type statusDoc struct {
 	Running  bool       `json:"running"`
 	PID      int        `json:"pid"`
@@ -431,10 +435,18 @@ type statusDoc struct {
 	Store    string     `json:"store"`
 	Ctl      string     `json:"ctl"`
 	HTTP     *string    `json:"http"`
+	SSH      *statusSSH `json:"ssh,omitempty"`
 	Sessions struct {
 		Live    int `json:"live"`
 		Stopped int `json:"stopped"`
 	} `json:"sessions"`
+}
+
+// statusSSH is where the daemon's SSH server listens, and its host key's
+// SHA256 fingerprint, which a client asked to trust it is compared with.
+type statusSSH struct {
+	Addr    string `json:"addr"`
+	HostKey string `json:"host_key"`
 }
 
 // sayStatus prints a status, as JSON or as lines a person reads. In the
@@ -465,6 +477,9 @@ func (c *cli) sayStatus(doc *statusDoc) error {
 		fmt.Fprintf(c.out, "\ncontrol socket %s\n", oneLine(doc.Ctl))
 		if doc.HTTP != nil {
 			fmt.Fprintf(c.out, "http on %s\n", oneLine(*doc.HTTP))
+		}
+		if doc.SSH != nil {
+			fmt.Fprintf(c.out, "ssh on %s, host key %s\n", oneLine(doc.SSH.Addr), oneLine(doc.SSH.HostKey))
 		}
 	}
 	if s := doc.Sessions; s.Live+s.Stopped > 0 || doc.Running {
