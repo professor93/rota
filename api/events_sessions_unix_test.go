@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -259,5 +260,136 @@ func TestATerminalNeverListedSaysNothing(t *testing.T) {
 	}
 	if got := published(p.api, events.SessionStarted, events.SessionEnded); len(got) != 0 {
 		t.Fatalf("a terminal never listed said %+v", got)
+	}
+}
+
+// A person whose page was attached to the daemon before is not said to join
+// again when the page comes back where it got to (since) on the next one,
+// within twice the settle of that daemon taking the session up. A page
+// opened for the first time is said, and so is one that comes back later.
+func TestARestartSaysNoViewerAgain(t *testing.T) {
+	p := sessFakesOnly(t, func() *terms { return withHeld(t, []string{"FAKE_HOLDER_PRINT=hello"}) })
+	id := p.start(nil)["id"].(string)
+	hello := p.attach(id, p.alice, "").waitType("hello")
+	if e := sessWait(t, p.api, events.ViewerJoined, id, 5*time.Second); e.Viewer != "alice" {
+		t.Fatalf("alice joined as %+v", e)
+	}
+	back := fmt.Sprintf("since=%d", int64(hello["offset"].(float64)))
+	before := time.Now()
+	q := p.restart()
+	forward := q.frozenClock()
+	if ts := q.api.findTerminal(id); ts == nil || ts.adoptedAt.Before(before) {
+		t.Fatalf("the window does not start when the session was taken up: %+v", ts)
+	}
+	joined := func(n int) []string {
+		t.Helper()
+		for end := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+			var who []string
+			for _, e := range sessOf(q.api, events.ViewerJoined, id) {
+				who = append(who, e.Viewer)
+			}
+			if len(who) >= n || time.Now().After(end) {
+				return who
+			}
+		}
+	}
+
+	q.attach(id, q.alice, back).waitType("hello")
+	sessQuiet(t, q.api, id, 200*time.Millisecond, events.ViewerJoined)
+	q.attach(id, q.watch, "").waitType("hello")
+	if got := joined(1); !slices.Equal(got, []string{"looker"}) {
+		t.Fatalf("a page opened within the window: the next daemon said %v joined", got)
+	}
+	forward(2 * viewerSettle)
+	q.attach(id, q.bob, back).waitType("hello")
+	if got := joined(2); !slices.Equal(got, []string{"looker", "bob"}) {
+		t.Fatalf("a page back after the window: the next daemon said %v joined", got)
+	}
+}
+
+// sessOnEnds makes the harness's store three claude accounts: 1 with no
+// stored login, so its sessions run on a token; 3 whose stored login ends at
+// until; and 5 on a long-lived token that ends then. It starts a held
+// session on each, whose holder (FAKE_HOLDER_TOKEN_UNTIL) says that what it
+// runs on lasts until then, and returns their ids by account.
+func sessOnEnds(t *testing.T, p *terms, until time.Time) map[int]string {
+	t.Helper()
+	blob := fmt.Sprintf(`{"accounts":[
+	 {"id":1,"provider":"claude","email":"a@x","token":{"accessToken":"tok-1"}},
+	 {"id":3,"provider":"claude","email":"b@x","token":{"accessToken":"tok-3"},"extra":{"refresh_token_expires_at":"%d"}},
+	 {"id":5,"provider":"claude","email":"long@x","token":{"accessToken":"tok-5"},"long":{"accessToken":"long-token-5555","expiresAt":%d}}]}`,
+		until.UnixMilli(), until.UnixMilli())
+	if err := os.WriteFile(filepath.Join(p.dir, "accounts.json"), []byte(blob), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ids := map[int]string{}
+	for _, a := range []int{1, 3, 5} {
+		doc := p.sessStart(p.alice, map[string]any{"account": a, "cols": 80, "rows": 24, "label": fmt.Sprintf("s%d", a)})
+		ids[a] = doc["id"].(string)
+		sessWait(t, p.api, events.SessionStarted, ids[a], 5*time.Second)
+	}
+	return ids
+}
+
+// sessTokensEnd moves s's frozen clock to a minute before until, where
+// nothing is said of any session's token, and then past it, where two
+// sweeps say each one's end once, in the words of what it runs on.
+func sessTokensEnd(t *testing.T, s *Server, forward func(time.Duration), until time.Time, ids map[int]string) {
+	t.Helper()
+	forward(until.Sub(s.now()) - time.Minute)
+	s.sweepTerminals()
+	for _, id := range ids {
+		if got := sessOf(s, events.AccountDead, id); len(got) != 0 {
+			t.Fatalf("a minute before the end, %s said %+v", id, got)
+		}
+	}
+	forward(2 * time.Minute)
+	s.sweepTerminals()
+	s.sweepTerminals()
+	for a, c := range map[int]struct{ name, words string }{
+		1: {"a@x", "the token it was started with ended at "},
+		3: {"b@x", "its login ended at "},
+		5: {"long@x", "the token it was started with ended at "},
+	} {
+		got := sessOf(s, events.AccountDead, ids[a])
+		want := fmt.Sprintf("can no longer be reached from s%d: %s%s", a, c.words, sessUTC(until))
+		if len(got) != 1 || got[0].Reason != "token" || got[0].Account != a || got[0].Name != c.name || got[0].Text != want {
+			t.Errorf("account %d's session said %+v, want once %q", a, got, want)
+		}
+	}
+	if ts := s.findTerminal(ids[5]); ts == nil || !ts.longToken {
+		t.Error("the session on a long-lived token is not known to be on one")
+	}
+}
+
+// A held session's token, or its login, ending is said once, in the words
+// of what it runs on, from what its holder said when it started.
+func TestAHeldSessionsTokenEndIsSaidOnce(t *testing.T) {
+	until := time.Now().Add(72 * time.Hour).Truncate(time.Millisecond)
+	p := sessFakesOnly(t, func() *terms {
+		return withHeld(t, []string{"FAKE_HOLDER_TOKEN_UNTIL=" + until.Format(time.RFC3339Nano)})
+	})
+	ids := sessOnEnds(t, p, until)
+	sessTokensEnd(t, p.api, p.frozenClock(), until, ids)
+}
+
+// So is an adopted session's, from the record its holder wrote and from its
+// account as the daemon that took it up read it; the daemon that let it go
+// said nothing of it.
+func TestAnAdoptedSessionsTokenEndIsSaidOnce(t *testing.T) {
+	until := time.Now().Add(72 * time.Hour).Truncate(time.Millisecond)
+	p := sessFakesOnly(t, func() *terms {
+		return withHeld(t, []string{"FAKE_HOLDER_TOKEN_UNTIL=" + until.Format(time.RFC3339Nano)})
+	})
+	ids := sessOnEnds(t, p, until)
+	q := p.restart()
+	for _, id := range ids {
+		if doc := q.describe(id); doc["state"] != heldLive {
+			t.Fatalf("the next daemon did not take %s up: %v", id, doc)
+		}
+	}
+	sessTokensEnd(t, q.api, q.frozenClock(), until, ids)
+	if got := published(p.api, events.AccountDead); len(got) != 0 {
+		t.Fatalf("the daemon that let them go said %+v", got)
 	}
 }

@@ -71,6 +71,8 @@ import (
 //	                              whose CLI is ending
 //	FAKE_HOLDER_STATE_AFTER=<path> send the State a link opens with only once
 //	                              path exists, as a holder slow to say it
+//	FAKE_HOLDER_TOKEN_UNTIL=<t>   say in the Ready line and in meta.json that
+//	                              the credential inside lasts until t (RFC 3339)
 //
 // The conversation and its folder are written into meta.json as well, as a
 // real holder keeps them there for a session that has stopped.
@@ -136,7 +138,7 @@ func fakeHolder() {
 	// signal at once, and a hangup before Notify would end this process by
 	// default rather than be recorded.
 	f.signals()
-	fakeReady(holdwire.Ready{OK: true, PID: os.Getpid()})
+	fakeReady(holdwire.Ready{OK: true, PID: os.Getpid(), TokenUntil: fakeTokenUntil()})
 	if null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0); err == nil {
 		os.Stdout.Close()
 		os.Stdout = null
@@ -175,6 +177,13 @@ func fakePrepare(req *holdwire.Request, tokenURL string) {
 	release()
 	st.Close()
 	fail(errors.New("the fake holder prepares and goes no further"))
+}
+
+// fakeTokenUntil is when the credential inside is said to end: what
+// FAKE_HOLDER_TOKEN_UNTIL says, else never.
+func fakeTokenUntil() time.Time {
+	at, _ := time.Parse(time.RFC3339Nano, os.Getenv("FAKE_HOLDER_TOKEN_UNTIL"))
+	return at
 }
 
 func fakeReady(r holdwire.Ready) {
@@ -238,7 +247,7 @@ func (f *fake) open(req *holdwire.Request) error {
 		Provider: "claude", HolderPID: os.Getpid(), HolderStart: start, BootID: boot,
 		Protocol: fakeMajor(), Version: version, Cwd: req.Cwd, Args: req.Args, Started: time.Now(),
 		Conversation: os.Getenv("FAKE_HOLDER_CONVERSATION"), ConversationCwd: os.Getenv("FAKE_HOLDER_CONVERSATION_CWD"),
-		ConversationName: os.Getenv("FAKE_HOLDER_CONVERSATION_NAME")}
+		ConversationName: os.Getenv("FAKE_HOLDER_CONVERSATION_NAME"), TokenUntil: fakeTokenUntil()}
 	return holdwire.WriteMeta(f.dir, f.meta)
 }
 

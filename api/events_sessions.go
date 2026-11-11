@@ -201,8 +201,8 @@ func (ts *termSession) endedWords(why, by string, idle bool, code int, age time.
 // that has ended: it stays listed for a while, and replays. Called with
 // ts.mu held.
 //
-// A daemon that restarts says it again of a person whose page reconnects to
-// it: R6's cost for now; its baseline belongs where a session is adopted.
+// A page coming back to a daemon that has just restarted is counted and not
+// said (cameBack); it is said to leave like anybody else.
 func (ts *termSession) viewerCame(tc *termConn) {
 	if tc.via == "local" || ts.ended {
 		return
@@ -215,19 +215,50 @@ func (ts *termSession) viewerCame(tc *termConn) {
 		}
 		p = &presence{}
 		ts.present[key] = p
-		to := "control"
-		if tc.watch || ts.lookOnly || !tc.role.allows(RoleControl) {
-			to = "watch"
+		if !ts.cameBack(tc, key) {
+			to := "control"
+			if tc.watch || ts.lookOnly || !tc.role.allows(RoleControl) {
+				to = "watch"
+			}
+			ts.s.emit(events.Event{Type: events.ViewerJoined, Account: ts.account, Session: ts.id,
+				Name: ts.eventName(), Reason: tc.via, Viewer: tc.name,
+				Text: "has " + tc.name + " attached, to " + to})
 		}
-		ts.s.emit(events.Event{Type: events.ViewerJoined, Account: ts.account, Session: ts.id,
-			Name: ts.eventName(), Reason: tc.via, Viewer: tc.name,
-			Text: "has " + tc.name + " attached, to " + to})
 	}
 	p.n++
 	if p.timer != nil {
 		p.timer.Stop() // back within the settle
 		p.timer = nil
 	}
+}
+
+// cameBack reports whether tc, the first connection of the person key, is
+// a page coming back to a session this server took up from a daemon before
+// (adoptedAt), whose person that daemon said joined: one that says where it
+// got to (resumed), within twice viewerSettle of the taking up, for a person
+// not attached to it since. A page opened for the first time, and a person
+// already said to have left, are said. since is the client's to send, so one
+// that sends it unasked goes unsaid for those seconds, and is still said to
+// leave. Called with ts.mu held.
+//
+// The window holds while a page's longest wait between tries
+// (terminal.html's TERM_BACKOFF, 15 s), with the taking up and the held
+// screen on top, stays under it: a page back later is said again. Once it
+// has passed, who has been seen can change nothing, and is let go of.
+func (ts *termSession) cameBack(tc *termConn, key string) bool {
+	if ts.adoptedAt.IsZero() {
+		return false
+	}
+	if ts.s.now().Sub(ts.adoptedAt) >= 2*viewerSettle {
+		ts.seen = nil
+		return false
+	}
+	first := !ts.seen[key]
+	if ts.seen == nil {
+		ts.seen = map[string]bool{}
+	}
+	ts.seen[key] = true
+	return first && tc.resumed
 }
 
 // viewerWent is tc having left ts. Once a person's last connection has gone,
@@ -312,28 +343,47 @@ func (ts *termSession) hardEnd() bool {
 	return rota.Flavor(ts.provider) == "claude" || ts.longToken
 }
 
-// runsOn sets what ts's credential is, from a, the account as chosen, and
-// until, the time its holder says that credential lasts: onToken by
-// onTokenFor, and longToken from a. A terminal this server runs reads both
-// from its plan instead, which knows its environment.
-func (ts *termSession) runsOn(a *rota.Account, until time.Time) {
-	ts.tokenUntil, ts.onToken = until, onTokenFor(a, until)
-	ts.longToken = a != nil && a.LongValid()
+// runsOn sets what a held session's credential is, from e, its account's
+// (as chosen, or as a sweep read it for a session taken up), and until, the
+// time its holder says that credential lasts: onToken by e.onToken, and
+// longToken from e. A terminal this server runs reads both from its plan
+// instead, which knows its environment.
+func (ts *termSession) runsOn(e accountCred, until time.Time) {
+	ts.tokenUntil, ts.onToken = until, e.onToken(until)
+	ts.longToken = e.long
 }
 
-// onTokenFor reports whether a held claude session on account a runs on a
-// token rather than on a's stored login, from until, the time its holder
+// accountCred is what a session's words need of the account it runs on: its
+// provider, when its stored login ends, and whether it holds a long-lived
+// token still good. It holds no credential, so a sweep keeps one for every
+// account (readAccounts). The zero value is no account.
+type accountCred struct {
+	provider   string
+	loginUntil time.Time
+	long       bool
+}
+
+// credOf is a's accountCred as of now, and the zero value for nil.
+func credOf(a *rota.Account) accountCred {
+	if a == nil {
+		return accountCred{}
+	}
+	return accountCred{provider: a.Provider, loginUntil: a.LoginUntil(), long: a.LongValid()}
+}
+
+// onToken reports whether a held claude session on this account runs on a
+// token rather than on its stored login, from until, the time its holder
 // says its credential lasts: a session on the stored login lasts as long as
 // the login does (holdwire.LoginUntil), and one on a token as long as the
 // token. The holder says only until, so this is inferred, and only the words
 // of a token's end depend on it: a prepare in the holder that moved the
-// login's end reads as a token. A session of any other flavor is on its
-// token whatever this says.
-func onTokenFor(a *rota.Account, until time.Time) bool {
-	if a == nil || until.IsZero() || rota.Flavor(a.Provider) != "claude" {
+// login's end, or a login since, reads as a token. A session of any other
+// flavor is on its token whatever this says.
+func (e accountCred) onToken(until time.Time) bool {
+	if until.IsZero() || rota.Flavor(e.provider) != "claude" {
 		return false
 	}
-	return !until.Equal(a.LoginUntil())
+	return !until.Equal(e.loginUntil)
 }
 
 // tokenInEnv reports whether a claude CLI with this environment runs on a

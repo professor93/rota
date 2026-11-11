@@ -35,8 +35,11 @@ func TestASlowSinkDelaysNobodyElse(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if a.tries() != 1 {
-		t.Fatalf("the stuck sink was tried %d times", a.tries())
+	// The stuck sink's own worker may not have been scheduled yet: it is
+	// waited for, and is then stuck on its first event with nothing sent.
+	settled(t, "the stuck sink to be tried once", func() bool { return a.tries() == 1 })
+	if got := a.delivered(); len(got) != 0 {
+		t.Fatalf("the stuck sink sent %+v", got)
 	}
 }
 

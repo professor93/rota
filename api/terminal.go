@@ -249,6 +249,10 @@ type termConn struct {
 	// to be sent: those are on its screen already. Zero is nothing to skip.
 	// It belongs to the session's mu.
 	skip int64
+	// resumed is a connection that said where it got to (since), as a page
+	// coming back does after a hello, and not one opening the terminal for
+	// the first time (viewerCame). It belongs to the session's mu.
+	resumed bool
 
 	// The rest is a held session's viewer's alone (repainting), and stays
 	// empty for every other terminal, whose rules do not change.
@@ -761,7 +765,12 @@ type termSession struct {
 	// taken up. onToken is a claude session on a token rather than on its
 	// account's stored login, and longToken one on a long-lived token: both
 	// are set once when the session is made, and say whether and in which
-	// words its token's end is said (hardEnd).
+	// words its token's end is said (hardEnd). adoptedAt is when this server
+	// took the session up from a daemon before, zero for one it started, and
+	// set before it is listed: the start of viewerCame's window for pages
+	// coming back. seen is every person attached to such a session within
+	// that window, whom it no longer covers; it goes once the window has
+	// passed.
 	stoppedBy   string
 	stoppedIdle bool
 	endWhy      string
@@ -771,6 +780,8 @@ type termSession struct {
 	tokenSaid   bool
 	onToken     bool
 	longToken   bool
+	adoptedAt   time.Time
+	seen        map[string]bool
 }
 
 /* ------------------------------------------------------------ the keyboard --- */
@@ -1198,6 +1209,7 @@ func (ts *termSession) attach(tc *termConn, since int64, replayAll bool) {
 		ts.audit("keyboard taken", "to", tc.name)
 	}
 	ts.conns = append(ts.conns, tc)
+	tc.resumed = !replayAll
 	ts.viewerCame(tc)
 	from := since
 	if replayAll {
