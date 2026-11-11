@@ -5,6 +5,7 @@ package notify
 import (
 	"os"
 	"os/exec"
+	"runtime"
 	"syscall"
 )
 
@@ -18,10 +19,11 @@ func ownGroup(cmd *exec.Cmd) {
 // it started that is still in its group. It is os.ErrProcessDone when the
 // program had already ended: no member of the group is left (ESRCH), or on
 // macOS only zombies are (EPERM); the leader may still be a zombie for Wait
-// to reap, which a kill would not change.
+// to reap, which a kill would not change. Linux signals a zombie, so there
+// EPERM is a live group the daemon may not signal, and stays an error.
 func killGroup(cmd *exec.Cmd) error {
 	err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	if err == syscall.ESRCH || err == syscall.EPERM {
+	if err == syscall.ESRCH || err == syscall.EPERM && runtime.GOOS == "darwin" {
 		return os.ErrProcessDone
 	}
 	return err

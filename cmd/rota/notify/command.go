@@ -34,6 +34,10 @@ const (
 	cmdTempFail = 75
 )
 
+// cmdKill is killGroup, a variable so a test can play a program that ended
+// by itself just as its time ran out.
+var cmdKill = killGroup
+
 // command is a command sink: a program run once for each event, handed the
 // event on its stdin.
 type command struct {
@@ -94,7 +98,7 @@ func (c *command) send(ctx context.Context, e events.Event) error {
 	// itself as ctx ended is said by how it ended.
 	var killed atomic.Bool
 	cmd.Cancel = func() error {
-		err := killGroup(cmd)
+		err := cmdKill(cmd)
 		killed.Store(err == nil)
 		return err
 	}
@@ -124,7 +128,8 @@ func (c *command) send(ctx context.Context, e events.Event) error {
 // with keys. A failure that passes, such as a fork limit or a binary being
 // written, is tried again; any other, such as a program gone, not allowed
 // to run or not a program at all (a script without its #! line), is
-// dropped at once.
+// dropped at once. Windows says its own codes, never these, so there every
+// start failure is dropped.
 func cmdStartFailed(err error, keys []string) error {
 	msg := errors.New(cleanErr(fmt.Errorf("command could not start: %w", err), keys))
 	for _, temp := range []error{syscall.EAGAIN, syscall.ENOMEM, syscall.ETXTBSY, syscall.EMFILE, syscall.ENFILE, syscall.EINTR} {

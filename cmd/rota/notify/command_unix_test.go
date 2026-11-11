@@ -7,7 +7,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -143,6 +145,39 @@ func cmdStat(pid int) (state byte, group int, ok bool) {
 	}
 	g, err := strconv.Atoi(string(f[2]))
 	return f[0][0], g, err == nil
+}
+
+// killGroup on a program that has ended by itself says so
+// (os.ErrProcessDone) rather than claiming a kill: once reaped (ESRCH),
+// and on macOS while still a zombie (EPERM). Linux signals a zombie and
+// says nil, so that half is macOS's.
+func TestKillingAnEndedGroupSaysItHadEnded(t *testing.T) {
+	path := fakecli.Install(t, t.TempDir(), "rota-cmd-ended", fakecli.Spec{})
+	reaped := exec.Command(path)
+	ownGroup(reaped)
+	if err := reaped.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := killGroup(reaped); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("reaped: %v", err)
+	}
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	zombie := exec.Command(path)
+	ownGroup(zombie)
+	if err := zombie.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer zombie.Wait()
+	for end := time.Now().Add(10 * time.Second); syscall.Kill(-zombie.Process.Pid, 0) == nil; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(end) {
+			t.Fatal("the program never ended")
+		}
+	}
+	if err := killGroup(zombie); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("zombie: %v", err)
+	}
 }
 
 // A program that can never start, such as a script without its #! line

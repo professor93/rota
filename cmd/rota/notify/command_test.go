@@ -283,6 +283,23 @@ func TestAMissingProgramFailsTheSinkNotTheDaemon(t *testing.T) {
 	}
 }
 
+// A program that ended by itself just as its time ran out, so that the kill
+// found nothing to kill, is said by how it ended: 75 is tried again, not
+// dropped as a timeout.
+func TestAKillThatFoundNothingIsNoKill(t *testing.T) {
+	was := cmdKill
+	t.Cleanup(func() { cmdKill = was })
+	cmdKill = func(*exec.Cmd) error { return os.ErrProcessDone }
+	cmdFake(t, "rota-cmd-late", fakecli.Spec{Sleep: "300ms", Stderr: []string{"busy"}, Exit: 75})
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := cmdSink(t, nil, "rota-cmd-late").send(ctx, cmdEvent())
+	var r *retry
+	if !errors.As(err, &r) || err.Error() != "command exited 75: busy" {
+		t.Fatalf("got %#v", err)
+	}
+}
+
 // cmdKilled is how a program killed at the end of its attempt is said.
 const cmdKilled = "command did not exit in time and was killed"
 
