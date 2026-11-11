@@ -39,6 +39,10 @@ func holderKillAfter() time.Duration { return hold.StopAfter + 2*time.Second }
 
 func stopAllWait() time.Duration { return holderKillAfter() + time.Second }
 
+// daemonHintWait is how long serve start asks a daemon it found running
+// whether it serves SSH, for the hint it may add to its line.
+const daemonHintWait = 2 * time.Second
+
 /* ---------------------------------------------------------------- start --- */
 
 // startDaemon is `rota serve start`: spawnDaemon, said. A daemon already
@@ -59,10 +63,19 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 		// run --detach starts one, and it never will. Judged only from a
 		// daemon that answers on its control socket, which it listens on
 		// only once its record names its SSH server: one still starting may
-		// be about to serve it.
+		// be about to serve it. The question waits daemonHintWait at most,
+		// since its answer only adds a hint: a daemon that does not answer
+		// by then gets none, and the try still out is left to finish.
 		if !ctlOnly && r.running.PID != 0 {
 			if cfg, _, _, err := daemonConfig(conf, r.home); err == nil && cfg.SSH.Enabled {
-				if d := daemonAnswering(filepath.Dir(r.sock)); d != nil && d.PID == r.running.PID && d.SSH == "" {
+				asked := make(chan *holdwire.Daemon, 1)
+				go func() { asked <- daemonAnswering(filepath.Dir(r.sock)) }()
+				var d *holdwire.Daemon
+				select {
+				case d = <-asked:
+				case <-time.After(daemonHintWait):
+				}
+				if d != nil && d.PID == r.running.PID && d.SSH == "" {
 					fmt.Fprintln(c.out, "it does not run the SSH server [ssh] turns on: a daemon started with --ctl-only, as rota run --detach starts one, never does; rota serve stop, then rota serve start, runs it")
 				}
 			}

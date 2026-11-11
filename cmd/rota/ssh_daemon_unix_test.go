@@ -482,6 +482,56 @@ func TestStartSaysNothingOfSSHForADaemonStillStarting(t *testing.T) {
 	}
 }
 
+// A daemon that holds the store and its control socket and never answers
+// keeps serve start no longer than daemonHintWait for the hint: its one
+// line, and nothing of SSH.
+func TestStartWaitsOnlySoLongForADaemonThatDoesNotAnswer(t *testing.T) {
+	r := newSSHRig(t)
+	release, err := holdwire.ClaimDaemon(r.terminals, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	ln, err := net.Listen("unix", holdwire.CtlSock(r.terminals))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var held []net.Conn
+	accepted := make(chan struct{})
+	go func() {
+		defer close(accepted)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c) // accepted, and never answered
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		<-accepted
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			c.Close()
+		}
+	})
+	began := time.Now()
+	out, errb, code := r.rota("serve", "start")
+	took := time.Since(began)
+	want := fmt.Sprintf("rota daemon already running for %s (pid %d)\n", r.home, os.Getpid())
+	if code != 0 || out != want || errb != "" {
+		t.Fatalf("serve start with a daemon that does not answer: exit %d %q %q, want %q", code, out, errb, want)
+	}
+	if took > daemonHintWait+3*time.Second {
+		t.Fatalf("serve start with a daemon that does not answer took %s", took)
+	}
+}
+
 // [ssh] alone opens no HTTP port: status says http null, and ssh.
 func TestOnlySSHOpensNoHTTP(t *testing.T) {
 	r := newSSHRig(t)
