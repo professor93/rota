@@ -462,26 +462,47 @@ func TestAPasteFillsTheFieldOnceAndShowsNoKey(t *testing.T) {
 
 		// A key or a token pasted into the code field is no code: it stays in
 		// the field, drawn as stars, and is never sent to the provider's
-		// token endpoint, by the paste or by enter.
-		for _, v := range []string{backendHTTPKey, backendHTTPSetup, "sk-proj-TESTONLY-0000000000", "xai-TESTONLY-key-00000000"} {
-			_, seen := run(t, m, tea.PasteMsg{Content: "\n" + v + "\r\n"})
-			seen = append(seen, loginPress(t, m, "enter")...)
+		// token endpoint, by the paste or by enter. That holds wherever the
+		// key stands in what was pasted, as an environment line pastes it.
+		refused := func(what string, seen []tea.Msg) {
+			t.Helper()
 			if got := loginFinishes(b); len(got) != 1 {
-				t.Errorf("%.12s… was sent as a code: %q", v, got)
-			}
-			if s.in.Value() != v {
-				t.Errorf("the field does not hold what was pasted")
+				t.Errorf("%s was sent as a code: %q", what, got)
 			}
 			p := plain(m)
-			if strings.Contains(p, "TESTONLY") || !strings.Contains(loginText(m), "that looks like a key or a token, not a code; nothing was sent") {
-				t.Errorf("the key is drawn, or not said to be no code:\n%s", p)
+			if strings.Contains(p, "TESTONLY") || !strings.Contains(loginText(m), loginNoCode) {
+				t.Errorf("%s is drawn, or not said to be no code:\n%s", what, p)
 			}
 			for _, s := range loginToasts(seen) {
 				if strings.Contains(s, "TESTONLY") {
-					t.Errorf("a toast holds the key: %q", s)
+					t.Errorf("a toast holds %s: %q", what, s)
 				}
 			}
 		}
+		for i, v := range []string{backendHTTPKey, backendHTTPSetup, "sk-proj-TESTONLY-0000000000", "xai-TESTONLY-key-00000000",
+			"ANTHROPIC_API_KEY=" + backendHTTPKey, "OPENAI_API_KEY=sk-proj-TESTONLY-0000000000",
+			`export XAI_API_KEY="xai-TESTONLY-key-00000000"`} {
+			_, seen := run(t, m, tea.PasteMsg{Content: "\n" + v + "\r\n"})
+			seen = append(seen, loginPress(t, m, "enter")...)
+			if s.in.Value() != v {
+				t.Errorf("the field does not hold what was pasted")
+			}
+			refused(fmt.Sprintf("paste %d", i), seen)
+		}
+		// Nor is a key typed by hand after a space, which is sent trimmed.
+		seen := loginPress(t, m, "ctrl+u", "space", "s", "k", "-", "p", "r", "o", "j", "-", "T", "E", "S", "T", "O", "N", "L", "Y")
+		if s.in.Value() != " sk-proj-TESTONLY" {
+			t.Fatalf("typed %q", s.in.Value())
+		}
+		if strings.Contains(plain(m), "TESTONLY") {
+			t.Errorf("a key typed after a space is drawn:\n%s", plain(m))
+		}
+		seen = append(seen, loginPress(t, m, "enter")...)
+		refused("a typed key", seen)
+		// Nor anything clean would change: a bidi override would reorder the
+		// line, and no code holds one.
+		_, seen = run(t, m, tea.PasteMsg{Content: "CO‮DE"})
+		refused("a bidi override", seen)
 		// A code is still sent from the same field.
 		run(t, m, tea.PasteMsg{Content: "CODE2"})
 		if got := loginFinishes(b); len(got) != 2 || got[1][1] != "CODE2" {
@@ -1454,7 +1475,7 @@ func TestAnAnswerAwaitedIsNeverLost(t *testing.T) {
 }
 
 func TestASignInByItselfIsNotCancelledUnsaid(t *testing.T) {
-	m, b, _ := loginModel(t, loginRows())
+	m, b, ticks := loginModel(t, loginRows())
 	var made []int
 	accountsOf(m).do.login = func(e *env, again *wire.Account) asider {
 		f := newLogin(e, again).(*loginFlow)
@@ -1477,7 +1498,10 @@ func TestASignInByItselfIsNotCancelledUnsaid(t *testing.T) {
 	for range slices.Index(wire.LoginProviders(), "grok") - slices.Index(wire.LoginProviders(), "claude") {
 		loginPress(t, m, "down")
 	}
-	loginPress(t, m, "enter", "down", "enter")
+	loginPress(t, m, "enter")
+	// The person takes their time over the pick: a second is left.
+	run(t, m, ticks.advance(14*time.Minute+59*time.Second)...)
+	loginPress(t, m, "down", "enter")
 	f := loginFlowOf(t, m)
 	// The server registers the account whatever the TUI does now: esc is
 	// not offered, and does not hide what happens.
@@ -1487,6 +1511,12 @@ func TestASignInByItselfIsNotCancelledUnsaid(t *testing.T) {
 	loginPress(t, m, "esc")
 	if loginOf(m) != f {
 		t.Fatal("esc closed a flow whose account the server is registering")
+	}
+	// Nor does the login running out meanwhile end it: the finish was sent
+	// in time, and its answer is what happened.
+	run(t, m, ticks.advance(2*time.Second)...)
+	if loginOf(m) != f || strings.Contains(loginText(m), "has expired") {
+		t.Fatalf("the flow ended while the server signed the account in:\n%s", plain(m))
 	}
 	close(hold)
 	_, seen := await(t, m)
@@ -1525,6 +1555,22 @@ func TestAnAccountKnownByNothingStraysNoLogin(t *testing.T) {
 	loginPress(t, m, "enter")
 	if got := loginBegins(b); !slices.Equal(got, []LoginBegin{{Account: 12}, {Provider: "codex"}}) {
 		t.Errorf("begun %+v", got)
+	}
+
+	// An account known by its e-mail alone is known: its refusal is not
+	// one for having no identity, and F40's path is tried.
+	rows = append(loginRows(), wire.Account{ID: 10, Provider: "codex", Email: "e@x", Order: 7, Threshold: 75})
+	m, b, _ = loginModel(t, rows)
+	b.BeginLoginFn = func(_ context.Context, lb LoginBegin) (backendLogin, error) {
+		if lb.Account != 0 {
+			return backendLogin{}, &client.Refusal{Status: 400, Message: "no"}
+		}
+		return backendLogin{ID: "cdx123", Provider: "codex", URL: loginURL, Kind: "code", CreatedAt: loginNow.UnixMilli()}, nil
+	}
+	loginSelect(t, m, 10)
+	loginPress(t, m, "l", "enter")
+	if got := loginBegins(b); !slices.Equal(got, []LoginBegin{{Account: 10}, {Provider: "codex"}}) {
+		t.Errorf("an account with an e-mail is taken for one known by nothing: begun %+v", got)
 	}
 }
 
@@ -1592,6 +1638,11 @@ func TestAPasteIsTakenWhole(t *testing.T) {
 	loginPress(t, m, "9")
 	if v := s.in.Value(); v != "XYZ9" {
 		t.Errorf("typing after a paste gives %q", v)
+	}
+	// A code typed with a space after it is a code, sent trimmed.
+	loginPress(t, m, "ctrl+u", "C", "O", "D", "E", "space", "enter")
+	if got := loginFinishes(b); len(got) != 3 || got[2][1] != "CODE" {
+		t.Errorf("sent %q", got)
 	}
 }
 

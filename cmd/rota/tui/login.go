@@ -581,7 +581,7 @@ func (f *loginFlow) tick() tea.Cmd {
 	}
 	// An answer awaited is taken first: what was sent in time may have
 	// finished the login.
-	if !f.e.now().Before(f.ends) && !(f.stepping() && loginWaiting(f.step)) {
+	if !f.e.now().Before(f.ends) && !f.awaiting() {
 		return f.end("the login " + f.login.ID + " has expired")
 	}
 	return f.ticker()

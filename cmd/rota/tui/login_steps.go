@@ -157,12 +157,6 @@ func loginScrub(text, value string) string {
 	return text
 }
 
-// loginSecretLike says v is no code: clean would change it (a key's shape,
-// or something a terminal would act on), or it starts as an API key does.
-func loginSecretLike(v string) bool {
-	return clean(v) != v || strings.HasPrefix(v, "sk-") || strings.HasPrefix(v, "xai-")
-}
-
 // loginTrim is a paste as a field takes it: line breaks gone, and the
 // spaces around it.
 func loginTrim(s string) string {
@@ -354,7 +348,7 @@ func (s *loginCode) submit() tea.Cmd {
 	id, v := s.l.ID, strings.TrimSpace(s.in.Value())
 	if loginSecretLike(v) {
 		if !s.busy {
-			s.said = loginSaid{text: "that looks like a key or a token, not a code; nothing was sent"}
+			s.said = loginSaid{text: loginNoCode}
 		}
 		return nil
 	}

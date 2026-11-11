@@ -7,6 +7,7 @@ package tui
 
 import (
 	"context"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,29 @@ import (
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/wire"
 )
+
+// awaiting says the flow awaits an answer for its parked login: its step's
+// to what it sent, or the server's to a finish with no code. Until it comes
+// the flow does not end, since that answer may have finished the login.
+func (f *loginFlow) awaiting() bool {
+	return (f.stepping() && loginWaiting(f.step)) || (f.stage == loginBeginning && f.login != nil)
+}
+
+// loginKeyStart finds an API key's start anywhere in a value, at a word's
+// start as clean finds an Anthropic key: an OpenAI or Anthropic "sk-", an
+// xAI "xai-", after an "OPENAI_API_KEY=" or a quote as well.
+var loginKeyStart = regexp.MustCompile(`(^|[^A-Za-z0-9])(sk|xai)-`)
+
+// loginNoCode is what the code step says of a value loginSecretLike refuses.
+const loginNoCode = "that is not a code: it looks like a key or a token, or holds characters no code has; nothing was sent"
+
+// loginSecretLike says v, as it would be sent (trimmed), is no code: clean
+// would change it (an Anthropic key or token anywhere in it, or anything a
+// terminal acts on), or it holds the start of another provider's key.
+func loginSecretLike(v string) bool {
+	v = strings.TrimSpace(v)
+	return clean(v) != v || loginKeyStart.MatchString(v)
+}
 
 // loginAgainKinds are l's kinds for a claude login: short, bound to the
 // account; long, which goes on whichever account approves it; and a setup
