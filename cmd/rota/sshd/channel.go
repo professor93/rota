@@ -71,6 +71,10 @@ func channelServe(ctx context.Context, sc *sshdConn, ch ssh.Channel, reqs <-chan
 		_ = ch.Close()
 		if done != nil {
 			<-done
+			// Only now, with the client's own close in, which says it has
+			// everything sent before it, or with the connection gone, may a
+			// closing server cut the connection (sshdBusy).
+			sc.s.busy.Add(-1)
 		}
 	}()
 	for req := range reqs {

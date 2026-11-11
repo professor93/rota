@@ -150,8 +150,10 @@ const (
 
 // sshdCloseWait is how long Close gives the commands running, told by their
 // context, to end and say so on their channels, an attach its last line and
-// every command its exit-status, before each connection is closed under
-// them. A test knob.
+// every command its exit-status, and each client to close its channel in
+// answer, which says it has all of that, before each connection is cut. It
+// bounds the cut only: Close still returns once every command has. A test
+// knob.
 var sshdCloseWait = time.Second
 
 // sshdStopping is why a command's context ends when the server stops, which
@@ -221,7 +223,7 @@ type Server struct {
 	peer     func(net.Addr) string
 	ctx      context.Context
 	cancel   context.CancelCauseFunc
-	busy     atomic.Int64 // commands running, on every connection
+	busy     atomic.Int64 // channels with a command whose client has yet to close them
 
 	mu       sync.Mutex
 	closed   bool
@@ -326,9 +328,11 @@ func (s *Server) Serve() error {
 }
 
 // Close stops listening, tells every command by its context that the
-// server is stopping, and gives them up to sshdCloseWait to end and say so
-// on their channels: an attach ends lost, with its line. Then it closes
-// every connection, and returns once every connection's goroutines have.
+// server is stopping, and gives them up to sshdCloseWait to end, say so on
+// their channels (an attach ends lost, with its line) and have each client
+// close its channel in answer. Then it cuts every connection, and returns
+// once every connection's goroutines have: the wait bounds the cut, not a
+// command that will not end.
 func (s *Server) Close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -527,7 +531,8 @@ func (c *sshdConn) sshdShut() {
 }
 
 // sshdBusy counts a command started, which stops the idle clock, and which
-// a closing server waits for.
+// a closing server waits for until the client has closed its channel
+// (channelServe gives it back then).
 func (c *sshdConn) sshdBusy() {
 	c.s.busy.Add(1)
 	c.mu.Lock()
@@ -539,7 +544,6 @@ func (c *sshdConn) sshdBusy() {
 // sshdRest counts a command ended, and starts the idle clock when it was
 // the last running, unless the connection has ended meanwhile.
 func (c *sshdConn) sshdRest() {
-	defer c.s.busy.Add(-1)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.running--; c.running == 0 && !c.ended {

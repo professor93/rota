@@ -34,10 +34,13 @@ takes up the ones a daemon before it left; linux and macOS only:
   rota serve stop [--all] [--yes]                 stop it; its sessions go on
   rota serve status                               whether it runs; 3 if not
 
-It listens on <store>/terminals/ctl.sock, which only you can reach, and on a
-TCP port only where server.toml sets [server] listen and --ctl-only is not
-given. It logs to <store>/daemon.log, or to [server] log_file. stop --all ends
-every session too, and asks first; off a terminal it needs --yes.
+It listens on <store>/terminals/ctl.sock, which only you can reach; on a TCP
+port only where server.toml sets [server] listen; and runs the SSH server only
+where it sets [ssh] enabled. --ctl-only forbids both, and a daemon started by
+itself, as rota run --detach starts one, is always --ctl-only: serve stop and
+serve start to have the file's port and SSH. It logs to <store>/daemon.log,
+or to [server] log_file. stop --all ends every session too, and asks first;
+off a terminal it needs --yes.
 
   rota serve install     make it a systemd user unit or a launchd agent
   rota serve uninstall   take that away; its sessions go on
@@ -103,7 +106,7 @@ func (f *inFlight) wait(until time.Time) bool {
 func (c *cli) serveStart(args []string) error {
 	fs := flag.NewFlagSet("serve start", flag.ContinueOnError)
 	foreground := fs.Bool("foreground", false, "be the daemon in this process, as a supervisor runs it")
-	ctlOnly := fs.Bool("ctl-only", false, "serve the control socket alone, whatever server.toml says about a port")
+	ctlOnly := fs.Bool("ctl-only", false, "serve the control socket alone: no port, no SSH, whatever the file says")
 	conf := fs.String("config", "", "read this file, not <store dir>/server.toml")
 	if ok, err := c.daemonFlags(fs, args); !ok {
 		return err

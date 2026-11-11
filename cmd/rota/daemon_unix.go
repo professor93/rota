@@ -54,6 +54,14 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 	}
 	if r.running != nil {
 		fmt.Fprintf(c.out, "rota daemon already running for %s%s\n", oneLine(r.home), pidOf(r.running))
+		// A file that turns SSH on, which the daemon running does not serve:
+		// it was most likely started on its control socket alone, as rota
+		// run --detach starts one, and it never will.
+		if !ctlOnly && r.running.PID != 0 && r.running.SSH == "" {
+			if cfg, _, _, err := daemonConfig(conf, r.home); err == nil && cfg.SSH.Enabled {
+				fmt.Fprintln(c.out, "it does not run the SSH server [ssh] turns on: a daemon started with --ctl-only, as rota run --detach starts one, never does; rota serve stop, then rota serve start, runs it")
+			}
+		}
 		return nil
 	}
 	line := fmt.Sprintf("rota daemon started for %s (pid %d); control socket %s", oneLine(r.home), r.started.PID, oneLine(r.sock))

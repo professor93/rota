@@ -3,11 +3,14 @@
 package sshd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -270,7 +273,8 @@ func TestAStoppingServerSaysWhyToEachAttach(t *testing.T) {
 }
 
 // A command that does not end when it is told is not waited for beyond
-// sshdCloseWait: the connection is closed under it, with no exit-status.
+// sshdCloseWait: the connection is cut under it, with no exit-status. Close
+// itself returns only once the command has.
 func TestCloseWaitsOnlySoLongForACommand(t *testing.T) {
 	sshdKnob(t, &sshdCloseWait, 200*time.Millisecond)
 	stuck := make(chan struct{})
@@ -280,6 +284,11 @@ func TestCloseWaitsOnlySoLongForACommand(t *testing.T) {
 	}
 	t.Cleanup(func() { delete(commands, "stuck") })
 	r := sshdStart(t)
+	// Let go before the rig's own Close, which runs after this, so a failure
+	// below ends the test rather than hanging it.
+	var once sync.Once
+	release := func() { once.Do(func() { close(stuck) }) }
+	t.Cleanup(release)
 	sess, err := r.signIn(r.me).NewSession()
 	if err != nil {
 		t.Fatal(err)
@@ -300,10 +309,128 @@ func TestCloseWaitsOnlySoLongForACommand(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the client never saw its channel end")
 	}
-	close(stuck)
+	release()
 	select {
 	case <-closed:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Close did not return")
+	}
+}
+
+// On a slow link a stopping server waits for each client to close its
+// channel, which says it has the attach's last line and its exit-status,
+// before it cuts the connection: a cut before then can lose both, as a
+// reset loses what a socket had yet to deliver.
+func TestAStoppingServerWaitsForTheClientOnASlowLink(t *testing.T) {
+	r := commandsStart(t, commandsTty)
+	r.open(t, "api")
+	addr := slowLink(t, r.s.Addr(), 20*time.Millisecond)
+	nc, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cc, chans, reqs, err := ssh.NewClientConn(nc, addr, r.config("me", ssh.PublicKeys(r.me)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := ssh.NewClient(cc, chans, reqs)
+	t.Cleanup(func() { c.Close() })
+	a := attachOpen(t, c, "attach api", 80, 24)
+	a.wait(0, "ready 80x24")
+	began := time.Now()
+	if err := r.s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(began); took > sshdCloseWait+time.Second {
+		t.Errorf("Close took %s", took)
+	}
+	if code := a.end(); code != 1 {
+		t.Errorf("an attach over a slow link to a stopping server exited %d, want 1", code)
+	}
+	if got, want := a.err.String(), "rota: lost api: the SSH server is stopping; attach api tries again\r\n"; got != want {
+		t.Errorf("stderr %q, want %q", got, want)
+	}
+}
+
+// slowLink is a TCP proxy to addr that passes every byte on delay after it
+// came, each way, as a mobile link does. When either side goes, the other is
+// closed at once and whatever the link still held for it is lost.
+func slowLink(t *testing.T, addr string, delay time.Duration) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		mu    sync.Mutex
+		conns []net.Conn
+		wg    sync.WaitGroup
+	)
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		for _, c := range conns {
+			c.Close()
+		}
+		mu.Unlock()
+		wg.Wait()
+	})
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			in, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			out, err := net.Dial("tcp", addr)
+			if err != nil {
+				in.Close()
+				continue
+			}
+			mu.Lock()
+			conns = append(conns, in, out)
+			mu.Unlock()
+			wg.Add(2)
+			go func() { defer wg.Done(); slowPipe(in, out, delay) }()
+			go func() { defer wg.Done(); slowPipe(out, in, delay) }()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// slowPipe copies from to to, each read delay after it came, and closes
+// both the moment from ends, dropping what it had yet to pass on.
+func slowPipe(from, to net.Conn, delay time.Duration) {
+	type chunk struct {
+		at time.Time
+		b  []byte
+	}
+	q := make(chan chunk, 4096)
+	written := make(chan struct{})
+	go func() {
+		defer close(written)
+		for c := range q {
+			time.Sleep(time.Until(c.at.Add(delay)))
+			if _, err := to.Write(c.b); err != nil {
+				for range q {
+				}
+				return
+			}
+		}
+	}()
+	buf := make([]byte, 32<<10)
+	for {
+		n, err := from.Read(buf)
+		if n > 0 {
+			q <- chunk{time.Now(), bytes.Clone(buf[:n])}
+		}
+		if err != nil {
+			from.Close()
+			to.Close()
+			close(q)
+			<-written
+			return
+		}
 	}
 }

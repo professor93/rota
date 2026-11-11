@@ -416,6 +416,30 @@ func TestCtlOnlyOpensNoSSH(t *testing.T) {
 	sshwNoSSHKey(t, r.daemonRig)
 }
 
+// serve start finding a daemon that does not run the SSH server the file
+// turns on, one started on its control socket alone, says how to have it;
+// finding one that runs it, it says only that it runs.
+func TestStartSaysWhySSHIsOff(t *testing.T) {
+	r := newSSHRig(t)
+	r.start("--ctl-only")
+	already := "rota daemon already running for " + r.home + " ("
+	out, errb, code := r.rota("serve", "start")
+	if code != 0 || !strings.HasPrefix(out, already) || !strings.HasSuffix(out,
+		")\nit does not run the SSH server [ssh] turns on: a daemon started with --ctl-only, as rota run --detach starts one, never does; rota serve stop, then rota serve start, runs it\n") {
+		t.Fatalf("serve start with a --ctl-only daemon running: exit %d %q %q", code, out, errb)
+	}
+	if out, errb, code := r.rota("serve", "start", "--ctl-only"); code != 0 || strings.Count(out, "\n") != 1 {
+		t.Fatalf("serve start --ctl-only with one running: exit %d %q %q", code, out, errb)
+	}
+	if _, _, code := r.rota("serve", "stop"); code != 0 {
+		t.Fatal("serve stop failed")
+	}
+	r.start()
+	if out, errb, code := r.rota("serve", "start"); code != 0 || !strings.HasPrefix(out, already) || strings.Count(out, "\n") != 1 {
+		t.Fatalf("serve start with an SSH daemon running: exit %d %q %q", code, out, errb)
+	}
+}
+
 // [ssh] alone opens no HTTP port: status says http null, and ssh.
 func TestOnlySSHOpensNoHTTP(t *testing.T) {
 	r := newSSHRig(t)
@@ -550,6 +574,7 @@ func TestForegroundServeServesSSH(t *testing.T) {
 	t.Setenv("PATH", holdFake(t, "claude", fakecli.Spec{})+string(os.PathListSeparator)+os.Getenv("PATH"))
 	key, addr := sshwKey(t), sshwFreePort(t)
 	body := "[routes]\nterminal = true\n\n" + sshwFile(addr, key)
+	var a *sshwTerm
 	stderr, code := serveSSHFor(t, body, func(base, said, fp string) {
 		if said != addr {
 			t.Errorf("serve said ssh on %s, want %s", said, addr)
@@ -572,14 +597,63 @@ func TestForegroundServeServesSSH(t *testing.T) {
 		if resp.StatusCode != nethttp.StatusCreated {
 			t.Fatalf("POST /v1/terminals answered %d", resp.StatusCode)
 		}
-		out, errb, code := sshwRun(t, sshwDial(t, addr, fp, key), "list")
+		c := sshwDial(t, addr, fp, key)
+		out, errb, code := sshwRun(t, c, "list")
 		if code != 0 || !strings.Contains(out, "  api  ") {
 			t.Errorf("list over SSH: exit %d %q %q", code, out, errb)
 		}
+		a = sshwOpen(t, c, "attach api", 120, 40)
+		a.wait("ready 100x30")
 	})
 	if code != 0 {
 		t.Fatalf("serve exited %d:\n%s", code, stderr)
 	}
+	// The SSH server went before the terminals it reaches: the attach was
+	// told the server is stopping, not that its terminal went, and its
+	// connection was over before the terminal was killed.
+	out, killed := strings.Index(stderr, `msg="ssh signed out"`), strings.Index(stderr, `msg="terminal killed"`)
+	if out < 0 || killed < 0 || out > killed {
+		t.Fatalf("the SSH connection did not end before the terminal was killed:\n%s", stderr)
+	}
+	if code := a.end(); code != 1 {
+		t.Fatalf("an attach over SSH as serve stopped exited %d, want 1; stderr %q", code, a.err.String())
+	}
+	if got, want := a.err.String(), "rota: lost api: the SSH server is stopping; attach api tries again\r\n"; got != want {
+		t.Fatalf("stderr %q, want %q", got, want)
+	}
+	if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+		c.Close()
+		t.Fatalf("%s is still open after serve stopped", addr)
+	}
+}
+
+// A foreground serve that cannot serve its port lets go of its SSH server
+// too: nothing is left listening once it has returned.
+func TestForegroundServeLetsGoOfSSHWhenItStops(t *testing.T) {
+	sshwNoAgent(t)
+	taken := refusing(t)
+	addr := sshwFreePort(t)
+	conf := filepath.Join(t.TempDir(), "server.toml")
+	body := "[routes]\nterminal = true\n\n" + sshwFile(addr, sshwKey(t))
+	if err := os.WriteFile(conf, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	errb := &sshwBuf{}
+	done := make(chan int, 1)
+	go func() { done <- run([]string{"serve", taken, "--config", conf, "--refresh-every=0"}, io.Discard, errb) }()
+	select {
+	case code := <-done:
+		if code != 1 || !strings.Contains(errb.String(), "serving ssh on "+addr) {
+			t.Fatalf("serve on a taken port: exit %d\n%s", code, errb.String())
+		}
+	case <-time.After(30 * time.Second):
+		t.Fatalf("serve on a taken port never returned:\n%s", errb.String())
+	}
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("serve returned with %s still taken: %v", addr, err)
+	}
+	l.Close()
 }
 
 // Without [routes] terminal there is nothing for SSH to reach in

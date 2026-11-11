@@ -253,4 +253,40 @@ func TestOnlyTheClaimUpdatesItsRecord(t *testing.T) {
 	if _, err := os.Stat(DaemonPIDFile(terminals)); !os.IsNotExist(err) {
 		t.Fatalf("a refused update wrote daemon.pid: %v", err)
 	}
+
+	// A record somebody else's: one naming another process while the lock
+	// is held, and one naming this process with nobody holding the lock, as
+	// a daemon that died leaves it. Neither is touched.
+	for _, tc := range []struct {
+		name string
+		pid  int
+		lock bool
+	}{
+		{"another process's", os.Getpid() + 1, true},
+		{"this process's, with the lock free", os.Getpid(), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			terminals := t.TempDir()
+			if tc.lock {
+				release, err := ClaimDaemon(terminals, "1.4.0-test")
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer release()
+			}
+			raw, err := rota.EncodeIndent(&Daemon{PID: tc.pid, Version: "1.4.0-test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(DaemonPIDFile(terminals), raw, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := Update(terminals, ssh); err == nil {
+				t.Fatal("the record was updated")
+			}
+			if now, err := os.ReadFile(DaemonPIDFile(terminals)); err != nil || string(now) != string(raw) {
+				t.Fatalf("a refused update changed daemon.pid to %s (%v)", now, err)
+			}
+		})
+	}
 }

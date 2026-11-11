@@ -2451,13 +2451,14 @@ func (c *cli) serve(args []string) (err error) {
 	// terminals, and goes before them on the way out: each attach over it
 	// is told the server is stopping, and says so.
 	var sshSrv *sshd.Server
+	sshErrs := make(chan error, 1)
 	if cfg.SSH.Enabled {
 		if sshSrv, err = sshwireServe(cfg, opts.Dir, srv, logger); err != nil {
 			srv.Stop()
 			return err
 		}
 		defer sshSrv.Close()
-		go func() { _ = sshSrv.Serve() }()
+		go func() { sshErrs <- sshSrv.Serve() }()
 		say(fmt.Sprintf("rota %s serving ssh on %s (host key %s)", wire.Version, sshSrv.Addr(), sshSrv.Fingerprint()))
 	}
 	server := newHTTPServer(listener.Addr, srv.Handler(), logger)
@@ -2480,6 +2481,16 @@ func (c *cli) serve(args []string) (err error) {
 			return nil
 		}
 		return err
+	case err := <-sshErrs:
+		// Serve ends by itself only when its listener fails under it. The
+		// SSH server is then gone, and so is this server, saying why, as
+		// it does for its port.
+		_ = server.Close()
+		srv.Stop()
+		if err == nil {
+			err = errors.New("its listener closed")
+		}
+		return fmt.Errorf("the SSH server stopped: %w", err)
 	case <-ctx.Done():
 		stop()
 		say("\nrota: shutting down; waiting for runs in flight (interrupt again to stop now)")
