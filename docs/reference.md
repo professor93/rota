@@ -2956,7 +2956,8 @@ SSH alone. A daemon that a session started by itself, `--ctl-only`, never
 opens SSH, whatever the file says. `serve start` adds where it listens to
 its line, `; ssh on 127.0.0.1:2222`, and the log says `rota daemon serves
 ssh` with the address and the fingerprint. Stopping the daemon closes SSH
-first, so each attach over it ends with its line, and the sessions go on.
+first, so each attach over it ends lost with its line, *rota: lost api: the
+SSH server is stopping; attach api tries again*, and the sessions go on.
 
 Foreground `rota serve` serves SSH as well, only with `[routes] terminal`,
 since SSH reaches the terminals and nothing else: *[ssh] enabled needs
