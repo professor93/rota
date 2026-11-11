@@ -19,11 +19,13 @@ import (
 )
 
 // editModel is the Accounts tab over rows, started at w×h, with every
-// Change answered with the account it names and every Remove taken.
+// Change answered with the account it names and every Remove taken, each
+// checked to come with a deadline.
 func editModel(t *testing.T, rows []wire.Account, w, h int, with ...func(*Options)) (*Model, *fakeBackend) {
 	t.Helper()
 	m, b := accountsModel(t, rows, with...)
-	b.ChangeFn = func(_ context.Context, id int, _ Change) (wire.Account, error) {
+	b.ChangeFn = func(ctx context.Context, id int, _ Change) (wire.Account, error) {
+		editDeadline(t, ctx, "Change")
 		for _, r := range rows {
 			if r.ID == id {
 				return r, nil
@@ -31,17 +33,29 @@ func editModel(t *testing.T, rows []wire.Account, w, h int, with ...func(*Option
 		}
 		return wire.Account{}, &client.Refusal{Status: 404, Message: fmt.Sprintf("no such account: %d", id)}
 	}
-	b.RemoveFn = func(context.Context, int) error { return nil }
+	b.RemoveFn = func(ctx context.Context, _ int) error {
+		editDeadline(t, ctx, "Remove")
+		return nil
+	}
 	run(t, m, tea.BatchMsg{m.Init()}, size(w, h))
 	return m, b
 }
 
-// editOverSSH makes Who answer a control principal that is not this
-// machine's own.
-func editOverSSH(b *fakeBackend) {
-	b.WhoFn = func(context.Context) (Principal, error) {
-		return Principal{Name: "alice", Role: "control", Via: "ssh"}, nil
+// editDeadline fails the test when a call came with no deadline (R29).
+func editDeadline(t *testing.T, ctx context.Context, call string) {
+	if _, ok := ctx.Deadline(); !ok {
+		t.Errorf("%s was called with no deadline", call)
 	}
+}
+
+// editAway makes Who answer a control principal that is not this
+// machine's own, by via: "user" is how the TUI over SSH is signed in,
+// "token" a bearer token and "invite" an invite. It returns the answer, for
+// the test to hand on at once.
+func editAway(b *fakeBackend, via string) modelWhoMsg {
+	p := Principal{Name: "alice", Role: "control", Via: via}
+	b.WhoFn = func(context.Context) (Principal, error) { return p, nil }
+	return modelWhoMsg{Who: p}
 }
 
 // editSaid is a Change as the fields it sends, by the API's names.
@@ -118,6 +132,21 @@ func editBeside(lines []string, label string) string {
 	return editJoined(out)
 }
 
+// editWhere checks that refusal is said where, a row's label or "top", and
+// nowhere else.
+func editWhere(t *testing.T, lines []string, refusal, where string) {
+	t.Helper()
+	at := map[string]string{"top": editAbove(lines)}
+	for _, l := range []string{"order", "threshold", "folder", "config", "sessions", "remote control", "forget long token", "clear"} {
+		at[l] = editBeside(lines, l)
+	}
+	for place, got := range at {
+		if says := strings.Contains(got, editJoined([]string{refusal})); says != (place == where) {
+			t.Errorf("%s says %q\n%s", place, got, strings.Join(lines, "\n"))
+		}
+	}
+}
+
 // editAbove is what is drawn above the first row.
 func editAbove(lines []string) string {
 	var out []string
@@ -183,6 +212,10 @@ func TestEditSavesOnlyWhatChanged(t *testing.T) {
 			error: "threshold: threshold must be a percentage from 1 to 100"},
 		{name: "out of range", msgs: press("tab", "ctrl+u", "0", "enter"),
 			error: "threshold: threshold must be a percentage from 1 to 100"},
+		{name: "above 100", msgs: press("tab", "ctrl+u", "1", "0", "1", "enter"),
+			error: "threshold: threshold must be a percentage from 1 to 100"},
+		{name: "saved from another row", msgs: press("tab", "ctrl+u", "x", "tab", "tab", "enter"),
+			error: "threshold: threshold must be a percentage from 1 to 100"},
 		{name: "a key", msgs: append(press("tab", "tab"), tea.PasteMsg{Content: backendHTTPKey}, press("enter")[0]),
 			error: "folder: that value looks like a key"},
 	} {
@@ -203,6 +236,9 @@ func TestEditSavesOnlyWhatChanged(t *testing.T) {
 				}
 				if got := editBeside(editScreen(m), label); !strings.Contains(got, say) {
 					t.Errorf("beside %s: %q, not %q", label, got, say)
+				}
+				if f := editFocused(editScreen(m)); f != label {
+					t.Errorf("the focus is on %q, not on the row refused", f)
 				}
 				_, h := m.body()
 				if strings.Contains(m.stack[0].View(80, h), "TESTONLY") {
@@ -346,24 +382,69 @@ func TestEditShowsTheRefusalBesideItsField(t *testing.T) {
 			}
 			run(t, m, press("e")...)
 			run(t, m, c.msgs...)
-			lines := editScreen(m)
 			if len(m.stack) != 1 || len(b.named("Change")) != 1 {
 				t.Fatalf("%d overlays open after %d changes", len(m.stack), len(b.named("Change")))
 			}
-			at := map[string]string{"top": editAbove(lines)}
-			for _, l := range []string{"order", "threshold", "folder", "config", "sessions", "remote control", "clear"} {
-				at[l] = editBeside(lines, l)
-			}
-			for where, got := range at {
-				if says := strings.Contains(got, editJoined([]string{c.refusal})); says != (where == c.where) {
-					t.Errorf("%s says %q\n%s", where, got, strings.Join(lines, "\n"))
-				}
-			}
-			if f := editFocused(lines); c.where != "top" && f != c.where {
+			editWhere(t, editScreen(m), c.refusal, c.where)
+			if f := editFocused(editScreen(m)); c.where != "top" && f != c.where {
 				t.Errorf("the focus is on %q, not on the row refused", f)
 			}
 		})
 	}
+	// The account is written into the server's sentences as
+	// provider/label, and a label is the person's words; prose has words of
+	// its own. Neither places a refusal: the rows sent come first.
+	t.Run("the account's label and prose", func(t *testing.T) {
+		rows := accountsThree()
+		rows[0].Name, rows[0].LongUntil = "team place long term", accountsAt(90*24*time.Hour)
+		two := append(press("tab", "ctrl+u", "8", "0", "tab"), tea.PasteMsg{Content: "/srv"}, press("enter")[0])
+		for _, c := range []struct {
+			name, refusal string
+			msgs          []tea.Msg
+			where         string
+		}{
+			{"a row word in the label", "account is already running: Claude Code is running in claude/team place long term's home; " +
+				"its configuration directory can change once that has stopped",
+				append(press("tab", "tab", "tab"), tea.PasteMsg{Content: "/srv/conf"}, press("enter")[0]), "config"},
+			{"the label alone", "account is already running: claude/team place long term is in use", two, "top"},
+			{"too long", "that took too long; try again in a moment", two, "top"},
+			{"a row word inside another word", "account is already running: its reorders wait", two, "top"},
+			{"another row in prose, one row sent", "account is already running: wait for its sessions to end",
+				press("tab", "ctrl+u", "8", "0", "enter"), "threshold"},
+			{"a row not sent, among two sent", "sessions cannot change while it runs", two, "sessions"},
+			{"a sent row named after one not sent", "sessions are kept apart from it; cwd must be an absolute path", two, "folder"},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				m, b := editModel(t, rows, 120, 40)
+				b.ChangeFn = func(context.Context, int, Change) (wire.Account, error) {
+					return wire.Account{}, &client.Refusal{Status: 409, Message: c.refusal}
+				}
+				run(t, m, press("e")...)
+				run(t, m, c.msgs...)
+				editWhere(t, editScreen(m), c.refusal, c.where)
+			})
+		}
+	})
+	// Over SSH a refusal that names Remote Control is said under it, and
+	// the row still takes no focus: nothing there can be changed from here.
+	t.Run("Remote Control named over SSH", func(t *testing.T) {
+		refusal := "remote_control is taken only over the control socket"
+		m, b := editModel(t, accountsThree(), 120, 40)
+		run(t, m, editAway(b, "user"))
+		b.ChangeFn = func(context.Context, int, Change) (wire.Account, error) {
+			return wire.Account{}, &client.Refusal{Status: 403, Message: refusal}
+		}
+		run(t, m, press("e")...)
+		run(t, m, append(press("tab", "ctrl+u", "8", "0", "tab"), tea.PasteMsg{Content: "/srv"}, press("enter")[0])...)
+		editWhere(t, editScreen(m), refusal, "remote control")
+		if f := editFocused(editScreen(m)); f != "folder" {
+			t.Errorf("the focus moved to %q", f)
+		}
+		run(t, m, press("space", "enter")...)
+		if got := editCalls(b); !slices.Equal(got, []string{"1: threshold=80 cwd=/srv", "1: threshold=80 cwd=/srv"}) {
+			t.Errorf("sent %q", got)
+		}
+	})
 	t.Run("cleaned", func(t *testing.T) {
 		m, b := editModel(t, accountsThree(), 120, 40)
 		b.ChangeFn = func(context.Context, int, Change) (wire.Account, error) {
@@ -425,8 +506,7 @@ func TestClearAsksFirstAndSendsTheFour(t *testing.T) {
 
 	t.Run("over SSH", func(t *testing.T) {
 		m, b := editModel(t, editSet(), 80, 24)
-		editOverSSH(b)
-		run(t, m, modelWhoMsg{Who: Principal{Name: "alice", Role: "control", Via: "ssh"}})
+		run(t, m, editAway(b, "user"))
 		run(t, m, press("e")...)
 		run(t, m, press("shift+tab", "enter")...)
 		if ask := editJoined(editScreen(m)); !strings.Contains(ask, "rota set 1 --remote-control off") {
@@ -503,36 +583,34 @@ func TestForgetLongShowsOnlyWithALongToken(t *testing.T) {
 // remote_control: the server takes a change of it only over the control
 // socket. Its row says where it is changed instead.
 func TestEditOverSSHNeverSendsRemoteControl(t *testing.T) {
-	m, b := editModel(t, accountsThree(), 120, 40)
-	editOverSSH(b)
-	run(t, m, modelWhoMsg{Who: Principal{Name: "alice", Role: "control", Via: "ssh"}})
-	run(t, m, press("e")...)
-	lines := editScreen(m)
-	for _, l := range lines {
-		if m := editRowAt.FindStringSubmatch(l); m != nil && m[2] == "remote control" {
-			if !strings.Contains(l, "changed on this machine: rota set 1 --remote-control on") {
+	for _, via := range []string{"user", "token", "invite"} {
+		t.Run(via, func(t *testing.T) {
+			m, b := editModel(t, accountsThree(), 120, 40)
+			run(t, m, editAway(b, via))
+			run(t, m, press("e")...)
+			lines := editScreen(m)
+			if l := lines[editRowIndex(lines, "remote control")]; !strings.Contains(l, "changed on this machine: rota set 1 --remote-control on") {
 				t.Errorf("the row reads %q", l)
 			}
-		}
-	}
-	var seen []string
-	for range 6 {
-		seen = append(seen, editFocused(editScreen(m)))
-		run(t, m, press("tab", "space")...)
-	}
-	if want := []string{"order", "threshold", "folder", "config", "sessions", "clear"}; !slices.Equal(seen, want) {
-		t.Errorf("tab went %q", seen)
-	}
-	run(t, m, press("tab", "ctrl+u", "8", "0", "enter")...)
-	if got := editCalls(b); !slices.Equal(got, []string{"1: threshold=80"}) {
-		t.Errorf("over SSH the form sent %q", got)
+			var seen []string
+			for range 6 {
+				seen = append(seen, editFocused(editScreen(m)))
+				run(t, m, press("tab", "space")...)
+			}
+			if want := []string{"order", "threshold", "folder", "config", "sessions", "clear"}; !slices.Equal(seen, want) {
+				t.Errorf("tab went %q", seen)
+			}
+			run(t, m, press("tab", "ctrl+u", "8", "0", "enter")...)
+			if got := editCalls(b); !slices.Equal(got, []string{"1: threshold=80"}) {
+				t.Errorf("over SSH the form sent %q", got)
+			}
+		})
 	}
 
 	rows := accountsThree()
 	rows[0].RemoteControl = true
-	m, b = editModel(t, rows, 120, 40)
-	editOverSSH(b)
-	run(t, m, modelWhoMsg{Who: Principal{Name: "alice", Role: "control", Via: "ssh"}})
+	m, b := editModel(t, rows, 120, 40)
+	run(t, m, editAway(b, "user"))
 	run(t, m, press("e")...)
 	if got := editJoined(editScreen(m)); !strings.Contains(got, "on · changed on this machine: rota set 1 --remote-control off") {
 		t.Errorf("an account with it on: %s", got)
@@ -544,8 +622,13 @@ func TestEditOverSSHNeverSendsRemoteControl(t *testing.T) {
 		t.Errorf("locally: %s", got)
 	}
 	run(t, m, press("esc", "down", "down", "e")...)
-	if got := editJoined(editScreen(m)); !strings.Contains(got, "codex account 3") || strings.Contains(got, "remote control") {
+	if got := editJoined(editScreen(m)); !strings.Contains(got, "codex account 3") || strings.Contains(got, "remote control") ||
+		strings.Contains(got, "sessions") || !strings.Contains(got, "folder and config back to the defaults") {
 		t.Errorf("a codex account: %s", got)
+	}
+	run(t, m, press("shift+tab", "enter")...)
+	if got := editJoined(editScreen(m)); !strings.Contains(got, "Its folder and config go back to the defaults, as rota set 3 --clear does.") {
+		t.Errorf("clearing a codex account asks: %s", got)
 	}
 }
 
@@ -695,9 +778,28 @@ func TestAnEditOfAnAccountRemovedElsewhereSaysSo(t *testing.T) {
 		if !strings.Contains(got, gone) || !strings.Contains(got, "no such account: 3") {
 			t.Errorf("after a 404 the form says: %s", got)
 		}
+		if after := editAfterChange(b); !slices.Contains(after, "Accounts(none)") {
+			t.Errorf("after a 404 the backend was asked %q", after)
+		}
 		run(t, m, press("enter")...)
 		if len(m.stack) != 0 {
 			t.Errorf("enter did not close it")
+		}
+	})
+	t.Run("removed before y", func(t *testing.T) {
+		m, b := editModel(t, rows, 120, 40)
+		b.RemoveFn = func(ctx context.Context, _ int) error {
+			editDeadline(t, ctx, "Remove")
+			return &client.Refusal{Status: 404, Message: "no such account: 3"}
+		}
+		run(t, m, press("down", "down", "d")...)
+		run(t, m, press("y")...)
+		if got := plain(m); !strings.Contains(got, gone) || strings.Contains(got, "was not removed") {
+			t.Errorf("a remove that found it gone says:\n%s", got)
+		}
+		calls := b.calls()
+		if i := slices.Index(calls, "Remove(3)"); i < 0 || !slices.Contains(calls[i:], "Accounts(none)") {
+			t.Errorf("after the remove the backend was asked %q", calls)
 		}
 	})
 	t.Run("under the confirm", func(t *testing.T) {
@@ -743,13 +845,13 @@ func TestEditWaitsForItsSave(t *testing.T) {
 	if got := editJoined(editScreen(m)); !strings.Contains(got, "saving…") {
 		t.Errorf("a save under way is not said: %s", got)
 	}
-	run(t, m, press("9", "enter", "esc", "shift+tab")...)
+	run(t, m, append(press("9", "enter", "esc", "shift+tab"), tea.PasteMsg{Content: "7"})...)
 	if len(m.stack) != 1 || len(b.named("Change")) != 1 || m.typing() {
 		t.Fatalf("keys while saving: %d open, %q sent, typing %v", len(m.stack), editCalls(b), m.typing())
 	}
 	end(&client.Refusal{Status: 409, Message: "busy now"})
 	lines := editScreen(m)
-	if l := lines[editRowIndex(lines, "threshold")]; !strings.Contains(l, "80") || strings.Contains(l, "809") {
+	if l := lines[editRowIndex(lines, "threshold")]; !strings.Contains(l, "80") || strings.Contains(l, "809") || strings.Contains(l, "807") {
 		t.Errorf("a key typed while saving reached the field: %q", l)
 	}
 	if got := editBeside(lines, "threshold"); !strings.Contains(got, "busy now") {
@@ -786,11 +888,16 @@ func TestConfirmIsYesOrNo(t *testing.T) {
 	if got := plain(m); !strings.Contains(got, "y yes") || !strings.Contains(got, "n/esc no") {
 		t.Errorf("the footer does not offer y and n:\n%s", got)
 	}
-	// The same confirm twice opens once.
+	// The same confirm twice opens once; another opens over it.
 	run(t, m, ask())
 	if len(m.stack) != 1 {
 		t.Errorf("the same confirm opened %d times", len(m.stack))
 	}
+	run(t, m, openMsg{O: newConfirm(m.e, "Stop the other session?", "", yes)})
+	if len(m.stack) != 2 {
+		t.Errorf("confirms of two titles opened %d", len(m.stack))
+	}
+	run(t, m, press("n")...)
 	run(t, m, press("x", "enter", "space", "tab", "1")...)
 	if len(m.stack) != 1 || said != 0 {
 		t.Fatalf("a key that is neither y nor n: %d open, yes ran %d times", len(m.stack), said)
@@ -835,8 +942,7 @@ func TestEditDrawsWithinItsWidth(t *testing.T) {
 			b.ChangeFn = func(context.Context, int, Change) (wire.Account, error) {
 				return wire.Account{}, &client.Refusal{Status: 400, Message: "cwd \x1b[31mis\x1b[0m " + strings.Repeat("long ", 40) + backendHTTPKey}
 			}
-			editOverSSH(b)
-			run(t, m, modelWhoMsg{Who: Principal{Name: "alice", Role: "control", Via: "ssh"}}, live3())
+			run(t, m, editAway(b, "user"), live3())
 			check := func(what string) {
 				t.Helper()
 				_, h := m.body()

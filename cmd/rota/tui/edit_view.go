@@ -10,7 +10,6 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/charmbracelet/x/ansi"
-	rota "github.com/professor93/rota/lib"
 )
 
 func (f *editForm) View(w, h int) string {
@@ -71,7 +70,10 @@ func (f *editForm) row(i, w int) []string {
 		value = editWrap(th.Text, say, vw)
 	case editClear:
 		what := "folder, config and sessions back to the defaults"
-		if f.local && rota.Flavor(f.acct.Provider) == "claude" {
+		switch {
+		case !f.claude():
+			what = "folder and config back to the defaults"
+		case f.local:
 			what = "folder, config, sessions and remote control back to the defaults"
 		}
 		value = editWrap(th.Muted, what, vw)

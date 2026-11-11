@@ -59,7 +59,9 @@ const (
 var editLabels = [...]string{"order", "threshold", "folder", "config", "sessions", "remote control", "forget long token", "clear"}
 
 // editNames are the words a refusal names each row by: the API's field
-// names, and the store's and the rotation's words for them.
+// names, and the store's and the rotation's words for them. The forget row
+// has none: the API refuses long only for a value other than forget, which
+// this form never sends, and "long" is a word of ordinary sentences.
 var editNames = [...][]string{
 	editOrder:     {"order", "place", "placed"},
 	editThreshold: {"threshold"},
@@ -67,7 +69,6 @@ var editNames = [...][]string{
 	editConfig:    {"config_dir", "configuration directory"},
 	editSessions:  {"sessions"},
 	editRemote:    {"remote_control", "remote control"},
-	editForget:    {"long"},
 }
 
 // editHints say under the row with focus what it takes.
@@ -135,12 +136,17 @@ type editSavedMsg struct {
 func newEdit(e *env, acct wire.Account) overlay {
 	f := &editForm{e: e, keys: editFormKeys(), acct: acct, local: e.who.Via == "local", remote: acct.RemoteControl}
 	for fd := editOrder; fd <= editSessions; fd++ {
+		// Sessions and Remote Control are Claude Code's: the server refuses
+		// either for another provider's account.
+		if fd == editSessions && !f.claude() {
+			continue
+		}
 		in := newInput(e.th)
 		in.CharLimit = editLimit
 		in.SetValue(editValue(fd, acct))
 		f.rows = append(f.rows, editRow{field: fd, in: in, orig: editNorm(fd, in.Value())})
 	}
-	if rota.Flavor(acct.Provider) == "claude" {
+	if f.claude() {
 		f.rows = append(f.rows, editRow{field: editRemote})
 	}
 	if acct.LongUntil != "" {
@@ -192,6 +198,7 @@ func editNorm(fd editField, v string) string {
 }
 
 func (f *editForm) About() (string, int) { return "edit", f.acct.ID }
+func (f *editForm) claude() bool         { return rota.Flavor(f.acct.Provider) == "claude" }
 func (f *editForm) Closed() bool         { return f.closed }
 func (f *editForm) live() bool           { return !f.gone && !f.saving && !f.closed }
 func (f *editForm) Typing() bool         { return f.live() && f.text(f.at) }
@@ -406,6 +413,7 @@ func (f *editForm) saved(msg editSavedMsg) tea.Cmd {
 		return tea.Batch(toast(levelInfo, "%s%s", say, editName(f.acct)), editRefresh)
 	case errors.As(msg.err, &no) && no.Status == http.StatusNotFound:
 		f.gone, f.why = true, no.Error()
+		return editRefresh
 	case f.gone:
 	default:
 		f.refused(msg.err, msg.sent)
@@ -413,15 +421,12 @@ func (f *editForm) saved(msg editSavedMsg) tea.Cmd {
 	return nil
 }
 
-// refused puts a refusal under the row it names first, or under the one
-// row sent when it names none; anything else, a failure that is not the
-// server's refusal among them, is said at the top.
+// refused puts the server's refusal under a row, as place picks it, and
+// anything else, a failure that is not a refusal among them, at the top.
 func (f *editForm) refused(err error, sent []editField) {
 	text, at := err.Error(), editField(-1)
 	if no := (*client.Refusal)(nil); errors.As(err, &no) {
-		if at = editNamed(text); at < 0 && len(sent) == 1 {
-			at = sent[0]
-		}
+		at = f.place(text, sent)
 	}
 	for i := range f.rows {
 		if f.rows[i].field == at {
@@ -435,17 +440,70 @@ func (f *editForm) refused(err error, sent []editField) {
 	f.note = text
 }
 
-// editNamed is the row a refusal names first, or -1.
-func editNamed(text string) editField {
-	low, best, first := strings.ToLower(text), editField(-1), len(text)+1
-	for fd, names := range editNames {
-		for _, n := range names {
-			if i := editWord(low, n); i >= 0 && i < first {
-				best, first = editField(fd), i
-			}
+// place is the row a refusal is about: of the rows it names, the first
+// that this write sent; else the one row sent, when it sent one; else the
+// first it names that the form has; else none, -1. The account, as the
+// server writes it into a sentence, names nothing: its label is the
+// person's own words, and may hold a row's.
+func (f *editForm) place(text string, sent []editField) editField {
+	named := editNamed(editUnlabelled(text, f.acct))
+	for _, fd := range named {
+		if slices.Contains(sent, fd) {
+			return fd
 		}
 	}
-	return best
+	if len(sent) == 1 {
+		return sent[0]
+	}
+	for _, fd := range named {
+		if slices.ContainsFunc(f.rows, func(r editRow) bool { return r.field == fd }) {
+			return fd
+		}
+	}
+	return -1
+}
+
+// editUnlabelled is text with account a taken out where the server writes
+// it, provider/label (rota.Account's String): the label is the name, else
+// the email, else the uuid's start, else account-N.
+func editUnlabelled(text string, a wire.Account) string {
+	uuid := a.UUID
+	if len(uuid) > 12 {
+		uuid = uuid[:12] + "..."
+	}
+	for _, label := range []string{a.Name, a.Email, uuid, "account-" + strconv.Itoa(a.ID)} {
+		if label != "" {
+			text = strings.ReplaceAll(text, a.Provider+"/"+label, " ")
+		}
+	}
+	return text
+}
+
+// editNamed is every row text names, in the order it first names them.
+func editNamed(text string) []editField {
+	type hit struct {
+		at int
+		fd editField
+	}
+	var hits []hit
+	low := strings.ToLower(text)
+	for fd, names := range editNames {
+		first := -1
+		for _, n := range names {
+			if i := editWord(low, n); i >= 0 && (first < 0 || i < first) {
+				first = i
+			}
+		}
+		if first >= 0 {
+			hits = append(hits, hit{first, editField(fd)})
+		}
+	}
+	slices.SortFunc(hits, func(x, y hit) int { return x.at - y.at })
+	out := make([]editField, len(hits))
+	for i, h := range hits {
+		out[i] = h.fd
+	}
+	return out
 }
 
 // editWord is where w first stands in s as words of their own, or -1.
@@ -471,8 +529,10 @@ func editWord(s, w string) int {
 func (f *editForm) askClear() tea.Cmd {
 	empty, shared, id := "", "shared", strconv.Itoa(f.acct.ID)
 	c := Change{Cwd: &empty, ConfigDir: &empty, Sessions: &shared}
-	body := "Its folder, config and sessions go back to the defaults"
-	claude := rota.Flavor(f.acct.Provider) == "claude"
+	body, claude := "Its folder, config and sessions go back to the defaults", f.claude()
+	if !claude {
+		body = "Its folder and config go back to the defaults"
+	}
 	switch {
 	case f.local:
 		off := false
