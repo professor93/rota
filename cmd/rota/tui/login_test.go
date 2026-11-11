@@ -167,6 +167,18 @@ func loginSaw(t *testing.T, msgs []tea.Msg, want tea.Msg) {
 	t.Errorf("no %#v among %#v", want, msgs)
 }
 
+// loginStarts counts the times a loginFakeStep named name was started
+// among msgs.
+func loginStarts(msgs []tea.Msg, name string) int {
+	n := 0
+	for _, msg := range msgs {
+		if msg == tea.Msg(shellPing("started "+name)) {
+			n++
+		}
+	}
+	return n
+}
+
 func loginToasted(t *testing.T, msgs []tea.Msg, want string) {
 	t.Helper()
 	if got := loginToasts(msgs); !slices.Contains(got, want) {
@@ -1224,14 +1236,20 @@ func TestAStepKeepsTheKeysItOffers(t *testing.T) {
 		asked[0].Approve != loginURL || asked[0].Account != 0 {
 		t.Fatalf("the page was asked for %+v", asked)
 	}
-	loginSaw(t, seen, shellPing("started the one-time page"))
+	// Shown, a step is started once, and only then.
+	if n := loginStarts(seen, "the one-time page"); n != 1 {
+		t.Errorf("the page was started %d times as it was shown", n)
+	}
 	if f.step != step(page) || f.Busy() != "the one-time page" || !strings.Contains(plain(m), "the one-time page") {
 		t.Fatalf("the page is not shown, or its work not said: %T %q", f.step, f.Busy())
 	}
 	// esc is the page's while it offers it: the flow is not put aside.
-	loginPress(t, m, "esc")
+	seen = loginPress(t, m, "esc")
 	if !slices.Equal(page.got, []string{"esc"}) || f.Aside() {
 		t.Errorf("esc went to the flow, not the page: %q aside %v", page.got, f.Aside())
+	}
+	if n := loginStarts(seen, "the one-time page"); n != 0 {
+		t.Errorf("a key to the page shown started it again, %d times", n)
 	}
 	// The page answers for itself, as the code step would have.
 	_, seen = run(t, m, stepDone{End: LoginEnd{Account: 14, Provider: "claude", Status: "added"}})

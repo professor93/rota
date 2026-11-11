@@ -43,6 +43,10 @@ type asider interface {
 
 // step is one stage of the login flow: the code, the device, the page.
 type step interface {
+	// Init starts what the step runs by itself: a device login's first
+	// question, the page's look at this machine's addresses. The flow
+	// calls it once, when it shows the step; nil where nothing starts.
+	Init() tea.Cmd
 	Update(msg tea.Msg) (step, tea.Cmd)
 	View(width int) string
 	Keys() []key.Binding
@@ -74,6 +78,7 @@ func overlayNotYet() step { return overlayStub{} }
 
 type overlayStub struct{}
 
+func (overlayStub) Init() tea.Cmd                    { return nil }
 func (s overlayStub) Update(tea.Msg) (step, tea.Cmd) { return s, nil }
 func (overlayStub) View(int) string                  { return "not yet" }
 func (overlayStub) Keys() []key.Binding              { return nil }

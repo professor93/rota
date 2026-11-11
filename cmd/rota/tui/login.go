@@ -241,14 +241,10 @@ func (f *loginFlow) toStep(msg tea.Msg) tea.Cmd {
 	return cmd
 }
 
-// show puts s in place of the step shown, and starts it: a step that runs
-// by itself (a device login polls) has Init.
+// show puts s in place of the step shown, and starts it (Init), once.
 func (f *loginFlow) show(s step) tea.Cmd {
 	f.step, f.stage = s, loginStepping
-	if i, ok := s.(interface{ Init() tea.Cmd }); ok {
-		return i.Init()
-	}
-	return nil
+	return s.Init()
 }
 
 // arm sets which of the flow's keys work where it is.

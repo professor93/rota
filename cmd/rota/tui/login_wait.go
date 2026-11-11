@@ -296,6 +296,9 @@ type loginWaitDelegated struct {
 
 func (s *loginWaitDelegated) command() string { return "rota login " + strconv.Itoa(s.account) }
 
+// Init starts nothing: the terminal is handed over on enter.
+func (*loginWaitDelegated) Init() tea.Cmd { return nil }
+
 func (s *loginWaitDelegated) Update(msg tea.Msg) (step, tea.Cmd) {
 	switch msg := msg.(type) {
 	case loginWaitBack:

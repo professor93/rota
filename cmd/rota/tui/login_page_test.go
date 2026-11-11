@@ -111,6 +111,7 @@ func (h *loginPageHost) Closed() bool             { return false }
 // what was typed so far, which comes back as it was.
 type loginPageField struct{ value string }
 
+func (*loginPageField) Init() tea.Cmd                    { return nil }
 func (f *loginPageField) Update(tea.Msg) (step, tea.Cmd) { return f, nil }
 func (f *loginPageField) View(int) string                { return "code field: " + f.value }
 func (f *loginPageField) Keys() []key.Binding            { return nil }

@@ -243,6 +243,9 @@ func (s *loginCode) size(width int) {
 	s.in.SetValue(s.in.Value())
 }
 
+// Init starts nothing: the code step waits for the person.
+func (*loginCode) Init() tea.Cmd { return nil }
+
 func (s *loginCode) Typing() bool { return s.in.Focused() }
 
 func (s *loginCode) arm() {
@@ -412,6 +415,9 @@ func (s *loginSecret) size(width int) {
 		in.SetValue(in.Value())
 	}
 }
+
+// Init starts nothing: the secret step waits for the person.
+func (*loginSecret) Init() tea.Cmd { return nil }
 
 func (s *loginSecret) Typing() bool { return s.value.Focused() || s.label.Focused() }
 
