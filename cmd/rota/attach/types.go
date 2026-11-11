@@ -141,4 +141,10 @@ type Options struct {
 	// repainted and with nothing typed meanwhile sent. Nil ends the attach as
 	// Lost at once.
 	Redial func() (*client.Client, error)
+
+	// Inside is the id of the held session this terminal itself runs in,
+	// or "" for none or not known. n and p pass over it: shown here, it
+	// would be shown its own output, which it prints again, without end.
+	// The caller refuses to begin on it.
+	Inside string
 }

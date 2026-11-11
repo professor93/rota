@@ -2663,6 +2663,15 @@ It needs three things, and says which is missing:
   stopped, which only its id or the start of one finds, is *session api has
   ended; rota list --sessions shows it*, exit `1` both.
 
+It is never the session it runs in. Shown inside itself, a session would be
+shown its own output, print it again, and so on without end, so `--attach`
+run inside a held session refuses that one however it is named: *you are
+inside api; attaching to it would feed it its own output*, exit `1`.
+`Ctrl-\` `n` and `p` pass it over too. A process is inside a session as
+`ctl.sock` tells it (*[The control socket](#the-control-socket)*), and one
+that cannot be placed is let through. Over SSH nothing can tell (*[Over
+SSH](#over-ssh)*).
+
 `--attach` takes the session and nothing else: no account (*--attach takes a
 session, not an account: rota run --attach <session>*), no prompt or CLI
 arguments, and none of `--detach`, `--share`, `--label` or
@@ -3017,6 +3026,18 @@ for everything else. Keep it out of the ssh-agent the sessions can reach,
 or add it with `ssh-add -c`, which asks before each use: a key in the agent
 signs for whatever reaches `SSH_AUTH_SOCK`, passphrase or not, and a held
 CLI keeps that variable, since git over SSH inside a session needs it.
+
+**Another, of the same kind.** `rota run --attach` refuses the session it
+runs in (*[Attaching from a terminal](#attaching-from-a-terminal)*), but
+the SSH server cannot see the process at the other end of a connection, so
+it cannot tell that an `ssh -t <host> attach api` typed inside session api
+comes from api itself. That attach shows api its own output, which api
+prints again, without end, and floods every other window on it. Don't:
+attach over SSH from outside the session. If it happens, `Ctrl-\` `d`
+typed at a window outside leaves only that window; stop the loop with
+`Ctrl-\` `Ctrl-\` `d` at the window that holds api's keyboard, which types
+the chord into api for the inner attach to read, or by killing that `ssh`
+from elsewhere.
 
 ### The playground
 

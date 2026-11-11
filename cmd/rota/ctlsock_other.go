@@ -14,3 +14,7 @@ import (
 func listenCtl(*api.Server, string, *slog.Logger, ...*inFlight) (func(), error) {
 	return nil, holdwire.ErrPlatform
 }
+
+// heldSessionOf places no process here: no session is held on this
+// platform for one to run inside.
+func heldSessionOf(int, string) (string, error) { return "", nil }

@@ -45,7 +45,8 @@ var attachRun = attach.Run
 // attachTo is `rota run --attach <session>`. It takes no account, no
 // prompt or arguments, and none of the flags that start a terminal; it
 // needs this terminal, standard input and output alike, and a daemon that
-// lists the session live. The attach then runs until the person leaves,
+// lists the session live, and it is refused the held session it runs
+// inside, which n and p then pass over too. The attach then runs until the person leaves,
 // the session ends, or it is lost; SIGTERM, SIGHUP or an interrupt sent to
 // this rota ends it as lost. The terminal is given back as it was, a panic
 // included, and the one line saying why it ended goes to stderr, as text
@@ -90,12 +91,22 @@ func (c *cli) attachTo(id int, rest []string, ask shareAsk, remote remoteAsk) er
 	if err != nil {
 		return c.sendFailed("%v", err)
 	}
+	name := s.Name
+	if name == "" {
+		name = s.ID
+	}
 	if s.State != "live" {
-		name := s.Name
-		if name == "" {
-			name = s.ID
-		}
 		return c.sendFailed("session %s has ended; rota list --sessions shows it", heldCell(name))
+	}
+	// Shown inside itself, a session would be shown its own output, which
+	// it prints again, without end. A process that cannot be placed is let
+	// through: this is a guard against a mistake, not a rule.
+	inside, err := heldSessionOf(os.Getpid(), terminals)
+	if err != nil {
+		inside = ""
+	}
+	if inside == s.ID {
+		return c.sendFailed("you are inside %s; attaching to it would feed it its own output", heldCell(name))
 	}
 
 	ctx, stop := interrupted()
@@ -110,6 +121,7 @@ func (c *cli) attachTo(id int, rest []string, ask shareAsk, remote remoteAsk) er
 		Key:    attach.DaemonKey(terminals),
 		Teach:  attach.TaughtFile(terminals),
 		Redial: func() (*rotaclient.Client, error) { return rotaclient.Dial(terminals) },
+		Inside: inside,
 	})
 	// At once: a key typed before the terminal is handed back is dropped.
 	restore()

@@ -449,3 +449,81 @@ func TestASignalGivesTheTerminalBack(t *testing.T) {
 		t.Fatalf("after a signal the session is %q, want live", s.State)
 	}
 }
+
+// An attach run inside the held session it names would show that session
+// its own output, which it prints again, without end: it is refused, by the
+// session's id, its name or the start of its id, as a session that is not
+// there is, exit 1 and the terminal untouched. Another session is attached
+// to as ever, told which one this terminal is inside, so that n and p pass
+// it over. The attach runs in this process, put inside the session by the
+// parent its walk up the processes is told.
+func TestAttachRefusesTheSessionItIsIn(t *testing.T) {
+	r := newDaemonRig(t)
+	r.start()
+	id := r.newSession("api")
+	other := r.newSession("job")
+	rec := holdwire.Judge(r.terminals, id)
+	if rec.Meta == nil || rec.Meta.HolderPID <= 0 {
+		t.Fatalf("session api's record reads %+v", rec)
+	}
+	self := os.Getpid()
+	wasParent := parentOf
+	t.Cleanup(func() { parentOf = wasParent })
+	parentOf = func(pid int) (int, error) {
+		if pid == self {
+			return rec.Meta.HolderPID, nil
+		}
+		return wasParent(pid)
+	}
+
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { master.Close(); slave.Close() })
+	if err := pty.Resize(master, 100, 30); err != nil {
+		t.Fatal(err)
+	}
+	before := attachTermios(t, master)
+	screen := watchScreen(master)
+
+	wasRun, wasIn := attachRun, stdin
+	t.Cleanup(func() { attachRun, stdin = wasRun, wasIn })
+	stdin = slave
+	var (
+		ran     []string
+		options attach.Options
+	)
+	attachRun = func(_ context.Context, _ attach.Terminal, _ *rotaclient.Client, to string, o attach.Options) attach.Result {
+		ran, options = append(ran, to), o
+		return attach.Result{Why: attach.Detached}
+	}
+
+	for _, name := range []string{id, "api", id[:6]} {
+		var errb bytes.Buffer
+		if code := run([]string{"run", "--attach", name}, slave, &errb); code != 1 {
+			t.Fatalf("rota run --attach %s from inside it: exit %d, want 1; stderr %q", name, code, errb.String())
+		}
+		if got, want := errb.String(), "rota: you are inside api; attaching to it would feed it its own output\n"; got != want {
+			t.Fatalf("rota run --attach %s from inside it: stderr %q, want %q", name, got, want)
+		}
+	}
+	if len(ran) != 0 {
+		t.Fatalf("the session this terminal is in was attached to: %v", ran)
+	}
+	time.Sleep(100 * time.Millisecond) // for a late write to show
+	if text := screen.text(); text != "" {
+		t.Fatalf("a refused attach wrote to the terminal: %q", text)
+	}
+	if now := attachTermios(t, master); now.Iflag != before.Iflag || now.Oflag != before.Oflag || now.Lflag != before.Lflag || now.Cflag != before.Cflag {
+		t.Fatalf("a refused attach left the terminal's settings %+v; they were %+v", now, before)
+	}
+
+	var errb bytes.Buffer
+	if code := run([]string{"run", "--attach", "job"}, slave, &errb); code != 0 {
+		t.Fatalf("rota run --attach job from inside api: exit %d; stderr %q", code, errb.String())
+	}
+	if len(ran) != 1 || ran[0] != other || options.Inside != id {
+		t.Fatalf("from inside api, job was attached as %v with Inside %q; want %s inside %s", ran, options.Inside, other, id)
+	}
+}

@@ -103,6 +103,43 @@ func TestNextWrapsAndSaysWhenAlone(t *testing.T) {
 	}
 }
 
+// n and p never land on the session this terminal is inside, which would
+// show it its own output: they pass over it both ways, and with only that
+// one besides the session shown, n says there is no other.
+func TestNextPassesOverTheSessionItIsIn(t *testing.T) {
+	runKnobs(t)
+	term := runNewTerm(80, 24)
+	src := runNewSrc(runSession("a", 0), runSession("b", 1), runSession("c", 2))
+	for _, id := range []string{"a", "c", "a", "c"} {
+		src.add(runNewLink(id, 80, 24))
+	}
+	done := runAttach(context.Background(), term, src, "a", Options{Inside: "b"})
+	runWait(t, "a opened", func() bool { return len(src.gotOpens()) == 1 })
+	for n, key := range []string{"\x1cn", "\x1cn", "\x1cp"} {
+		term.typ(t, key)
+		runWait(t, "the next open", func() bool { return len(src.gotOpens()) == n+2 })
+	}
+	if got := strings.Join(src.gotOpens(), " "); got != "a c a c" {
+		t.Errorf("inside b, n n p opened %s, want a c a c", got)
+	}
+	term.typ(t, "\x1cd")
+	runResult(t, done)
+
+	term2 := runNewTerm(80, 24)
+	src2 := runNewSrc(runSession("a", 0), runSession("b", 1))
+	src2.add(runNewLink("a", 80, 24))
+	done2 := runAttach(context.Background(), term2, src2, "a", Options{Inside: "b"})
+	term2.typ(t, "\x1cn")
+	runWait(t, "the note", func() bool { return strings.Contains(term2.output(), "rota: no other live session") })
+	said := strings.Count(term2.output(), "rota: no other live session")
+	term2.typ(t, "\x1cp")
+	runWait(t, "the note again", func() bool { return strings.Count(term2.output(), "rota: no other live session") > said })
+	term2.typ(t, "\x1cd")
+	if r := runResult(t, done2); r.Why != Detached || len(src2.gotOpens()) != 1 {
+		t.Errorf("inside b with only a besides: %v after %v opens", r.Why, src2.gotOpens())
+	}
+}
+
 // TestAStalledSessionHoldsUpNoOther: a send to one session that stalls
 // holds up neither n nor the next session's typing. What was asked of the
 // stalled one still reaches it, in order, before its close.

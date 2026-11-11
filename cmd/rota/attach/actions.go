@@ -98,7 +98,8 @@ func (r *runner) move(dir int) {
 }
 
 // onListed opens the next live, attachable session, by when each started,
-// or the one before it, round from the last to the first.
+// or the one before it, round from the last to the first; never the one
+// this terminal is inside.
 func (r *runner) onListed(l runListed, now time.Time) {
 	if l.gen != r.gen || r.phase != runListing {
 		return
@@ -110,7 +111,7 @@ func (r *runner) onListed(l runListed, now time.Time) {
 	}
 	var live []client.Session
 	for _, s := range l.all {
-		if s.State == "live" && s.Attachable {
+		if s.State == "live" && s.Attachable && s.ID != r.o.Inside {
 			live = append(live, s)
 		}
 	}
