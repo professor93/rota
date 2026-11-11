@@ -225,14 +225,19 @@ func hookStatus(code int) string {
 }
 
 // hookAfter is how long a Retry-After of v asks for, as seconds or as an
-// HTTP date, at most limit. One that cannot be read, or has passed, is 0:
-// backoff's own wait.
+// HTTP date, at most limit; a count of seconds too long to read is limit.
+// One that cannot be read, or has passed, is 0: backoff's own wait. The
+// queue caps it again with its own maxAfter; this cap is the sink's own.
 func hookAfter(v string, now time.Time, limit time.Duration) time.Duration {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return 0
 	}
-	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+	n, err := strconv.ParseInt(v, 10, 64)
+	if errors.Is(err, strconv.ErrRange) && n > 0 {
+		return limit
+	}
+	if err == nil {
 		if n <= 0 {
 			return 0
 		}

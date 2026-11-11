@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"bufio"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -65,7 +66,7 @@ func hookEvent() events.Event {
 	}
 }
 
-// hookSend sends one event within a second.
+// hookSend sends one event within five seconds.
 func hookSend(t *testing.T, w *webhook) error {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -194,6 +195,9 @@ func TestServerErrorsAreTriedAgainAndOthersAreNot(t *testing.T) {
 		case "/429-long":
 			w.Header().Set("Retry-After", "999999")
 			w.WriteHeader(http.StatusTooManyRequests)
+		case "/429-huge":
+			w.Header().Set("Retry-After", "99999999999999999999")
+			w.WriteHeader(http.StatusTooManyRequests)
 		case "/429-junk":
 			w.Header().Set("Retry-After", "soon")
 			w.WriteHeader(http.StatusTooManyRequests)
@@ -228,6 +232,7 @@ func TestServerErrorsAreTriedAgainAndOthersAreNot(t *testing.T) {
 		{"/429", true, func(d time.Duration) bool { return d == 2*time.Second }, "webhook answered 429 Too Many Requests"},
 		{"/429-date", true, func(d time.Duration) bool { return d > 80*time.Second && d <= 90*time.Second }, "webhook answered 429 Too Many Requests"},
 		{"/429-long", true, func(d time.Duration) bool { return d == maxAfter }, "webhook answered 429 Too Many Requests"},
+		{"/429-huge", true, func(d time.Duration) bool { return d == maxAfter }, "webhook answered 429 Too Many Requests"},
 		{"/429-junk", true, func(d time.Duration) bool { return d == 0 }, "webhook answered 429 Too Many Requests"},
 		{"/502-past", true, func(d time.Duration) bool { return d == 0 }, "webhook answered 502 Bad Gateway"},
 		{"/big", true, func(d time.Duration) bool { return d == 0 }, "webhook answered 500 Internal Server Error"},
@@ -453,7 +458,9 @@ func TestPlainHTTPIsOnlyForThisMachine(t *testing.T) {
 }
 
 // An https webhook goes through the proxy the environment names, checks
-// the certificate it is shown, and is held to no address of its own.
+// the certificate it is shown, and is held to no address of its own. No
+// name is resolved but by a name server in memory that knows none, so a
+// webhook that skipped its proxy fails here without leaving the machine.
 func TestAnHTTPSWebhookUsesTheEnvironmentsProxy(t *testing.T) {
 	hookSeams(t)
 	if reflect.ValueOf(hookProxy).Pointer() != reflect.ValueOf(http.ProxyFromEnvironment).Pointer() {
@@ -470,6 +477,7 @@ func TestAnHTTPSWebhookUsesTheEnvironmentsProxy(t *testing.T) {
 	}))
 	defer proxy.Close()
 	pu, _ := url.Parse(proxy.URL)
+	hookResolver = (&hookDNS{}).resolver()
 	var calls atomic.Int32
 	hookProxy = func(r *http.Request) (*url.URL, error) {
 		calls.Add(1)
@@ -489,15 +497,114 @@ func TestAnHTTPSWebhookUsesTheEnvironmentsProxy(t *testing.T) {
 		t.Fatalf("the proxy was asked %d times and got %q", calls.Load(), got)
 	}
 
-	// A certificate nobody vouches for is refused.
-	hookProxy = http.ProxyFromEnvironment
-	tlsSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	// A certificate nobody vouches for is refused before a byte of the
+	// request is sent, and tried again: a clock not yet set at boot, or a
+	// captive portal, mends itself.
+	hookProxy = func(*http.Request) (*url.URL, error) { return nil, nil }
+	var reached atomic.Int32
+	tlsSrv := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached.Add(1) }))
 	tlsSrv.Config.ErrorLog = log.New(io.Discard, "", 0) // the refused handshake
 	tlsSrv.StartTLS()
 	defer tlsSrv.Close()
 	err = hookSend(t, hookNew(t, tlsSrv.URL+"/h", ""))
 	if err == nil || !strings.Contains(err.Error(), "certificate") {
 		t.Fatalf("a certificate nobody vouches for gave %v", err)
+	}
+	var r *retry
+	if !errors.As(err, &r) {
+		t.Fatalf("%v is not tried again", err)
+	}
+	if n := reached.Load(); n != 0 {
+		t.Fatalf("the server behind a refused certificate got %d requests", n)
+	}
+}
+
+// The rule of plain http, address by address: this machine's own loopback
+// and nothing else, not a private, link-local, shared or unspecified one,
+// nor a v4 address mapped into or kept in v6.
+func TestPlainHTTPIsLoopbackOnly(t *testing.T) {
+	for addr, ok := range map[string]bool{
+		"127.0.0.1:80": true, "127.255.255.254:80": true, "[::1]:80": true, "[::ffff:127.0.0.1]:80": true,
+		"[::ffff:10.0.0.1]:80": false, "0.0.0.0:80": false, "[::]:80": false, "[::ffff:0.0.0.0]:80": false,
+		"169.254.169.254:80": false, "[fe80::1%lo0]:80": false, "10.0.0.1:80": false,
+		"192.168.1.1:80": false, "172.16.0.1:80": false, "100.64.0.1:80": false, "[fc00::1]:80": false,
+		"[::127.0.0.1]:80": false, "[64:ff9b::7f00:1]:80": false, "localhost:80": false, "garbage": false,
+	} {
+		if err := hookHere("tcp", addr, nil); (err == nil) != ok {
+			t.Errorf("%s: %v, want allowed=%v", addr, err, ok)
+		}
+	}
+}
+
+// An answer's body is read only in part, so one that never ends holds no
+// attempt.
+func TestAnAnswersBodyIsReadOnlyInPart(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(strings.Repeat("x", 8192)))
+		w.(http.Flusher).Flush()
+		<-release
+	}))
+	defer srv.Close()
+	defer close(release)
+	start := time.Now()
+	if err := hookSend(t, hookNew(t, srv.URL+"/h", "")); err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > time.Second {
+		t.Fatalf("an endless body held the send %v", d)
+	}
+}
+
+// What the server says after its status code is never said: the code is,
+// by Go's name for it.
+func TestTheServersReasonIsNotSaid(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				bufio.NewReader(c).ReadString('\n')
+				io.WriteString(c, "HTTP/1.1 503 QSECRET99 down\r\nContent-Length: 0\r\n\r\n")
+			}()
+		}
+	}()
+	err = hookSend(t, hookNew(t, "http://"+l.Addr().String()+"/h", ""))
+	if err == nil || err.Error() != "webhook answered 503 Service Unavailable" {
+		t.Fatalf("send = %v", err)
+	}
+}
+
+// Each answer is read and closed, so one connection carries many events.
+func TestOneConnectionCarriesManyEvents(t *testing.T) {
+	var conns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+		if s == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+	w := hookNew(t, srv.URL+"/h", "")
+	for range 3 {
+		if err := hookSend(t, w); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := conns.Load(); n != 1 {
+		t.Fatalf("3 events took %d connections", n)
 	}
 }
 
