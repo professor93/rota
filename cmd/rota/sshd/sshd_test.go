@@ -117,7 +117,7 @@ func sshdStart(t *testing.T, edit ...func(*Options)) *sshdRig {
 	commands["who"] = func(_ context.Context, ch *Channel, _ []string) int {
 		w := httptest.NewRecorder()
 		ch.Handler.ServeHTTP(w, httptest.NewRequest("GET", "/v1/session", nil))
-		fmt.Fprintf(ch.Out, "%s%s", w.Body.String(), ch.Login)
+		fmt.Fprint(ch.Out, w.Body.String())
 		return 0
 	}
 	commands["tty"] = func(_ context.Context, ch *Channel, _ []string) int {
@@ -695,8 +695,8 @@ func TestTheChannelKnowsItsPerson(t *testing.T) {
 		}
 		out, _, code := sshdRun(t, cl, "who")
 		cl.Close()
-		if code != 0 || out != c.want+"\n"+c.login {
-			t.Errorf("who: %d %q; want %q then %q", code, out, c.want, c.login)
+		if code != 0 || out != c.want+"\n" {
+			t.Errorf("who as login %s: %d %q; want %q", c.login, code, out, c.want)
 		}
 	}
 }

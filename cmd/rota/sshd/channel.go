@@ -24,10 +24,9 @@ type Channel struct {
 	// Resize carries each window-change, columns first. It holds the newest
 	// four; an older one nobody read is dropped.
 	Resize <-chan [2]int
-	// User is the person the key signed in, and Login the name the client
-	// typed, which decides nothing (Ruling 5).
-	User  User
-	Login string
+	// User is the person the key signed in. The name the client typed
+	// decides nothing (Ruling 5), and is only logged at sign-in.
+	User User
 	// Handler is the API as User: Options.Handler of the person, made once
 	// per connection.
 	Handler http.Handler
@@ -58,7 +57,7 @@ func channelServe(ctx context.Context, sc *sshdConn, ch ssh.Channel, reqs <-chan
 	resize := make(chan [2]int, channelResizes)
 	c := &Channel{
 		In: ch, Out: ch, Err: ch.Stderr(), Resize: resize,
-		User: sc.user, Login: sc.login, Handler: sc.handler,
+		User: sc.user, Handler: sc.handler,
 		Key: sc.s.o.Key, Taught: sc.s.o.Taught,
 		slot: sc.limitsSlot, tui: sc.s.o.TUI,
 	}
@@ -140,7 +139,8 @@ func channelServe(ctx context.Context, sc *sshdConn, ch ssh.Channel, reqs <-chan
 }
 
 // channelTerm says a TERM is a terminal's name and nothing else: letters,
-// digits and . _ + -, at most 64 of them. It goes on to a CLI's environment.
+// digits and . _ + -, at most 64 of them. It goes on only to TUISession.Env:
+// `new` sends a session no environment (Ruling 11).
 func channelTerm(t string) bool {
 	if t == "" || len(t) > 64 {
 		return false
