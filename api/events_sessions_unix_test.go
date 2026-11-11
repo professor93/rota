@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -263,26 +264,46 @@ func TestATerminalNeverListedSaysNothing(t *testing.T) {
 }
 
 // A person whose page was attached to the daemon before is not said to join
-// again when it reconnects to the next one, within twice the settle of that
-// daemon taking the session up; a person who attaches after that is.
+// again when the page comes back where it got to (since) on the next one,
+// within twice the settle of that daemon taking the session up. A page
+// opened for the first time is said, and so is one that comes back later.
 func TestARestartSaysNoViewerAgain(t *testing.T) {
-	p := sessFakesOnly(t, func() *terms { return withHeld(t, nil) })
+	p := sessFakesOnly(t, func() *terms { return withHeld(t, []string{"FAKE_HOLDER_PRINT=hello"}) })
 	id := p.start(nil)["id"].(string)
-	p.attach(id, p.alice, "").waitType("hello")
+	hello := p.attach(id, p.alice, "").waitType("hello")
 	if e := sessWait(t, p.api, events.ViewerJoined, id, 5*time.Second); e.Viewer != "alice" {
 		t.Fatalf("alice joined as %+v", e)
 	}
+	back := fmt.Sprintf("since=%d", int64(hello["offset"].(float64)))
+	before := time.Now()
 	q := p.restart()
 	forward := q.frozenClock()
-	q.attach(id, q.alice, "").waitType("hello")
-	sessQuiet(t, q.api, id, 200*time.Millisecond, events.ViewerJoined)
-	forward(2 * viewerSettle)
-	q.attach(id, q.bob, "").waitType("hello")
-	if e := sessWait(t, q.api, events.ViewerJoined, id, 5*time.Second); e.Viewer != "bob" {
-		t.Fatalf("after the window, %+v joined", e)
+	if ts := q.api.findTerminal(id); ts == nil || ts.adoptedAt.Before(before) {
+		t.Fatalf("the window does not start when the session was taken up: %+v", ts)
 	}
-	if got := sessOf(q.api, events.ViewerJoined, id); len(got) != 1 {
-		t.Fatalf("the next daemon said %+v", got)
+	joined := func(n int) []string {
+		t.Helper()
+		for end := time.Now().Add(5 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+			var who []string
+			for _, e := range sessOf(q.api, events.ViewerJoined, id) {
+				who = append(who, e.Viewer)
+			}
+			if len(who) >= n || time.Now().After(end) {
+				return who
+			}
+		}
+	}
+
+	q.attach(id, q.alice, back).waitType("hello")
+	sessQuiet(t, q.api, id, 200*time.Millisecond, events.ViewerJoined)
+	q.attach(id, q.watch, "").waitType("hello")
+	if got := joined(1); !slices.Equal(got, []string{"looker"}) {
+		t.Fatalf("a page opened within the window: the next daemon said %v joined", got)
+	}
+	forward(2 * viewerSettle)
+	q.attach(id, q.bob, back).waitType("hello")
+	if got := joined(2); !slices.Equal(got, []string{"looker", "bob"}) {
+		t.Fatalf("a page back after the window: the next daemon said %v joined", got)
 	}
 }
 

@@ -154,6 +154,8 @@ let termNudge = false;       // a key pressed by somebody who may not type
 let termOpenNew = false;     // the New terminal form is unfolded
 let termPolling = false;
 const CLAIM_WAIT = 10000;    // the server's own wait before a force is allowed
+// The longest wait stays well under twice the server's viewer settle (20 s):
+// a page back later than that, after a daemon restart, is said to join again.
 const TERM_BACKOFF = [1, 2, 4, 8, 15];
 
 const termWatcher = () => !!termYou && termYou.role === "watch";

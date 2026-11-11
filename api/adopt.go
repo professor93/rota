@@ -98,7 +98,7 @@ func (s *Server) sweepRecords() {
 	}
 	now := s.now()
 	records := holdwire.Scan(s.terminals)
-	s.readLabels(records)
+	s.readAccounts(records)
 	var live []holdwire.Record
 	running := map[string]bool{}
 	for _, r := range records {
@@ -178,11 +178,11 @@ func (s *Server) readopt(records []holdwire.Record) {
 		return
 	}
 	s.termsMu.Lock()
-	labels, ends := s.labels, s.ends
+	labels, creds := s.labels, s.creds
 	s.termsMu.Unlock()
 	var wg sync.WaitGroup
 	for i := range records {
-		wg.Go(func() { s.adopt(&records[i], labels, ends) })
+		wg.Go(func() { s.adopt(&records[i], labels, creds) })
 	}
 	wg.Wait()
 }
@@ -195,10 +195,10 @@ func (s *Server) readopt(records []holdwire.Record) {
 // tries again.
 //
 // What its credential is comes from its record's end and its account as
-// the sweep read it (ends), as for a session a holder has just answered
+// the sweep read it (creds), as for a session a holder has just answered
 // for: an account since removed tells nothing, and one logged in again
 // since makes a session on its stored login read as one on a token.
-func (s *Server) adopt(r *holdwire.Record, labels map[int]string, ends map[int]accountEnds) {
+func (s *Server) adopt(r *holdwire.Record, labels map[int]string, creds map[int]accountCred) {
 	if s.isStopping() || !s.pend(r.ID, false) {
 		return
 	}
@@ -233,7 +233,7 @@ func (s *Server) adopt(r *holdwire.Record, labels map[int]string, ends map[int]a
 		name: m.Name, cwd: m.Cwd, started: started,
 		back: h, cols: cols, rows: rows, ring: ring.NewAt(s.opts.Terminal.Scrollback, w.Oldest),
 	}
-	ts.runsOn(ends[m.Account], m.TokenUntil)
+	ts.runsOn(creds[m.Account], m.TokenUntil)
 	ts.idleAt = s.now()
 	ts.adoptedAt = ts.idleAt
 	h.ts = ts
@@ -283,15 +283,15 @@ func (s *Server) isStopping() bool {
 	return s.stopping
 }
 
-// readLabels reads each account's own name from the store, for the
+// readAccounts reads each account's own name from the store, for the
 // sessions whose records name only the account's id, and keeps them for
-// describing those, with what each account's credential is (accountEnds)
+// describing those, with what each account's credential is (accountCred)
 // for the sessions it takes up. Only a sweep opens the store for them, and
 // only when a record names an account — never a request, which would
 // otherwise wait on the store's lock to say what is on disk. A store that
 // cannot be read keeps what is already known: the records say everything
 // else.
-func (s *Server) readLabels(records []holdwire.Record) {
+func (s *Server) readAccounts(records []holdwire.Record) {
 	if !slices.ContainsFunc(records, func(r holdwire.Record) bool { return r.Meta != nil && r.Meta.Account != 0 }) {
 		return
 	}
@@ -300,13 +300,13 @@ func (s *Server) readLabels(records []holdwire.Record) {
 		return
 	}
 	labels := make(map[int]string, len(st.Accounts))
-	ends := make(map[int]accountEnds, len(st.Accounts))
+	creds := make(map[int]accountCred, len(st.Accounts))
 	for _, a := range st.Accounts {
-		labels[a.ID], ends[a.ID] = a.Label(), endsOf(a)
+		labels[a.ID], creds[a.ID] = a.Label(), credOf(a)
 	}
 	st.Close()
 	s.termsMu.Lock()
-	s.labels, s.ends = labels, ends
+	s.labels, s.creds = labels, creds
 	s.termsMu.Unlock()
 }
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -356,12 +357,12 @@ func TestNoViewerLeavesAnEndedSession(t *testing.T) {
 	sessQuiet(t, h.api, ts.id, 10*viewerSettle, events.ViewerLeft)
 }
 
-// A person who attaches to a session this server took up from a daemon
-// before, within twice the settle of taking it up, is counted and not said:
-// their page was attached to that daemon, which said they joined, and is
-// reconnecting. One who attaches later is said, one counted that way is said
-// to leave like anybody else, and a session this server started has no such
-// window.
+// A page that comes back where it got to (since), to a session this server
+// took up from a daemon before, within twice the settle of taking it up, is
+// counted and not said: that daemon said its person joined. Anybody else is
+// said: a page opened for the first time, a person already said to have
+// left, one who comes after the window, and anybody on a session this server
+// started. One counted silently is said to leave like anybody else.
 func TestAViewerBackAfterARestartIsNotSaidAgain(t *testing.T) {
 	setFor(t, &viewerSettle, 20*time.Millisecond)
 	h := eventsServer(t)
@@ -370,17 +371,23 @@ func TestAViewerBackAfterARestartIsNotSaidAgain(t *testing.T) {
 	h.api.clock.set(func() time.Time { mu.Lock(); defer mu.Unlock(); return at })
 	forward := func(d time.Duration) { mu.Lock(); at = at.Add(d); mu.Unlock() }
 	ts := sessIn(h.api, at.Add(-time.Hour), func(ts *termSession) { ts.adoptedAt = at })
+	joined := func(ts *termSession) []string {
+		var who []string
+		for _, e := range sessOf(h.api, events.ViewerJoined, ts.id) {
+			who = append(who, e.Viewer)
+		}
+		return who
+	}
 
 	forward(2*viewerSettle - time.Millisecond)
 	alice := sessConn("alice", "user", RoleControl, false)
-	ts.attach(alice, 0, true)
-	if got := sessOf(h.api, events.ViewerJoined, ts.id); len(got) != 0 {
-		t.Fatalf("alice, back within the window, joined %+v", got)
+	ts.attach(alice, 0, false)
+	if got := joined(ts); len(got) != 0 {
+		t.Fatalf("alice, back within the window, joined %v", got)
 	}
-	forward(time.Millisecond)
-	ts.attach(sessConn("bob", "user", RoleControl, false), 0, true)
-	if got := sessOf(h.api, events.ViewerJoined, ts.id); len(got) != 1 || got[0].Viewer != "bob" {
-		t.Fatalf("bob, after the window, joined %+v", got)
+	ts.attach(sessConn("carol", "user", RoleControl, false), 0, true)
+	if got := joined(ts); !slices.Equal(got, []string{"carol"}) {
+		t.Fatalf("carol, opening the session within the window, joined %v", got)
 	}
 	ts.detach(alice)
 	for end := time.Now().Add(5 * time.Second); len(sessOf(h.api, events.ViewerLeft, ts.id)) == 0; time.Sleep(5 * time.Millisecond) {
@@ -391,11 +398,21 @@ func TestAViewerBackAfterARestartIsNotSaidAgain(t *testing.T) {
 	if e := sessOf(h.api, events.ViewerLeft, ts.id)[0]; e.Viewer != "alice" {
 		t.Fatalf("alice left as %+v", e)
 	}
+	ts.attach(sessConn("alice", "user", RoleControl, false), 0, false)
+	if got := joined(ts); !slices.Equal(got, []string{"carol", "alice"}) {
+		t.Fatalf("alice, back within the window after she was said to leave, joined %v", got)
+	}
+
+	forward(time.Millisecond)
+	ts.attach(sessConn("bob", "user", RoleControl, false), 0, false)
+	if got := joined(ts); !slices.Equal(got, []string{"carol", "alice", "bob"}) {
+		t.Fatalf("bob, back after the window, joined %v", got)
+	}
 
 	started := sessIn(h.api, h.api.now())
-	started.attach(sessConn("alice", "user", RoleControl, false), 0, true)
-	if got := sessOf(h.api, events.ViewerJoined, started.id); len(got) != 1 {
-		t.Fatalf("alice, on a session this server started, joined %+v", got)
+	started.attach(sessConn("alice", "user", RoleControl, false), 0, false)
+	if got := joined(started); !slices.Equal(got, []string{"alice"}) {
+		t.Fatalf("alice, back on a session this server started, joined %v", got)
 	}
 }
 
@@ -559,7 +576,7 @@ func TestASessionKnowsWhatItRunsOn(t *testing.T) {
 		{"codex", &rota.Account{Provider: "codex"}, end, false},
 		{"no account", nil, end, false},
 	} {
-		if got := endsOf(c.a).onToken(c.until); got != c.want {
+		if got := credOf(c.a).onToken(c.until); got != c.want {
 			t.Errorf("%s: on a token is %v, want %v", c.what, got, c.want)
 		}
 	}
