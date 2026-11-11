@@ -209,7 +209,8 @@ func (f *loginFlow) Update(msg tea.Msg) (overlay, tea.Cmd) {
 		return f, nil
 	case loginPageMsg:
 		if f.stage == loginStepping && msg.from == f.step {
-			// Task 17's page goes back to the step it was opened from.
+			// The page goes back to the step it was opened from.
+			msg.ask.Back = msg.from
 			return f, f.show(f.steps.page(f.e, msg.ask))
 		}
 		return f, nil

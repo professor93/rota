@@ -689,6 +689,58 @@ func TestFiveWrongTriesReturnToTheField(t *testing.T) {
 	loginPageGone(t, link)
 }
 
+// Through the login flow itself, not a stand-in: esc, five wrong tries and
+// the page's time running out each go back to the code field the page was
+// opened from, holding what was typed, and the flow goes on.
+func TestThePageGoesBackToTheFieldOfTheFlow(t *testing.T) {
+	loginPageOffer(t, nil, loginPageLo)
+	m, b, _ := loginModel(t, nil)
+	b.FinishLoginFn = func(_ context.Context, id, code string) (LoginEnd, error) {
+		return LoginEnd{}, errors.New("the code " + code + " was not accepted")
+	}
+	loginPress(t, m, "n", "enter", "enter", "enter", "A", "B", "esc")
+	f := loginFlowOf(t, m)
+	code := loginCodeOf(t, f)
+	open := func(why string) *loginPageStep {
+		t.Helper()
+		loginPress(t, m, "w")
+		s, ok := f.step.(*loginPageStep)
+		if !ok {
+			t.Fatalf("%s: w shows %T, not the page", why, f.step)
+		}
+		return s
+	}
+	back := func(why string) {
+		t.Helper()
+		if f.step != step(code) || code.in.Value() != "AB" || f.Closed() || f.stage != loginStepping || loginOf(m) != f {
+			t.Fatalf("%s: the flow shows %T (closed %v, stage %d), not the field it came from:\n%s", why, f.step, f.Closed(), f.stage, plain(m))
+		}
+	}
+
+	open("esc")
+	loginPress(t, m, "esc")
+	back("esc")
+
+	loginPageReal(t)
+	s := open("five wrong tries")
+	loginPress(t, m, "enter")
+	if s.page == nil {
+		t.Fatal("no page was served")
+	}
+	for i := 1; i <= loginpage.MaxTries; i++ {
+		loginPagePost(t, s.page.URL, "WRONG-CODE-12345")
+	}
+	loginPageDrain(t, m)
+	back("five wrong tries")
+
+	timed := loginPageFaked(t, "http://127.0.0.1:1/SECRET", "")
+	open("its time ran out")
+	loginPress(t, m, "enter")
+	timed.end(loginpage.End{Why: loginpage.TimedOut})
+	loginPageDrain(t, m)
+	back("its time ran out")
+}
+
 func TestThePageURLIsCopiedNotLogged(t *testing.T) {
 	loginPageReal(t)
 	loginPageOffer(t, nil, loginPageLo)
