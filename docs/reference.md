@@ -592,9 +592,8 @@ link = ""                   # the address a phone opens this server at, for a me
 Much of that has no flag at all and never will: the whole of `[routes]`,
 `[terminal]` and `[events]`, all of `[auth]` but the token itself,
 `store.dir`, and the three keys a run that stays open is governed by —
-`input_timeout`,
-`input_grace` and `replay`, which were configurable from the library alone
-until this file existed. A command line is for what changes between one
+`input_timeout`, `input_grace` and `replay`, which were configurable from
+the library alone until this file existed. A command line is for what changes between one
 server and the next run of it; who may sign in, and whether this server
 holds terminals, is not that.
 
@@ -627,9 +626,9 @@ without serving, each line saying where its value came from — `# default`,
 printed, only whether there is one: every field the schema marks `secret` —
 the token, a user's password, a token entry's digest, a webhook's `url` —
 comes out as `"(set)"`, so the output can be pasted where the file itself
-could not. With
-nothing secret set it is a file rota reads straight back; with something set
-it says at the top that it is a report and not a file to load.
+could not. With nothing secret set it is a file rota reads straight back;
+with something set it says at the top that it is a report and not a file to
+load.
 
 rota has no database, and this file configures none. What persists is the
 store directory: the accounts, the homes rota stages for them and, now, this
@@ -667,8 +666,8 @@ see *Who is asking, and what they may do*.
 | `GET` | `/v1/ws` | control | a WebSocket that starts a run on whichever account the rotation picks and carries it both ways |
 | `GET` | `/v1/accounts/{id}/ws` | control | the same, on that account |
 | `GET` | `/v1/runs/{id}/ws` | watch | attach a WebSocket to a run already going, `?since=N` replaying what was missed |
-| `GET` | `/v1/events` | watch | the server's events as a stream (`text/event-stream`), each an `id:`, an `event:` and one `data:` line of JSON, with `: ping` every 25 seconds: after `Last-Event-ID`, else after `?since=N` (`0` is all of the last 1024 kept), else from now, and `?on=account.*,session.ended` for only those. Asked for events older than it keeps, it says `event: gap` first. It ends when the server begins to stop, and a page sign-in's stream when the sign-in ends. `503` past 64 streams at once from the network, or past 16 for one sign-in (a page session, else a token or a user); the control socket's own, which the daemon's sinks read, are not counted |
-| `POST` | `/v1/events` | control | publish a test event: `{"type":"test","sink":"…"}` → `202 {"id":N}`, for that sink or, with no `sink`, for every one; `429` for a second one for the same sink within a second |
+| `GET` | `/v1/events` | watch | the server's events as a stream (`text/event-stream`), each an `id:`, an `event:` and one `data:` line of JSON, with `: ping` every 25 seconds: after `Last-Event-ID`, else after `?since=N` (`0` is all of the last 1024 kept), else from now, and `?on=account.*,session.ended` for only those. Asked for events older than it keeps, it says `event: gap` first. It ends when the server begins to stop, and a page sign-in's stream when the sign-in ends. `503` past 64 streams at once from the network, or past 16 for one sign-in (a page session, else a token or a user); the control socket's own, which the daemon's sinks read, are not counted — see *[Events](#events)* |
+| `POST` | `/v1/events` | control | publish a test event: `{"type":"test","sink":"…"}` → `202 {"id":N}`, for that sink or, with no `sink`, for every one; `429` for a second one for the same sink within a second; `rota serve status --test` is what waits for each sink's outcome |
 | `GET` | `/v1/terminals` | watch | the terminals running right now, and the ones that have just ended; a held session, in a process of its own under the rota daemon, adds `"held":true`, `state` (`live`, `ended`, `interrupted` or `broken`), `attachable`, `reachable`, `pid` (its holder), `name`, `title`, `conversation`, `conversation_cwd`, `resumable`, `ended_at` once it has stopped, `made_by` for a holder this rota cannot attach to (`unknown` when its record does not say), and `status` (`running`, `needs_you`, `quiet` or `stopped`). The daemon also lists the held sessions its store's records describe: the stopped ones, for `keep_stopped`, and the running ones it is not linked to |
 | `GET` | `/v1/terminals/{id}` | watch | one of them: what it runs, who is watching, who holds the keyboard, and the same held fields, for a stopped held session too |
 | `POST` | `/v1/terminals` | control | `{"account":1,"args":[],"cwd":"…","cols":120,"rows":40,"label":"…"}` — start one; `503` when the server is stopping as it starts, and a held session started by then goes on running for the next daemon to take up. Over the control socket alone, `"env":["NAME=value",…]` is the environment a held session starts from in place of the daemon's, which its holder keeps the variables that describe another terminal out of, and `"remote_control":true`, or the session's name, starts an account's CLI with Claude Code's Remote Control on for whichever account is chosen, turning its setting on first and refusing what could not work, by the same rule and in the same words as `rota run --remote-control`. An empty `env` is `400`, since it would start the session with no `PATH`; from anybody else either is `403`: *env is taken only over the control socket*, or *remote_control is taken only over the control socket* |
@@ -872,14 +871,15 @@ let go of the store. That is moments, as a rule; the minute is for a refresh
 under way, which is finished first, so that the provider's answer is saved
 and in its home before the daemon goes. Within ten seconds the daemon closes
 its port and its control socket, giving what they are serving all but the
-last second to finish; then its event sinks have what is left of those ten
-seconds to send what they have, `daemon.stopped` last (*[Events](#events)*);
-then it ends every WebSocket either of them handed over, each told `1001`
-*the server is stopping*, lets go of every session,
-still running, waits up to 45 seconds for any refresh still under way, and
-lets go of the store last; the last second of the ten is for those goodbyes
-to go out. It says `rota daemon stopped; N sessions keep running`. With no daemon
-it says `no rota daemon is running for <store>` and exits `0`.
+last second to finish; then its event sinks have until the ten seconds are
+up to send what they have, `daemon.stopped` last (*[Events](#events)*); then
+it ends every WebSocket either of them handed over, each told `1001` *the
+server is stopping*, lets go of every session, still running, waits up to 45
+seconds for any refresh still under way, and lets go of the store last. The
+goodbyes have what is left of the ten seconds, and a second at least, so a
+drain that ran out makes the stop a second longer. It says `rota daemon
+stopped; N sessions keep running`. With no daemon it says `no rota daemon is
+running for <store>` and exits `0`.
 
 `rota serve stop --all` ends the sessions as well. At a terminal it asks
 first; anything but `y` or `yes` stops nothing and exits `1`, and off a
@@ -1065,11 +1065,10 @@ all on stderr. When `server.toml` names event sinks, the first line ends
 any daemon does (*[Events](#events)*). A session whose name has a control
 character in it is shown with a space for each, as an account's name is,
 and `rota send` is shown its id instead, since the name as shown matches
-nothing. A daemon another
-start got to first, between this one's look
-and its start, is named instead of the first line — *rota: a rota daemon is
-already running for /home/me/.rota (pid 4242)* — since it may serve a port as
-well. `--json` prints the session instead of the line about it, as the
+nothing. A daemon another start got to first, between this one's look and
+its start, is named instead of the first line — *rota: a rota daemon is
+already running for /home/me/.rota (pid 4242)* — since it may serve a port
+as well. `--json` prints the session instead of the line about it, as the
 daemon describes it: the document `GET /v1/terminals` lists, with the
 account an object and `ended` a bool (*[A terminal on the
 server](#a-terminal-on-the-server)*). `--remote-control` with an account named
@@ -2489,11 +2488,11 @@ which is `0700`:
 | `ctl.sock` | the daemon's control socket, `0600`: who reaches it, and how long its path may be, are in *[The control socket](#the-control-socket)* |
 | `daemon.lock` | locked by the one daemon serving the store, for as long as it does. Only this lock says a daemon runs; a socket or a pid file left behind never does |
 | `daemon.pid` | which process that daemon is, its version, when it started and the port it serves, for `serve status` and `serve stop` |
+| `sinks.json` | how each event sink is doing, for `serve status`, `0600` and with no secret in it; written only by a daemon with sinks (*[Events](#events)*) |
 | `<id>/` | one held session, `0700`; its id is 16 hexadecimal characters |
 | `<id>/sock` | the holder's socket, `0600`. It takes a link only from the daemon serving the store: *only the rota daemon serving this store may link to a session* |
 | `<id>/lock` | locked by the holder for its whole life: locked is running, whatever its socket does |
 | `<id>/meta.json` | the session's record, `0600`: its account, folder, arguments and conversation, which process its holder and its CLI are and when each started, and, once it stops, when and with what exit. It outlives the holder, which is how a stopped session is still listed. It holds no credential rota keeps; its arguments are what was typed, less the flags that pick a conversation |
-| `sinks.json` | how each event sink is doing, for `serve status`, `0600` and with no secret in it; written only by a daemon with sinks (*[Events](#events)*) |
 | `<id>/holder.log` | what the holder had to say, among it the warning a claude launch gives about a settings file that puts back what it drops (see *[Providers](#providers)*), and why the holder crashed if it did; moved to `holder.log.1` at 1 MiB. It is written only as a plain file, never through a link, and not at all once others may read or write it |
 
 The daemon's own log is `<store>/daemon.log`, or `[server] log_file`. A
@@ -2611,8 +2610,8 @@ only the daemon sends them on, and some events only it can say:
 
 | | foreground `rota serve` | the daemon |
 |---|---|---|
-| `account.*` | after each background sweep | the same |
-| `session.started`, `session.ended`, `viewer.*` | of its own terminals, shared ones among them | of its held sessions |
+| `account.*` | after each background sweep; a session's token with the terminals' sweep | the same |
+| `session.started`, `session.ended`, `viewer.*` | of its own terminals, shared ones among them | of its held sessions, and shared ones |
 | `session.attention`, `session.quiet` | — | of its held sessions |
 | `daemon.started`, `daemon.stopped` | — | yes |
 | sinks | none: it says once at start *events: [[events.sink]] is sent by the rota daemon (rota serve start); this foreground server sends none* | every `[[events.sink]]` |
@@ -2667,10 +2666,10 @@ account; nothing does either yet, so no event carries them.
 
 #### The words
 
-What `text` says, by type, with `name` before it. A percentage is rounded
-to a whole number, a time is `21:20 UTC`, a span is cut to its two largest
-units — `45s`, `12m`, `1h 3m`, `2h`, `2d 4h` — and a folder is its base
-name, never its path.
+What `text` says, by type, with `name` before it. A percentage is rounded to
+a whole number, a time is `21:20 UTC`, a span is whole seconds, whole
+minutes, or its two largest units above that — `45s`, `12m`, `1h 3m`, `2h`,
+`2d 4h` — and a folder is its base name, never its path.
 
 | Type (reason) | `text` |
 |---|---|
@@ -2711,18 +2710,19 @@ above `0` is `400` *since must be an event id*. `?on=` is a comma-separated
 list of patterns — a type, `<prefix>.*` for every type under it, or `*` —
 and a pattern that matches no type is `400`, naming it and listing the
 types: `on: "acount.*" names no event; the events are account.threshold,
-account.reset, …`.
+account.reset, …`; an `on` of nothing but commas is `400` *on names no
+event*.
 
 Ids are the time they were given, in microseconds, and one more than the
-last when the clock has not moved on, so they keep rising across a
-restart: a `Last-Event-ID` from before the daemon restarted is older than
-anything the new one has, and gets everything it keeps and nothing twice.
-A stream asked for events older than any still kept says so first, once,
-with `event: gap` and a `data:` line whose `text` is `events before <id>
-were not kept`; a gap has no `id:` line, so the browser's `Last-Event-ID`
-stays where it was. An id newer than any this server gave — a daemon whose
-clock ran ahead, an id from another server — is not trusted: the stream
-gives everything kept, after a gap.
+last when the clock has not moved on, so they keep rising across a restart:
+a `Last-Event-ID` from before the daemon restarted is older than anything
+the new one has, and gets everything it keeps and nothing twice. A stream
+asked for events older than any still kept says so first, once, and again if
+it falls that far behind, with `event: gap` and a `data:` line whose `text`
+is `events before <id> were not kept`; a gap has no `id:` line, so the
+browser's `Last-Event-ID` stays where it was. An id newer than any this
+server gave — a daemon whose clock ran ahead, an id from another server — is
+not trusted: the stream gives everything kept, after a gap.
 
 Publishing never waits for a reader. A stream ends when:
 
@@ -2732,7 +2732,7 @@ Publishing never waits for a reader. A stream ends when:
 - the page sign-in it was opened with has signed out or expired, which is
   looked at with each heartbeat;
 - the server begins to stop, after the events it had not yet sent. A stream
-  opened after that gives what is kept, and ends.
+  opened after that gives what it asks for of what is kept, and ends.
 
 A server holds 64 streams at once from the network, and one sign-in — a
 page session, else a token or a user — 16 of them; past either it answers
@@ -2742,13 +2742,14 @@ control socket's are not counted, the daemon's own sinks among them.
 **The test event.** `POST /v1/events` takes the `control` role and one body,
 `{"type":"test","sink":"telegram"}`, or with no `sink` for every sink, and
 answers `202 {"id":N}`: the daemon's sinks send it whatever their `on` says,
-and sending it is theirs to do. Anything else is `400` *only a test event
-can be posted: {"type":"test","sink":"<name or empty for every sink>"}*, and
-a `sink` that could not be a sink's name *sink must be a sink's name, or
-empty for every sink*; a second for the same sink within a second is `429`
-*a test event for
-telegram was sent a moment ago*; a server that is stopping answers `503`
-*this server is stopping*.
+and sending it is theirs to do; only `rota serve status --test` waits for
+what each did. Any other body is `400` *only a test event can be posted:
+{"type":"test","sink":"<name or empty for every sink>"}*, one over 4096
+bytes *a test event is at most 4096 bytes*, and a `sink` that could not be a
+sink's name *sink must be a sink's name, or empty for every sink*; a second
+for the same sink within a second is `429` *a test event for telegram was
+sent a moment ago*; a server that is stopping answers `503` *this server is
+stopping*.
 
 #### When each is said
 
@@ -2757,8 +2758,8 @@ a server starts is a baseline, and nothing about it is said**: the accounts
 as it first reads them, the sessions it takes up, and what each of those
 was doing. `daemon.started` says how many it took up. So a daemon restarted
 for an upgrade does not announce every account over its threshold and every
-session that is waiting, and a crossing that happened while no daemon ran
-is never pushed.
+session that is waiting, and a crossing that happened during a night with
+no daemon is never pushed.
 
 - **Accounts** are looked at after each background sweep — `refresh_every`,
   two minutes by default, and the read a few seconds after a window resets
@@ -2796,13 +2797,13 @@ is never pushed.
   the session's start and the taking up can make one on its stored login
   read as one on a token.
 - **`session.started`** is said once by whatever lists a new running
-  session: a terminal started, a held session started, a terminal shared.
-  A session taken up from a daemon before is no new session.
+  session: a terminal started, a held session started, a terminal shared. A
+  session taken up from a daemon before is no new session.
   **`session.ended`** is said once its CLI has ended: `interrupted` for a
-  holder that went
-  without recording its exit, `stopped` for one somebody or the idle
-  timeout stopped, else `exited`. A session the daemon lets go of, still
-  running, says nothing, and one never said to start is not said to end.
+  holder that went without recording its exit, `stopped` for one somebody or
+  the idle timeout stopped, else `exited`. A session the daemon lets go of,
+  still running, says nothing, and a session whose start failed is not said
+  to end.
 - **Viewers** are people, not connections: a person, by how they came in
   and their name, joins with their first connection, and leaves 10 seconds
   after their last has gone, unless they came back meanwhile, so a laptop
@@ -2901,18 +2902,19 @@ http only to this machine (127.0.0.1, ::1, localhost)* — or that holds a
 user or password, and a program given as a relative path: *command's
 program must be a name on PATH or an absolute path*. No refusal repeats the
 address. What can only be known as the sink starts — a token file nobody
-else may read, a program on `PATH`, a network that is up — is the running
-sink's to find: it is then `failing`, says why in the log, and is sent
-nothing, and it never stops the daemon or another sink.
+else may read, a program on `PATH` — is the running sink's to find: it is
+then `failing`, says why in the log, and is sent nothing, and it never stops
+the daemon or another sink. A network that is down is only a failed
+attempt, tried again as below.
 
 **Where they run.** In every daemon: one `rota serve start` started, the one
 `rota serve install` hands the supervisor, and the one `rota run --detach`
 starts on its own when none runs, whose line says so — `…; events to
-telegram, webhook`. As it starts the daemon logs `events: 2 sinks:
-telegram, webhook`. The sinks read the daemon's own stream over its control
-socket, open it again from the last event they read if it breaks, and log
-*events: some events were missed* for a gap. A foreground `rota serve` sends
-none, and says so once.
+telegram, webhook`; `rota serve start`'s own line does not name them. As it
+starts the daemon logs `events: 2 sinks: telegram, webhook`. The sinks read
+the daemon's own stream over its control socket, open it again from the last
+event they read if it breaks, and log *events: some events were missed* for
+a gap. A foreground `rota serve` sends none, and says so once.
 
 **Delivery.** Each sink has a queue of its own and sends in order, so a sink
 that is slow or down holds up no other sink, and never the daemon:
@@ -2942,16 +2944,15 @@ have until ten seconds after the stop began to send what they have,
 log says *events were still being sent as the rota daemon stopped*. A sink
 slower than that misses `daemon.stopped`.
 
-**Telegram** sends each event to one chat as a plain message through the
-Bot API's `sendMessage`: its sentence, and the link to its session on a line
-of its own when there are both, with link previews off. A message longer
-than Telegram's limit of 4096, counted as Telegram counts, in UTF-16 units,
-is cut there and ends with `…`. The token is read once, as the sink starts.
-A link to the
-file is followed; the file it names must be a plain file, and a FIFO or a
-device is refused at once rather than waited on: *bot_token_file <path> is
-not a plain file*. It must be its owner's alone, as `server.toml` must
-(*bot_token_file: <path> is readable or writable by other users (mode
+**Telegram** sends each event to one chat as a plain message through the Bot
+API's `sendMessage`: its sentence, and the link to its session on a line of
+its own when there are both, with link previews off. A message longer than
+Telegram's limit of 4096, counted as Telegram counts, in UTF-16 units, is
+cut there and ends with `…`. The token is read once, as the sink starts. A
+link to the file is followed; the file it names must be a plain file, and a
+FIFO or a device is refused at once rather than waited on: *bot_token_file
+<path> is not a plain file*. It must be its owner's alone, as `server.toml`
+must (*bot_token_file: <path> is readable or writable by other users (mode
 0644); it is its owner's alone, so fix it with: chmod 600 <path>*), and hold
 a token and nothing else: *bot_token_file <path> holds no bot token*, *…
 holds more than 4096 bytes*, *… holds more than 256 bytes; a bot token is
@@ -2968,24 +2969,24 @@ Telegram is **send-only**. rota never reads what is said to the bot, and
 answering a session from the chat is not in this version.
 
 **A webhook** is posted each event's JSON, the line a stream's `data:`
-carries, with `Content-Type: application/json`, `User-Agent: rota/<version>`,
-`X-Rota-Event: <type>`, `X-Rota-Delivery: <id>`, and, with a `secret_file`,
-`X-Rota-Signature: sha256=<hex>`: the HMAC-SHA256 of the body as sent,
-keyed with what the file holds, trimmed. That file is read as a bot token's
-is, up to 4096 bytes: *secret_file <path> holds more than 4096 bytes*,
-*secret_file <path> holds no secret*. It goes over `https` anywhere,
+carries, with `Content-Type: application/json`, `User-Agent:
+rota/<version>`, `X-Rota-Event: <type>`, `X-Rota-Delivery: <id>`, and, with
+a `secret_file`, `X-Rota-Signature: sha256=<hex>`: the HMAC-SHA256 of the
+body as sent, keyed with what the file holds, trimmed. That file is read as
+a bot token's is, up to 4096 bytes: *secret_file <path> holds more than 4096
+bytes*, *secret_file <path> holds no secret*. It goes over `https` anywhere,
 through the proxy the daemon's environment names and with the certificate
 checked as always; a certificate that fails is tried again, since a clock
 not yet set or a captive portal mends itself. Plain `http` goes only to this
-machine, and that is checked at each address it connects to, after the name
-is resolved and before anything is sent, so a name that resolves elsewhere
-sends nothing in clear text: that is refused, *webhook: plain http only to
-this machine*, and never tried again. A `2xx` is delivered; `429`, a `5xx`
-and a server that cannot be reached are tried again, after its
-`Retry-After`, in seconds or as a date, when it gives one; anything else,
-a redirect among them, which is never followed, is dropped. Its error is
-*webhook answered 502 Bad Gateway*, in Go's words for the code: nothing of
-what the server sent is repeated.
+machine, never through a proxy, and that is checked at each address it
+connects to, after the name is resolved and before anything is sent, so a
+name that resolves elsewhere sends nothing in clear text: that is refused,
+*webhook: plain http only to this machine*, and never tried again. A `2xx`
+is delivered; `429`, a `5xx` and a server that cannot be reached are tried
+again, after its `Retry-After`, in seconds or as a date, when it gives one;
+anything else, a redirect among them, which is never followed, is dropped.
+Its error is *webhook answered 502 Bad Gateway*, in Go's words for the code:
+nothing of what the server sent is repeated.
 
 **A command** is run once for each event, its event's JSON and a newline on
 its standard input, never in its arguments. Its program is the first word
@@ -2999,10 +3000,10 @@ daemon's environment anyway. Its arguments are not a secret place: `ps`
 shows them. Its standard output is thrown away, and the first line of its
 standard error, up to 200 bytes, is what its error says. Exit `0` is
 delivered, `75` (`EX_TEMPFAIL`) is tried again, and anything else is
-dropped: *command exited 1: <that line>*. An attempt has its 15 seconds and
-two more for whatever still holds its standard error, about 17 at most;
-when it runs out the program's whole process group is killed — *command did
-not exit in time and was killed* — and the event dropped. After a program
+dropped: *command exited 1: <that line>*. At 15 seconds the program's whole
+process group is killed — *command did not exit in time and was killed* —
+and the event dropped; whatever still holds its standard error then has two
+seconds more, so an attempt takes about 17 at most. After a program
 exits by itself its group is left alone, since a script may mean to leave a
 job running. One that cannot start is tried again only for a cause that
 passes, a fork limit or a binary being written; for any other — gone, not
@@ -4754,8 +4755,8 @@ for that home — the server's own `server.toml`, the journal of every refresh
 own*), the socket a
 run that stays open is reached through (`runs/<id>.sock`), and, where the
 server holds terminals, `terminals/` — the share socket, any recordings
-and, where the store has a daemon, its control socket and a directory for
-each session it holds (see *[Held sessions and the
+and, where the store has a daemon, its control socket, a directory for each
+session it holds and, where it sends events, `sinks.json` (see *[Held sessions and the
 daemon](#held-sessions-and-the-daemon)*), files mode `0600` inside
 directories that are `0700` — beside the daemon's own `daemon.log`. rota
 has no database.
