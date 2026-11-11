@@ -24,6 +24,7 @@ import (
 
 	"github.com/professor93/rota/api"
 	"github.com/professor93/rota/cmd/rota/sshd"
+	"github.com/professor93/rota/internal/pty"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/message"
 	"github.com/professor93/rota/rotation"
@@ -2386,6 +2387,11 @@ func (c *cli) serve(args []string) (err error) {
 	// half gives is refused below, in the file's words.
 	if (cfg.TLS.Cert == "" || cfg.TLS.Key == "") && given["tls-cert"] != given["tls-key"] {
 		return usageErr("--tls-cert and --tls-key go together")
+	}
+	// Where there is no SSH server that is the one thing to say, before
+	// what else the file would need for one, and before serving anything.
+	if cfg.SSH.Enabled && !pty.Supported {
+		return usageErr("%v", sshwireNotHere)
 	}
 	opts, listener, err := cfg.Serve()
 	if err != nil {
