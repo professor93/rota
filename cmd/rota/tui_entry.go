@@ -197,7 +197,7 @@ func (q *quitSaid) begin() {
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		if !q.ended {
-			fmt.Fprintln(q.w, "rota: waiting for a refresh to be saved")
+			fmt.Fprintln(q.w, "rota: waiting for what the TUI started to finish, a refresh being saved among it")
 		}
 	})
 }

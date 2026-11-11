@@ -469,7 +469,7 @@ func TestQuittingWaitsForARefreshToBeSaved(t *testing.T) {
 	case <-time.After(60 * time.Second):
 		t.Fatal("quitting never ended")
 	}
-	if got := said.String(); got != "rota: waiting for a refresh to be saved\n" {
+	if got := said.String(); got != "rota: waiting for what the TUI started to finish, a refresh being saved among it\n" {
 		t.Fatalf("quitting said %q", got)
 	}
 	if got := readAccounts(t, home).Accounts[0].Token.Access; got != "NEW-1" {
@@ -535,13 +535,13 @@ func TestQuittingSaysOnceWhatItWaitsFor(t *testing.T) {
 	}
 	time.Sleep(50 * time.Millisecond) // past a second quitSayAfter
 	q.done()
-	if got := said.String(); got != "rota: waiting for a refresh to be saved\n" {
+	if got := said.String(); got != "rota: waiting for what the TUI started to finish, a refresh being saved among it\n" {
 		t.Fatalf("a slow quit said %q", got)
 	}
 	// Once done, nothing more is said, nor is a count begun.
 	q.begin()
 	time.Sleep(50 * time.Millisecond)
-	if got := said.String(); got != "rota: waiting for a refresh to be saved\n" {
+	if got := said.String(); got != "rota: waiting for what the TUI started to finish, a refresh being saved among it\n" {
 		t.Fatalf("after done it said %q", got)
 	}
 }
@@ -582,7 +582,7 @@ func TestQuittingCountsTheWaitFromTheProgramsEnd(t *testing.T) {
 	if err := (&cli{out: io.Discard, err: said, in: strings.NewReader("")}).openTUI(); err != nil {
 		t.Fatalf("openTUI: %v", err)
 	}
-	if got := said.String(); got != "rota: waiting for a refresh to be saved\n" {
+	if got := said.String(); got != "rota: waiting for what the TUI started to finish, a refresh being saved among it\n" {
 		t.Fatalf("a slow leave said %q", got)
 	}
 }
