@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/professor93/rota/api"
+	"github.com/professor93/rota/cmd/rota/notify"
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/termenv"
 	"github.com/professor93/rota/store"
@@ -129,13 +130,14 @@ func (c *cli) serveStop(args []string) error {
 }
 
 // serveStatus is `rota serve status`: 0 when a daemon runs, 3 when none
-// does.
+// does. --test sends a test event to the sink it names, or to every sink.
 func (c *cli) serveStatus(args []string) error {
 	fs := flag.NewFlagSet("serve status", flag.ContinueOnError)
+	test := fs.String("test", "", "send a test event to `SINK`, or to every sink for all; say what each did")
 	if ok, err := c.daemonFlags(fs, args); !ok {
 		return err
 	}
-	return c.daemonStatus()
+	return c.daemonStatus(*test)
 }
 
 // daemonFlags parses one daemon verb's flags. Asked for help, it prints what
@@ -163,10 +165,12 @@ func (c *cli) daemonFlags(fs *flag.FlagSet, args []string) (ok bool, err error) 
 // daemonStart is which daemon serves the store once a start is over: the
 // one it started, once that one answered as the process the start made, or
 // the one already running, found before anything started or having won the
-// store from the start's own daemon. Exactly one of the two is set.
+// store from the start's own daemon. Exactly one of the two is set. sinks is
+// what the sinks a daemon it started sends events to are called.
 type daemonStart struct {
 	home, sock       string
 	started, running *holdwire.Daemon
+	sinks            []string
 }
 
 // pidOf is " (pid N)" for a daemon whose record names it, and nothing for
@@ -417,7 +421,8 @@ func logTail(path string, from int64, n int) []string {
 }
 
 // statusDoc is `rota serve status --json`. Started and HTTP are null when
-// there is no daemon, or no port.
+// there is no daemon, or no port. Sinks is absent when the daemon sends
+// events to none.
 type statusDoc struct {
 	Running  bool       `json:"running"`
 	PID      int        `json:"pid"`
@@ -430,6 +435,7 @@ type statusDoc struct {
 		Live    int `json:"live"`
 		Stopped int `json:"stopped"`
 	} `json:"sessions"`
+	Sinks []notify.Status `json:"sinks,omitempty"`
 }
 
 // sayStatus prints a status, as JSON or as lines a person reads. In the
@@ -464,6 +470,10 @@ func (c *cli) sayStatus(doc *statusDoc) error {
 	}
 	if s := doc.Sessions; s.Live+s.Stopped > 0 || doc.Running {
 		fmt.Fprintf(c.out, "sessions: %d running, %d stopped\n", s.Live, s.Stopped)
+	}
+	now := time.Now()
+	for _, s := range doc.Sinks {
+		fmt.Fprintln(c.out, sinkLine(s, now))
 	}
 	return nil
 }

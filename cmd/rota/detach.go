@@ -95,7 +95,8 @@ func (c *cli) detach(id int, rest []string, ask shareAsk, remote remoteAsk) erro
 	switch {
 	case spawned == nil:
 	case spawned.started != nil:
-		fmt.Fprintf(c.err, "rota: started the rota daemon for %s (control socket only; rota serve stop ends it)\n", oneLine(spawned.home))
+		fmt.Fprintf(c.err, "rota: started the rota daemon for %s (control socket only; rota serve stop ends it)%s\n",
+			oneLine(spawned.home), eventsTo(spawned.sinks))
 	default:
 		fmt.Fprintf(c.err, "rota: a rota daemon is already running for %s%s\n", oneLine(spawned.home), pidOf(spawned.running))
 	}

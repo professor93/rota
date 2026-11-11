@@ -467,3 +467,36 @@ func TestAGiveUpCountsEverythingLeft(t *testing.T) {
 		t.Fatalf("dropped %d, want 4: the event, the test in flight and two waiting", s.Dropped)
 	}
 }
+
+// A sink is failing since its first failure in a row: retries and later
+// events that fail do not move that, while LastErrorAt follows each; a
+// delivery clears it, and the next failure starts it again.
+func TestFailingSinceIsWhenTheFailingBegan(t *testing.T) {
+	quick(t)
+	busy := errors.New("the chat is busy")
+	// Three failures, a delivery, then failures for good.
+	f := &fakeSender{answer: func(_ context.Context, call int, _ events.Event) error {
+		time.Sleep(3 * time.Millisecond) // so that each failure has a time of its own
+		if call == 4 {
+			return nil
+		}
+		return again(busy, 0)
+	}}
+	useSenders(t, map[string]any{"webhook": f})
+	src := newSource(ev(1, events.AccountDead))
+	d := &dialer{plan: []any{src}}
+	n := startNotifier(t, Options{Events: api.EventsSection{Sinks: []api.EventSink{webhookSink}}, Dial: d.dial})
+
+	eventually(t, "the first event to be sent", func() bool { return statusOf(t, n, "webhook").Sent == 1 })
+	if s := statusOf(t, n, "webhook"); s.State != stateOK || !s.FailingSince.IsZero() || s.LastErrorAt.IsZero() {
+		t.Fatalf("after a delivery: %+v", s)
+	}
+	src.feed <- ev(2, events.AccountDead)
+	eventually(t, "the second event to be dropped", func() bool { return statusOf(t, n, "webhook").Dropped == 1 })
+	s := statusOf(t, n, "webhook")
+	at := f.times()
+	if s.State != stateFailing || len(at) != 11 || !s.LastErrorAt.After(s.FailingSince) ||
+		s.FailingSince.Before(at[4]) || !s.FailingSince.Before(at[5]) {
+		t.Fatalf("failing since %v, last error %v; the attempts came at %v: %+v", s.FailingSince, s.LastErrorAt, at, s)
+	}
+}

@@ -16,4 +16,4 @@ func (c *cli) runDaemon(bool, string) error { return holdwire.ErrPlatform }
 
 func (c *cli) stopDaemon(bool, bool) error { return holdwire.ErrPlatform }
 
-func (c *cli) daemonStatus() error { return holdwire.ErrPlatform }
+func (c *cli) daemonStatus(string) error { return holdwire.ErrPlatform }
