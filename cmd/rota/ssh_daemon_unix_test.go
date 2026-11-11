@@ -9,6 +9,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	nethttp "net/http"
@@ -437,6 +438,31 @@ func TestStartSaysWhySSHIsOff(t *testing.T) {
 	r.start()
 	if out, errb, code := r.rota("serve", "start"); code != 0 || !strings.HasPrefix(out, already) || strings.Count(out, "\n") != 1 {
 		t.Fatalf("serve start with an SSH daemon running: exit %d %q %q", code, out, errb)
+	}
+}
+
+// serve start finding a daemon, with a file that does not turn SSH on, says
+// the one line it always said, and nothing of SSH: with no file at all
+// against a daemon on its port, and with [ssh] enabled = false against one
+// on its control socket alone.
+func TestStartWithoutSSHSaysOnlyThatItRuns(t *testing.T) {
+	r := newSSHRig(t)
+	if err := os.Remove(filepath.Join(r.home, "server.toml")); err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := r.start()
+	want := fmt.Sprintf("rota daemon already running for %s (pid %d)\n", r.home, pid)
+	if out, errb, code := r.rota("serve", "start"); code != 0 || out != want || errb != "" {
+		t.Fatalf("serve start with no file and a daemon running: exit %d %q %q, want %q", code, out, errb, want)
+	}
+	if _, _, code := r.rota("serve", "stop"); code != 0 {
+		t.Fatal("serve stop failed")
+	}
+	pid, _ = r.start("--ctl-only")
+	r.write(strings.Replace(sshwFile(r.addr, r.key), "enabled = true", "enabled = false", 1))
+	want = fmt.Sprintf("rota daemon already running for %s (pid %d)\n", r.home, pid)
+	if out, errb, code := r.rota("serve", "start"); code != 0 || out != want || errb != "" {
+		t.Fatalf("serve start with [ssh] off and a --ctl-only daemon running: exit %d %q %q, want %q", code, out, errb, want)
 	}
 }
 
