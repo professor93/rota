@@ -4,10 +4,15 @@ package sshd
 
 import (
 	"errors"
+	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/professor93/rota/cmd/rota/client"
+	"github.com/professor93/rota/internal/share"
 )
 
 /* ---------------------------------------- what a session is called, and by --- */
@@ -46,12 +51,13 @@ func TestTheWayBackNeedsNoQuoting(t *testing.T) {
 
 // A plain word is one a shell leaves as it is and words reads back whole.
 func TestAWayBackIsPlain(t *testing.T) {
-	for _, w := range []string{"api", "web-2.0_x@y:z,w/v%u+t=s", "0123456789abcdef"} {
+	for _, w := range []string{"api", "web-2.0_x@y:z,w/v%u+t=s", "0123456789abcdef", "a=b"} {
 		if !attachPlain(w) {
 			t.Errorf("%q is not plain", w)
 		}
 	}
-	for _, w := range []string{"", "my api", "it's", `say"hi"`, `a\b`, "$HOME", "a;b", "a|b", "a&b", "*", "~x",
+	// =api is zsh's path of the command api.
+	for _, w := range []string{"", "=api", "my api", "it's", `say"hi"`, `a\b`, "$HOME", "a;b", "a|b", "a&b", "*", "~x",
 		"a`b`", "(x)", "<x>", "a#b", "a!b", "a?b", "[x]", "{x}", "a\tb", "a\nb", "café", "\x1b[2J"} {
 		if attachPlain(w) {
 			t.Errorf("%q is plain", w)
@@ -112,6 +118,24 @@ func TestAHostileNameIsCleanedOnEveryLine(t *testing.T) {
 // never guessed between.
 func TestANameFindsOnlyWhatThisServerStarted(t *testing.T) {
 	const id = "5ba7ed0000000001"
+	// A held session says its state, whatever its kind; a terminal the
+	// server runs itself says none, and is named only for the kinds it
+	// starts.
+	for _, x := range []struct {
+		s     client.Session
+		named bool
+	}{
+		{client.Session{State: "live"}, true},
+		{client.Session{State: "exited", Kind: "later"}, true},
+		{client.Session{Kind: "account"}, true},
+		{client.Session{Kind: "shell"}, true},
+		{client.Session{Kind: "shared"}, false},
+		{client.Session{}, false},
+	} {
+		if got := attachNamed(x.s); got != x.named {
+			t.Errorf("attachNamed(%+v) = %v", x.s, got)
+		}
+	}
 	for _, x := range []struct {
 		s     client.Session
 		found bool
@@ -153,6 +177,83 @@ func TestANameFindsOnlyWhatThisServerStarted(t *testing.T) {
 		if code != 1 || !strings.HasPrefix(errOut, `2 live sessions are called "api"`) || !strings.Contains(errOut, api.ID) {
 			t.Errorf("%s api with two: %d %q", cmd, code, errOut)
 		}
+	}
+	attachGivenBack(t, r)
+}
+
+// attachShare offers a terminal on the rig's share socket, as `rota run
+// --share` would, labelled label, which says it is ready, again and again,
+// for five seconds. It gives the terminal's id.
+func attachShare(t *testing.T, label string) string {
+	t.Helper()
+	path := filepath.Join(os.Getenv("ROTA_HOME"), "terminals", share.SockName)
+	conn, err := net.DialTimeout("unix", path, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := share.NewConn(conn, 0)
+	t.Cleanup(func() { c.Close() })
+	hello := share.HelloMsg{Version: share.Version, Account: 1, Label: label, Cwd: "/src/" + label, Cols: 80, Rows: 24, PID: 4242, Mode: share.ModeControl}
+	if err := c.SendJSON(share.Hello, hello); err != nil {
+		t.Fatal(err)
+	}
+	kind, payload, err := c.Read()
+	if err != nil || kind != share.Welcome {
+		t.Fatalf("share hello: %d %q %v", kind, payload, err)
+	}
+	var yes share.WelcomeMsg
+	if err := share.Unmarshal(payload, &yes); err != nil {
+		t.Fatal(err)
+	}
+	c.Clear()
+	go func() {
+		for {
+			if _, _, err := c.Read(); err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		for range 50 {
+			if c.Send(share.Output, []byte("shared-ready\r\n")) != nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+	return yes.Terminal
+}
+
+// A shared terminal is found by its id alone, so the way back its last line
+// gives is its id, never the label its sharer chose: that label finds
+// nothing, or, once a session of the server's has it, that session.
+func TestASharedTerminalsWayBackIsItsID(t *testing.T) {
+	r := commandsStart(t, commandsTty)
+	id := attachShare(t, "api")
+	c := r.signIn(r.me)
+	if _, errOut, code := commandsPty(t, c, "attach api", 80, 24); code != 1 || !strings.HasPrefix(errOut, `no session is "api"`) {
+		t.Errorf("attach api, shared only: %d %q", code, errOut)
+	}
+	back := "attach " + id
+	for range 2 {
+		// The way back is the way back.
+		a := attachOpen(t, c, back, 80, 24)
+		a.wait(0, "shared-ready")
+		a.typ("\x1cd")
+		if code := a.end(); code != 0 {
+			t.Fatalf("%s: exit %d; stderr %q", back, code, a.err.String())
+		}
+		if got, want := a.err.String(), "rota: detached from api; "+back+" returns to it\r\n"; got != want {
+			t.Errorf("stderr %q, want %q", got, want)
+		}
+	}
+	// A session of the server's called api changes none of that.
+	r.open(t, "api")
+	a := attachOpen(t, c, back, 80, 24)
+	a.wait(0, "shared-ready")
+	a.typ("\x1cd")
+	if code := a.end(); code != 0 || a.err.String() != "rota: detached from api; "+back+" returns to it\r\n" {
+		t.Errorf("with a live api too: %d %q", code, a.err.String())
 	}
 	attachGivenBack(t, r)
 }

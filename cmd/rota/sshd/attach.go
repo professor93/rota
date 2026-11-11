@@ -99,11 +99,18 @@ func attachCommand(ctx context.Context, ch *Channel, args []string, word string)
 func attachFind(all []client.Session, word string) (client.Session, error) {
 	live := slices.Clone(all)
 	for i, s := range live {
-		if s.State == "" && s.Ended == nil && (s.Kind == holdwire.KindAccount || s.Kind == holdwire.KindShell) {
+		if s.State == "" && s.Ended == nil && attachNamed(s) {
 			live[i].State = "live"
 		}
 	}
 	return client.Match(live, word)
+}
+
+// attachNamed says a name may find s: a held session, which says its state,
+// or a terminal this server started, an account's CLI or a shell. A shared
+// terminal is found, and so is given back, by its id alone.
+func attachNamed(s client.Session) bool {
+	return s.State != "" || s.Kind == holdwire.KindAccount || s.Kind == holdwire.KindShell
 }
 
 // attachPlace takes one of the places an attach needs (Channel.slot), or
@@ -150,9 +157,10 @@ func attachTo(ctx context.Context, ch *Channel, c *client.Client, id, word strin
 	// The way back is typed after `ssh -t host`, where the person's shell
 	// takes off any quotes and ssh joins the words with spaces, so what
 	// arrives is never the quoted word: a name a shell would quote is given
-	// as the session's id.
+	// as the session's id. So is the name of a session no name finds, a
+	// shared terminal, whose label would find nothing, or another session.
 	o.Again = func(w string) string {
-		if !attachPlain(w) {
+		if !attachPlain(w) || !attachNamed(res.Session) {
 			w = attach.OneLine(res.Session.ID)
 		}
 		return word + " " + w
@@ -163,10 +171,14 @@ func attachTo(ctx context.Context, ch *Channel, c *client.Client, id, word strin
 }
 
 // attachPlain says w is a word no shell changes and words reads back as it
-// is: ASCII letters and digits and . _ @ % + = : , / -, at least one.
+// is: ASCII letters and digits and . _ @ % + = : , / -, at least one, and
+// not begun by =, which zsh turns into the path of a command of that name.
 // Anything else, a space, a quote, a backslash, any other character a shell
 // acts on, or one beyond ASCII, is not.
 func attachPlain(w string) bool {
+	if strings.HasPrefix(w, "=") {
+		return false
+	}
 	for i := 0; i < len(w); i++ {
 		switch c := w[i]; {
 		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
