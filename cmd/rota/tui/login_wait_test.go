@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -108,6 +109,24 @@ func loginWaitOf[T any](msgs []tea.Msg) []T {
 // loginWaitLines is the step's view at width w as plain lines.
 func loginWaitLines(s step, w int) []string {
 	return strings.Split(ansi.Strip(s.View(w)), "\n")
+}
+
+// loginWaitTimerSet waits, at most five seconds, until a timer is set on
+// ticks: a timer is set by a command, which a busy machine may run a moment
+// after the round that started it has ended.
+func loginWaitTimerSet(t *testing.T, ticks *fakeTicks) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		ticks.mu.Lock()
+		n := len(ticks.timers)
+		ticks.mu.Unlock()
+		if n > 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no timer was set")
+		}
+	}
 }
 
 func loginWaitAsked(b *fakeBackend) []string {
@@ -301,6 +320,35 @@ func TestADeviceQuestionThatHangsIsNotAskedTwice(t *testing.T) {
 	}
 }
 
+// A question that hangs past its deadline holds the next one back, but not
+// the login's end: the step still ends when the login runs out.
+func TestADeviceLoginRunsOutWithAQuestionHanging(t *testing.T) {
+	ticks := &fakeTicks{}
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	b := &fakeBackend{FinishLoginFn: loginWaitFinishes(func() (LoginEnd, error) { <-release; return LoginEnd{Pending: true}, nil })}
+	e := loginWaitEnv(t, b, ticks)
+	ctx, cancel := context.WithCancel(context.Background())
+	e.ctx = ctx
+	h := &loginWaitHost{s: newDeviceStep(e, loginWaitLogin(ticks), "w"), width: 80}
+	run(t, h, tea.BatchMsg{h.Init()})
+	cancel()
+	await(t, h)
+	if h.s.(*loginWaitDevice).parked.Load() != 1 {
+		t.Fatal("the question that hangs is not counted")
+	}
+	// The one timer the answer set fires past the login's end.
+	loginWaitTimerSet(t, ticks)
+	_, seen := run(t, h, ticks.advance(13*time.Minute)...)
+	d, done := loginWaitDone(t, seen)
+	if !done || d.Err == nil || d.Err.Error() != "the login dev-1 has expired" {
+		t.Fatalf("a login run out with its question hanging gave %+v (done %v)", d, done)
+	}
+	if got := loginWaitAsked(b); len(got) != 1 {
+		t.Errorf("with its question hanging the step asked %q", got)
+	}
+}
+
 func TestADeviceRefusalIsSaidAndTheWaitGoesOn(t *testing.T) {
 	ticks := &fakeTicks{}
 	b := &fakeBackend{FinishLoginFn: loginWaitFinishes(
@@ -309,6 +357,9 @@ func TestADeviceRefusalIsSaidAndTheWaitGoesOn(t *testing.T) {
 		},
 		func() (LoginEnd, error) {
 			return LoginEnd{}, errors.New("the rota API did not answer POST /v1/login/dev-1")
+		},
+		func() (LoginEnd, error) {
+			return LoginEnd{}, &client.Refusal{Status: 409, Message: "another rota holds the store"}
 		},
 		loginWaitPending,
 		loginWaitAdded,
@@ -326,8 +377,13 @@ func TestADeviceRefusalIsSaidAndTheWaitGoesOn(t *testing.T) {
 	if !strings.Contains(plain(h), "did not answer") || strings.Contains(plain(h), "502") {
 		t.Errorf("a later failure does not replace the first:\n%s", plain(h))
 	}
+	// A busy store is no verdict on the login: the wait goes on.
+	_, seen = run(t, h, ticks.advance(loginWaitEvery)...)
+	if _, done := loginWaitDone(t, seen); done || !strings.Contains(plain(h), "another rota holds the store") {
+		t.Fatalf("a 409 ended the wait, or is not said:\n%s", plain(h))
+	}
 	run(t, h, ticks.advance(loginWaitEvery)...)
-	if strings.Contains(plain(h), "did not answer") {
+	if strings.Contains(plain(h), "another rota") {
 		t.Errorf("a pending answer leaves the failure said:\n%s", plain(h))
 	}
 	_, seen = run(t, h, ticks.advance(loginWaitEvery)...)
@@ -336,21 +392,46 @@ func TestADeviceRefusalIsSaidAndTheWaitGoesOn(t *testing.T) {
 	}
 }
 
+// The ends the CLI's wait has too: a login no longer parked, the provider's
+// verdict on the device code, and a login no approval can finish. Each ends
+// the step at once, says so cleaned, and asks nothing more.
 func TestADeviceLoginNothingCanFinishEndsTheWait(t *testing.T) {
-	for _, no := range []*client.Refusal{
-		{Status: 404, Message: "no pending login dev-1"},
-		{Status: 400, Reason: "unfinishable", Message: "the account this login was begun for is gone"},
+	for _, c := range []struct {
+		name    string
+		no      *client.Refusal
+		says    string
+		refresh bool // the listing is read again, for what the login may have added
+	}{
+		// Another rota finished it, an answer lost on the way finished it
+		// here, or it ran out.
+		{"gone", &client.Refusal{Status: 404, Message: "no pending login dev-1"},
+			"the login dev-1 is no longer parked: finished elsewhere, or run out", true},
+		// The provider denied it, or its code is spent: approving again
+		// cannot help, as lib answers it with a 400 in the provider's words.
+		{"denied", &client.Refusal{Status: 400, Message: "login was denied\x1b[2J"}, "login was denied", false},
+		{"unfinishable", &client.Refusal{Status: 400, Reason: "unfinishable", Message: "the account this login was begun for is gone"},
+			"the account this login was begun for is gone", false},
+		// The reason alone decides, whatever status carries it.
+		{"unfinishable at any status", &client.Refusal{Status: 422, Reason: "unfinishable", Message: "approved by another account"},
+			"approved by another account", false},
 	} {
-		t.Run(no.Message, func(t *testing.T) {
+		t.Run(c.name, func(t *testing.T) {
 			ticks := &fakeTicks{}
 			b := &fakeBackend{FinishLoginFn: loginWaitFinishes(loginWaitPending,
-				func() (LoginEnd, error) { return LoginEnd{}, no })}
+				func() (LoginEnd, error) { return LoginEnd{}, c.no })}
 			h := &loginWaitHost{s: newDeviceStep(loginWaitEnv(t, b, ticks), loginWaitLogin(ticks), "w"), width: 80}
 			run(t, h, tea.BatchMsg{h.Init()})
 			_, seen := run(t, h, ticks.advance(loginWaitEvery)...)
 			d, done := loginWaitDone(t, seen)
-			if !done || !errors.Is(d.Err, no) {
-				t.Fatalf("%v gave %+v (done %v), want it as the step's end", no, d, done)
+			if !done || !errors.Is(d.Err, c.no) || d.Err.Error() != c.says {
+				t.Fatalf("%v gave %+v (done %v), want an end saying %q over the refusal", c.no, d, done, c.says)
+			}
+			var want []refreshMsg
+			if c.refresh {
+				want = []refreshMsg{{How: RefreshStale}}
+			}
+			if got := loginWaitOf[refreshMsg](seen); !slices.Equal(got, want) {
+				t.Errorf("the end asked for %v, want %v", got, want)
 			}
 			run(t, h, ticks.advance(time.Minute)...)
 			if got := loginWaitAsked(b); len(got) != 2 {
@@ -358,6 +439,67 @@ func TestADeviceLoginNothingCanFinishEndsTheWait(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Every question carries the deadline of a login's finish (R29), and the
+// step's own life: leaving the login ends a question still out, and none
+// follows, whether it was out or the timer was set.
+func TestADeviceQuestionEndsWithItsDeadlineOrTheStep(t *testing.T) {
+	t.Run("the deadline", func(t *testing.T) {
+		var left time.Duration
+		b := &fakeBackend{FinishLoginFn: func(ctx context.Context, _, _ string) (LoginEnd, error) {
+			if dl, ok := ctx.Deadline(); ok {
+				left = time.Until(dl)
+			}
+			return LoginEnd{Pending: true}, nil
+		}}
+		ticks := &fakeTicks{}
+		h := &loginWaitHost{s: newDeviceStep(loginWaitEnv(t, b, ticks), loginWaitLogin(ticks), "w"), width: 80}
+		run(t, h, tea.BatchMsg{h.Init()})
+		if left <= envFinishTimeout-10*time.Second || left > envFinishTimeout {
+			t.Errorf("a question had %v left of its deadline, want about %v", left, envFinishTimeout)
+		}
+	})
+	t.Run("left while a question is out", func(t *testing.T) {
+		ended := make(chan error, 1)
+		b := &fakeBackend{FinishLoginFn: func(ctx context.Context, _, _ string) (LoginEnd, error) {
+			<-ctx.Done()
+			ended <- ctx.Err()
+			return LoginEnd{}, ctx.Err()
+		}}
+		ticks := &fakeTicks{}
+		h := &loginWaitHost{s: newDeviceStep(loginWaitEnv(t, b, ticks), loginWaitLogin(ticks), "w"), width: 80}
+		run(t, h, tea.BatchMsg{h.Init()})
+		h.s.(interface{ Leave(context.Context) }).Leave(context.Background())
+		select {
+		case err := <-ended:
+			if !errors.Is(err, context.Canceled) {
+				t.Errorf("the question ended with %v, want it cancelled", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("leaving the step left its question running")
+		}
+		_, seen := await(t, h)
+		if _, done := loginWaitDone(t, seen); done || strings.Contains(plain(h), "canceled") {
+			t.Errorf("a step left said %v:\n%s", seen, plain(h))
+		}
+		if due := ticks.advance(time.Minute); len(due) != 0 || len(loginWaitAsked(b)) != 1 {
+			t.Errorf("a step left set a timer (%v) or asked again: %q", due, loginWaitAsked(b))
+		}
+	})
+	t.Run("left while the timer is set", func(t *testing.T) {
+		ticks := &fakeTicks{}
+		b := &fakeBackend{FinishLoginFn: loginWaitFinishes(loginWaitPending)}
+		h := &loginWaitHost{s: newDeviceStep(loginWaitEnv(t, b, ticks), loginWaitLogin(ticks), "w"), width: 80}
+		run(t, h, tea.BatchMsg{h.Init()})
+		leave := h.s.(interface{ Leave(context.Context) }).Leave
+		leave(context.Background())
+		leave(context.Background())
+		_, seen := run(t, h, ticks.advance(time.Minute)...)
+		if got := loginWaitAsked(b); len(got) != 1 || len(seen) != 0 {
+			t.Errorf("a step left asked %q and said %v", got, seen)
+		}
+	})
 }
 
 func TestADeviceLoginRunsOutOnTheClock(t *testing.T) {
@@ -507,7 +649,7 @@ func TestADelegatedLoginHandsOverTheTerminal(t *testing.T) {
 	if got := plain(h); !strings.Contains(got, "grok signs this account in itself; enter hands it the terminal") {
 		t.Errorf("the step says:\n%s", got)
 	}
-	if keys := h.s.Keys(); len(keys) != 1 || keys[0].Help().Key != "enter" {
+	if keys := h.s.Keys(); len(keys) != 1 || keys[0].Help().Key != "⏎" || !slices.Equal(keys[0].Keys(), []string{"enter"}) {
 		t.Errorf("the keys are %v", keys)
 	}
 	_, seen := run(t, h, press("enter")...)
@@ -553,13 +695,26 @@ func TestAFailedHandOffShowsItsLastWords(t *testing.T) {
 		t.Fatalf("a failed hand-off ended the step: %v", seen)
 	}
 	got := plain(h)
-	if !strings.Contains(got, "boom") || strings.Contains(got, "starting") || !strings.Contains(got, "exit 3") {
+	if !strings.Contains(got, "rota login 6 ended with exit status 3: boom") || strings.Contains(got, "starting") {
 		t.Errorf("the step does not say the last words and the exit:\n%s", got)
 	}
 	// enter tries again.
 	_, seen = run(t, h, press("enter")...)
-	if len(loginWaitOf[handOffMsg](seen)) != 1 || len(*ran) != 2 {
-		t.Errorf("enter after a failure did not hand the terminal over again: %v, ran %q", seen, *ran)
+	offs := loginWaitOf[handOffMsg](seen)
+	if len(offs) != 1 || len(*ran) != 2 {
+		t.Fatalf("enter after a failure did not hand the terminal over again: %v, ran %q", seen, *ran)
+	}
+	// One a signal ended says the signal, not an exit of -1.
+	if runtime.GOOS != "windows" {
+		sleeper := exec.Command(fakecli.Install(t, t.TempDir(), "sleeper", fakecli.Spec{Sleep: "30s"}))
+		if err := sleeper.Start(); err != nil {
+			t.Fatal(err)
+		}
+		sleeper.Process.Kill()
+		run(t, h, offs[0].Done(sleeper.Wait()))
+		if got := plain(h); !strings.Contains(got, "rota login 6 ended with signal: killed") {
+			t.Errorf("a hand-off a signal ended:\n%s", got)
+		}
 	}
 
 	// A rota that cannot be started says why.
@@ -577,7 +732,7 @@ func TestAFailedHandOffShowsItsLastWords(t *testing.T) {
 	e = loginWaitEnv(t, &fakeBackend{}, &fakeTicks{}, func(o *Options) { o.Exec = func(...string) *exec.Cmd { return nil } })
 	h = &loginWaitHost{s: newDelegatedStep(e, 6), width: 80}
 	_, seen = run(t, h, press("enter")...)
-	offs := loginWaitOf[handOffMsg](seen)
+	offs = loginWaitOf[handOffMsg](seen)
 	if len(offs) != 1 || offs[0].Cmd != nil {
 		t.Fatalf("no command gave %+v", offs)
 	}
@@ -637,8 +792,13 @@ func TestTheWaitStepsFitAndShowNoControls(t *testing.T) {
 			}
 		})
 		e.list = Listing{Accounts: []wire.Account{{ID: 6, Provider: hostile}}}
+		// And a URL with raw controls in it, which no parse takes a code
+		// from, drawn cleaned all the same.
+		raw := *l
+		raw.URL = "https://auth.example.com/" + hostile
 		return []*loginWaitHost{
 			{s: newDeviceStep(e, l, hostile)},
+			{s: newDeviceStep(e, &raw, hostile)},
 			{s: newDelegatedStep(e, 6)},
 		}
 	}

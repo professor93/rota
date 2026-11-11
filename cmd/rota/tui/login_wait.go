@@ -41,7 +41,7 @@ func loginWaitKeys() loginWaitBindings {
 	return loginWaitBindings{
 		Open:        key.NewBinding(key.WithKeys("o"), key.WithHelp("o", "open in a browser")),
 		Copy:        key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy the link")),
-		Hand:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "hand it the terminal")),
+		Hand:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("⏎", "hand it the terminal")),
 		CopyCommand: key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "copy the command")),
 	}
 }
@@ -66,6 +66,17 @@ type (
 	}
 )
 
+// loginWaitEnded is how a device login ended without an account: text as
+// the person reads it, cleaned, over the refusal it came from, which
+// errors.As still finds.
+type loginWaitEnded struct {
+	text string
+	err  error
+}
+
+func (e loginWaitEnded) Error() string { return e.text }
+func (e loginWaitEnded) Unwrap() error { return e.err }
+
 // newDeviceStep waits for l, a device login, to be approved as who. It
 // shows where, with the code to check there, and asks the server about the
 // login every loginWaitEvery until it is approved, it runs out, or no
@@ -74,6 +85,9 @@ type (
 // message it hears.
 func newDeviceStep(e *env, l *backendLogin, who string) step {
 	s := &loginWaitDevice{e: e, who: who, keys: loginWaitKeys()}
+	// The step's own life, which Leave ends. It hangs from nothing, so a
+	// step never left holds nothing of the program's.
+	s.life, s.leave = context.WithCancel(context.Background())
 	if l != nil {
 		s.l = *l
 	}
@@ -106,7 +120,16 @@ type loginWaitDevice struct {
 	// parked counts questions answered for and still running (env.callOr):
 	// none is sent beside one (Backend).
 	parked atomic.Int32
+	// life ends when the step is left: a question out then ends with it,
+	// and no other is asked.
+	life  context.Context
+	leave context.CancelFunc
 }
+
+// Leave ends the step's wait: a question still out is cancelled, and none
+// follows. The flow calls it when the person leaves the login, and Run when
+// the program ends. It may be called from any goroutine, more than once.
+func (s *loginWaitDevice) Leave(context.Context) { s.leave() }
 
 // Init asks the first question, once.
 func (s *loginWaitDevice) Init() tea.Cmd {
@@ -140,10 +163,13 @@ func (s *loginWaitDevice) Update(msg tea.Msg) (step, tea.Cmd) {
 	return s, tea.Batch(start, cmd)
 }
 
-// poll is the timer's turn: the end once the login has run out, nothing
+// poll is the timer's turn: nothing once the step is left, the end once the
+// login has run out (a question still running beside it or not), nothing
 // beside a question still running, and otherwise the next question.
 func (s *loginWaitDevice) poll() tea.Cmd {
 	switch {
+	case s.life.Err() != nil:
+		return nil
 	case !s.e.now().Before(s.ends):
 		return s.end(stepDone{Err: fmt.Errorf("the login %s has expired", s.l.ID)})
 	case s.parked.Load() > 0:
@@ -156,23 +182,39 @@ func (s *loginWaitDevice) ask() tea.Cmd {
 	if s.l.ID == "" {
 		return s.end(stepDone{Err: errors.New("there is no login to wait for")})
 	}
-	b, id := s.e.b, s.l.ID
+	b, id, life := s.e.b, s.l.ID, s.life
 	return s.e.callOr(envFinishTimeout, func(ctx context.Context) tea.Msg {
+		// Under the program's life and the deadline, as every call, and
+		// under the step's own: leaving the login ends the question too.
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		defer context.AfterFunc(life, cancel)()
 		end, err := b.FinishLogin(ctx, id, "")
 		return loginWaitAnswer{s: s, End: end, Err: err}
 	}, func(err error) tea.Msg { return loginWaitAnswer{s: s, Err: err} }, &s.parked)
 }
 
-// answer takes what the server said. A login that is gone (404), or that
-// no approval can finish, ends the step in the server's words; any other
-// failure is said, and the wait goes on, on the same login.
+// answer takes what the server said, as the CLI's wait does. A 404 is a
+// login no longer parked: one another rota finished, one an answer lost on
+// the way finished here, or one that ran out; the listing is read again to
+// show which. A 400 is the provider's verdict on the device code (denied,
+// expired, spent), or a login no approval can finish: asking again cannot
+// help, so the step ends in the server's words. Any other failure (a busy
+// store, a provider or a daemon that did not answer) is said, and the wait
+// goes on, on the same login.
 func (s *loginWaitDevice) answer(a loginWaitAnswer) tea.Cmd {
+	if s.life.Err() != nil {
+		return nil
+	}
 	var no *client.Refusal
 	switch {
 	case a.Err == nil && !a.End.Pending:
 		return s.end(stepDone{End: a.End})
-	case errors.As(a.Err, &no) && (no.Status == http.StatusNotFound || no.Reason == "unfinishable"):
-		return s.end(stepDone{Err: a.Err})
+	case errors.As(a.Err, &no) && no.Status == http.StatusNotFound:
+		gone := loginWaitEnded{clean("the login " + s.l.ID + " is no longer parked: finished elsewhere, or run out"), a.Err}
+		return tea.Batch(s.end(stepDone{Err: gone}), func() tea.Msg { return refreshMsg{How: RefreshStale} })
+	case errors.As(a.Err, &no) && (no.Status == http.StatusBadRequest || no.Reason == "unfinishable"):
+		return s.end(stepDone{Err: loginWaitEnded{clean(a.Err.Error()), a.Err}})
 	case a.Err != nil:
 		s.said = clean(a.Err.Error())
 	default:
@@ -308,7 +350,8 @@ func (s *loginWaitDelegated) back(b loginWaitBack) tea.Cmd {
 	var exit *exec.ExitError
 	why := s.command() + " could not run: " + b.Err.Error()
 	if errors.As(b.Err, &exit) {
-		why = s.command() + " ended with exit " + strconv.Itoa(exit.ExitCode())
+		// "exit status 3", or "signal: interrupt" for one a signal ended.
+		why = s.command() + " ended with " + exit.String()
 		if b.Last != "" {
 			why += ": " + b.Last
 		}
