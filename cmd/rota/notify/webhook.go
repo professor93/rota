@@ -140,11 +140,12 @@ func hookHere(_, address string, _ syscall.RawConn) error {
 	return nil
 }
 
-// send posts e. A 2xx is delivered; 429 and 5xx are tried again, after the
-// server's Retry-After when it gives one; a failure to reach the server is
-// tried again; any other answer, a redirect among them, is dropped, and so
-// is plain http to an address that is not this machine. Nothing of the
-// answer's body is said, and no error holds the address.
+// send posts e. A 2xx is delivered; 408, 429 and 5xx are tried again, as
+// Telegram's are, after the server's Retry-After when it gives one; a
+// failure to reach the server is tried again; any other answer, a redirect
+// among them, is dropped, and so is plain http to an address that is not
+// this machine. Nothing of the answer's body is said, and no error holds
+// the address.
 func (w *webhook) send(ctx context.Context, e events.Event) error {
 	body := hookBody(e)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.url, bytes.NewReader(body))
@@ -174,7 +175,7 @@ func (w *webhook) send(ctx context.Context, e events.Event) error {
 		return nil
 	}
 	err = fmt.Errorf("webhook answered %s", hookStatus(code))
-	if code == http.StatusTooManyRequests || code >= 500 {
+	if code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500 {
 		return again(err, hookAfter(resp.Header.Get("Retry-After"), time.Now(), w.maxAfter))
 	}
 	return dropped(err)
