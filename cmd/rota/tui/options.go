@@ -76,6 +76,12 @@ type Options struct {
 	// Profile is the colour depth to draw at. Nil: Profile(Out, Env,
 	// Remote).
 	Profile *colorprofile.Profile
+
+	// Ended, when set, is called once the program has ended and the
+	// terminal is given back, before Run leaves the tabs and overlays,
+	// which may take up to ten seconds: the caller can then count, and
+	// say, what quitting waits for from there.
+	Ended func()
 }
 
 // Daemon is what Options.Daemon says: whether the daemon runs, its pid, the

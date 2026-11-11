@@ -74,7 +74,7 @@ var quitSayAfter = time.Second
 // Bubble Tea's while the program runs (a ^C typed into a CLI the TUI has
 // handed the terminal to reaches this process too, and is the CLI's), and
 // once it has ended is let pass, so the wait for the save finishes; the
-// line quitWait says tells what it is waiting for.
+// line quitSaid says tells what it is waiting for.
 func (c *cli) openTUI() error {
 	home, terminals, err := daemonStore()
 	if err != nil {
@@ -128,6 +128,10 @@ func (c *cli) openTUI() error {
 		stop()
 		srv.Stop()
 	})
+	// The wait is counted from the program's end, the screen given back:
+	// the TUI leaving what it holds open is part of it.
+	said := &quitSaid{w: c.err}
+	defer said.done()
 	defer quit() // a panic out of the TUI still waits for the save
 	host, _ := os.Hostname()
 	res, err := startTUI(ctx, tui.Options{
@@ -138,8 +142,11 @@ func (c *cli) openTUI() error {
 		Exec:    selfCmd,
 		OpenURL: localBrowser(),
 		Host:    host,
+		Ended:   said.begin,
 	})
-	quitWait(c.err, quit)
+	said.begin() // a TUI that ended without saying so has ended now
+	quit()
+	said.done()
 	if l := res.Pending; l != nil {
 		// The TUI's reading of the login carries no state, and finishLater
 		// needs none: the id and the kind say the command (R18). One that
@@ -166,25 +173,42 @@ var tuiSignals = func(c chan<- os.Signal, sigs ...os.Signal) (release func()) {
 	return func() { signal.Stop(c) }
 }
 
-// quitWait runs stop, which waits for a refresh under way to be answered
-// and saved, up to store.RefreshTimeout, and for a run kept open to be
-// closed. Once that has taken quitSayAfter it says so on w, once, so that
-// nobody takes a TUI that has gone for one that hangs.
-func quitWait(w io.Writer, stop func()) {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		stop()
-	}()
-	t := time.NewTimer(quitSayAfter)
-	defer t.Stop()
-	select {
-	case <-done:
+// quitSaid is the line quitting says when its wait goes on: the TUI leaving
+// what it holds open, then the server's stop, which waits for a refresh
+// under way to be answered and saved, up to store.RefreshTimeout, and for a
+// run kept open to be closed. begin starts the count, once; once
+// quitSayAfter has passed with done not yet called, the line is said on w,
+// once, so that nobody takes a TUI that has gone for one that hangs.
+// Nothing is said after done.
+type quitSaid struct {
+	w     io.Writer
+	mu    sync.Mutex
+	t     *time.Timer
+	ended bool
+}
+
+func (q *quitSaid) begin() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.t != nil || q.ended {
 		return
-	case <-t.C:
-		fmt.Fprintln(w, "rota: waiting for a refresh to be saved")
 	}
-	<-done
+	q.t = time.AfterFunc(quitSayAfter, func() {
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		if !q.ended {
+			fmt.Fprintln(q.w, "rota: waiting for a refresh to be saved")
+		}
+	})
+}
+
+func (q *quitSaid) done() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.ended = true
+	if q.t != nil {
+		q.t.Stop()
+	}
 }
 
 // localDaemon is what the header says about this store's daemon. When one

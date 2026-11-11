@@ -16,8 +16,8 @@ import (
 const programLeaveTimeout = 10 * time.Second
 
 // Run runs the TUI on o's terminal until the person quits or ctx ends. It
-// then leaves each tab, which closes what it holds open, and returns the
-// login a flow left parked, if one did.
+// then calls o.Ended, leaves each tab, which closes what it holds open, and
+// returns the login a flow left parked, if one did.
 //
 // Over SSH (Remote) the size comes from Cols and Rows, the colour depth
 // from TERM, and no signal of this process is the TUI's. Run is the one
@@ -48,6 +48,9 @@ func Run(ctx context.Context, o Options) (Result, error) {
 		programResize(ctx, &wg, p.Send, m.e.win, o.Resize)
 	}
 	_, err := p.Run()
+	if o.Ended != nil {
+		o.Ended()
+	}
 	cancel()
 	wg.Wait()
 	if lerr := programLeave(m.leavers()); lerr != nil {

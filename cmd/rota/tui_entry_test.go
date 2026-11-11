@@ -514,7 +514,9 @@ func TestAPanicInTheTUIStillStopsItsServer(t *testing.T) {
 // past quitSayAfter says so once, while it is still waiting.
 func TestQuittingSaysOnceWhatItWaitsFor(t *testing.T) {
 	var quick bytes.Buffer
-	quitWait(&quick, func() {})
+	q := &quitSaid{w: &quick}
+	q.begin()
+	q.done()
 	if quick.Len() != 0 {
 		t.Fatalf("a quick quit said %q", quick.String())
 	}
@@ -523,21 +525,65 @@ func TestQuittingSaysOnceWhatItWaitsFor(t *testing.T) {
 	quitSayAfter = 20 * time.Millisecond
 	t.Cleanup(func() { quitSayAfter = was })
 	said := &quitWriter{wrote: make(chan struct{}, 4)}
-	stopped := false
-	quitWait(said, func() {
+	q = &quitSaid{w: said}
+	q.begin()
+	q.begin() // a second begin counts nothing again
+	select {
+	case <-said.wrote:
+	case <-time.After(10 * time.Second):
+		t.Error("nothing was said while the wait went on")
+	}
+	time.Sleep(50 * time.Millisecond) // past a second quitSayAfter
+	q.done()
+	if got := said.String(); got != "rota: waiting for a refresh to be saved\n" {
+		t.Fatalf("a slow quit said %q", got)
+	}
+	// Once done, nothing more is said, nor is a count begun.
+	q.begin()
+	time.Sleep(50 * time.Millisecond)
+	if got := said.String(); got != "rota: waiting for a refresh to be saved\n" {
+		t.Fatalf("after done it said %q", got)
+	}
+}
+
+// The wait quitting says is counted from the program's end, when the
+// screen is given back, so the TUI's own leaving (a page closed, a run
+// stopped, up to ten seconds) is part of it: a TUI that ran long and left
+// at once says nothing, and one still leaving past quitSayAfter says so
+// once, while it is leaving.
+func TestQuittingCountsTheWaitFromTheProgramsEnd(t *testing.T) {
+	t.Setenv("ROTA_HOME", t.TempDir())
+	fakeSignals(t)
+	was := quitSayAfter
+	quitSayAfter = 300 * time.Millisecond
+	t.Cleanup(func() { quitSayAfter = was })
+
+	tuiStarts(t, func(_ context.Context, o tui.Options) (tui.Result, error) {
+		time.Sleep(2 * quitSayAfter)
+		o.Ended()
+		return tui.Result{}, nil
+	})
+	var quick bytes.Buffer
+	if err := (&cli{out: io.Discard, err: &quick, in: strings.NewReader("")}).openTUI(); err != nil || quick.Len() != 0 {
+		t.Fatalf("a TUI that ran long and left at once ended with %v, saying %q", err, quick.String())
+	}
+
+	said := &quitWriter{wrote: make(chan struct{}, 4)}
+	tuiStarts(t, func(_ context.Context, o tui.Options) (tui.Result, error) {
+		o.Ended()
 		select {
 		case <-said.wrote:
 		case <-time.After(10 * time.Second):
-			t.Error("nothing was said while the wait went on")
+			t.Error("nothing was said while the TUI was still leaving")
 		}
-		time.Sleep(50 * time.Millisecond) // past a second quitSayAfter
-		stopped = true
+		time.Sleep(2 * quitSayAfter) // past a second quitSayAfter
+		return tui.Result{}, nil
 	})
-	if !stopped {
-		t.Fatal("quitWait returned before the stop did")
+	if err := (&cli{out: io.Discard, err: said, in: strings.NewReader("")}).openTUI(); err != nil {
+		t.Fatalf("openTUI: %v", err)
 	}
 	if got := said.String(); got != "rota: waiting for a refresh to be saved\n" {
-		t.Fatalf("a slow quit said %q", got)
+		t.Fatalf("a slow leave said %q", got)
 	}
 }
 

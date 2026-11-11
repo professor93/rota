@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -237,5 +238,34 @@ func programSize(t *testing.T, sizes <-chan [2]int, want [2]int) {
 func TestRunWantsABackend(t *testing.T) {
 	if _, err := Run(context.Background(), Options{In: strings.NewReader(""), Out: io.Discard}); err == nil {
 		t.Error("Run without a Backend did not refuse")
+	}
+}
+
+// Run says, once, when the program has ended and the screen is given back,
+// before it leaves the tabs, which may take a while: its caller counts the
+// wait it may have to explain from there.
+func TestRunSaysWhenTheProgramHasEnded(t *testing.T) {
+	shellRegistry(t)
+	left := make(chan time.Duration, 1)
+	register(10, func(e *env) tab { return &shellTab{title: "Ten", left: left} })
+	var ended atomic.Int32
+	leftBefore := make(chan bool, 4)
+	in, wait := programRun(t, Options{
+		Backend: &fakeBackend{}, Out: &programOut{}, Env: []string{"TERM=xterm"},
+		Remote: true, Cols: 80, Rows: 24,
+		Ended: func() { ended.Add(1); leftBefore <- len(left) > 0 },
+	})
+	programType(in, "qq")
+	if _, err := wait(); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if n := ended.Load(); n != 1 {
+		t.Fatalf("Ended was called %d times", n)
+	}
+	if <-leftBefore {
+		t.Error("Ended was called after the tabs were left")
+	}
+	if len(left) != 1 {
+		t.Error("the tab was never left")
 	}
 }
