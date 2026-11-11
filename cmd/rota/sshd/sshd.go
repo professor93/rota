@@ -32,6 +32,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/professor93/rota/api"
+	"github.com/professor93/rota/cmd/rota/attach"
 	"github.com/professor93/rota/cmd/rota/client"
 )
 
@@ -57,22 +58,55 @@ type Options struct {
 	Handler func(p *api.Principal) http.Handler
 	// Log is where sign-ins, refusals and commands are said; nil is nowhere.
 	Log *slog.Logger
-	// Key is the chord's key, zero meaning Ctrl-\, and Taught says whether a
-	// person has been shown it; both are handed to each Channel.
+	// Key is the chord's key, zero meaning Ctrl-\. Taught is each attach's
+	// Options.Teach: asked before an attach shows a session, it says true
+	// for a person still to be shown the chord, and records them as shown,
+	// as attach.TaughtFile does; nil shows nobody. Both are handed to each
+	// Channel.
 	Key    byte
 	Taught func(person string) bool
-	// TUI, when set, is what a bare `ssh host` runs.
+	// TUI, when set, is what a bare `ssh host` on a terminal runs. It must
+	// return once ctx is done, which it is when the person's channel or
+	// connection closes and when the server stops: Close waits for it.
 	TUI func(ctx context.Context, s TUISession) error
 }
 
 // TUISession is what Options.TUI is given: the person's terminal, its TERM
 // (Env holds only TERM=…) and size, its resizes, a client for the API as
-// that person, the chord's key, and whether a person has been shown it.
+// that person, and the chord's key. Taught is each attach's Options.Teach,
+// as Options.Taught is: true for a person still to be shown the chord,
+// recording them as shown.
 //
 // Slot is taken before each attach the TUI makes and given back after it,
 // by calling done: an attach keeps a copy of a session's screen in the
 // daemon, so a TUI's attaches count against the same places an `ssh host
 // attach` does. Its error is the sentence to show.
+//
+// In is the one reader of what the person types (a pump), which every
+// receiver of it shares, one at a time, so that nothing typed is lost or
+// reordered as the terminal goes from the TUI to an attach and back. Beside
+// Read it has the methods
+//
+//	Input() <-chan []byte // each chunk typed, for an attach
+//	Hold()                // end a waiting Read with io.EOF, taking nothing, until Resume
+//	Resume()              // let Reads go on
+//
+// Before the TUI hands the terminal to an attach, it calls Hold; the attach
+// receives on Input (attach.Command takes as stdin a file, a pump such as
+// this one, or nil, and refuses anything else); and once the attach has
+// returned the TUI calls Resume and reads again. A Read must never be
+// waiting while an attach runs: it would take the attach's first key.
+//
+// With Bubble Tea, where each goes is fixed (measured with v2.1.1):
+//   - Hold in Update, right before returning the tea.Exec of the attach,
+//     never inside the exec command: by then Bubble Tea has only marked its
+//     reader cancelled, its Read still waits here, and the key it takes is
+//     dropped.
+//   - Resume at the end of the exec command's own Run, after the attach has
+//     returned: never at Run's start, which hands the attach's keys back to
+//     Bubble Tea's Read, and never in tea.Exec's callback, which comes after
+//     Bubble Tea has started reading again, so its first Read meets the hold,
+//     ends with io.EOF and leaves the TUI deaf.
 type TUISession struct {
 	In         io.Reader
 	Out        io.Writer
@@ -159,9 +193,6 @@ var sshdKeyExchanges = []string{
 // never SHA-1 and never one cut to 96 bits.
 var sshdMACs = []string{ssh.HMACSHA256ETM, ssh.HMACSHA512ETM, ssh.HMACSHA256, ssh.HMACSHA512}
 
-// sshdDefaultKey is Ctrl-\, the chord's key when Options names none.
-const sshdDefaultKey = 0x1C
-
 // Server is one SSH listener and the connections it has taken.
 type Server struct {
 	o        Options
@@ -222,7 +253,7 @@ func Listen(o Options) (*Server, error) {
 	}
 	o.Users = slices.Clone(o.Users)
 	if o.Key == 0 {
-		o.Key = sshdDefaultKey
+		o.Key = attach.DefaultKey
 	}
 	log := o.Log
 	if log == nil {

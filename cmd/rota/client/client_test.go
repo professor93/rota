@@ -361,6 +361,14 @@ func TestCreateGetAndARefusedSend(t *testing.T) {
 	if caller := <-callers; caller != holdwire.CallerDetach {
 		t.Fatalf("the caller named goes in the header, and it says %q", caller)
 	}
+	// A shell is asked for by its kind, which an account's CLI leaves out.
+	if _, err := c.Create(Create{Kind: "shell", Cols: 120, Rows: 40}); err != nil {
+		t.Fatal(err)
+	}
+	if raw, _ := json.Marshal(<-got); string(raw) != `{"cols":120,"kind":"shell","rows":40}` {
+		t.Fatalf("Create of a shell sent %s", raw)
+	}
+	<-callers
 
 	if s, err := c.Get("a1b2c3d4e5f60718"); err != nil || s.Name != "refactor" {
 		t.Fatalf("Get: %+v %v", s, err)

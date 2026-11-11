@@ -82,14 +82,22 @@ func sshdKnob(t *testing.T, knob *time.Duration, d time.Duration) {
 	t.Cleanup(func() { *knob = old })
 }
 
-// sshdPrincipal is the Handler: GET /v1/session answers with the person.
+// sshdPrincipal is the Handler: GET /v1/session answers with the person,
+// and GET /v1/terminals lists no session.
 func sshdPrincipal(p *api.Principal) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/session", func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(p)
 	})
+	mux.HandleFunc("GET /v1/terminals", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"terminals":[]}`)
+	})
 	return mux
 }
+
+// sshdBare is what a bare command prints with no session and no TUI: the
+// list, a blank line, and the commands.
+const sshdBare = "no sessions\n\n" + usage
 
 func sshdStart(t *testing.T, edit ...func(*Options)) *sshdRig {
 	t.Helper()
@@ -637,9 +645,10 @@ func TestTheCommandIsAFixedList(t *testing.T) {
 	default:
 	}
 
-	// A bare command, by shell or by an empty line, is the usage on stdout.
+	// A bare command, by shell or by an empty line, is the list and the
+	// usage on stdout.
 	for _, line := range []string{"", "  \t "} {
-		if out, errOut, code := sshdRun(t, c, line); code != 0 || out != usage || errOut != "" {
+		if out, errOut, code := sshdRun(t, c, line); code != 0 || out != sshdBare || errOut != "" {
 			t.Errorf("%q: %d %q %q", line, code, out, errOut)
 		}
 	}
@@ -652,7 +661,7 @@ func TestTheCommandIsAFixedList(t *testing.T) {
 	if err := sess.Shell(); err != nil {
 		t.Fatal(err)
 	}
-	if err := sess.Wait(); err != nil || shell.String() != usage {
+	if err := sess.Wait(); err != nil || shell.String() != sshdBare {
 		t.Errorf("shell: %v %q", err, shell.String())
 	}
 	// With a pty, a line ends as a terminal in raw mode needs it to.
@@ -665,7 +674,7 @@ func TestTheCommandIsAFixedList(t *testing.T) {
 	if err := sess.RequestPty("xterm", 24, 80, ssh.TerminalModes{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := sess.Run(""); err != nil || shell.String() != strings.ReplaceAll(usage, "\n", "\r\n") {
+	if err := sess.Run(""); err != nil || shell.String() != strings.ReplaceAll(sshdBare, "\n", "\r\n") {
 		t.Errorf("bare with a pty: %v %q", err, shell.String())
 	}
 }

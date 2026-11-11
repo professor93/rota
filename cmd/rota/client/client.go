@@ -485,8 +485,11 @@ func ids(sessions []Session) string {
 }
 
 // Create is a session to start. Account 0 is the rotation's choice, made by
-// the daemon. Args go to the CLI after its own name. Cwd, Cols and Rows left
-// out are the daemon's defaults, and Label names the session.
+// the daemon. Kind "shell" is the person's login shell instead of a CLI,
+// which takes no account and which the server refuses unless its file
+// allows one; left out, it is an account's CLI. Args go to the CLI after its
+// own name. Cwd, Cols and Rows left out are the daemon's defaults, and Label
+// names the session.
 //
 // Env, when set, is the environment the session starts from in place of the
 // daemon's: the caller's own, from which the holder keeps whatever describes
@@ -502,6 +505,7 @@ func ids(sessions []Session) string {
 // it on the account whose home holds it, where that account can start.
 type Create struct {
 	Account    int
+	Kind       string
 	Args       []string
 	Cwd        string
 	Cols, Rows uint16
@@ -521,6 +525,7 @@ type Create struct {
 // the name to give the session.
 type createDoc struct {
 	Account       int      `json:"account,omitempty"`
+	Kind          string   `json:"kind,omitempty"`
 	Args          []string `json:"args,omitempty"`
 	Cwd           string   `json:"cwd,omitempty"`
 	Cols          uint16   `json:"cols,omitempty"`
@@ -534,7 +539,7 @@ type createDoc struct {
 // Create starts a session and says what it is, once its holder is running
 // the CLI.
 func (c *Client) Create(r Create) (Session, error) {
-	in := createDoc{Account: r.Account, Args: r.Args, Cwd: r.Cwd, Cols: r.Cols, Rows: r.Rows, Label: r.Label, Env: r.Env,
+	in := createDoc{Account: r.Account, Kind: r.Kind, Args: r.Args, Cwd: r.Cwd, Cols: r.Cols, Rows: r.Rows, Label: r.Label, Env: r.Env,
 		Resume: r.Resume}
 	switch {
 	case r.RemoteControlName != "":

@@ -284,6 +284,7 @@ Anything after an account id is passed to the vendor CLI's own login
 | `-i`, `--interactive` | open the CLI as it comes instead of asking it anything |
 | `--share[=control\|watch]` | open the CLI here *and* offer this terminal to a rota server on this machine |
 | `--detach` | hand the CLI to a session this store's daemon holds instead of to this terminal, and return; the CLI's arguments after `--` or `-i`, and no prompt — see *[The daemon](#the-daemon)* |
+| `--attach <session>` | this terminal on a held session, by its name, label, folder or id, as `rota send` finds one: what it shows, and what you type goes to it; `Ctrl-\` then `d` leaves it running. The line it ends with is text, `--json` or not. Linux and macOS |
 | `--label <name>` | what to call that shared terminal, or that held session, in the listing |
 | `--remote-control[=name]` | open a claude account's Claude Code with its own Remote Control on, turning the account's setting on first — see *Remote Control* |
 | `--` | everything after it belongs to the vendor CLI, untouched |
