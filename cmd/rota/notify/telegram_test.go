@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/professor93/rota/api"
@@ -180,6 +182,22 @@ func TestAMessageIsTheSentenceAndTheLink(t *testing.T) {
 	if c := string(got[len(got)-1].body["chat_id"]); c != `"@rota_news"` {
 		t.Fatalf("chat_id %s, want \"@rota_news\"", c)
 	}
+
+	// A number written with a sign or leading zeros is sent as JSON writes
+	// it, not as typed, which JSON would refuse.
+	for _, c := range []struct{ typed, sent string }{{"+123", "123"}, {"0123", "123"}, {"-1001234", "-1001234"}} {
+		s, err := newTelegram(api.EventSink{Type: "telegram", BotTokenFile: tgTokenFile(t, tgToken), ChatID: c.typed}, env{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.send(t.Context(), tgAttention("")); err != nil {
+			t.Fatalf("chat_id %q: %v", c.typed, err)
+		}
+		got = f.requests()
+		if id := string(got[len(got)-1].body["chat_id"]); id != c.sent {
+			t.Fatalf("chat_id %q was sent as %s, want %s", c.typed, id, c.sent)
+		}
+	}
 }
 
 // A message longer than Telegram takes is cut at 4096 runes, on a rune's
@@ -210,6 +228,20 @@ func TestALongMessageIsCut(t *testing.T) {
 	}
 	if f.tgText(t) != whole {
 		t.Fatal("a message of 4096 runes was changed")
+	}
+
+	// Telegram counts UTF-16 units, two for a rune beyond the BMP: 5000
+	// emoji are cut to at most 4096 units, on a rune's boundary.
+	emoji := strings.Repeat("😀", 5000)
+	if err := s.send(t.Context(), events.Event{ID: 3, Type: events.Test, Time: time.Now().UTC(), Text: emoji}); err != nil {
+		t.Fatal(err)
+	}
+	text = f.tgText(t)
+	if units := len(utf16.Encode([]rune(text))); !utf8.ValidString(text) || units > 4096 || units < 4094 {
+		t.Fatalf("5000 emoji were cut to %d UTF-16 units (valid UTF-8: %v)", units, utf8.ValidString(text))
+	}
+	if cut := strings.TrimSuffix(text, "…"); cut == text || !strings.HasPrefix(emoji, cut) {
+		t.Fatal("the cut emoji are not the start of the message and an ellipsis")
 	}
 }
 
@@ -246,6 +278,10 @@ func TestTelegramSaysWhenToTryAgain(t *testing.T) {
 		{429, `{"ok":false,"error_code":429,"parameters":{"retry_after":9223372037}}`, retried, maxAfter, ""},
 		{429, `{"ok":false,"error_code":429}`, retried, 0, "telegram answered 429: Too Many Requests"},
 		{500, `{"ok":false,"error_code":500,"description":"Internal Server Error"}`, retried, 0, "telegram answered 500: Internal Server Error"},
+		{408, `{"ok":false,"error_code":408,"description":"Request Timeout"}`, retried, 0, "telegram answered 408: Request Timeout"},
+		// An answer is read to 64 KiB: past that its JSON is cut and not
+		// read, and the status line says it.
+		{500, `{"ok":false,"error_code":500,"description":"` + strings.Repeat("x", 70<<10) + `"}`, retried, 0, "telegram answered 500: Internal Server Error"},
 		{502, `<html>bad gateway</html>`, retried, 0, "telegram answered 502: Bad Gateway"},
 		{401, `{"ok":false,"error_code":401,"description":"Unauthorized"}`, droppedIt, 0, "telegram answered 401: Unauthorized"},
 		{400, `{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}`, droppedIt, 0, "telegram answered 400: Bad Request: chat not found"},
@@ -312,7 +348,7 @@ func TestTelegramSaysWhenToTryAgain(t *testing.T) {
 // tgNoToken fails the test if what holds any form of the token.
 func tgNoToken(t *testing.T, where, what string) {
 	t.Helper()
-	for _, part := range []string{tgToken, "AAH-tgSecretPart_xyz", "123456%3A", "123456%3a"} {
+	for _, part := range []string{tgToken, "AAH-tgSecretPart_xyz", "123456%3A", "123456%3a", "123456:A", "bot1234"} {
 		if strings.Contains(what, part) {
 			t.Fatalf("%s holds the token (%q): %s", where, part, what)
 		}
@@ -383,6 +419,22 @@ func TestNoAnswerRepeatsTheToken(t *testing.T) {
 		tgNoToken(t, "the cleaned error", cleanErr(err, s.secrets()))
 	}
 
+	// Telegram's description is cut to be said, but only once the token is
+	// out of it: a cut that falls anywhere inside bot<token> leaves no part
+	// of it.
+	for pad := 140; pad <= 200; pad++ {
+		tgServe(t, func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusUnauthorized)
+			b, _ := json.Marshal(map[string]any{"ok": false, "error_code": 401,
+				"description": "Unauthorized: " + strings.Repeat("x", pad) + " " + strings.TrimPrefix(r.URL.Path, "/")})
+			w.Write(b)
+		})
+		s := tgSink(t, "")
+		err := s.send(t.Context(), tgAttention("s1"))
+		tgNoToken(t, fmt.Sprintf("the error with %d bytes before the path", pad), err.Error())
+		tgNoToken(t, fmt.Sprintf("the cleaned error with %d bytes before the path", pad), cleanErr(err, s.secrets()))
+	}
+
 	// An attempt bounded by its context ends when it does, and says no
 	// token.
 	release := make(chan struct{})
@@ -416,6 +468,18 @@ func TestATokenFileOthersCanReadIsRefused(t *testing.T) {
 	}
 	tgNoToken(t, "the refusal", err.Error())
 
+	// A link to a file others can read is refused too, by the link's name,
+	// which chmod follows to the file.
+	openLink := filepath.Join(t.TempDir(), "tg.token")
+	if err := os.Symlink(open, openLink); err != nil {
+		t.Fatal(err)
+	}
+	_, err = newTelegram(api.EventSink{Type: "telegram", BotTokenFile: openLink, ChatID: "1"}, env{})
+	if err == nil || !strings.Contains(err.Error(), "chmod 600 "+openLink) {
+		t.Fatalf("a link to a token file others can read gave %v", err)
+	}
+	tgNoToken(t, "the refusal", err.Error())
+
 	// A link to a file of its owner's is followed, and read.
 	target := tgTokenFile(t, tgToken)
 	link := filepath.Join(t.TempDir(), "tg.token")
@@ -433,14 +497,22 @@ func TestABadTokenFileMakesNoSink(t *testing.T) {
 	empty := tgTokenFile(t, " \n\t\n")
 	long := tgTokenFile(t, "123:"+strings.Repeat("Q", 300))
 	odd := tgTokenFile(t, "123:abc/../x?y#z")
+	huge := tgTokenFile(t, tgToken+strings.Repeat(" ", 5000)+"QQQQJUNK")
 	missing := filepath.Join(t.TempDir(), "none")
 	dir := t.TempDir()
+	notToken := func(body string) string { return tgTokenFile(t, body) }
+	prefixed, noID, noKey, wordID := notToken("bot123:ABC"), notToken(":abc"), notToken("123:"), notToken("abc:def")
 	for _, c := range []struct {
 		path, says string
 	}{
 		{empty, "bot_token_file " + empty + " holds no bot token"},
 		{long, "bot_token_file " + long + " holds more than 256 bytes"},
+		{huge, "bot_token_file " + huge + " is more than 4096 bytes"},
 		{odd, "bot_token_file " + odd + " does not hold a bot token"},
+		{prefixed, "bot_token_file " + prefixed + " does not hold a bot token"},
+		{noID, "bot_token_file " + noID + " does not hold a bot token"},
+		{noKey, "bot_token_file " + noKey + " does not hold a bot token"},
+		{wordID, "bot_token_file " + wordID + " does not hold a bot token"},
 		{missing, missing},
 		{dir, "bot_token_file " + dir + " is not a plain file"},
 	} {

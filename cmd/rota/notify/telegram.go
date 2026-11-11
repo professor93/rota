@@ -9,16 +9,13 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
+	"unicode/utf16"
 
 	"github.com/professor93/rota/api"
 	"github.com/professor93/rota/internal/events"
-	"github.com/professor93/rota/internal/owner"
 )
 
 // telegramAPI is where Telegram's Bot API is, a variable so a test can
@@ -26,7 +23,7 @@ import (
 var telegramAPI = "https://api.telegram.org"
 
 const (
-	// tgMaxText is the most runes Telegram takes in one message.
+	// tgMaxText is the most Telegram takes in one message, in UTF-16 units.
 	tgMaxText = 4096
 	// tgMaxToken is the longest bot token a token file may hold.
 	tgMaxToken = 256
@@ -60,8 +57,9 @@ func newTelegram(s api.EventSink, e env) (sender, error) {
 		return nil, errors.New("chat_id is empty; a telegram sink sends to one chat")
 	}
 	var id json.RawMessage
-	if _, err := strconv.ParseInt(chat, 10, 64); err == nil {
-		id = json.RawMessage(chat)
+	if n, err := strconv.ParseInt(chat, 10, 64); err == nil {
+		// As JSON writes the number: "+123" and "0123" are not JSON.
+		id = json.RawMessage(strconv.FormatInt(n, 10))
 	} else if id, err = json.Marshal(chat); err != nil {
 		return nil, errors.New("chat_id cannot be sent")
 	}
@@ -70,6 +68,8 @@ func newTelegram(s api.EventSink, e env) (sender, error) {
 	// holds the token stays inside TLS.
 	tr.Proxy = http.ProxyFromEnvironment
 	tr.MaxResponseHeaderBytes = tgMaxAnswer
+	tr.MaxIdleConnsPerHost = 1
+	tr.IdleConnTimeout = 30 * time.Second
 	return &telegram{
 		token:    token,
 		endpoint: strings.TrimRight(telegramAPI, "/") + "/bot" + token + "/sendMessage",
@@ -85,47 +85,25 @@ func newTelegram(s api.EventSink, e env) (sender, error) {
 	}, nil
 }
 
-// tgReadToken reads the bot token from path: a plain file, through any
-// link to it, that is its owner's alone, holding the token and nothing
-// else but space around it. Its error names path and never what is in it.
+// tgReadToken reads the bot token from path (readSecretFile), and refuses
+// what is not one: a token is the bot's number, a colon and its key, at
+// most tgMaxToken bytes. Its error names path and never what is in it.
 func tgReadToken(path string) (string, error) {
 	const key = "bot_token_file"
-	// A link is followed, as secret managers make them, and the file it
-	// ends at is what is opened and checked. Opening that with OpenFlags
-	// keeps a FIFO from holding the daemon's start.
-	target, err := filepath.EvalSymlinks(path)
+	token, err := readSecretFile(key, path, "bot token", 4096)
 	if err != nil {
-		return "", fmt.Errorf("%s: %w", key, err)
+		return "", err
 	}
-	f, err := os.OpenFile(target, os.O_RDONLY|owner.OpenFlags, 0)
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", key, err)
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", key, err)
-	}
-	if !fi.Mode().IsRegular() {
-		return "", fmt.Errorf("%s %s is not a plain file", key, path)
-	}
-	if err := owner.Only(path, fi.Mode()); err != nil {
-		return "", fmt.Errorf("%s: %w", key, err)
-	}
-	raw, err := io.ReadAll(io.LimitReader(f, 4096))
-	if err != nil {
-		return "", fmt.Errorf("%s %s cannot be read", key, path)
-	}
-	token := strings.TrimSpace(string(raw))
+	id, rest, _ := strings.Cut(token, ":")
 	switch {
-	case token == "":
-		return "", fmt.Errorf("%s %s holds no bot token", key, path)
 	case len(token) > tgMaxToken:
 		return "", fmt.Errorf("%s %s holds more than %d bytes; a bot token is shorter", key, path, tgMaxToken)
-	case strings.ContainsFunc(token, func(r rune) bool { return !tgTokenRune(r) }):
+	case id == "" || rest == "" || strings.ContainsFunc(id, func(r rune) bool { return r < '0' || r > '9' }),
+		strings.ContainsFunc(token, func(r rune) bool { return !tgTokenRune(r) }):
 		// The token goes into the URL's path as it is: a byte that would
-		// change the path, or the URL, is not a token's.
-		return "", fmt.Errorf("%s %s does not hold a bot token: a token is letters, digits and \":_-.~\" only", key, path)
+		// change the path, or the URL, is not a token's; nor is a token
+		// pasted with the "bot" the URL puts before it.
+		return "", fmt.Errorf("%s %s does not hold a bot token: a token is the bot's number, a colon and its key, of letters, digits and \"_-.~\"", key, path)
 	}
 	return token, nil
 }
@@ -190,7 +168,7 @@ func (t *telegram) send(ctx context.Context, e events.Event) error {
 			code = http.StatusBadRequest
 		}
 	}
-	err = tgFailed(code, a, parsed)
+	err = t.failed(code, a, parsed)
 	switch {
 	case code == http.StatusTooManyRequests:
 		secs := a.Parameters.RetryAfter
@@ -217,13 +195,15 @@ func (t *telegram) after(secs int64) time.Duration {
 	return time.Duration(secs) * time.Second
 }
 
-// tgFailed says that Telegram answered code: in Telegram's own words when
+// failed says that Telegram answered code: in Telegram's own words when
 // the answer was Telegram's JSON, else in the status line's. Nothing else
-// of a body is said, since a proxy's page may echo the path.
-func tgFailed(code int, a tgReply, parsed bool) error {
+// of a body is said, since a proxy's page may echo the path. The words are
+// rid of the token before they are cut, so that a cut never leaves a part
+// of it that no longer matches.
+func (t *telegram) failed(code int, a tgReply, parsed bool) error {
 	said := http.StatusText(code)
 	if d := strings.TrimSpace(a.Description); parsed && d != "" {
-		said = events.Clean(d, tgMaxSaid)
+		said = events.Clean(redact(d, t.secrets()), tgMaxSaid)
 	}
 	if said == "" {
 		return fmt.Errorf("telegram answered %d", code)
@@ -232,22 +212,28 @@ func tgFailed(code int, a tgReply, parsed bool) error {
 }
 
 // text is e as a message: its sentence, and on a line of its own the link
-// to its session's terminal when there is a link and a session, the whole
-// cut at tgMaxText runes on a rune's boundary.
+// to its session's terminal when there is a link and a session. Past
+// tgMaxText it is cut on a rune's boundary and ends with "…". Telegram
+// counts a message's length in UTF-16 units, so they are what is counted:
+// never fewer than its runes.
 func (t *telegram) text(e events.Event) string {
 	s := events.Sentence(e)
 	if t.link != "" && e.Session != "" {
 		s += "\n" + t.link + "/terminal#" + e.Session
 	}
-	if utf8.RuneCountInString(s) <= tgMaxText {
+	n := 0
+	for _, r := range s {
+		n += utf16.RuneLen(r)
+	}
+	if n <= tgMaxText {
 		return s
 	}
-	n := 0
-	for i := range s {
-		if n == tgMaxText-1 {
+	n = 0
+	for i, r := range s {
+		if n+utf16.RuneLen(r) > tgMaxText-1 { // room for "…", one unit
 			return s[:i] + "…"
 		}
-		n++
+		n += utf16.RuneLen(r)
 	}
 	return s
 }
