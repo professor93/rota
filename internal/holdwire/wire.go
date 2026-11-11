@@ -137,8 +137,9 @@ type ScreenHead struct {
 }
 
 // StateMsg is what the holder knows about the session beyond its bytes: the
-// title the CLI set, how many bells it rang, the terminal modes it has on,
-// and what the CLI's own registry says, when it keeps one.
+// title the CLI set, how many bells it rang (a BEL, or a notification OSC 9
+// or OSC 777 asked for), the terminal modes it has on, and what the CLI's
+// own registry says, when it keeps one.
 type StateMsg struct {
 	Title    string       `json:"title,omitempty"`
 	Bells    uint64       `json:"bells,omitempty"`

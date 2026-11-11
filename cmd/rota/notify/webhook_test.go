@@ -150,8 +150,8 @@ func TestAWebhookIsSignedAndLabelled(t *testing.T) {
 		e.Session != want.Session || e.Name != want.Name || e.Text != want.Text || e.Reason != want.Reason {
 		t.Fatalf("the body is %+v, want %+v", e, want)
 	}
-	if strings.Contains(string(r.body), "\n") {
-		t.Fatalf("the body %q is not one line", r.body)
+	if string(r.body) != string(events.JSON(want)) {
+		t.Fatalf("the body is %q, want events.JSON's %q", r.body, events.JSON(want))
 	}
 }
 
@@ -176,7 +176,7 @@ func TestAWebhookWithoutASecretIsUnsigned(t *testing.T) {
 	}
 }
 
-// 429 and 5xx are tried again, after the server's Retry-After when it gives
+// 408, 429 and 5xx are tried again, after the server's Retry-After when it gives
 // one, as seconds or a date, and never longer than maxAfter. Any other
 // answer is dropped, a redirect too: none is followed.
 func TestServerErrorsAreTriedAgainAndOthersAreNot(t *testing.T) {
@@ -204,6 +204,8 @@ func TestServerErrorsAreTriedAgainAndOthersAreNot(t *testing.T) {
 		case "/502-past":
 			w.Header().Set("Retry-After", "Mon, 01 Jan 2001 00:00:00 GMT")
 			w.WriteHeader(http.StatusBadGateway)
+		case "/408":
+			w.WriteHeader(http.StatusRequestTimeout)
 		case "/404":
 			w.WriteHeader(http.StatusNotFound)
 		case "/400":
@@ -236,6 +238,7 @@ func TestServerErrorsAreTriedAgainAndOthersAreNot(t *testing.T) {
 		{"/429-junk", true, func(d time.Duration) bool { return d == 0 }, "webhook answered 429 Too Many Requests"},
 		{"/502-past", true, func(d time.Duration) bool { return d == 0 }, "webhook answered 502 Bad Gateway"},
 		{"/big", true, func(d time.Duration) bool { return d == 0 }, "webhook answered 500 Internal Server Error"},
+		{"/408", true, func(d time.Duration) bool { return d == 0 }, "webhook answered 408 Request Timeout"},
 		{"/404", false, nil, "webhook answered 404 Not Found"},
 		{"/400", false, nil, "webhook answered 400 Bad Request"},
 		{"/302", false, nil, "webhook answered 302 Found"},

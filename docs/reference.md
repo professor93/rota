@@ -2982,8 +2982,9 @@ machine, never through a proxy, and that is checked at each address it
 connects to, after the name is resolved and before anything is sent, so a
 name that resolves elsewhere sends nothing in clear text: that is refused,
 *webhook: plain http only to this machine*, and never tried again. A `2xx`
-is delivered; `429`, a `5xx` and a server that cannot be reached are tried
-again, after its `Retry-After`, in seconds or as a date, when it gives one;
+is delivered; `408`, `429`, a `5xx` and a server that cannot be reached
+are tried again, as Telegram's are, after its `Retry-After`, in seconds or
+as a date, when it gives one;
 anything else, a redirect among them, which is never followed, is dropped.
 Its error is *webhook answered 502 Bad Gateway*, in Go's words for the code:
 nothing of what the server sent is repeated.

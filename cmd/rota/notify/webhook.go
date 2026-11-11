@@ -69,7 +69,7 @@ func newWebhook(s api.EventSink, e env) (sender, error) {
 	case err != nil:
 		return nil, errors.New("url is not an address")
 	case u.Scheme != "https" && u.Scheme != "http":
-		return nil, errors.New("a webhook goes over https, or over http only to this machine")
+		return nil, errors.New("a webhook goes over https, or over http only to this machine (127.0.0.1, ::1, localhost)")
 	case u.Hostname() == "":
 		return nil, errors.New("url has no host")
 	case u.User != nil:
@@ -140,13 +140,14 @@ func hookHere(_, address string, _ syscall.RawConn) error {
 	return nil
 }
 
-// send posts e. A 2xx is delivered; 429 and 5xx are tried again, after the
-// server's Retry-After when it gives one; a failure to reach the server is
-// tried again; any other answer, a redirect among them, is dropped, and so
-// is plain http to an address that is not this machine. Nothing of the
-// answer's body is said, and no error holds the address.
+// send posts e. A 2xx is delivered; 408, 429 and 5xx are tried again, as
+// Telegram's are, after the server's Retry-After when it gives one; a
+// failure to reach the server is tried again; any other answer, a redirect
+// among them, is dropped, and so is plain http to an address that is not
+// this machine. Nothing of the answer's body is said, and no error holds
+// the address.
 func (w *webhook) send(ctx context.Context, e events.Event) error {
-	body := hookBody(e)
+	body := events.JSON(e)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.url, bytes.NewReader(body))
 	if err != nil {
 		return dropped(w.clean(err))
@@ -174,7 +175,7 @@ func (w *webhook) send(ctx context.Context, e events.Event) error {
 		return nil
 	}
 	err = fmt.Errorf("webhook answered %s", hookStatus(code))
-	if code == http.StatusTooManyRequests || code >= 500 {
+	if code == http.StatusRequestTimeout || code == http.StatusTooManyRequests || code >= 500 {
 		return again(err, hookAfter(resp.Header.Get("Retry-After"), time.Now(), w.maxAfter))
 	}
 	return dropped(err)
@@ -185,14 +186,6 @@ func (w *webhook) secrets() []string { return w.keys }
 // clean is err as it may be said: without the address, which net/http
 // repeats, or any other secret of this sink.
 func (w *webhook) clean(err error) error { return errors.New(cleanErr(err, w.keys)) }
-
-// hookBody is e's JSON as a stream's frame writes it, on one line.
-func hookBody(e events.Event) []byte {
-	f := events.Frame(e)
-	const data = "\ndata: "
-	i := bytes.Index(f, []byte(data))
-	return bytes.TrimSuffix(f[i+len(data):], []byte("\n\n"))
-}
 
 // hookStatus is a status code as Go names it, not as the server's reason
 // phrase does: "302 Found".

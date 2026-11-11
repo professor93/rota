@@ -87,6 +87,30 @@ func TestFrameNeverFails(t *testing.T) {
 	}
 }
 
+// Frame's data line is JSON(e) byte for byte, for an ordinary event and
+// for the odd ones Frame mends, so a sink that sends JSON sends what a
+// stream carries.
+func TestFrameCarriesJSON(t *testing.T) {
+	nan := 0.0
+	nan /= nan
+	zone := time.FixedZone("x", 5*3600)
+	for _, e := range []Event{
+		full(),
+		{ID: 9, Type: Test, Time: time.Date(2026, 11, 10, 2, 0, 0, 0, zone), Text: "local"},
+		{ID: 1, Type: AccountThreshold, Text: "bad \xff byte", Percent: &nan, Time: time.Date(12000, 1, 1, 0, 0, 0, 0, time.UTC)},
+		{ID: 3, Type: "test\r\ndata: {}\n\nevent: evil", Text: "x"},
+	} {
+		j := JSON(e)
+		if bytes.ContainsAny(j, "\r\n") {
+			t.Fatalf("JSON(%+v) is not one line: %q", e, j)
+		}
+		want := fmt.Sprintf("id: %d\nevent: %s\ndata: %s\n\n", e.ID, Clean(e.Type, 0), j)
+		if got := string(Frame(e)); got != want {
+			t.Fatalf("Frame = %q\nwant    %q", got, want)
+		}
+	}
+}
+
 func TestReaderSkipsWhatIsNotAnEvent(t *testing.T) {
 	var in bytes.Buffer
 	in.WriteString(Retry)
