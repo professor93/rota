@@ -7,12 +7,15 @@ import (
 	tea "charm.land/bubbletea/v2"
 )
 
-// overlay is a view over the tabs: a form, a confirm, the login flow. It is
-// opened by an openMsg. Overlays stack: the top one has the keys, pastes
-// and the mouse, every open one hears every other message, and one that
-// says it is Closed is dropped, giving the keys back to the one under it,
-// or to the tab. An overlay that holds something open (a page's listener)
-// also has Leave(ctx context.Context), which Run calls after the program
+// overlay is a view over the tabs: a form, a confirm, the login flow. A
+// view opens one with env.open, as its Update returns, or a command with an
+// openMsg. Overlays stack: the top one has the keys, pastes and the mouse,
+// every open one hears every other message, and one that says it is Closed
+// is dropped, giving the keys back to the one under it, or to the tab.
+// What the shell may also ask of one, each optional: Init() tea.Cmd, run
+// once as it is opened (modelStarter); Busy() string, what quitting ends,
+// named in the quit ask; and, for one that holds something open (a page's
+// listener), Leave(ctx context.Context), which Run calls after the program
 // ends, as it does a tab's.
 type overlay interface {
 	Update(msg tea.Msg) (overlay, tea.Cmd)
