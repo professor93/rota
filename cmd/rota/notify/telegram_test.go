@@ -507,7 +507,7 @@ func TestABadTokenFileMakesNoSink(t *testing.T) {
 	}{
 		{empty, "bot_token_file " + empty + " holds no bot token"},
 		{long, "bot_token_file " + long + " holds more than 256 bytes"},
-		{huge, "bot_token_file " + huge + " is more than 4096 bytes"},
+		{huge, "bot_token_file " + huge + " holds more than 4096 bytes"},
 		{odd, "bot_token_file " + odd + " does not hold a bot token"},
 		{prefixed, "bot_token_file " + prefixed + " does not hold a bot token"},
 		{noID, "bot_token_file " + noID + " does not hold a bot token"},
