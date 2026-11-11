@@ -10,7 +10,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 
 	"charm.land/bubbles/v2/key"
 	"charm.land/bubbles/v2/textinput"
@@ -23,20 +22,112 @@ import (
 // accountsActBad is what the typed threshold says of a value it cannot take.
 const accountsActBad = "a threshold is a whole percentage from 1 to 100"
 
+// accountsActState is what the actions keep between a change sent and its
+// answer being listed: each account's threshold, and the moves waiting
+// behind the one out. It is the tab's (accountsTab.act), read and written
+// in Update alone, and its zero value is ready.
+type accountsActState struct {
+	ids map[int]*accountsActFlight
+	// moving says a move is out, and moves are the ones pressed since, in
+	// order: each is sent once the one before it is answered.
+	moving bool
+	moves  []accountsActPlace
+}
+
+// accountsActPlace is a move waiting: the account and where to.
+type accountsActPlace struct {
+	acct  wire.Account
+	place string
+}
+
+// accountsActFlight is one account's threshold change.
+type accountsActFlight struct {
+	// out is true while a change is in flight, and sent is its value. next
+	// is the value pressed or typed since, each press clamped as it came,
+	// 0 for none; it is sent once out is answered.
+	out        bool
+	sent, next int
+	// now is what the last answer set, 0 for none. Until a listing comes,
+	// a step is taken from it rather than from the table, which may still
+	// show the value before.
+	now int
+}
+
+// accountsActAnswer is how a change the actions sent was answered, which
+// the tab hands back to them (answered). A move's names its place; a
+// threshold's names none.
+type accountsActAnswer struct {
+	id    int
+	place string
+	v     int    // the threshold sent
+	got   int    // the threshold the server answered with
+	who   string // the account, as a refusal names it
+	err   error
+}
+
+// accountsActSend is the command that sends c for the account ans is
+// about, under an ordinary call's deadline, and answers with ans and how
+// it went: an error for a refusal, a panic or no answer, so whatever waits
+// on the answer always hears one.
+func accountsActSend(e *env, c Change, ans accountsActAnswer) tea.Cmd {
+	b := e.b
+	return e.callOr(envCallTimeout, func(ctx context.Context) tea.Msg {
+		r, err := b.Change(ctx, ans.id, c)
+		out := ans
+		out.got, out.err = r.Threshold, err
+		return out
+	}, func(err error) tea.Msg {
+		out := ans
+		out.err = err
+		return out
+	}, nil)
+}
+
+// answered takes the answer to a change the actions sent.
+func (a *accountsTab) answered(m accountsActAnswer) tea.Cmd {
+	if m.place != "" {
+		return a.act.moved(a.e, m)
+	}
+	return a.act.set(a.e, m)
+}
+
 // move puts acct at place in the rotation, in the words `rota set --order`
-// takes: up, down, first, last or out. Each press is a move of its own. A
-// move shifts the others, so once it is answered the listing is read
-// again as it is; a refusal is said, cleaned, in a toast.
+// takes: up, down, first, last or out. Each press is a move of its own. One
+// move of the tab's is out at a time, as moving one account shifts the
+// others: the next waits for its answer, so the server takes them in the
+// order pressed.
 func (a *accountsTab) move(acct wire.Account, place string) tea.Cmd {
-	b, id := a.e.b, acct.ID
-	what := accountsActWho(acct) + " could not " + accountsActMove(place)
-	failed := func(err error) tea.Msg { return accountsActRefused(what, err) }
-	return a.e.callOr(envCallTimeout, func(ctx context.Context) tea.Msg {
-		if _, err := b.Change(ctx, id, Change{Order: &place}); err != nil {
-			return failed(err)
-		}
-		return accountsActRefresh()
-	}, failed, nil)
+	if a.act.moving {
+		a.act.moves = append(a.act.moves, accountsActPlace{acct, place})
+		return nil
+	}
+	a.act.moving = true
+	return accountsActMoveTo(a.e, acct, place)
+}
+
+func accountsActMoveTo(e *env, acct wire.Account, place string) tea.Cmd {
+	return accountsActSend(e, Change{Order: &place}, accountsActAnswer{id: acct.ID, place: place, who: accountsActWho(acct)})
+}
+
+// moved takes a move's answer: the next move waiting is sent, and after
+// the last the listing is read again, as a move shifts the others. A
+// refusal is said, cleaned, the moves waiting are dropped, and the listing
+// is read again.
+func (s *accountsActState) moved(e *env, m accountsActAnswer) tea.Cmd {
+	if !s.moving {
+		return nil
+	}
+	if m.err != nil {
+		s.moving, s.moves = false, nil
+		return accountsActRefused(m.who+" could not "+accountsActMove(m.place), m.err)
+	}
+	if len(s.moves) > 0 {
+		next := s.moves[0]
+		s.moves = s.moves[1:]
+		return accountsActMoveTo(e, next.acct, next.place)
+	}
+	s.moving = false
+	return accountsActRefresh
 }
 
 // accountsActMove is what a move to place does, as a refusal says it.
@@ -58,8 +149,9 @@ func accountsActMove(place string) string {
 
 // nudge moves acct's threshold by delta, within 1..100 (R36). One change
 // of an account's threshold is out at a time: the presses while it is out
-// are summed and sent as one change once it is answered, so a key held
-// down sends two changes, not thirty.
+// make one value, clamped press by press as they would be one at a time,
+// sent once it is answered, so a key held down sends two changes, not
+// thirty.
 func (a *accountsTab) nudge(acct wire.Account, delta int) tea.Cmd {
 	return accountsActThreshold(a, acct, 0, delta)
 }
@@ -73,6 +165,106 @@ func (a *accountsTab) toggleOut(acct wire.Account) tea.Cmd {
 	return a.move(acct, "out")
 }
 
+// accountsActThreshold sets acct's threshold to to, or keeps it when to is
+// 0, moved by by, within 1..100. While a change of it is out, this makes
+// the value that follows it, from the one waiting or the one out: a typed
+// value replaces the steps before it. Else it is sent now, from the
+// threshold listed, or from the last answer when no listing has come
+// since; one that changes nothing is not sent.
+func accountsActThreshold(a *accountsTab, acct wire.Account, to, by int) tea.Cmd {
+	if i := slices.IndexFunc(a.rows, func(r wire.Account) bool { return r.ID == acct.ID }); i >= 0 {
+		acct = a.rows[i]
+	}
+	s := &a.act
+	f := s.ids[acct.ID]
+	if f != nil && f.out {
+		from := f.next
+		if from == 0 {
+			from = f.sent
+		}
+		f.next = accountsActStep(from, to, by)
+		return nil
+	}
+	from := barsThreshold(acct.Threshold)
+	if f != nil {
+		from = f.now
+	}
+	want := accountsActStep(from, to, by)
+	if want == from {
+		return nil
+	}
+	if s.ids == nil {
+		s.ids = map[int]*accountsActFlight{}
+	}
+	if f == nil {
+		f = &accountsActFlight{}
+		s.ids[acct.ID] = f
+	}
+	f.out, f.sent = true, want
+	return accountsActSetTo(a.e, acct.ID, accountsActWho(acct), want)
+}
+
+func accountsActSetTo(e *env, id int, who string, v int) tea.Cmd {
+	return accountsActSend(e, Change{Threshold: &v}, accountsActAnswer{id: id, v: v, who: who})
+}
+
+// accountsActStep is to, or from when to is 0, moved by by, within 1..100.
+func accountsActStep(from, to, by int) int {
+	if to != 0 {
+		from = to
+	}
+	return min(max(from+by, 1), 100)
+}
+
+// set takes a threshold's answer: the value that waited is sent, or, with
+// none, the listing is read again so the table shows the threshold. A
+// refusal is said, cleaned, and the value waiting goes with it; a value
+// answered before it in the same run of presses still stands until a
+// listing comes, as the server has it.
+func (s *accountsActState) set(e *env, m accountsActAnswer) tea.Cmd {
+	f := s.ids[m.id]
+	if f == nil || !f.out {
+		return nil
+	}
+	if m.err != nil {
+		f.out, f.next = false, 0
+		if f.now == 0 {
+			delete(s.ids, m.id)
+		}
+		return accountsActRefused(fmt.Sprintf("the threshold of %s could not be set to %d%%", m.who, m.v), m.err)
+	}
+	f.now = m.v
+	if m.got >= 1 && m.got <= 100 {
+		f.now = m.got
+	}
+	if f.next != 0 && f.next != f.now {
+		v := f.next
+		f.sent, f.next = v, 0
+		return accountsActSetTo(e, m.id, m.who, v)
+	}
+	f.out, f.next = false, 0
+	return accountsActRefresh
+}
+
+// listed lets go, at a listing, of each answer that waited for one: from
+// now on a step is taken from what is listed. A change still out is kept.
+func (s *accountsActState) listed() {
+	for id, f := range s.ids {
+		if !f.out {
+			delete(s.ids, id)
+		}
+	}
+}
+
+// accountsActRefused says what could not be done and why, cleaned, and
+// asks for the listing as it now is, since a refusal may mean the account
+// changed or went.
+func accountsActRefused(what string, err error) tea.Cmd {
+	return tea.Batch(toast(levelErr, "%s", clean(what+": "+err.Error())), accountsActRefresh)
+}
+
+func accountsActRefresh() tea.Msg { return refreshMsg{How: RefreshNone} }
+
 // crossed rings the bell once, and says which in a toast each, when
 // accounts went over their thresholds between two listings (R11): usage
 // read below the threshold before and at it or past it now. The threshold
@@ -80,12 +272,7 @@ func (a *accountsTab) toggleOut(acct wire.Account) tea.Cmd {
 // usage past nothing and rings nothing; an account listed or read for the
 // first time is no crossing, as the first listing is none. The bell is
 // armed again once the account falls back below.
-//
-// The tab calls it at every listing after the first, which is also when a
-// threshold answered stops standing in for the one listed
-// (accountsActListed).
 func (a *accountsTab) crossed(before, after []wire.Account) tea.Cmd {
-	accountsActListed(a)
 	was := make(map[int]wire.Account, len(before))
 	for _, r := range before {
 		was[r.ID] = r
@@ -125,195 +312,6 @@ func accountsActWho(acct wire.Account) string {
 		return p + "/" + accountsLabel(acct)
 	}
 	return accountsLabel(acct)
-}
-
-// accountsActRefused says what could not be done and why, cleaned, and
-// asks for the listing as it now is, since a refusal may mean the account
-// changed or went.
-func accountsActRefused(what string, err error) tea.Msg {
-	return tea.BatchMsg{toast(levelErr, "%s", clean(what+": "+err.Error())), accountsActRefresh}
-}
-
-func accountsActRefresh() tea.Msg { return refreshMsg{How: RefreshNone} }
-
-// accountsActState is every account's threshold change that is out, or
-// whose answer no listing has shown yet, by the tab it was asked in. Update
-// and the change's own command both reach it, so it is locked. It is kept
-// beside the tab, not in it, because the tab's struct is accounts.go's and
-// the tab hands its actions back nothing but listings. A tab's entries go
-// when the last is let go of, or when its program's context ends.
-type accountsActState struct {
-	sync.Mutex
-	of map[*accountsTab]*accountsActTab
-}
-
-type accountsActTab struct {
-	ids  map[int]*accountsActFlight
-	stop func() bool
-}
-
-// accountsActFlight is one account's threshold change.
-type accountsActFlight struct {
-	// out is true while a change is in flight. to is a threshold typed
-	// meanwhile, 0 for none, and by the steps pressed meanwhile, summed:
-	// both go as one change once it is answered.
-	out    bool
-	to, by int
-	// now is the threshold the last answer set. Until a listing comes, a
-	// step is taken from it rather than from the table, which may still
-	// show the one before.
-	now int
-}
-
-var accountsActFlights accountsActState
-
-// flight is id's change in a, or nil. s is locked.
-func (s *accountsActState) flight(a *accountsTab, id int) *accountsActFlight {
-	if t := s.of[a]; t != nil {
-		return t.ids[id]
-	}
-	return nil
-}
-
-// hold is id's change in a, made when there is none. A tab's first one
-// ties the tab's entries to its program's context. s is locked, and it
-// runs in Update, which is where a.e may be read.
-func (s *accountsActState) hold(a *accountsTab, id int) *accountsActFlight {
-	t := s.of[a]
-	if t == nil {
-		if s.of == nil {
-			s.of = map[*accountsTab]*accountsActTab{}
-		}
-		t = &accountsActTab{ids: map[int]*accountsActFlight{}}
-		s.of[a] = t
-		t.stop = context.AfterFunc(a.e.ctx, func() {
-			s.Lock()
-			defer s.Unlock()
-			if s.of[a] == t {
-				delete(s.of, a)
-			}
-		})
-	}
-	f := t.ids[id]
-	if f == nil {
-		f = &accountsActFlight{}
-		t.ids[id] = f
-	}
-	return f
-}
-
-// drop lets go of f, id's change in a, and of a's entry once it holds
-// none. s is locked.
-func (s *accountsActState) drop(a *accountsTab, id int, f *accountsActFlight) {
-	t := s.of[a]
-	if t == nil || t.ids[id] != f {
-		return
-	}
-	delete(t.ids, id)
-	if len(t.ids) == 0 {
-		t.stop()
-		delete(s.of, a)
-	}
-}
-
-// accountsActListed lets go, at a listing, of each of a's answers that
-// waited for one: from now on a step is taken from what is listed. A
-// change still out is kept.
-func accountsActListed(a *accountsTab) {
-	s := &accountsActFlights
-	s.Lock()
-	defer s.Unlock()
-	if t := s.of[a]; t != nil {
-		for id, f := range t.ids {
-			if !f.out {
-				s.drop(a, id, f)
-			}
-		}
-	}
-}
-
-// accountsActThreshold sets acct's threshold to to, or keeps it when to is
-// 0, moved by by, within 1..100. While a change of it is out, this is kept
-// for when that one is answered, a typed value replacing the steps pressed
-// before it. Else it is sent now, from the threshold listed, or from the
-// last answer when no listing has come since; one that changes nothing is
-// not sent.
-func accountsActThreshold(a *accountsTab, acct wire.Account, to, by int) tea.Cmd {
-	if i := slices.IndexFunc(a.rows, func(r wire.Account) bool { return r.ID == acct.ID }); i >= 0 {
-		acct = a.rows[i]
-	}
-	s := &accountsActFlights
-	s.Lock()
-	defer s.Unlock()
-	f := s.flight(a, acct.ID)
-	if f != nil && f.out {
-		if to != 0 {
-			f.to, f.by = to, 0
-		}
-		f.by += by
-		return nil
-	}
-	from := barsThreshold(acct.Threshold)
-	if f != nil {
-		from = f.now
-	}
-	want := accountsActStep(from, to, by)
-	if want == from {
-		return nil
-	}
-	f = s.hold(a, acct.ID)
-	f.out = true
-	return accountsActSend(a, acct, f, want)
-}
-
-// accountsActStep is to, or from when to is 0, moved by by, within 1..100.
-func accountsActStep(from, to, by int) int {
-	if to != 0 {
-		from = to
-	}
-	return min(max(from+by, 1), 100)
-}
-
-// accountsActAnswer is how one change of a threshold was answered: with
-// the threshold sent, as the server keeps a value from 1 to 100 as it is,
-// or with why not.
-type accountsActAnswer struct{ err error }
-
-// accountsActSend is the command that sets acct's threshold to want, then
-// sends what was pressed while that was out, one change at a time, each
-// under an ordinary call's deadline. Once nothing is left it asks for the
-// listing. A refusal ends it, drops what was pressed meanwhile, and is said.
-func accountsActSend(a *accountsTab, acct wire.Account, f *accountsActFlight, want int) tea.Cmd {
-	// The command reads the shell's env only through this copy, made in
-	// Update.
-	e, b, id, who := *a.e, a.e.b, acct.ID, accountsActWho(acct)
-	s := &accountsActFlights
-	return func() tea.Msg {
-		for {
-			v := want
-			// callOr answers with what either function made, an answer.
-			got, _ := e.callOr(envCallTimeout, func(ctx context.Context) tea.Msg {
-				_, err := b.Change(ctx, id, Change{Threshold: &v})
-				return accountsActAnswer{err}
-			}, func(err error) tea.Msg { return accountsActAnswer{err} }, nil)().(accountsActAnswer)
-			s.Lock()
-			if got.err != nil {
-				s.drop(a, id, f)
-				s.Unlock()
-				return accountsActRefused(fmt.Sprintf("the threshold of %s could not be set to %d%%", who, v), got.err)
-			}
-			f.now, want = v, v
-			if f.to != 0 || f.by != 0 {
-				want, f.to, f.by = accountsActStep(f.now, f.to, f.by), 0, 0
-			}
-			if want == f.now {
-				f.out = false
-				s.Unlock()
-				return accountsActRefresh()
-			}
-			s.Unlock()
-		}
-	}
 }
 
 // accountsActBindings are the typed threshold's keys.
@@ -383,6 +381,12 @@ func (o *accountsActTyped) Update(msg tea.Msg) (overlay, tea.Cmd) {
 		o.in.SetValue(v)
 		o.in.CursorEnd()
 		o.bad = false
+	case listingMsg:
+		// An account another terminal removed has no threshold to set.
+		if msg.Err == nil && !slices.ContainsFunc(msg.Listing.Accounts, func(r wire.Account) bool { return r.ID == o.acct.ID }) {
+			o.closed = true
+			return o, toast(levelWarn, "%s", accountsActWho(o.acct)+" is no longer listed; its threshold was not set")
+		}
 	}
 	return o, nil
 }

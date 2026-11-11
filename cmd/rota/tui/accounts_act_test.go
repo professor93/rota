@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -67,6 +68,22 @@ func (f *accountsActFake) holdListing() chan struct{} {
 	return f.holdList
 }
 
+// taken waits until a Change has taken the hold holdNext set.
+func (f *accountsActFake) taken(t *testing.T) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(time.Millisecond) {
+		f.mu.Lock()
+		h := f.hold
+		f.mu.Unlock()
+		if h == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("no change took the hold")
+		}
+	}
+}
+
 func (f *accountsActFake) refuse(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -96,7 +113,7 @@ func (f *accountsActFake) accounts(ctx context.Context, how Refresh) (Listing, e
 
 func (f *accountsActFake) change(ctx context.Context, id int, c Change) (wire.Account, error) {
 	f.mu.Lock()
-	hold, no, panics := f.hold, f.no, f.panics
+	hold := f.hold
 	f.hold = nil
 	f.mu.Unlock()
 	if hold != nil {
@@ -106,6 +123,10 @@ func (f *accountsActFake) change(ctx context.Context, id int, c Change) (wire.Ac
 			return wire.Account{}, ctx.Err()
 		}
 	}
+	// What a held change answers is what the test set by its release.
+	f.mu.Lock()
+	no, panics := f.no, f.panics
+	f.mu.Unlock()
 	if panics != "" {
 		panic(panics)
 	}
@@ -190,13 +211,15 @@ func TestMovesSendOnePlaceEach(t *testing.T) {
 			t.Errorf("%s said %v and rang %d", c.key, toasts, bells)
 		}
 	}
-	// Moves are not coalesced: three presses are three places.
-	changes := len(accountsActChanges(b))
+	// Moves are not coalesced: three presses are three places, sent in the
+	// order pressed, and the listing is read once after the last.
+	changes, lists := len(accountsActChanges(b)), len(b.named("Accounts"))
 	run(t, m, press("K", "K", "J")...)
-	got := accountsActChanges(b)[changes:]
-	slices.Sort(got)
-	if !slices.Equal(got, []string{"1 order down", "1 order up", "1 order up"}) {
+	if got := accountsActChanges(b)[changes:]; !slices.Equal(got, []string{"1 order up", "1 order up", "1 order down"}) {
 		t.Errorf("K K J sent %q", got)
+	}
+	if got := accountsActListings(b, lists); !slices.Equal(got, []string{"Accounts(none)"}) {
+		t.Errorf("after K K J the listing was read %q", got)
 	}
 	// The selected account is the one moved.
 	run(t, m, press("down", "u")...)
@@ -206,11 +229,56 @@ func TestMovesSendOnePlaceEach(t *testing.T) {
 	// last and out are moves too, the words x sends.
 	a := accountsOf(m)
 	changes = len(accountsActChanges(b))
-	run(t, m, tea.BatchMsg{a.move(a.rows[2], "last"), a.move(a.rows[2], "out")})
-	got = accountsActChanges(b)[changes:]
-	slices.Sort(got)
-	if !slices.Equal(got, []string{"3 order last", "3 order out"}) {
+	run(t, m, tea.BatchMsg{a.move(a.rows[2], "last")})
+	run(t, m, tea.BatchMsg{a.move(a.rows[2], "out")})
+	if got := accountsActChanges(b)[changes:]; !slices.Equal(got, []string{"3 order last", "3 order out"}) {
 		t.Errorf("last and out sent %q", got)
+	}
+}
+
+// One move is out at a time, whichever account it moves: a move pressed
+// while one is out waits for its answer, so the server takes them in the
+// order pressed (M2). A refusal drops those waiting.
+func TestAccountsActMovesGoOneAtATime(t *testing.T) {
+	m, b, f := accountsActModel(t, accountsThree())
+	accountsActStart(t, m)
+	release := f.holdNext()
+	run(t, m, press("x", "u", "down", "K")...)
+	if got := accountsActChanges(b); !slices.Equal(got, []string{"1 order out"}) {
+		t.Fatalf("with the first move out, x u down K sent %q", got)
+	}
+	lists := len(b.named("Accounts"))
+	close(release)
+	await(t, m)
+	run(t, m)
+	if got := accountsActChanges(b); !slices.Equal(got, []string{"1 order out", "1 order first", "2 order up"}) {
+		t.Errorf("x u down K sent %q", got)
+	}
+	if got := accountsActListings(b, lists); !slices.Equal(got, []string{"Accounts(none)"}) {
+		t.Errorf("after the moves the listing was read %q", got)
+	}
+	// A refused move drops the moves waiting behind it, and the next press
+	// is sent at once.
+	release = f.holdNext()
+	run(t, m, press("J", "J", "up", "x")...)
+	f.refuse(errors.New("no"))
+	close(release)
+	_, seen := await(t, m)
+	run(t, m)
+	if got := accountsActChanges(b)[3:]; !slices.Equal(got, []string{"2 order down"}) {
+		t.Errorf("a refused move and three waiting sent %q", got)
+	}
+	if toasts, _ := accountsActSaid(seen); len(toasts) != 1 || toasts[0].Text != "claude/home@example.com could not move down: no" {
+		t.Errorf("a refused move said %v", toasts)
+	}
+	f.refuse(nil)
+	run(t, m, press("J")...)
+	if got := accountsActChanges(b)[4:]; !slices.Equal(got, []string{"1 order down"}) {
+		t.Errorf("after a refusal, J sent %q", got)
+	}
+	// An answer nothing waits for changes nothing.
+	if cmd := accountsOf(m).answered(accountsActAnswer{id: 1, place: "up"}); cmd != nil {
+		t.Errorf("a move's answer with none out gave %v", cmd)
 	}
 }
 
@@ -315,16 +383,202 @@ func TestNudgesCoalesce(t *testing.T) {
 	}
 }
 
-// accountsActLeft is the ids a's kept changes are for.
-func accountsActLeft(a *accountsTab) []int {
-	s := &accountsActFlights
-	s.Lock()
-	defer s.Unlock()
-	var ids []int
-	if t := s.of[a]; t != nil {
-		for id := range t.ids {
-			ids = append(ids, id)
+// Presses while a change is out are clamped one at a time, as they are when
+// each is answered before the next, so the same keys give the same
+// threshold however slowly the server answers (M1).
+func TestAccountsActStepsClampAsPressed(t *testing.T) {
+	rows := accountsThree()
+	rows[0].Threshold, rows[1].Threshold = 95, 5
+	m, b, f := accountsActModel(t, rows)
+	accountsActStart(t, m)
+	held := func(keys ...string) []string {
+		t.Helper()
+		n := len(accountsActChanges(b))
+		release := f.holdNext()
+		run(t, m, press(keys...)...)
+		close(release)
+		await(t, m)
+		run(t, m)
+		return accountsActChanges(b)[n:]
+	}
+	one := func(keys ...string) []string {
+		t.Helper()
+		n := len(accountsActChanges(b))
+		for _, k := range keys {
+			run(t, m, press(k)...)
 		}
+		return accountsActChanges(b)[n:]
+	}
+	a := accountsOf(m)
+	if got := held("+", "+", "+", "-"); !slices.Equal(got, []string{"1 threshold 100", "1 threshold 95"}) || a.rows[0].Threshold != 95 {
+		t.Errorf("from 95, + + + - with the first out sent %q and ends at %d", got, a.rows[0].Threshold)
+	}
+	if got := one("+", "+", "+", "-"); !slices.Equal(got, []string{"1 threshold 100", "1 threshold 95"}) || a.rows[0].Threshold != 95 {
+		t.Errorf("from 95, + + + - one by one sent %q and ends at %d", got, a.rows[0].Threshold)
+	}
+	// Steps that come back to the value out send nothing more.
+	if got := held("+", "+", "+"); !slices.Equal(got, []string{"1 threshold 100"}) {
+		t.Errorf("from 95, + + + with the first out sent %q", got)
+	}
+	run(t, m, press("down")...)
+	if got := held("-", "-", "-", "+"); !slices.Equal(got, []string{"2 threshold 1", "2 threshold 6"}) || a.rows[1].Threshold != 6 {
+		t.Errorf("from 5, - - - + with the first out sent %q and ends at %d", got, a.rows[1].Threshold)
+	}
+}
+
+// A refusal after an answer in the same run of presses keeps that answer
+// until a listing comes: the server has it, and the next press steps from
+// it (N1).
+func TestAccountsActARefusalKeepsWhatWasSet(t *testing.T) {
+	m, b, f := accountsActModel(t, accountsThree())
+	accountsActStart(t, m)
+	// No listing comes until the end, so what is kept stands throughout.
+	gate, listing := make(chan struct{}), b.AccountsFn
+	b.AccountsFn = func(ctx context.Context, how Refresh) (Listing, error) {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return Listing{}, ctx.Err()
+		}
+		return listing(ctx, how)
+	}
+	first := f.holdNext()
+	run(t, m, press("+", "+")...) // 80 out, 85 waiting
+	f.taken(t)
+	second := f.holdNext()
+	close(first)
+	await(t, m) // 80 answered; 85 sent and held
+	f.refuse(errors.New("no"))
+	close(second)
+	_, seen := await(t, m) // 85 refused
+	if toasts, _ := accountsActSaid(seen); len(toasts) != 1 || toasts[0].Text != "the threshold of claude/work@example.com could not be set to 85%: no" {
+		t.Errorf("the refusal said %v", toasts)
+	}
+	if left := accountsActLeft(accountsOf(m)); !slices.Equal(left, []int{1}) {
+		t.Errorf("after the refusal the answer of 80 is kept for %v", left)
+	}
+	// An answer nothing waits for changes nothing, a kept one included.
+	if cmd := accountsOf(m).answered(accountsActAnswer{id: 1, v: 50, got: 50}); cmd != nil {
+		t.Errorf("a threshold's answer with none out gave %v", cmd)
+	}
+	// What waited behind a refused change goes with it: 85 out, 90
+	// waiting, 85 refused; the next step goes from 80 to 85, and once
+	// that is answered nothing more is sent.
+	release := f.holdNext()
+	run(t, m, press("+", "+")...)
+	close(release)
+	await(t, m)
+	f.refuse(nil)
+	run(t, m, press("+")...)
+	if got := accountsActChanges(b); !slices.Equal(got, []string{"1 threshold 80", "1 threshold 85", "1 threshold 85", "1 threshold 85"}) {
+		t.Errorf("after 85 was refused twice, + sent %q", got)
+	}
+	// A refusal of a first change keeps nothing: the next step goes from
+	// the table, though no listing has come.
+	f.refuse(errors.New("no"))
+	run(t, m, press("down", "-")...) // home, 100 to 95, refused
+	if left := accountsActLeft(accountsOf(m)); !slices.Equal(left, []int{1}) {
+		t.Errorf("after home's first change was refused, changes are kept for %v", left)
+	}
+	f.refuse(nil)
+	run(t, m, press("-")...)
+	if got := accountsActChanges(b)[4:]; !slices.Equal(got, []string{"2 threshold 95", "2 threshold 95"}) {
+		t.Errorf("after a first step was refused, - sent %q", got)
+	}
+	close(gate)
+	for len(harnessDriverOf(t).leftover()) > 0 {
+		await(t, m)
+	}
+}
+
+// What the server answers a threshold with is what stands until a listing
+// comes, even where it kept another value than the one sent; an answer
+// without one stands for the value sent (N4).
+func TestAccountsActTheAnswerIsWhatStands(t *testing.T) {
+	m, b, _ := accountsActModel(t, accountsThree())
+	accountsActStart(t, m)
+	// The first change is kept as 70; later answers carry no threshold.
+	var mu sync.Mutex
+	answered := 0
+	b.ChangeFn = func(ctx context.Context, id int, c Change) (wire.Account, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if answered++; answered == 1 {
+			return wire.Account{ID: id, Threshold: 70}, nil
+		}
+		return wire.Account{ID: id}, nil
+	}
+	// No listing comes until the end.
+	gate := make(chan struct{})
+	b.AccountsFn = func(ctx context.Context, how Refresh) (Listing, error) {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return Listing{}, ctx.Err()
+		}
+		return Listing{Accounts: accountsThree()}, nil
+	}
+	run(t, m, press("+")...) // 80 sent, 70 kept
+	run(t, m, press("+")...) // from 70: 75, which stands
+	run(t, m, press("+")...) // from 75: 80
+	if got := accountsActChanges(b); !slices.Equal(got, []string{"1 threshold 80", "1 threshold 75", "1 threshold 80"}) {
+		t.Errorf("steps after a server keeping 70 sent %q", got)
+	}
+	close(gate)
+	for len(harnessDriverOf(t).leftover()) > 0 {
+		await(t, m)
+	}
+}
+
+// A key that opens an overlay opens it before the next key is routed, so
+// the keys typed straight after it reach it, and an enter among them
+// launches nothing (I2).
+func TestAccountsActKeysTypedAfterAnOpenReachIt(t *testing.T) {
+	m, b, _ := accountsActModel(t, accountsThree())
+	accountsActStart(t, m)
+	a := accountsOf(m)
+	var launched []int
+	a.do.launch = func(_ *accountsTab, acct wire.Account) tea.Cmd { launched = append(launched, acct.ID); return nil }
+	run(t, m, press("%", "8", "0", "enter")...)
+	if got := accountsActChanges(b); !slices.Equal(got, []string{"1 threshold 80"}) || len(m.stack) != 0 || len(launched) != 0 {
+		t.Errorf("%%80⏎ together sent %q, left %d overlays and launched %v", got, len(m.stack), launched)
+	}
+	for _, k := range []string{"e", "d", "n", "l"} {
+		o := &shellOverlay{}
+		switch k {
+		case "e":
+			a.do.edit = func(*env, wire.Account) overlay { return o }
+		case "d":
+			a.do.remove = func(*env, wire.Account) overlay { return o }
+		default:
+			a.do.login = func(*env, *wire.Account) asider { return shellAsider{o} }
+		}
+		run(t, m, press(k, "x", "enter", "K")...)
+		if !slices.Equal(o.keys, []string{"x", "enter", "K"}) || len(launched) != 0 || len(accountsActChanges(b)) != 1 {
+			t.Errorf("%s then x ⏎ K: the overlay took %q, launched %v, changes %q", k, o.keys, launched, accountsActChanges(b))
+		}
+		run(t, m, press("esc")...)
+		if len(m.stack) != 0 {
+			t.Fatalf("esc left %d overlays", len(m.stack))
+		}
+	}
+	// Two asked for in one Update both open, in the order asked.
+	under, over := &shellOverlay{}, &shellOverlay{}
+	a.do.edit = func(e *env, acct wire.Account) overlay {
+		e.open(under)
+		return over
+	}
+	run(t, m, press("e", "y")...)
+	if len(m.stack) != 2 || m.stack[0] != overlay(under) || !slices.Equal(over.keys, []string{"y"}) {
+		t.Errorf("two opened together left %d overlays, the top taking %q", len(m.stack), over.keys)
+	}
+}
+
+// accountsActLeft is the ids a keeps a threshold change for.
+func accountsActLeft(a *accountsTab) []int {
+	var ids []int
+	for id := range a.act.ids {
+		ids = append(ids, id)
 	}
 	slices.Sort(ids)
 	return ids
@@ -392,6 +646,16 @@ func TestTypedThresholdChecksItsValue(t *testing.T) {
 	if o.in.Value() != "88" || !strings.Contains(plain(m), bad) {
 		t.Errorf("a paste of nothing made the field %q:\n%s", o.in.Value(), plain(m))
 	}
+	// Four digits are no threshold, nor is a key whose text holds a letter
+	// after a digit, as an input method may send.
+	run(t, m, tea.PasteMsg{Content: "1000"})
+	if o.in.Value() != "88" || !strings.Contains(plain(m), bad) {
+		t.Errorf("a pasted 1000 made the field %q", o.in.Value())
+	}
+	run(t, m, tea.KeyPressMsg(tea.Key{Code: '8', Text: "8a"}))
+	if o.in.Value() != "88" || !strings.Contains(plain(m), bad) {
+		t.Errorf("a key of 8a made the field %q", o.in.Value())
+	}
 	run(t, m, tea.PasteMsg{Content: " 85%\r\n"})
 	if o.in.Value() != "85" || strings.Contains(plain(m), bad) {
 		t.Errorf("a pasted 85%% made the field %q:\n%s", o.in.Value(), plain(m))
@@ -441,10 +705,26 @@ func TestTypedThresholdChecksItsValue(t *testing.T) {
 	if got := accountsActChanges(b)[2:]; !slices.Equal(got, []string{"1 threshold 100", "1 threshold 1", "1 threshold 7"}) {
 		t.Errorf("100, 1 and 007 sent %q", got)
 	}
-	// Opened twice before the first arrives, it opens once.
-	run(t, m, press("%", "%")...)
-	if len(m.stack) != 1 {
-		t.Errorf("%% %% opened %d fields", len(m.stack))
+	// A second % goes to the field the first opened.
+	o = open()
+	run(t, m, press("%")...)
+	if len(m.stack) != 1 || !o.bad {
+		t.Errorf("%% in the field opened %d fields, complaint %v", len(m.stack), o.bad)
+	}
+	// A listing without the account closes the field and says so.
+	rows := accountsThree()[1:]
+	_, seen = run(t, m, accountsListing(rows...))
+	toasts, _ := accountsActSaid(seen)
+	if !o.Closed() || len(m.stack) != 0 || len(toasts) != 1 ||
+		toasts[0].Text != "claude/work@example.com is no longer listed; its threshold was not set" {
+		t.Errorf("a listing without the account left the field open %v, said %v", !o.Closed(), toasts)
+	}
+	// A listing that fails, or that still has it, leaves the field open.
+	run(t, m, accountsListing(accountsThree()...))
+	o = open()
+	run(t, m, listingMsg{Err: errors.New("x")}, accountsListing(accountsThree()...))
+	if o.Closed() {
+		t.Error("a failed listing, or one with the account, closed the field")
 	}
 }
 
@@ -640,6 +920,28 @@ func TestTheBellRingsOnceAndRearms(t *testing.T) {
 			t.Errorf("rang %v and said %v", bells, toasts)
 		}
 	})
+	t.Run("it names the window that decides, at most 100%", func(t *testing.T) {
+		// Both over 80: the one that resets last is when the account is
+		// back, so it is named, though the other is higher.
+		two := at(1, "a@b", 80, 85)
+		two.Windows = []wire.Window{
+			{Name: "5h", Percent: 85, ResetsAt: accountsAt(time.Hour)},
+			{Name: "7d", Percent: 82, ResetsAt: accountsAt(48 * time.Hour)},
+		}
+		past := at(2, "c@d", 80, 130)
+		blank := at(3, "e@f", 80, 90)
+		blank.Provider = "  "
+		_, toasts := listings(t, []wire.Account{at(1, "a@b", 80, 10), at(2, "c@d", 80, 10), at(3, "e@f", 80, 10)},
+			[]wire.Account{two, past, blank})
+		var got []string
+		for _, s := range toasts[1] {
+			got = append(got, s.Text)
+		}
+		want := []string{"claude/a@b crossed its 80% (7d 82%)", "claude/c@d crossed its 80% (5h 100%)", "e@f crossed its 80% (5h 90%)"}
+		if !slices.Equal(got, want) {
+			t.Errorf("said %q, not %q", got, want)
+		}
+	})
 	t.Run("what it says is cleaned", func(t *testing.T) {
 		const key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 		hostile := func(pct float64) wire.Account {
@@ -719,32 +1021,6 @@ func TestARefusedMoveIsAToast(t *testing.T) {
 	saidOnce(t, seen, "the threshold of claude/work@example.com could not be set to 75%: no account 1")
 }
 
-// Whatever is kept for a tab's changes goes when its program ends, even
-// with an answer no listing has shown yet.
-func TestAccountsActForgetsWithTheProgram(t *testing.T) {
-	m, _, f := accountsActModel(t, accountsThree())
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	m.e.ctx = ctx
-	accountsActStart(t, m)
-	a := accountsOf(m)
-	listed := f.holdListing()
-	run(t, m, press("+")...)
-	if left := accountsActLeft(a); !slices.Equal(left, []int{1}) {
-		t.Fatalf("an answer not yet listed is kept for %v", left)
-	}
-	cancel()
-	deadline := time.Now().Add(5 * time.Second)
-	for len(accountsActLeft(a)) != 0 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if left := accountsActLeft(a); len(left) != 0 {
-		t.Errorf("after the program ended, changes are kept for %v", left)
-	}
-	close(listed)
-	await(t, m)
-}
-
 func TestActUpdateDoesNoIO(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	m, b, _ := accountsActModel(t, accountsThree())
@@ -771,6 +1047,19 @@ func TestActUpdateDoesNoIO(t *testing.T) {
 		}
 		m.Update(openMsg{O: a.typedThreshold(rows[2])})
 		for _, msg := range append([]tea.Msg{tea.PasteMsg{Content: "5"}}, press("enter", "esc")...) {
+			m.Update(msg)
+			m.View()
+		}
+		// The answers, which send what waits as commands.
+		for _, msg := range []tea.Msg{
+			accountsActAnswer{id: 1, place: "up", who: "w"},
+			accountsActAnswer{id: 1, place: "down", who: "w", err: errors.New("no")},
+			accountsActAnswer{id: 1, v: 80, got: 80, who: "w"},
+			accountsActAnswer{id: 1, v: 90, who: "w", err: errors.New("no")},
+			accountsActAnswer{id: 9, v: 1, who: "w"},
+			accountsActAnswer{id: 9, place: "out", who: "w"},
+			accountsListing(rows...),
+		} {
 			m.Update(msg)
 			m.View()
 		}

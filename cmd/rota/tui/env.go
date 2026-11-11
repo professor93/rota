@@ -46,9 +46,21 @@ type env struct {
 	// ctx ends when the program does; every call runs under it.
 	ctx context.Context
 	win *envWindow
+	// opening is what a view asked to open during this Update (open).
+	opening []overlay
 }
 
 func (e *env) now() time.Time { return e.o.Now() }
+
+// open asks the shell to open o as soon as the Update that asks returns,
+// before the next message is routed, so keys typed straight after the one
+// that opened it reach it, not the view under it. Building an overlay does
+// no I/O; one opened after I/O comes back as an openMsg instead. It
+// returns nil, for a key's action to return.
+func (e *env) open(o overlay) tea.Cmd {
+	e.opening = append(e.opening, o)
+	return nil
+}
 
 func (e *env) tick(d time.Duration, fn func(time.Time) tea.Msg) tea.Cmd {
 	return e.o.Tick(d, fn)

@@ -76,6 +76,9 @@ type accountsTab struct {
 	failed error
 	// do is what each key reaches, the other tasks' actions.
 	do accountsDoing
+	// act is what the account actions (accounts_act.go) keep between a
+	// change sent and its answer being listed.
+	act accountsActState
 }
 
 func newAccounts(e *env) tab {
@@ -99,6 +102,8 @@ func (a *accountsTab) Leave(ctx context.Context) {}
 
 func (a *accountsTab) Update(msg tea.Msg) (tab, tea.Cmd) {
 	switch msg := msg.(type) {
+	case accountsActAnswer:
+		return a, a.answered(msg)
 	case listingMsg:
 		if msg.Err == nil {
 			return a, a.listed(msg.Listing.Accounts)
@@ -145,6 +150,7 @@ func (a *accountsTab) listed(rows []wire.Account) tea.Cmd {
 	default:
 		a.sel = a.rows[min(at, len(a.rows)-1)].ID
 	}
+	a.act.listed()
 	if first {
 		return nil
 	}
@@ -223,8 +229,9 @@ func (a *accountsTab) Keys() []key.Binding {
 	return out
 }
 
-// key is what a key press does. An action that opens an overlay sends it
-// to the shell to open.
+// key is what a key press does. An action that opens an overlay has the
+// shell open it as this Update returns (env.open), so the keys typed
+// after it reach it.
 func (a *accountsTab) key(msg tea.KeyPressMsg) tea.Cmd {
 	a.arm()
 	k := &a.keys
@@ -238,7 +245,7 @@ func (a *accountsTab) key(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, k.Refresh):
 		return func() tea.Msg { return refreshMsg{How: RefreshForce} }
 	case key.Matches(msg, k.Add):
-		return accountsOpen(a.do.login(a.e, nil))
+		return a.e.open(a.do.login(a.e, nil))
 	}
 	acct, ok := a.selected()
 	if !ok {
@@ -258,20 +265,22 @@ func (a *accountsTab) key(msg tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(msg, k.Less):
 		return a.do.nudge(a, acct, -accountsStep)
 	case key.Matches(msg, k.Typed):
-		return accountsOpen(a.do.typed(a, acct))
+		return a.e.open(a.do.typed(a, acct))
 	case key.Matches(msg, k.Out):
 		return a.do.toggleOut(a, acct)
 	case key.Matches(msg, k.Relogin):
-		return accountsOpen(a.do.login(a.e, &acct))
+		return a.e.open(a.do.login(a.e, &acct))
 	case key.Matches(msg, k.Edit):
-		return accountsOpen(a.do.edit(a.e, acct))
+		return a.e.open(a.do.edit(a.e, acct))
 	case key.Matches(msg, k.Remove):
-		return accountsOpen(a.do.remove(a.e, acct))
+		return a.e.open(a.do.remove(a.e, acct))
 	}
 	return nil
 }
 
-// accountsOpen asks the shell to open o, unless there is nothing to open.
+// accountsOpen asks the shell to open o, unless there is nothing to open,
+// once its command's message comes back. env.open opens it as the Update
+// returns, which a key's action wants: the keys typed after it reach it.
 func accountsOpen(o overlay) tea.Cmd {
 	if o == nil || o.Closed() {
 		return nil

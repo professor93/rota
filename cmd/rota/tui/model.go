@@ -178,8 +178,8 @@ func (m *Model) Init() tea.Cmd {
 // message to every tab and overlay, after the shell has taken what it
 // keeps of it.
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Whatever gave a field focus, the help is not left open under it.
-	defer m.chromeFollow()
+	// Open what a view asked to (env.open); keep no help over a field.
+	defer func() { m.opened(); m.chromeFollow() }()
 	if cmd, ok := m.effect(msg); ok {
 		return m, cmd
 	}
@@ -434,6 +434,13 @@ func (m *Model) open(o overlay) {
 	}
 	m.stack = append(m.stack, o)
 	m.settle()
+}
+
+// opened opens, in order and as openMsg would, what views asked to open.
+func (m *Model) opened() {
+	for ; len(m.e.opening) > 0; m.e.opening = m.e.opening[1:] {
+		m.open(m.e.opening[0])
+	}
 }
 
 // settle drops every closed overlay, takes a flow that says it is aside

@@ -1032,35 +1032,54 @@ func (o accountsAbout) Update(msg tea.Msg) (overlay, tea.Cmd) {
 
 func (o accountsAbout) About() (string, int) { return o.kind, o.account }
 
-// A key pressed twice before its overlay arrives opens it once: the shell
-// does not open an overlay about what the one on top is about (m4).
+// A key that opens an overlay opens it as its Update returns, so the keys
+// a terminal sends with it reach the overlay: a double d opens one. And the
+// shell opens no overlay about what the one on top is about (m4).
 func TestAccountsTheSameOverlayOpensOnce(t *testing.T) {
 	m, _ := accountsModel(t, accountsThree())
 	run(t, m, tea.BatchMsg{m.Init()}, size(80, 24))
 	a := accountsOf(m)
-	a.do.remove = func(_ *env, acct wire.Account) overlay { return accountsAbout{&shellOverlay{}, "remove", acct.ID} }
-	a.do.edit = func(_ *env, acct wire.Account) overlay { return accountsAbout{&shellOverlay{}, "edit", acct.ID} }
-	a.do.typed = func(*accountsTab, wire.Account) overlay { return &shellOverlay{} }
-	for _, c := range []struct {
-		keys []string
-		open int
-	}{
-		{[]string{"d", "d"}, 1},         // the same remove twice
-		{[]string{"e", "e", "e"}, 1},    // the same edit three times
-		{[]string{"d", "down", "d"}, 2}, // removes of two accounts
-		{[]string{"e", "d"}, 2},         // two kinds, one account
-		{[]string{"%", "%"}, 2},         // overlays that do not say
-	} {
-		// Every key reaches the tab before the first overlay is opened, as
-		// keys a terminal sends together do.
-		run(t, m, press(c.keys...)...)
-		if len(m.stack) != c.open {
-			t.Errorf("%q opened %d overlays, not %d", c.keys, len(m.stack), c.open)
+	var made []*shellOverlay
+	about := func(kind string, id int) overlay {
+		o := &shellOverlay{}
+		made = append(made, o)
+		return accountsAbout{o, kind, id}
+	}
+	a.do.remove = func(_ *env, acct wire.Account) overlay { return about("remove", acct.ID) }
+	a.do.edit = func(_ *env, acct wire.Account) overlay { return about("edit", acct.ID) }
+	a.do.typed = func(*accountsTab, wire.Account) overlay { o := &shellOverlay{}; made = append(made, o); return o }
+	for _, c := range [][]string{{"d", "d"}, {"e", "e", "e"}, {"d", "down", "d"}, {"e", "d"}, {"%", "%"}} {
+		made = nil
+		run(t, m, press(c...)...)
+		if len(m.stack) != 1 || len(made) != 1 {
+			t.Errorf("%q opened %d overlays and made %d", c, len(m.stack), len(made))
+		} else if !slices.Equal(made[0].keys, c[1:]) {
+			t.Errorf("%q: the overlay took %q", c, made[0].keys)
 		}
 		for len(m.stack) > 0 {
 			run(t, m, press("esc")...)
 		}
 		run(t, m, selectMsg{Account: 1})
+	}
+	// Opened together, the same overlay opens once, and two others both.
+	for _, c := range []struct {
+		open []overlay
+		want int
+	}{
+		{[]overlay{about("remove", 1), about("remove", 1)}, 1}, // the same remove twice
+		{[]overlay{about("remove", 1), about("remove", 2)}, 2}, // removes of two accounts
+		{[]overlay{about("edit", 1), about("remove", 1)}, 2},   // two kinds, one account
+		{[]overlay{&shellOverlay{}, &shellOverlay{}}, 2},       // overlays that do not say
+	} {
+		for _, o := range c.open {
+			run(t, m, openMsg{O: o})
+		}
+		if len(m.stack) != c.want {
+			t.Errorf("opened %d overlays, not %d", len(m.stack), c.want)
+		}
+		for len(m.stack) > 0 {
+			run(t, m, press("esc")...)
+		}
 	}
 }
 
