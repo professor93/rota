@@ -2484,8 +2484,10 @@ func (c *cli) serve(args []string) (err error) {
 	case err := <-sshErrs:
 		// Serve ends by itself only when its listener fails under it. The
 		// SSH server is then gone, and so is this server, saying why, as
-		// it does for its port.
+		// it does for its port. SSH is closed before the server stops, as on
+		// every other way out, so an attach still over it ends with its line.
 		_ = server.Close()
+		sshSrv.Close()
 		srv.Stop()
 		if err == nil {
 			err = errors.New("its listener closed")
