@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -36,22 +37,69 @@ var loginPageClock = time.Date(2026, 11, 10, 20, 17, 0, 0, time.UTC)
 // loginPageLo is what pageChoices offers first on any machine.
 var loginPageLo = loginpage.Choice{Addr: "127.0.0.1", Iface: "lo", Who: "only this machine; from another one, through ssh -L"}
 
-// loginPageHost stands in for the login flow (Task 15): it shows the step it
-// holds, takes the step each Update returns, as the flow does, and keeps
-// every stepDone instead of closing.
+// loginPageHost stands in for the login flow (Task 15), routing as it does:
+// a key reaches the step only when the step is typing or one of its Keys
+// matches it (the rest are kept in dropped, where the flow would take them
+// itself), every other message reaches it, the step each Update returns is
+// shown, and a step newly shown has its Init run. It keeps every stepDone
+// instead of closing.
 type loginPageHost struct {
-	st   step
-	done []stepDone
+	st      step
+	done    []stepDone
+	dropped []string
 }
 
 func (h *loginPageHost) Update(msg tea.Msg) (overlay, tea.Cmd) {
-	if d, ok := msg.(stepDone); ok {
-		h.done = append(h.done, d)
+	switch msg := msg.(type) {
+	case stepDone:
+		h.done = append(h.done, msg)
 		return h, nil
+	case tea.KeyPressMsg:
+		if !h.st.Typing() && !key.Matches(msg, h.st.Keys()...) {
+			h.dropped = append(h.dropped, msg.String())
+			return h, nil
+		}
 	}
+	was := h.st
 	var cmd tea.Cmd
 	h.st, cmd = h.st.Update(msg)
+	if h.st != was {
+		return h, tea.Batch(cmd, h.init())
+	}
 	return h, cmd
+}
+
+// init is the step's Init, when it has one, as the flow's show runs it.
+func (h *loginPageHost) init() tea.Cmd {
+	if i, ok := h.st.(interface{ Init() tea.Cmd }); ok {
+		return i.Init()
+	}
+	return nil
+}
+
+// loginPageShow shows a page step asked as ask, as the flow does on w, and
+// runs its Init.
+func loginPageShow(t *testing.T, m *Model, h *loginPageHost, ask pageAsk) *loginPageStep {
+	t.Helper()
+	h.st = newPageStep(m.e, ask)
+	run(t, m, tea.BatchMsg{h.init()})
+	return loginPageOf(t, h)
+}
+
+// loginPageReady is a page step for ask whose Init has answered, outside
+// any model.
+func loginPageReady(e *env, ask pageAsk) *loginPageStep {
+	s := newPageStep(e, ask).(*loginPageStep)
+	s.Update(s.Init()())
+	return s
+}
+
+// loginPageGot is what got kept, or nothing.
+func loginPageGot(got *loginPageResult) LoginEnd {
+	if e := got.Load(); e != nil {
+		return *e
+	}
+	return LoginEnd{}
 }
 
 func (h *loginPageHost) View(width, _ int) string { return h.st.View(width) }
@@ -68,12 +116,15 @@ func (f *loginPageField) View(int) string                { return "code field: "
 func (f *loginPageField) Keys() []key.Binding            { return nil }
 func (f *loginPageField) Typing() bool                   { return false }
 
-// loginPageOffer makes pageChoices answer choices, or err.
-func loginPageOffer(t *testing.T, err error, choices ...loginpage.Choice) {
+// loginPageOffer makes pageChoices answer choices, or err, and counts the
+// times it was asked.
+func loginPageOffer(t *testing.T, err error, choices ...loginpage.Choice) *atomic.Int32 {
 	t.Helper()
+	var asked atomic.Int32
 	saved := pageChoices
-	pageChoices = func() ([]loginpage.Choice, error) { return slices.Clone(choices), err }
+	pageChoices = func() ([]loginpage.Choice, error) { asked.Add(1); return slices.Clone(choices), err }
 	t.Cleanup(func() { pageChoices = saved })
+	return &asked
 }
 
 // loginPageReal serves real pages, on loopback in these tests, and closes
@@ -104,13 +155,15 @@ func loginPageReal(t *testing.T) {
 
 // loginPageFake stands in for loginpage.Serve: it keeps the options each
 // page was asked with and listens nowhere. Its page ends when the test ends
-// it, or as Stopped when it is closed.
+// it, or as Stopped when it is closed, unless hold says a value is still
+// being checked.
 type loginPageFake struct {
 	mu      sync.Mutex
 	opts    []loginpage.Options
 	url, fp string
 	err     error
 	done    chan loginpage.End
+	hold    atomic.Bool
 }
 
 func loginPageFaked(t *testing.T, url, fp string) *loginPageFake {
@@ -124,8 +177,11 @@ func loginPageFaked(t *testing.T, url, fp string) *loginPageFake {
 		if f.err != nil {
 			return nil, f.err
 		}
-		return &loginpage.Page{URL: f.url, Fingerprint: f.fp, Done: f.done,
-			Close: func() { f.end(loginpage.End{Why: loginpage.Stopped}) }}, nil
+		return &loginpage.Page{URL: f.url, Fingerprint: f.fp, Done: f.done, Close: func() {
+			if !f.hold.Load() {
+				f.end(loginpage.End{Why: loginpage.Stopped})
+			}
+		}}, nil
 	}
 	t.Cleanup(func() { loginPageServe = saved })
 	return f
@@ -169,7 +225,7 @@ func loginPageSetup(t *testing.T, b *fakeBackend, ask pageAsk, with ...func(*Opt
 	m := shellModel(t, b, ticks, append([]func(*Options){func(o *Options) { o.Host = "box" }}, with...)...)
 	shellStart(t, m)
 	host := &loginPageHost{st: newPageStep(m.e, ask)}
-	run(t, m, openMsg{O: host})
+	run(t, m, openMsg{O: host}, tea.BatchMsg{host.init()})
 	if len(m.stack) == 0 || m.stack[len(m.stack)-1] != overlay(host) {
 		t.Fatal("the host overlay did not open")
 	}
@@ -370,20 +426,20 @@ func TestTheChoicesSayWhoCanReachThem(t *testing.T) {
 	} {
 		ask := loginPageCode(nil)
 		ask.Approve, ask.Login.Account, ask.Account = c.approve, c.account, 0
-		if o := newPageStep(m.e, ask).(*loginPageStep).options("127.0.0.1"); o.LoginURL != c.link || o.Approve != c.person {
+		if o := loginPageReady(m.e, ask).options("127.0.0.1"); o.LoginURL != c.link || o.Approve != c.person {
 			t.Errorf("%+v: the page links to %q and names %q", c, o.LoginURL, o.Approve)
 		}
 	}
 
 	// 127.0.0.1 is selected wherever it is listed.
 	loginPageOffer(t, nil, choices[1], loginPageLo)
-	if s := newPageStep(m.e, loginPageCode(nil)).(*loginPageStep); s.sel != 1 {
+	if s := loginPageReady(m.e, loginPageCode(nil)); s.sel != 1 {
 		t.Errorf("with 127.0.0.1 second, %d is selected", s.sel)
 	}
 
 	// Addresses that cannot be listed leave 127.0.0.1, said so.
 	loginPageOffer(t, errors.New("no interfaces here"), choices[1])
-	s = newPageStep(m.e, loginPageCode(nil)).(*loginPageStep)
+	s = loginPageReady(m.e, loginPageCode(nil))
 	if len(s.choices) != 1 || s.choices[0].Addr != "127.0.0.1" ||
 		!strings.Contains(loginPageFlat(s.View(80)), "this machine's addresses cannot be listed (no interfaces here)") {
 		t.Errorf("with no addresses listed, the step offers %+v:\n%s", s.choices, s.View(80))
@@ -436,7 +492,7 @@ func TestEscClosesThePage(t *testing.T) {
 		t.Fatalf("esc before serving left %T shown", host.st)
 	}
 
-	host.st = newPageStep(m.e, loginPageCode(back))
+	loginPageShow(t, m, host, loginPageCode(back))
 	run(t, m, press("enter")...)
 	s := loginPageOf(t, host)
 	if s.page == nil {
@@ -455,13 +511,14 @@ func TestEscClosesThePage(t *testing.T) {
 	}
 	loginPageGone(t, link)
 	for _, msg := range seen {
-		if _, ok := msg.(stepDone); ok {
-			t.Errorf("esc sent %+v", msg)
+		switch msg.(type) {
+		case stepDone, toastMsg:
+			t.Errorf("esc sent %+v: the person closed it, and nothing needs saying", msg)
 		}
 	}
 
 	// Run leaves a page still up: its listener is closed.
-	host.st = newPageStep(m.e, loginPageCode(back))
+	loginPageShow(t, m, host, loginPageCode(back))
 	run(t, m, press("enter")...)
 	s = loginPageOf(t, host)
 	link = s.page.URL
@@ -476,7 +533,7 @@ func TestEscClosesThePage(t *testing.T) {
 
 	// esc while the page starts closes it as soon as it is up.
 	f := loginPageFaked(t, "http://127.0.0.1:1/SECRET", "")
-	host.st = newPageStep(m.e, loginPageCode(back))
+	loginPageShow(t, m, host, loginPageCode(back))
 	s = loginPageOf(t, host)
 	_, serve := s.Update(press("enter")[0])
 	run(t, m, press("esc")...)
@@ -488,8 +545,18 @@ func TestEscClosesThePage(t *testing.T) {
 		t.Errorf("a page started after esc leaves %T, served %d", host.st, len(f.asked()))
 	}
 
+	// And one that then fails to start goes back all the same.
+	f.err = errors.New("listen tcp 127.0.0.1:0: address already in use")
+	s = loginPageShow(t, m, host, loginPageCode(back))
+	_, serve = s.Update(press("enter")[0])
+	run(t, m, press("esc")...)
+	loginPageDrain(t, m, serve())
+	if host.st != step(back) {
+		t.Errorf("a page that failed to start after esc leaves %T", host.st)
+	}
+
 	// With no step to go back to, esc ends the flow.
-	host.st = newPageStep(m.e, loginPageCode(nil))
+	loginPageShow(t, m, host, loginPageCode(nil))
 	run(t, m, press("esc")...)
 	if len(host.done) != 1 || host.done[0].Err == nil || host.done[0].Err.Error() != "the one-time page was closed" {
 		t.Errorf("esc with nothing to go back to sent %+v", host.done)
@@ -502,6 +569,11 @@ func TestAnotherPagesWordsAreIgnored(t *testing.T) {
 	f := loginPageFaked(t, "http://127.0.0.1:1/SECRET", "")
 	back := &loginPageField{}
 	m, host, ticks := loginPageSetup(t, &fakeBackend{}, loginPageCode(back))
+	fresh := newPageStep(m.e, loginPageCode(nil)).(*loginPageStep)
+	fresh.Update(loginPageChoicesMsg{ID: fresh.id + 1000, Choices: []loginpage.Choice{loginPageLo}})
+	if fresh.ready {
+		t.Error("another step's addresses made this one ready")
+	}
 	s := loginPageOf(t, host)
 	_, serve := s.Update(press("enter")[0])
 	other := s.id + 1000
@@ -609,6 +681,11 @@ func TestFiveWrongTriesReturnToTheField(t *testing.T) {
 		!strings.Contains(toasts[0], "was not accepted") || strings.Contains(toasts[0], "WRONG-CODE-12345") {
 		t.Errorf("the toasts are %q, want the reason without the value", toasts)
 	}
+	for _, msg := range seen {
+		if tm, ok := msg.(toastMsg); ok && tm.Level != levelWarn {
+			t.Errorf("the reason is said at level %d, want a warning", tm.Level)
+		}
+	}
 	loginPageGone(t, link)
 }
 
@@ -627,6 +704,11 @@ func TestThePageURLIsCopiedNotLogged(t *testing.T) {
 	secret := strings.TrimPrefix(u.Path, "/")
 	if len(secret) != 43 {
 		t.Fatalf("the link's secret is %q", secret)
+	}
+	// A paste while the page is up says where it goes, never what it was.
+	_, got = run(t, m, tea.PasteMsg{Content: "PASTED-CODE-12345"})
+	if toasts := loginPageToasts(got); len(toasts) != 1 || !strings.Contains(toasts[0], "paste it there") || strings.Contains(toasts[0], "PASTED") {
+		t.Errorf("a paste while the page is up said %q", toasts)
 	}
 	_, got = run(t, m, press("c")...)
 	seen = append(seen, got...)
@@ -691,7 +773,7 @@ func TestThePageSaysHowToReachIt(t *testing.T) {
 	f := loginPageFaked(t, "https://203.0.113.7:8788/SECRET", "AB:CD:EF")
 	ask := loginPageCode(&loginPageField{})
 	ask.Login.CreatedAt = ticks.now().Add(2*time.Minute - logins.TTL).UnixMilli()
-	host.st = newPageStep(m.e, ask)
+	loginPageShow(t, m, host, ask)
 	run(t, m, press("enter")...)
 	view = loginPageFlat(loginPageOf(t, host).View(80))
 	if !strings.Contains(view, "AB:CD:EF") || strings.Contains(view, "ssh -L") || !strings.Contains(view, "2m left") {
@@ -723,7 +805,7 @@ func TestThePageEndsAsItWasUsed(t *testing.T) {
 	// The login's own end came first: that is said instead.
 	ask := loginPageCode(back)
 	ask.Login.CreatedAt = loginPageClock.Add(2*time.Minute - logins.TTL).UnixMilli()
-	host.st = newPageStep(m.e, ask)
+	loginPageShow(t, m, host, ask)
 	run(t, m, press("enter")...)
 	f.end(loginpage.End{Why: loginpage.TimedOut})
 	seen = loginPageDrain(t, m)
@@ -732,18 +814,27 @@ func TestThePageEndsAsItWasUsed(t *testing.T) {
 	}
 
 	// Refused: the flow ends with why.
-	host.st = newPageStep(m.e, loginPageCode(back))
+	loginPageShow(t, m, host, loginPageCode(back))
 	run(t, m, press("enter")...)
 	f.end(loginpage.End{Why: loginpage.Refused, Message: "no approval can finish this login"})
 	loginPageDrain(t, m)
 	if len(host.done) != 1 || host.done[0].Err == nil || host.done[0].Err.Error() != "no approval can finish this login" {
 		t.Errorf("a refusal sent %+v", host.done)
 	}
+	// One that says nothing still says why.
+	host.done = nil
+	loginPageShow(t, m, host, loginPageCode(back))
+	run(t, m, press("enter")...)
+	f.end(loginpage.End{Why: loginpage.Refused})
+	loginPageDrain(t, m)
+	if len(host.done) != 1 || host.done[0].Err == nil || host.done[0].Err.Error() != "this login cannot be finished any more" {
+		t.Errorf("a refusal with no words sent %+v", host.done)
+	}
 
 	// With nothing to go back to, five wrong tries end the flow too.
 	host.done = nil
 	ask = loginPageCode(nil)
-	host.st = newPageStep(m.e, ask)
+	loginPageShow(t, m, host, ask)
 	run(t, m, press("enter")...)
 	f.end(loginpage.End{Why: loginpage.Tries, Message: "not accepted"})
 	loginPageDrain(t, m)
@@ -754,7 +845,7 @@ func TestThePageEndsAsItWasUsed(t *testing.T) {
 	// A page that cannot listen leaves the choice, saying why.
 	f.err = errors.New("listen tcp 127.0.0.1:0: address already in use")
 	host.done = nil
-	host.st = newPageStep(m.e, loginPageCode(back))
+	loginPageShow(t, m, host, loginPageCode(back))
 	run(t, m, press("enter")...)
 	s := loginPageOf(t, host)
 	if s.page != nil || s.Busy() != "" || !strings.Contains(loginPageFlat(s.View(80)), "address already in use") {
@@ -838,8 +929,8 @@ func TestTheValueGoesWhereTheAskSays(t *testing.T) {
 		got := &loginPageResult{}
 		done, err := loginPageSubmit(b, c.ask, got)(ended, "V1")
 		calls := b.named(c.call)
-		if err != nil || done != "" || len(calls) == 0 || !slices.Equal(calls[len(calls)-1].Args, c.args) || got.get().Account != c.acct {
-			t.Errorf("%+v: done %q, err %v, %s took %v, kept %+v", c.ask, done, err, c.call, calls, got.get())
+		if err != nil || done != "" || len(calls) == 0 || !slices.Equal(calls[len(calls)-1].Args, c.args) || loginPageGot(got).Account != c.acct {
+			t.Errorf("%+v: done %q, err %v, %s took %v, kept %+v", c.ask, done, err, c.call, calls, loginPageGot(got))
 		}
 	}
 	if n := len(b.calls()); n != 4 {
@@ -851,12 +942,19 @@ func TestTheValueGoesWhereTheAskSays(t *testing.T) {
 	b.FinishLoginFn = func(ctx context.Context, id, code string) (LoginEnd, error) { return LoginEnd{Pending: true}, nil }
 	got := &loginPageResult{}
 	if _, err := loginPageSubmit(b, loginPageCode(nil), got)(context.Background(), "V"); err == nil ||
-		!strings.Contains(err.Error(), "not approved yet") || got.get() != (LoginEnd{}) {
-		t.Errorf("a login not approved yet gives %v and keeps %+v", err, got.get())
+		!strings.Contains(err.Error(), "not approved yet") || loginPageGot(got) != (LoginEnd{}) {
+		t.Errorf("a login not approved yet gives %v and keeps %+v", err, loginPageGot(got))
 	}
 	b.FinishLoginFn = func(ctx context.Context, id, code string) (LoginEnd, error) { panic("boom") }
 	if _, err := loginPageSubmit(b, loginPageCode(nil), &loginPageResult{})(context.Background(), "V"); err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Errorf("a panicking check gives %v", err)
+	}
+
+	// A code with no login to finish goes nowhere: the page ends.
+	n := len(b.calls())
+	_, err := loginPageSubmit(b, pageAsk{Want: loginpage.Code}, &loginPageResult{})(context.Background(), "V")
+	if err == nil || err.Error() != "there is no login for this page to finish" || errors.Unwrap(err) == nil || len(b.calls()) != n {
+		t.Errorf("a code with no login gives %v (final %v) after %q", err, err != nil && errors.Unwrap(err) != nil, b.calls()[n:])
 	}
 }
 
@@ -882,14 +980,16 @@ func TestThePageAddressGetsThePortItShould(t *testing.T) {
 
 func TestPageUpdateDoesNoIO(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
-	loginPageOffer(t, nil, loginPageLo)
+	listed := loginPageOffer(t, nil, loginPageLo)
 	f := loginPageFaked(t, "http://127.0.0.1:1/SECRET", "")
 	b := &fakeBackend{}
-	_, host, _ := loginPageSetup(t, b, loginPageCode(&loginPageField{}))
-	s := loginPageOf(t, host)
+	m, _, _ := loginPageSetup(t, b, loginPageCode(&loginPageField{}))
+	before := listed.Load()
 	page := &loginpage.Page{URL: "http://127.0.0.1:1/SECRET", Done: make(chan loginpage.End),
 		Close: func() { t.Error("Update closed the page itself") }}
+	var again tea.Cmd
 	assertNoIO(t, b, func() {
+		s := newPageStep(m.e, loginPageCode(&loginPageField{})).(*loginPageStep)
 		var st step = s
 		feed := func(msgs ...tea.Msg) {
 			for _, msg := range msgs {
@@ -899,15 +999,200 @@ func TestPageUpdateDoesNoIO(t *testing.T) {
 				s.Busy()
 			}
 		}
-		feed(press("down", "up", "enter", "enter")...)
+		feed(press("enter")[0], loginPageChoicesMsg{ID: s.id, Choices: []loginpage.Choice{loginPageLo, {Addr: "0.0.0.0", Who: "every interface", Warn: true}}})
+		feed(press("down", "up", "enter")...)
+		_, again = st.Update(press("enter")[0])
 		id := s.id
 		feed(loginPageServedMsg{ID: id, Page: page, Ends: loginPageClock.Add(time.Minute)},
 			loginPageTickMsg{ID: id}, press("c")[0], tea.PasteMsg{Content: "x"}, size(80, 24), press("esc")[0],
 			loginPageEndedMsg{ID: id, End: loginpage.End{Why: loginpage.Accepted}})
 	})
+	if listed.Load() != before {
+		t.Error("making the step or updating it read this machine's addresses")
+	}
+	if again != nil {
+		t.Error("a second enter while the page starts gave a command")
+	}
 	if len(f.asked()) != 0 {
 		t.Errorf("Update served a page itself: %+v", f.asked())
 	}
+}
+
+// One page at a time: enter serves only while an address is being chosen,
+// so the link already shown is never left to a page nothing closes, and a
+// value accepted while the page closes is never lost to a second one.
+func TestEnterServesOnePageAtATime(t *testing.T) {
+	loginPageOffer(t, nil, loginPageLo)
+	f := loginPageFaked(t, "http://127.0.0.1:1/SECRET", "")
+	f.hold.Store(true)
+	m, host, _ := loginPageSetup(t, &fakeBackend{}, loginPageCode(&loginPageField{}))
+	s := loginPageOf(t, host)
+	enter := press("enter")[0]
+	if cmd := newPageStep(m.e, loginPageCode(nil)).(*loginPageStep).serve(); cmd != nil {
+		t.Error("a step serves before it has read the addresses")
+	}
+	_, serve := s.Update(enter)
+	if _, again := s.Update(enter); again != nil || s.serve() != nil {
+		t.Error("enter while the page starts serves again")
+	}
+	run(t, m, serve())
+	run(t, m, enter)
+	if _, again := s.Update(enter); again != nil || s.serve() != nil || s.state != loginPageServing {
+		t.Errorf("enter while the page is up serves again (state %d)", s.state)
+	}
+	run(t, m, press("esc")...)
+	run(t, m, enter)
+	if _, again := s.Update(enter); again != nil || s.serve() != nil || s.state != loginPageClosing {
+		t.Errorf("enter while the page closes serves again (state %d)", s.state)
+	}
+	if n := len(f.asked()); n != 1 {
+		t.Fatalf("%d pages were served", n)
+	}
+	s.got.Store(&LoginEnd{Account: 14, Status: "added"})
+	f.end(loginpage.End{Why: loginpage.Accepted})
+	loginPageDrain(t, m)
+	if len(host.done) != 1 || host.done[0].End.Account != 14 {
+		t.Errorf("a value accepted while the page closed gave %+v", host.done)
+	}
+	if !slices.Equal(host.dropped, []string{"enter", "enter"}) {
+		t.Errorf("the flow kept %q for itself, want the two enters the step does not take", host.dropped)
+	}
+}
+
+// The step offers, and takes, only the keys that work where it is.
+func TestTheKeysAreThoseThatWorkThere(t *testing.T) {
+	loginPageOffer(t, nil, loginPageLo, loginpage.Choice{Addr: "0.0.0.0", Who: "every interface", Warn: true})
+	f := loginPageFaked(t, "http://127.0.0.1:1/SECRET", "")
+	f.hold.Store(true)
+	m, _, _ := loginPageSetup(t, &fakeBackend{}, loginPageCode(nil))
+	keys := func(s *loginPageStep) string {
+		var out []string
+		for _, k := range s.Keys() {
+			out = append(out, k.Help().Key+" "+k.Help().Desc)
+		}
+		return strings.Join(out, ", ")
+	}
+	want := func(state, got, want string) {
+		t.Helper()
+		if got != want {
+			t.Errorf("%s: keys %q, want %q", state, got, want)
+		}
+	}
+	s := newPageStep(m.e, loginPageCode(nil)).(*loginPageStep)
+	want("addresses not read yet", keys(s), "esc back")
+	if !strings.Contains(s.View(80), "Looking up this machine's addresses") {
+		t.Errorf("before the addresses are read the step says:\n%s", s.View(80))
+	}
+	s = loginPageReady(m.e, loginPageCode(nil))
+	want("choosing", keys(s), "⏎ serve the page, ↑/k up, ↓/j down, esc back")
+	if _, cmd := s.Update(press("c")[0]); cmd != nil {
+		t.Error("c while choosing does something")
+	}
+	_, serve := s.Update(press("enter")[0])
+	want("starting", keys(s), "esc back")
+	s.Update(press("esc")[0])
+	want("leaving while starting", keys(s), "")
+	s = loginPageReady(m.e, loginPageCode(nil))
+	_, serve = s.Update(press("enter")[0])
+	s.Update(serve())
+	want("serving", keys(s), "c copy the link, esc close the page")
+	s.Update(press("esc")[0])
+	want("closing", keys(s), "")
+	s.Update(loginPageEndedMsg{ID: s.id, End: loginpage.End{Why: loginpage.Stopped}})
+	want("over", keys(s), "")
+	m.e.who = Principal{Name: "eve", Role: "watch"}
+	want("choosing, for watch", keys(loginPageReady(m.e, loginPageCode(nil))), "↑/k up, ↓/j down, esc back")
+}
+
+// x, or anything else that drops the step, between enter and the page
+// coming up stops the page the moment it is up.
+func TestAPageLeftWhileStartingStopsOnceUp(t *testing.T) {
+	loginPageReal(t)
+	loginPageOffer(t, nil, loginPageLo)
+	m, _, _ := loginPageSetup(t, &fakeBackend{}, loginPageCode(&loginPageField{}))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, c := range []struct {
+		name  string
+		leave func(s *loginPageStep)
+	}{
+		{"Leave", func(s *loginPageStep) { s.Leave(ctx) }},
+		// esc, its command run, and the step dropped before the page's
+		// served message reaches it.
+		{"esc", func(s *loginPageStep) {
+			if _, stop := s.Update(press("esc")[0]); stop != nil {
+				stop()
+			}
+		}},
+	} {
+		s := loginPageReady(m.e, loginPageCode(&loginPageField{}))
+		_, serve := s.Update(press("enter")[0])
+		c.leave(s)
+		msg, ok := serve().(loginPageServedMsg)
+		if !ok || msg.Page == nil {
+			t.Fatalf("%s: the page did not start: %+v", c.name, msg)
+		}
+		select {
+		case e := <-msg.Page.Done:
+			if e.Why != loginpage.Stopped {
+				t.Errorf("%s: the page left while starting ended %v", c.name, e.Why)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: the page left while starting is still up", c.name)
+		}
+		loginPageGone(t, msg.Page.URL)
+	}
+}
+
+// The page lives as long as the program at most.
+func TestThePageEndsWithTheProgram(t *testing.T) {
+	loginPageReal(t)
+	loginPageOffer(t, nil, loginPageLo)
+	back := &loginPageField{}
+	m, host, _ := loginPageSetup(t, &fakeBackend{}, loginPageCode(back))
+	ctx, quit := context.WithCancel(context.Background())
+	m.e.ctx = ctx
+	run(t, m, press("enter")...)
+	link := loginPageOf(t, host).page.URL
+	quit()
+	loginPageDrain(t, m)
+	if host.st != step(back) {
+		t.Errorf("a page the program's end stopped leaves %T shown", host.st)
+	}
+	loginPageGone(t, link)
+}
+
+// Leave waits for a page that is up to close, but no longer than its
+// context allows.
+func TestLeaveWaitsForTheCloseWithinItsContext(t *testing.T) {
+	loginPageOffer(t, nil, loginPageLo)
+	m, _, _ := loginPageSetup(t, &fakeBackend{}, loginPageCode(nil))
+	var closed, stopped atomic.Bool
+	release := make(chan struct{})
+	for _, c := range []struct {
+		name  string
+		close func()
+		live  bool
+	}{
+		{"slow", func() { time.Sleep(200 * time.Millisecond); closed.Store(true) }, true},
+		{"stuck", func() { <-release }, false},
+	} {
+		stopped.Store(false)
+		s := loginPageReady(m.e, loginPageCode(nil))
+		s.state, s.stop = loginPageServing, func() { stopped.Store(true) }
+		s.page = &loginpage.Page{URL: "http://127.0.0.1:1/SECRET", Close: c.close}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		if !c.live {
+			cancel()
+		}
+		start := time.Now()
+		s.Leave(ctx)
+		cancel()
+		if c.live && !closed.Load() || !stopped.Load() || time.Since(start) > 900*time.Millisecond {
+			t.Errorf("%s: Leave returned after %v, closed %v, stopped %v", c.name, time.Since(start), closed.Load(), stopped.Load())
+		}
+	}
+	close(release)
 }
 
 // Every state of the step draws within its width, and what it draws from
