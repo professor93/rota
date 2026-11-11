@@ -547,7 +547,7 @@ func (f *editForm) askClear() tea.Cmd {
 		body += "."
 	}
 	body += " Its threshold, its place and its long-lived token stay."
-	return accountsOpen(newConfirm(f.e, "Clear the settings of "+editName(f.acct)+"?", body, func() tea.Cmd {
+	return f.e.open(newConfirm(f.e, "Clear the settings of "+editName(f.acct)+"?", body, func() tea.Cmd {
 		if !f.live() {
 			return nil
 		}

@@ -277,13 +277,3 @@ func (a *accountsTab) key(msg tea.KeyPressMsg) tea.Cmd {
 	}
 	return nil
 }
-
-// accountsOpen asks the shell to open o, unless there is nothing to open,
-// once its command's message comes back. env.open opens it as the Update
-// returns, which a key's action wants: the keys typed after it reach it.
-func accountsOpen(o overlay) tea.Cmd {
-	if o == nil || o.Closed() {
-		return nil
-	}
-	return func() tea.Msg { return openMsg{O: o} }
-}

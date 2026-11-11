@@ -506,6 +506,16 @@ func TestClearAsksFirstAndSendsTheFour(t *testing.T) {
 		t.Errorf("after clearing the backend was asked %q", after)
 	}
 
+	// The confirm opens as enter's Update returns: a y typed straight after
+	// reaches it, not the form under it.
+	t.Run("y at once", func(t *testing.T) {
+		m, b := editModel(t, editSet(), 80, 24)
+		run(t, m, press("e")...)
+		run(t, m, press("shift+tab", "enter", "y")...)
+		if got := editCalls(b); !slices.Equal(got, []string{"1: cwd= config_dir= sessions=shared remote_control=false"}) || len(m.stack) != 0 {
+			t.Errorf("enter y sent %q and left %d overlays", got, len(m.stack))
+		}
+	})
 	t.Run("over SSH", func(t *testing.T) {
 		m, b := editModel(t, editSet(), 80, 24)
 		run(t, m, editAway(b, "user"))
