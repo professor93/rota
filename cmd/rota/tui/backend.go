@@ -98,8 +98,9 @@ type LoginBegin struct {
 
 // backendLogin is a login just begun, as POST /v1/login answers it:
 // everything about it but its state, which stays with the parked login on
-// the server. Only the id is needed to finish it. CreatedAt is Unix seconds;
-// how long the login stays open is the server's to say, not this package's.
+// the server. Only the id is needed to finish it. CreatedAt is Unix
+// milliseconds; how long the login stays open is the server's to say, not
+// this package's.
 //
 // It is the TUI's own reading of that JSON rather than the SDK's type, so
 // the SDK exports nothing for it.

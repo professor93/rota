@@ -177,6 +177,11 @@ func run(argv []string, stdout, stderr io.Writer) int {
 		c.json, argv = true, argv[1:]
 	}
 	if len(argv) == 0 {
+		// On a terminal, the TUI; anywhere else, and for --json, the short
+		// usage exactly as before.
+		if !c.json && tuiTerminal(c.in, stdout) {
+			return c.report(c.openTUI())
+		}
 		fmt.Fprintln(stdout, shortUsage)
 		return 0
 	}
