@@ -47,7 +47,7 @@ func readSecretFile(key, path, what string, max int) (string, error) {
 		return "", fmt.Errorf("%s %s cannot be read", key, path)
 	}
 	if len(raw) > max {
-		return "", fmt.Errorf("%s %s is more than %d bytes; it should hold only the %s", key, path, max, what)
+		return "", fmt.Errorf("%s %s holds more than %d bytes", key, path, max)
 	}
 	s := strings.TrimSpace(string(raw))
 	if s == "" {

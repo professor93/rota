@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
-	"os"
 	"strconv"
 	"strings"
 	"syscall"
@@ -20,7 +19,6 @@ import (
 
 	"github.com/professor93/rota/api"
 	"github.com/professor93/rota/internal/events"
-	"github.com/professor93/rota/internal/owner"
 )
 
 // The seams of a webhook's way out, variables so a test can stand in for
@@ -98,33 +96,14 @@ func newWebhook(s api.EventSink, e env) (sender, error) {
 	return w, nil
 }
 
-// hookKey reads a webhook's key from path, a file only its owner may read,
-// trimmed. No error quotes what the file holds.
+// hookKey reads a webhook's key from path as every sink reads its secret
+// file (readSecretFile). No error quotes what the file holds.
 func hookKey(path string) ([]byte, error) {
-	f, err := os.Open(path)
+	key, err := readSecretFile("secret_file", path, "secret", hookKeyMax)
 	if err != nil {
-		return nil, fmt.Errorf("secret_file: %w", err)
+		return nil, err
 	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("secret_file: %w", err)
-	}
-	if err := owner.Only(path, fi.Mode()); err != nil {
-		return nil, fmt.Errorf("secret_file: %w", err)
-	}
-	raw, err := io.ReadAll(io.LimitReader(f, hookKeyMax+1))
-	if err != nil {
-		return nil, fmt.Errorf("secret_file: %w", err)
-	}
-	if len(raw) > hookKeyMax {
-		return nil, fmt.Errorf("secret_file %s holds more than %d bytes", path, hookKeyMax)
-	}
-	key := bytes.TrimSpace(raw)
-	if len(key) == 0 {
-		return nil, fmt.Errorf("secret_file %s holds no secret", path)
-	}
-	return key, nil
+	return []byte(key), nil
 }
 
 // hookTransport is one webhook's own way out. Its attempts are bounded by
