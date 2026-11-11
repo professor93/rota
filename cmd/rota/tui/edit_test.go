@@ -295,9 +295,11 @@ func editRowIndex(lines []string, label string) int {
 // stands.
 func TestEditFieldEditsAnywhere(t *testing.T) {
 	m, b := editModel(t, accountsThree(), 80, 24)
-	run(t, m, press("e", "e")...)
+	// One e: the form opens as the key's Update returns, so a second e
+	// would be typed into its first field.
+	run(t, m, press("e")...)
 	if len(m.stack) != 1 {
-		t.Fatalf("e e opened %d forms", len(m.stack))
+		t.Fatalf("e opened %d forms", len(m.stack))
 	}
 	run(t, m, press("tab", "tab", "tab", "tab")...)
 	if lines := editScreen(m); !strings.Contains(lines[editRowIndex(lines, "sessions")], "shared") {
