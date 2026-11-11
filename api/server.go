@@ -675,6 +675,10 @@ func (s *Server) maintain() (reset time.Time) {
 // A held terminal is the exception: it is let go of, still running, for the
 // next daemon on the store to take up — and the daemon's claim on the store
 // goes last, once nothing of this one is left to compete with that daemon.
+//
+// A caller that mounts Handler on its own http.Server calls StopRefreshing,
+// which ends every open GET /v1/events stream, before http.Server.Shutdown,
+// as rota serve does; otherwise Shutdown waits for those streams.
 func (s *Server) Stop() {
 	s.termsMu.Lock()
 	s.stopping = true
@@ -762,6 +766,9 @@ func (s *Server) settle() {
 }
 
 // Handler returns the router. Mount it on any net/http server.
+// A GET /v1/events stream lasts until StopRefreshing (or Stop), so call
+// StopRefreshing before that server's Shutdown, or Shutdown waits for every
+// open stream.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 

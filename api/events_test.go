@@ -2,6 +2,7 @@ package api
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -206,6 +207,31 @@ func TestStreamsEndWhenShutdownBegins(t *testing.T) {
 	}
 	if e := say(h.api, events.SessionEnded, "after"); e.ID != 0 {
 		t.Fatalf("an event was published after shutdown began: %+v", e)
+	}
+}
+
+// The order Handler's and Stop's docs give a caller with its own
+// http.Server: StopRefreshing ends every open stream, so the Shutdown after
+// it has no handler left to wait for.
+func TestShutdownAfterStopRefreshingDoesNotWaitOnAStream(t *testing.T) {
+	h := eventsServer(t)
+	hs := httptest.NewServer(h.api.Handler())
+	defer hs.Close()
+	rd, closeStream := streamFrom(t, hs.URL, "", bearer(h.token))
+	defer closeStream()
+	say(h.api, events.SessionEnded, "open")
+	if e := nextEvent(t, rd, 2*time.Second); e.Text != "open" {
+		t.Fatalf("the stream gave %+v, want it open before shutdown", e)
+	}
+	h.api.StopRefreshing()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	began := time.Now()
+	if err := hs.Config.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown after StopRefreshing gave %v after %v, want it to return with the stream ended", err, time.Since(began))
+	}
+	if took := time.Since(began); took > 3*time.Second {
+		t.Fatalf("Shutdown after StopRefreshing took %v with one stream open", took)
 	}
 }
 
