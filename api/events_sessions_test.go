@@ -378,6 +378,20 @@ func TestAViewerBackAfterARestartIsNotSaidAgain(t *testing.T) {
 		}
 		return who
 	}
+	// leaves detaches tc and waits for its person to be said to leave.
+	leaves := func(tc *termConn) {
+		t.Helper()
+		n := len(sessOf(h.api, events.ViewerLeft, ts.id))
+		ts.detach(tc)
+		for end := time.Now().Add(5 * time.Second); len(sessOf(h.api, events.ViewerLeft, ts.id)) == n; time.Sleep(5 * time.Millisecond) {
+			if time.Now().After(end) {
+				t.Fatalf("%s's leaving was never said", tc.name)
+			}
+		}
+		if e := sessOf(h.api, events.ViewerLeft, ts.id)[n]; e.Viewer != tc.name {
+			t.Fatalf("%s left as %+v", tc.name, e)
+		}
+	}
 
 	forward(2*viewerSettle - time.Millisecond)
 	alice := sessConn("alice", "user", RoleControl, false)
@@ -385,28 +399,32 @@ func TestAViewerBackAfterARestartIsNotSaidAgain(t *testing.T) {
 	if got := joined(ts); len(got) != 0 {
 		t.Fatalf("alice, back within the window, joined %v", got)
 	}
-	ts.attach(sessConn("carol", "user", RoleControl, false), 0, true)
+	carol := sessConn("carol", "user", RoleControl, false)
+	ts.attach(carol, 0, true)
 	if got := joined(ts); !slices.Equal(got, []string{"carol"}) {
 		t.Fatalf("carol, opening the session within the window, joined %v", got)
 	}
-	ts.detach(alice)
-	for end := time.Now().Add(5 * time.Second); len(sessOf(h.api, events.ViewerLeft, ts.id)) == 0; time.Sleep(5 * time.Millisecond) {
-		if time.Now().After(end) {
-			t.Fatal("alice's leaving was never said")
-		}
-	}
-	if e := sessOf(h.api, events.ViewerLeft, ts.id)[0]; e.Viewer != "alice" {
-		t.Fatalf("alice left as %+v", e)
-	}
+	leaves(alice)
 	ts.attach(sessConn("alice", "user", RoleControl, false), 0, false)
 	if got := joined(ts); !slices.Equal(got, []string{"carol", "alice"}) {
 		t.Fatalf("alice, back within the window after she was said to leave, joined %v", got)
 	}
+	leaves(carol)
+	ts.attach(sessConn("carol", "user", RoleControl, false), 0, false)
+	if got := joined(ts); !slices.Equal(got, []string{"carol", "alice", "carol"}) {
+		t.Fatalf("carol, opened, left and back within the window, joined %v", got)
+	}
 
 	forward(time.Millisecond)
 	ts.attach(sessConn("bob", "user", RoleControl, false), 0, false)
-	if got := joined(ts); !slices.Equal(got, []string{"carol", "alice", "bob"}) {
+	if got := joined(ts); !slices.Equal(got, []string{"carol", "alice", "carol", "bob"}) {
 		t.Fatalf("bob, back after the window, joined %v", got)
+	}
+	ts.mu.Lock()
+	seen := ts.seen
+	ts.mu.Unlock()
+	if seen != nil {
+		t.Fatalf("after the window the session still keeps who it has seen: %v", seen)
 	}
 
 	started := sessIn(h.api, h.api.now())

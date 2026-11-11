@@ -243,9 +243,14 @@ func (ts *termSession) viewerCame(tc *termConn) {
 //
 // The window holds while a page's longest wait between tries
 // (terminal.html's TERM_BACKOFF, 15 s), with the taking up and the held
-// screen on top, stays under it: a page back later is said again.
+// screen on top, stays under it: a page back later is said again. Once it
+// has passed, who has been seen can change nothing, and is let go of.
 func (ts *termSession) cameBack(tc *termConn, key string) bool {
 	if ts.adoptedAt.IsZero() {
+		return false
+	}
+	if ts.s.now().Sub(ts.adoptedAt) >= 2*viewerSettle {
+		ts.seen = nil
 		return false
 	}
 	first := !ts.seen[key]
@@ -253,7 +258,7 @@ func (ts *termSession) cameBack(tc *termConn, key string) bool {
 		ts.seen = map[string]bool{}
 	}
 	ts.seen[key] = true
-	return first && tc.resumed && ts.s.now().Sub(ts.adoptedAt) < 2*viewerSettle
+	return first && tc.resumed
 }
 
 // viewerWent is tc having left ts. Once a person's last connection has gone,

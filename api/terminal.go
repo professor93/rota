@@ -768,8 +768,9 @@ type termSession struct {
 	// words its token's end is said (hardEnd). adoptedAt is when this server
 	// took the session up from a daemon before, zero for one it started, and
 	// set before it is listed: the start of viewerCame's window for pages
-	// coming back. seen is every person attached to such a session since,
-	// whom that window no longer covers.
+	// coming back. seen is every person attached to such a session within
+	// that window, whom it no longer covers; it goes once the window has
+	// passed.
 	stoppedBy   string
 	stoppedIdle bool
 	endWhy      string
