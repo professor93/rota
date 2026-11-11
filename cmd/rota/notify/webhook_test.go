@@ -150,8 +150,8 @@ func TestAWebhookIsSignedAndLabelled(t *testing.T) {
 		e.Session != want.Session || e.Name != want.Name || e.Text != want.Text || e.Reason != want.Reason {
 		t.Fatalf("the body is %+v, want %+v", e, want)
 	}
-	if strings.Contains(string(r.body), "\n") {
-		t.Fatalf("the body %q is not one line", r.body)
+	if string(r.body) != string(events.JSON(want)) {
+		t.Fatalf("the body is %q, want events.JSON's %q", r.body, events.JSON(want))
 	}
 }
 

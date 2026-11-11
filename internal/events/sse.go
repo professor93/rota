@@ -39,14 +39,32 @@ const maxLine = 64 << 10
 //	event: <type>
 //	data: <the event as one line of JSON>
 //
-// followed by a blank line. Time is written in UTC. Frame is always one
+// followed by a blank line, where the data is JSON(e). Frame is always one
 // frame: the type goes through Clean first, so a line end in it cannot
 // start a frame of its own, and the event: line and the JSON's type are
-// always the same string. Clean leaves every real type as it is. Frame
-// never fails: a byte that is not UTF-8 is written as U+FFFD, a Percent
-// that is not a finite number is left out, and a Time RFC 3339 cannot write
-// (a year outside 0 to 9999) is written as the zero time.
+// always the same string. Clean leaves every real type as it is.
 func Frame(e Event) []byte {
+	data := JSON(e)
+	typ := Clean(e.Type, 0)
+	var b bytes.Buffer
+	b.Grow(len(data) + len(typ) + 40)
+	b.WriteString("id: ")
+	b.WriteString(strconv.FormatInt(e.ID, 10))
+	b.WriteString("\nevent: ")
+	b.WriteString(typ)
+	b.WriteString("\ndata: ")
+	b.Write(data)
+	b.WriteString("\n\n")
+	return b.Bytes()
+}
+
+// JSON is e as one line of JSON, with no line end: the data of its Frame,
+// and what a sink that forwards the event whole sends. Time is written in
+// UTC and the type goes through Clean. JSON never fails: a byte that is not
+// UTF-8 is written as U+FFFD, a Percent that is not a finite number is left
+// out, and a Time RFC 3339 cannot write (a year outside 0 to 9999) is
+// written as the zero time.
+func JSON(e Event) []byte {
 	e.Type = Clean(e.Type, 0)
 	e.Time = e.Time.UTC()
 	if y := e.Time.Year(); y < 0 || y > 9999 {
@@ -61,16 +79,7 @@ func Frame(e Event) []byte {
 		// than write a frame no reader can take.
 		panic("events: an event did not encode: " + err.Error())
 	}
-	var b bytes.Buffer
-	b.Grow(len(data) + len(e.Type) + 40)
-	b.WriteString("id: ")
-	b.WriteString(strconv.FormatInt(e.ID, 10))
-	b.WriteString("\nevent: ")
-	b.WriteString(e.Type)
-	b.WriteString("\ndata: ")
-	b.Write(data)
-	b.WriteString("\n\n")
-	return b.Bytes()
+	return data
 }
 
 // GapFrame is the note a stream sends, once and before any event, when it

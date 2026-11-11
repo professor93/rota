@@ -69,13 +69,8 @@ func TestACommandGetsTheEventOnStdin(t *testing.T) {
 	if rerr != nil {
 		t.Fatal(rerr)
 	}
-	line := string(raw)
-	if !strings.HasSuffix(line, "}\n") || strings.Count(line, "\n") != 1 {
-		t.Fatalf("stdin is not one line of JSON and a newline: %q", line)
-	}
-	frame := string(events.Frame(e))
-	if !strings.Contains(frame, "\ndata: "+line+"\n") {
-		t.Fatalf("stdin %q is not the stream's data line in\n%s", line, frame)
+	if want := string(events.JSON(e)) + "\n"; string(raw) != want {
+		t.Fatalf("stdin is %q, want events.JSON's line and a newline %q", raw, want)
 	}
 	var back events.Event
 	if err := json.Unmarshal(raw, &back); err != nil {

@@ -147,7 +147,7 @@ func hookHere(_, address string, _ syscall.RawConn) error {
 // this machine. Nothing of the answer's body is said, and no error holds
 // the address.
 func (w *webhook) send(ctx context.Context, e events.Event) error {
-	body := hookBody(e)
+	body := events.JSON(e)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, w.url, bytes.NewReader(body))
 	if err != nil {
 		return dropped(w.clean(err))
@@ -186,14 +186,6 @@ func (w *webhook) secrets() []string { return w.keys }
 // clean is err as it may be said: without the address, which net/http
 // repeats, or any other secret of this sink.
 func (w *webhook) clean(err error) error { return errors.New(cleanErr(err, w.keys)) }
-
-// hookBody is e's JSON as a stream's frame writes it, on one line.
-func hookBody(e events.Event) []byte {
-	f := events.Frame(e)
-	const data = "\ndata: "
-	i := bytes.Index(f, []byte(data))
-	return bytes.TrimSuffix(f[i+len(data):], []byte("\n\n"))
-}
 
 // hookStatus is a status code as Go names it, not as the server's reason
 // phrase does: "302 Found".

@@ -163,11 +163,7 @@ func (c *command) environ() []string {
 // cmdJSON is e as one line of JSON and a newline: the line the event
 // stream carries as its data.
 func cmdJSON(e events.Event) []byte {
-	f := events.Frame(e)
-	const data = "\ndata: "
-	i := bytes.Index(f, []byte(data))
-	line := bytes.TrimSuffix(f[i+len(data):], []byte("\n\n"))
-	return append(slices.Clip(line), '\n')
+	return append(events.JSON(e), '\n')
 }
 
 // cmdHead keeps the first cmdStderr bytes written to it and takes no notice
