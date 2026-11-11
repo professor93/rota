@@ -162,7 +162,7 @@ func newLogin(e *env, again *wire.Account) asider {
 
 // start is the flow from its beginning: n picks the provider; l on a key
 // asks for the key again, on a claude login picks the kind, and on any
-// other account says what enter begins.
+// other account has nothing to pick: Init begins it.
 func (f *loginFlow) start() {
 	f.gen++
 	f.stage, f.said, f.ended, f.at, f.opts, f.way = loginPicking, "", "", 0, nil, ""
@@ -179,7 +179,7 @@ func (f *loginFlow) start() {
 		}
 	case a.Provider == rota.DefaultProvider && a.Credential == "apikey":
 		f.provider, f.way = a.Provider, loginKey
-		f.show(newSecretStep(f.e, secretAsk{Want: loginpage.Key, Account: a.ID}))
+		f.step, f.stage = newSecretStep(f.e, secretAsk{Want: loginpage.Key, Account: a.ID}), loginStepping
 	case a.Provider == rota.DefaultProvider:
 		f.pick, f.provider = loginPickAgain, a.Provider
 		f.opts = loginAgainKinds()
@@ -313,6 +313,7 @@ func (f *loginFlow) key(msg tea.KeyPressMsg) tea.Cmd {
 		switch {
 		case key.Matches(msg, k.Again):
 			f.start()
+			return f.Init()
 		case key.Matches(msg, k.Close):
 			f.closed = true
 		}

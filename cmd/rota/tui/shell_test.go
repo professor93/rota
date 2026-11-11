@@ -1368,3 +1368,88 @@ func TestExecTailDoesNotWaitForWhatTheCommandLeftBehind(t *testing.T) {
 		t.Errorf("Last is %q", got)
 	}
 }
+
+// shellStarting is an overlay that starts something as it opens: Init
+// counts its starts, and its command says so to the overlays.
+type shellStarting struct {
+	*shellOverlay
+	starts *int
+}
+
+func (s shellStarting) Update(msg tea.Msg) (overlay, tea.Cmd) {
+	s.shellOverlay.Update(msg)
+	return s, nil
+}
+
+func (s shellStarting) Init() tea.Cmd {
+	*s.starts++
+	return func() tea.Msg { return shellPing("started") }
+}
+
+// shellStartingAsider is shellStarting as the login flow is: it can be put
+// aside.
+type shellStartingAsider struct {
+	shellAsider
+	starts *int
+}
+
+func (a shellStartingAsider) Update(msg tea.Msg) (overlay, tea.Cmd) {
+	a.shellOverlay.Update(msg)
+	return a, nil
+}
+
+func (a shellStartingAsider) Init() tea.Cmd {
+	*a.starts++
+	return nil
+}
+
+// An overlay that starts something as it opens is started once, as it is
+// put on the stack, opened by a view (env.open) or by openMsg, and what
+// it starts runs; one that is not opened is never started.
+func TestAnOverlayIsStartedOnceAsItOpens(t *testing.T) {
+	shellTabs(t, 10)
+	m := shellModel(t, &fakeBackend{}, &fakeTicks{})
+	shellStart(t, m)
+
+	n := 0
+	o := shellStarting{&shellOverlay{}, &n}
+	m.e.open(o)
+	run(t, m, shellPing("now"))
+	if n != 1 || len(m.stack) != 1 || !slices.Contains(o.got, "started") {
+		t.Fatalf("opened by a view: started %d times, stack %d, heard %q", n, len(m.stack), o.got)
+	}
+	run(t, m, shellPing("later"), press("k")[0])
+	if n != 1 {
+		t.Errorf("started again by what it heard after: %d", n)
+	}
+	run(t, m, press("esc")...)
+
+	p := shellStarting{&shellOverlay{}, &n}
+	run(t, m, openMsg{O: p})
+	if n != 2 || !slices.Contains(p.got, "started") {
+		t.Fatalf("opened by openMsg: started %d times in all, heard %q", n, p.got)
+	}
+	run(t, m, press("esc")...)
+	none := 0
+	if m.open(shellStarting{&shellOverlay{closed: true}, &none}) != nil || none != 0 {
+		t.Errorf("a closed overlay was started (%d)", none)
+	}
+
+	// A flow put aside comes back in place of the one asked for, which is
+	// not started; nor is the one that came back started again.
+	k := 0
+	a := shellStartingAsider{shellAsider{&shellOverlay{asider: true}}, &k}
+	run(t, m, openMsg{O: a})
+	run(t, m, press("esc")...)
+	if m.aside == nil || k != 1 {
+		t.Fatalf("the flow is not aside (%v), or was started %d times", m.aside, k)
+	}
+	run(t, m, openMsg{O: shellStartingAsider{shellAsider{&shellOverlay{asider: true}}, &k}})
+	if len(m.stack) == 0 {
+		t.Fatal("nothing came back")
+	}
+	back, ok := m.stack[len(m.stack)-1].(shellStartingAsider)
+	if k != 1 || m.aside != nil || !ok || back.shellOverlay != a.shellOverlay {
+		t.Errorf("bringing the flow back started %d in all, or did not bring it back", k)
+	}
+}

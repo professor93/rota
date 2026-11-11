@@ -2,8 +2,8 @@ package tui
 
 // What the login flow says and draws: the choices it offers with what each
 // gives up, whom a login is approved as, its title, its picks and its badge;
-// and what the shell asks of it beside: what it is about, the login it
-// holds, and what its step keeps running.
+// and what the shell asks of it beside: what it starts as it opens, what it
+// is about, the login it holds, and what its step keeps running.
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	rota "github.com/professor93/rota/lib"
 	"github.com/professor93/rota/wire"
 )
@@ -205,6 +206,20 @@ func (f *loginFlow) pickView(w int) []string {
 		lines = append(lines, loginPara(th.Over, f.said, w)...)
 	}
 	return lines
+}
+
+// Init starts the flow as the shell opens it, and as n begins it again:
+// l on an account whose login is begun one way only (neither claude's
+// kinds nor a key to paste) begins it at once, with no enter, and a step
+// shown from the start is started.
+func (f *loginFlow) Init() tea.Cmd {
+	switch {
+	case f.stage == loginPicking && f.pick == loginConfirm:
+		return f.choose()
+	case f.stepping():
+		return f.step.Init()
+	}
+	return nil
 }
 
 // About is the flow and the account it signs in again.

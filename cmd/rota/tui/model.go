@@ -177,9 +177,10 @@ func (m *Model) Init() tea.Cmd {
 // Update routes msg: a key or the mouse to what has focus, every other
 // message to every tab and overlay, after the shell has taken what it
 // keeps of it.
-func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	// Open what a view asked to (env.open); keep no help over a field.
-	defer func() { m.opened(); m.chromeFollow() }()
+func (m *Model) Update(msg tea.Msg) (_ tea.Model, cmd tea.Cmd) {
+	// Open what a view asked to (env.open), with what each opened starts;
+	// keep no help over a field.
+	defer func() { cmd = tea.Batch(cmd, m.opened()); m.chromeFollow() }()
 	if cmd, ok := m.effect(msg); ok {
 		return m, cmd
 	}
@@ -196,8 +197,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.toFocus(msg)
 	case openMsg:
-		m.open(msg.O)
-		return m, nil
+		return m, m.open(msg.O)
 	}
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
@@ -392,79 +392,6 @@ func (m *Model) broadcast(msg tea.Msg) tea.Cmd {
 	}
 	m.settle()
 	return tea.Batch(cmds...)
-}
-
-// modelAbout is an overlay that says what it is about: its kind and the
-// account it acts on. One that does not say is never taken for another.
-type modelAbout interface {
-	About() (kind string, account int)
-}
-
-// open puts o on top of the stack, unless the overlay on top is about the
-// same: a key pressed twice before its overlay arrived (a double d) opens
-// one. A login flow opened while one is put aside brings that one back and
-// is dropped: one flow at a time (R17).
-func (m *Model) open(o overlay) {
-	if o == nil || o.Closed() {
-		return
-	}
-	if n := len(m.stack); n > 0 {
-		t, ok1 := m.stack[n-1].(modelAbout)
-		u, ok2 := o.(modelAbout)
-		if ok1 && ok2 {
-			tk, ta := t.About()
-			if uk, ua := u.About(); tk == uk && ta == ua {
-				return
-			}
-		}
-	}
-	if _, ok := o.(asider); ok {
-		if m.aside != nil {
-			m.aside.Return()
-			m.stack = append(m.stack, m.aside)
-			m.aside = nil
-			m.settle()
-			return
-		}
-		for _, s := range m.stack {
-			if _, open := s.(asider); open {
-				return
-			}
-		}
-	}
-	m.stack = append(m.stack, o)
-	m.settle()
-}
-
-// opened opens, in order and as openMsg would, what views asked to open.
-func (m *Model) opened() {
-	for ; len(m.e.opening) > 0; m.e.opening = m.e.opening[1:] {
-		m.open(m.e.opening[0])
-	}
-}
-
-// settle drops every closed overlay, takes a flow that says it is aside
-// off the stack, and puts one that came back on top.
-func (m *Model) settle() {
-	var kept []overlay
-	for _, o := range m.stack {
-		if o.Closed() {
-			continue
-		}
-		if a, ok := o.(asider); ok && a.Aside() {
-			m.aside = a
-			continue
-		}
-		kept = append(kept, o)
-	}
-	m.stack = kept
-	if m.aside != nil && m.aside.Closed() {
-		m.aside = nil
-	}
-	if m.aside != nil && !m.aside.Aside() {
-		m.stack = append(m.stack, m.aside)
-		m.aside = nil
-	}
 }
 
 // result is what the TUI leaves behind: the parked login of a flow, aside

@@ -320,15 +320,15 @@ func TestAgainIsBoundToTheAccount(t *testing.T) {
 	}
 	loginPress(t, m, "x")
 
-	// Another provider's account has no kind to pick: enter begins its login.
+	// Another provider's account has no kind to pick: l begins its login
+	// at once, with no enter.
 	loginSelect(t, m, 6)
 	loginPress(t, m, "l")
-	if n := len(b.named("BeginLogin")); n != 1 {
-		t.Fatalf("l alone began a login (%d)", n)
-	}
-	loginPress(t, m, "enter")
 	if got := loginBegins(b); !slices.Equal(got[1:], []LoginBegin{{Account: 6}}) {
-		t.Fatalf("begun %+v", got)
+		t.Fatalf("l alone did not begin the login: begun %+v", got)
+	}
+	if f := loginFlowOf(t, m); f.Typing() {
+		t.Error("the code step opened with its field focused")
 	}
 	if txt := loginText(m); !strings.Contains(txt, "approve access as c@x, which is codex account 6; no other account's approval will finish it") {
 		t.Errorf("the codex step is not bound:\n%s", plain(m))
@@ -346,6 +346,38 @@ func TestAgainIsBoundToTheAccount(t *testing.T) {
 	loginPress(t, m, "o")
 	if !slices.Equal(opened, []string{loginURL}) {
 		t.Errorf("opened %q", opened)
+	}
+}
+
+// l on an account with nothing to pick begins its login as the flow opens,
+// and n begins it again at once once it has ended; a flow that is not
+// opened, because another is aside, begins nothing.
+func TestLBeginsAtOnceWhereNothingIsPicked(t *testing.T) {
+	m, b, ticks := loginModel(t, loginRows())
+	loginSelect(t, m, 6)
+	loginPress(t, m, "l")
+	if got := loginBegins(b); !slices.Equal(got, []LoginBegin{{Account: 6}}) {
+		t.Fatalf("l began %+v", got)
+	}
+	loginCodeOf(t, loginFlowOf(t, m))
+	run(t, m, ticks.advance(15*time.Minute)...)
+	if !strings.Contains(loginText(m), "has expired; n begins another") {
+		t.Fatalf("the login did not run out:\n%s", plain(m))
+	}
+	loginPress(t, m, "n")
+	if got := loginBegins(b); !slices.Equal(got, []LoginBegin{{Account: 6}, {Account: 6}}) {
+		t.Fatalf("n began %+v", got)
+	}
+	f := loginFlowOf(t, m)
+	loginCodeOf(t, f)
+	loginPress(t, m, "esc")
+	if !f.Aside() {
+		t.Fatal("esc did not put the flow aside")
+	}
+	loginSelect(t, m, 7)
+	loginPress(t, m, "l")
+	if got := loginBegins(b); len(got) != 2 || loginFlowOf(t, m) != f || f.Aside() {
+		t.Errorf("l over a flow aside began %+v, or did not bring the flow back", got)
 	}
 }
 
@@ -876,7 +908,7 @@ func TestADelegatedAccountGoesToItsStep(t *testing.T) {
 				Message: "account 7 signs in through its own CLI, so rota has no sign-in to start for it"}
 		}
 		loginSelect(t, m, 7)
-		loginPress(t, m, "l", "enter")
+		loginPress(t, m, "l")
 		if got := loginBegins(b); !slices.Equal(got, []LoginBegin{{Account: 7}}) {
 			t.Fatalf("begun %+v", got)
 		}
@@ -980,7 +1012,7 @@ func TestADelegatedAccountGoesToItsStep(t *testing.T) {
 			return LoginEnd{Account: 7, Provider: "grok", Status: "refreshed"}, nil
 		}
 		loginSelect(t, m, 7)
-		loginPress(t, m, "l", "enter")
+		loginPress(t, m, "l")
 		if got := loginBegins(b); !slices.Equal(got, []LoginBegin{{Account: 7}, {Provider: "grok"}}) {
 			t.Fatalf("begun %+v", got)
 		}
@@ -1014,7 +1046,7 @@ func TestADelegatedAccountGoesToItsStep(t *testing.T) {
 			return backendLogin{ID: "cdx123", Provider: "codex", URL: loginURL, Kind: "code", CreatedAt: loginNow.UnixMilli()}, nil
 		}
 		loginSelect(t, m, 6)
-		loginPress(t, m, "l", "enter")
+		loginPress(t, m, "l")
 		f := loginFlowOf(t, m)
 		if txt := loginText(m); !strings.Contains(txt, no+"; n begins another") || f.Pending() != nil || f.step != nil {
 			t.Errorf("the first refusal does not stand:\n%s", plain(m))
@@ -1552,7 +1584,7 @@ func TestAnAccountKnownByNothingStraysNoLogin(t *testing.T) {
 		return backendLogin{}, &client.Refusal{Status: 400, Message: no}
 	}
 	loginSelect(t, m, 8)
-	loginPress(t, m, "l", "enter")
+	loginPress(t, m, "l")
 	if got := loginBegins(b); !slices.Equal(got, []LoginBegin{{Account: 8}}) {
 		t.Errorf("begun %+v: a login of the provider's own was left parked", got)
 	}
@@ -1586,7 +1618,7 @@ func TestAnAccountKnownByNothingStraysNoLogin(t *testing.T) {
 		return backendLogin{ID: "cdx123", Provider: "codex", URL: loginURL, Kind: "code", CreatedAt: loginNow.UnixMilli()}, nil
 	}
 	loginSelect(t, m, 10)
-	loginPress(t, m, "l", "enter")
+	loginPress(t, m, "l")
 	if got := loginBegins(b); !slices.Equal(got, []LoginBegin{{Account: 10}, {Provider: "codex"}}) {
 		t.Errorf("an account with an e-mail is taken for one known by nothing: begun %+v", got)
 	}
