@@ -58,8 +58,11 @@ type Options struct {
 	Handler func(p *api.Principal) http.Handler
 	// Log is where sign-ins, refusals and commands are said; nil is nowhere.
 	Log *slog.Logger
-	// Key is the chord's key, zero meaning Ctrl-\, and Taught says whether a
-	// person has been shown it; both are handed to each Channel.
+	// Key is the chord's key, zero meaning Ctrl-\. Taught is each attach's
+	// Options.Teach: asked before an attach shows a session, it says true
+	// for a person still to be shown the chord, and records them as shown,
+	// as attach.TaughtFile does; nil shows nobody. Both are handed to each
+	// Channel.
 	Key    byte
 	Taught func(person string) bool
 	// TUI, when set, is what a bare `ssh host` on a terminal runs. It must
@@ -70,7 +73,9 @@ type Options struct {
 
 // TUISession is what Options.TUI is given: the person's terminal, its TERM
 // (Env holds only TERM=…) and size, its resizes, a client for the API as
-// that person, the chord's key, and whether a person has been shown it.
+// that person, and the chord's key. Taught is each attach's Options.Teach,
+// as Options.Taught is: true for a person still to be shown the chord,
+// recording them as shown.
 //
 // Slot is taken before each attach the TUI makes and given back after it,
 // by calling done: an attach keeps a copy of a session's screen in the
