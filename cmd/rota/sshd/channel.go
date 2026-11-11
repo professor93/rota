@@ -31,8 +31,8 @@ type Channel struct {
 	// Handler is the API as User: Options.Handler of the person, made once
 	// per connection.
 	Handler http.Handler
-	// Key is the chord's key and Taught says whether a person has been shown
-	// it, both from Options.
+	// Key is the chord's key and Taught says whether a person is still to
+	// be shown it (attach's Options.Teach), both from Options.
 	Key    byte
 	Taught func(string) bool
 	// slot takes one of the places an attach needs, since each keeps a copy

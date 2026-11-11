@@ -355,3 +355,29 @@ func TestAWindowChangeNeverResizes(t *testing.T) {
 		t.Errorf("the reset is not for the window as it is: %q", term.output())
 	}
 }
+
+// A terminal the server runs itself, rather than a held one, has no name:
+// the crop's note calls it by its label, then its folder, then its id, as
+// the daemon calls a held one, so a narrow window still has room for the
+// sizes.
+func TestAnUnnamedSessionIsCalledByItsLabel(t *testing.T) {
+	for _, c := range []struct {
+		s    client.Session
+		want string
+	}{
+		{client.Session{ID: "0123456789abcdef", Label: "api", Cwd: "/w/web"}, "api is 100x30"},
+		{client.Session{ID: "0123456789abcdef", Cwd: "/w/web"}, "web is 100x30"},
+		{client.Session{ID: "0123456789abcdef"}, "0123456789abcdef is 100x30"},
+		{client.Session{ID: "0123456789abcdef", Name: "named", Label: "api"}, "named is 100x30"},
+	} {
+		runKnobs(t)
+		term := runNewTerm(60, 12)
+		src := runNewSrc(c.s)
+		l := src.add(runNewLink(c.s.ID, 100, 30))
+		l.out("hi")
+		done := runAttach(context.Background(), term, src, c.s.ID, Options{})
+		runWait(t, c.want, func() bool { return strings.Contains(term.output(), "z fits; "+c.want) })
+		term.typ(t, "\x1cd")
+		runResult(t, done)
+	}
+}

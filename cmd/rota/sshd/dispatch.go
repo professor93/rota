@@ -17,8 +17,10 @@ type command func(ctx context.Context, ch *Channel, args []string) int
 // commands that fill it are list, attach, watch and new, registered here,
 // before any server starts; Listen takes its own copy.
 var commands = map[string]command{
-	"list": listRun,
-	"new":  newRun,
+	"list":   listRun,
+	"attach": attachRun,
+	"watch":  attachWatch,
+	"new":    newRun,
 }
 
 // usage is what a bare command prints after the list, and a wrong one after

@@ -13,6 +13,7 @@ require (
 	github.com/muesli/cancelreader v0.2.2
 	github.com/professor93/rota v1.4.0-beta.10
 	golang.org/x/crypto v0.58.0
+	golang.org/x/sys v0.49.0
 )
 
 require (
@@ -28,5 +29,4 @@ require (
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v1.0.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
 )
