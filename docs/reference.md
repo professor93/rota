@@ -572,6 +572,11 @@ record           = false    # keep each terminal's output under <store>/terminal
 record_max_bytes = 52428800 # how much of one terminal is kept; input never is
 share            = true     # take terminals offered by `rota run --share` here
 
+[ssh]                       # the SSH server; see Over SSH
+enabled  = false            # nothing listens unless this is true
+listen   = "127.0.0.1:2222" # host:port, or a bare port for every interface
+host_key = ""               # empty is <store>/ssh_host_ed25519_key, made 0600
+
 [runs]
 timeout         = "10m"     # hard cap on one run
 max_concurrent  = 8         # how many CLIs may run at once
@@ -585,15 +590,22 @@ allow_raw_flags = false
 
 [store]
 dir = ""                    # empty is $ROTA_HOME or ~/.rota
+
+# and any number of people and tokens; see The principals
+[[users]]
+name     = "alice"
+role     = "control"
+password = "pbkdf2-sha256$600000$<salt>$<hash>"
+ssh_keys = ["ssh-ed25519 AAAA... alice@laptop"]  # to sign in over SSH as well
 ```
 
-Much of that has no flag at all and never will: the whole of `[routes]` and
-`[terminal]`, all of `[auth]` but the token itself, `store.dir`, and the
-three keys a run that stays open is governed by — `input_timeout`,
-`input_grace` and `replay`, which were configurable from the library alone
-until this file existed. A command line is for what changes between one
-server and the next run of it; who may sign in, and whether this server
-holds terminals, is not that.
+Much of that has no flag at all and never will: the whole of `[routes]`,
+`[terminal]` and `[ssh]`, all of `[auth]` but the token itself,
+`store.dir`, and the three keys a run that stays open is governed by —
+`input_timeout`, `input_grace` and `replay`, which were configurable from
+the library alone until this file existed. A command line is for what
+changes between one server and the next run of it; who may sign in, and
+whether this server holds terminals or answers SSH, is not that.
 
 `[routes]` switches whole groups on and off. A group that is off is not
 registered, so its paths answer `404` exactly as a path this server never
@@ -793,6 +805,7 @@ the two differ like this:
 | Sessions | terminals in its own process; stopping it ends them | held sessions, one holder process each, which outlive it |
 | TCP | `127.0.0.1:8787` by default, with a token | only where `server.toml` sets `[server] listen`, and never with `--ctl-only` |
 | `ctl.sock` | no | always |
+| SSH | with `[ssh] enabled` and `[routes] terminal` | with `[ssh] enabled`, and never with `--ctl-only` (*[Over SSH](#over-ssh)*) |
 | Token | `--token`, `ROTA_TOKEN` or the file, and it will not start without one | `ROTA_TOKEN` or the file's, or else 32 random bytes held in memory and never written |
 | Logs | stderr, or `log_file` | `<store>/daemon.log`, or `log_file`; never stderr |
 
@@ -819,7 +832,8 @@ control socket and says
 rota daemon started for /home/me/.rota (pid 4242); control socket /home/me/.rota/terminals/ctl.sock; http on 127.0.0.1:8787
 ```
 
-the last part only with a port. A daemon that stops before it answers is
+the last part only with a port, and `; ssh on 127.0.0.1:2222` after it
+only with an SSH server. A daemon that stops before it answers is
 said with the last five lines it wrote to its log, and the exit is `1`. A
 daemon already running is `rota daemon already running for <store> (pid N)`
 and exit `0`, whether it was found before anything started or won the store
@@ -863,8 +877,9 @@ Elsewhere it sends the daemon SIGTERM — only while its pid
 is still the process `daemon.pid` names — and waits up to a minute for it to
 let go of the store. That is moments, as a rule; the minute is for a refresh
 under way, which is finished first, so that the provider's answer is saved
-and in its home before the daemon goes. Within ten seconds the daemon closes
-its port and its control socket, giving what they are serving all but the
+and in its home before the daemon goes. It closes its SSH server first,
+ending each connection to it, and within ten seconds it closes its port and
+its control socket, giving what they are serving all but the
 last second to finish; then it ends every WebSocket either of them handed
 over, each told `1001` *the server is stopping*, lets go of every session,
 still running, waits up to 45 seconds for any refresh still under way, and
@@ -894,8 +909,11 @@ control socket /home/me/.rota/terminals/ctl.sock
 sessions: 2 running, 1 stopped
 ```
 
-with `http on <address>` before the last line when it opens a port; the
-time is in this machine's zone. With no daemon it says `no rota daemon is
+with `http on <address>` before the last line when it opens a port, and
+`ssh on <address>, host key <fingerprint>` before the last line when it
+serves SSH, the fingerprint the one a client is shown (*[Over
+SSH](#over-ssh)*); the time is in this machine's zone. With no daemon it
+says `no rota daemon is
 running for <store>`, and the sessions line after it only when the store
 has a record of a running or a stopped one. With `--json`:
 
@@ -913,7 +931,10 @@ has a record of a running or a stopped one. With `--json`:
 ```
 
 `http` is the address of its port, or `null`; with no daemon, `running` is
-`false`, `pid` is `0`, `version` is empty and `started` is `null`.
+`false`, `pid` is `0`, `version` is empty and `started` is `null`. A daemon
+that serves SSH adds `"ssh": {"addr": "127.0.0.1:2222", "host_key":
+"SHA256:…"}`; one that does not has no `ssh` key at all, so the document
+is the same as before for every file without `[ssh] enabled`.
 
 In what `serve start`, `stop`, `status`, `install` and `uninstall` print, a
 tab, an escape or any other control character in a store, socket, log or
@@ -1156,6 +1177,7 @@ Beside it the file may name people and more tokens:
 name     = "inoyat"
 role     = "control"
 password = "pbkdf2-sha256$600000$<salt, base64>$<hash, base64>"
+ssh_keys = ["ssh-ed25519 AAAA... inoyat@laptop"]   # optional: see Over SSH
 
 [[tokens]]
 name   = "ci-watch"
@@ -1170,6 +1192,17 @@ iterations, a salt of at least 16 bytes and a 32-byte hash; a digest is 64
 hexadecimal characters.
 Every refusal names the entry — `[[users]] "inoyat": password: …` — because
 whoever reads it is looking at a file with several of them in it.
+
+A user may list `ssh_keys` as well, the public keys they sign in with over
+SSH (*[Over SSH](#over-ssh)*). One with keys may leave the password out,
+and then signs in over SSH alone: on the page that name is answered as an
+unknown one is, with the same sentence, the same derivation and the same
+count against the address. A user with neither is refused as before,
+``[[users]] "inoyat": password is empty; make one with `rota serve passwd
+inoyat` ``. Each key is one line as `authorized_keys` writes it, with nothing
+before its type, and one key is one person's: *`[[users]] "bob": ssh_keys
+#1 is also "inoyat"'s; one key is one person`*. A public key is not a
+secret, so `--print-config` prints it as written.
 
 **rota never writes this file.** A program that edits a file somebody else
 also edits has to merge, and a merge of the file that decides who may reach
@@ -2482,7 +2515,9 @@ which may hold a prompt, comes on its standard input. A person who types
 Every terminal a daemon starts is a held session: `rota run --detach`
 starts one, and so does `POST /v1/terminals` on a daemon. `rota list
 --sessions` and `GET /v1/terminals` list them, the terminal page watches
-and types at them, and `rota send` types a message into one.
+and types at them, `rota send` types a message into one, and `rota run
+--attach` and SSH put a terminal on one (*[Attaching from a
+terminal](#attaching-from-a-terminal)*, *[Over SSH](#over-ssh)*).
 
 **Where its files are.** Everything is under the store's `terminals/`,
 which is `0700`:
@@ -2491,7 +2526,8 @@ which is `0700`:
 |---|---|
 | `ctl.sock` | the daemon's control socket, `0600`: who reaches it, and how long its path may be, are in *[The control socket](#the-control-socket)* |
 | `daemon.lock` | locked by the one daemon serving the store, for as long as it does. Only this lock says a daemon runs; a socket or a pid file left behind never does |
-| `daemon.pid` | which process that daemon is, its version, when it started and the port it serves, for `serve status` and `serve stop` |
+| `daemon.pid` | which process that daemon is, its version, when it started, the port it serves, and the address and host key fingerprint of its SSH server when it runs one, for `serve status` and `serve stop` |
+| `taught` | who has been shown the chord before a first attach, one name per line, `0600` (*[Attaching from a terminal](#attaching-from-a-terminal)*) |
 | `<id>/` | one held session, `0700`; its id is 16 hexadecimal characters |
 | `<id>/sock` | the holder's socket, `0600`. It takes a link only from the daemon serving the store: *only the rota daemon serving this store may link to a session* |
 | `<id>/lock` | locked by the holder for its whole life: locked is running, whatever its socket does |
@@ -2565,11 +2601,13 @@ keyboard](#roles-and-the-keyboard)*.
 into a held session once its CLI is ready for one: *Sending into a held
 session*, under *[The daemon](#the-daemon)*.
 
+**Attaching.** `rota run --attach <session>` puts the terminal you are at
+on a held session, and `ssh -t -p 2222 <host> attach <session>` puts one
+anywhere else on it, both as the next two sections say. Each looks and types
+as the page does, by the same rules.
+
 **Not yet, and not everywhere.**
 
-- **Attaching from a terminal comes in a later beta.** For now a held
-  session is watched and typed at on the terminal page or over its
-  WebSocket, and `rota send` types a message into it.
 - **On Linux, a held session is sure to outlive its person's logout only
   under `rota serve install` with lingering on.** A daemon started by hand,
   and the sessions it holds, belong to the login and may end with it;
@@ -2581,10 +2619,382 @@ session*, under *[The daemon](#the-daemon)*.
   supervisor*, in *[The daemon](#the-daemon)*).
 - **Watch-only on `ctl.sock` is a guard against accidents, not a wall.** A
   process inside a held session that leaves both its parent and its
-  session, as a daemon does by forking twice, leaves the rule with it.
+  session, as a daemon does by forking twice, leaves the rule with it, and
+  so does one that signs in over SSH with this user's own key (*[Over
+  SSH](#over-ssh)*).
 - **Windows has none of this.** Every command that needs the daemon refuses
   there with *held sessions and the rota daemon run on linux and macOS*, and
-  foreground `rota serve` is the server it always was.
+  foreground `rota serve` is the server it always was, which refuses
+  `[ssh] enabled`: *the SSH server runs on linux and macOS*.
+
+### Attaching from a terminal
+
+```sh
+rota run 2 --detach --label api    # a held session, as above
+rota run --attach api              # this terminal on it; Ctrl-\ then d leaves
+rota run --attach api              # ...and back, from any terminal here
+```
+
+`rota run --attach <session>` hands the terminal you are at to a held
+session: what the session draws is drawn here, with its colours, mouse and
+keys as the CLI's own, what you type goes to it, and nothing of rota's is
+drawn around it. Nothing is started. A session held by `--detach`, by the
+terminal page or over SSH is joined as it is, and goes on when you leave.
+
+It needs three things, and says which is missing:
+
+- **A terminal**, on standard input and output both: *--attach needs a
+  terminal; rota send <session> "text" types into one from a script*, a
+  usage error.
+- **A daemon**: *no rota daemon is running for /home/me/.rota, so there is
+  no session to attach to; rota run <id> --detach starts one*, exit `1`.
+  Nothing is started for it.
+- **A live session.** It is found as `rota send` finds one (*Sending into a
+  held session*, under *[The daemon](#the-daemon)*): its id, the start of
+  one four characters or longer, or the label, the name or the folder of a
+  running one. One that is not found is said as `send` says it, and one that
+  has stopped is *session api has ended; rota list --sessions shows it*,
+  exit `1` both.
+
+`--attach` takes the session and nothing else: no account (*--attach takes a
+session, not an account: rota run --attach <session>*), no prompt or CLI
+arguments, and none of `--detach`, `--share`, `--label` or
+`--remote-control` (*--attach joins a session that is running; it takes no
+--detach, --share, --label or --remote-control*), each a usage error. It runs
+on linux and macOS, as the daemon does, and anywhere else is refused with
+*held sessions and the rota daemon run on linux and macOS*.
+
+**The chord.** One key is rota's while you are attached, `Ctrl-\`, and only
+as the first of two:
+
+| Keys | What they do |
+|---|---|
+| `Ctrl-\` `d` | leave; the session goes on |
+| `Ctrl-\` `n`, `Ctrl-\` `p` | the next or the previous session: the live ones you may attach to, oldest started first, round from the last to the first |
+| `Ctrl-\` `k` | take the keyboard |
+| `Ctrl-\` `z` | fit the session to this window |
+| `Ctrl-\` `?` | show these keys, until the next key |
+| `Ctrl-\` `Ctrl-\` | send `Ctrl-\` itself to the session |
+
+`Ctrl-]` was not taken because Claude Code binds it itself. The second key
+may be the letter, its capital, or the letter with Ctrl held, and the chord
+is read however the terminal sends it: the byte, the kitty keyboard
+protocol's form, xterm's modifyOtherKeys, or split across reads. Inside a
+bracketed paste nothing is a chord, and every byte is typed. Another second
+key ends the chord and is dropped. The key is `Ctrl-\` in 1.4.0, with no
+setting to change it; one that can be set may come later.
+
+With no second key after 400 ms, one row at the bottom of the window says
+what may follow, dropping whole items when the window is narrow:
+
+```
+Ctrl-\  d leave | n/p next/prev | k keyboard | z fit | ? help | Ctrl-\ itself
+```
+
+What the row covered is drawn again from the attach's own copy of the
+screen once the chord ends, or three seconds after a key it does not know.
+
+**The first time.** Before a person's first attach, a card in the middle of
+the window says how to leave, beginning *rota: to leave, press Ctrl-\ then
+d; the session goes on*, and names the keys. It stays five seconds or until
+a key, and that key does what it would have done anyway. Who has been shown
+it is remembered in the store's `terminals/taught`, one name per line, so
+it is shown once per person's name, whether they attach here or over SSH; a
+person who reaches the daemon under two names is shown it twice.
+
+**Its size.** Attaching never resizes a session: it is watched from several
+windows at once, and the last one to attach is not the one whose size it
+should take. `Ctrl-\ z` asks for this window's size, as a `fit` does on the
+page (*[Roles, and the keyboard](#roles-and-the-keyboard)*). Changing the
+window while attached changes nothing in the session either.
+
+- **A window that holds the session** is shown its bytes as they came. One
+  larger than the session shows it in its top left corner.
+- **A smaller window** is shown a crop, never the session's bytes wrapped,
+  which would garble it. The attach keeps its own copy of the session's
+  screen, and draws from it, on the window's alternate screen, the part
+  that fits: the bottom rows, since Claude Code draws its prompt at the
+  bottom, moved sideways only to keep the cursor in view. The window's last
+  row is a note, *rota: Ctrl-\ z fits; api is 100x30, this window 40x12*.
+  Mouse reporting is off while the window is cropped, because its
+  positions would point at the wrong cells; the other modes the session set
+  stay on. A window made large enough leaves the crop and is drawn the
+  session's screen again. A program that draws at the top of the screen
+  shows its bottom half first, and `z` fixes that.
+- **A session too large to keep a screen of** (*Falling behind*, in *[A
+  terminal on the server](#a-terminal-on-the-server)*) is shown to a smaller
+  window as the note alone, on a cleared window.
+
+**The keyboard and the notes.** The keyboard rules are the page's: you are
+a person, as `local` on the control socket is, so typing here takes the
+keyboard from another of your own devices and not from somebody else.
+`Ctrl-\ k` asks whoever holds it; asked again ten seconds or more later, it
+takes it (*rota: asked alice for the keyboard; Ctrl-\ k again after 10s
+takes it*). Somebody asking you is said as *rota: bob asks for the keyboard;
+they may take it in 10s*, and the attach neither grants nor denies: the
+page does. What the daemon refuses is said in the last row the same way,
+*rota: * and its sentence, once in three seconds however often it is said.
+Each note stays three seconds.
+
+**Watching.** SSH's `watch`, and any attach by a watch sign-in over SSH,
+look and never type. Their keys are dropped before they leave, and the
+chord is still read: `d`, `n`, `p` and `?` work, and `k` and `z` are
+answered with *rota: watching; this window cannot take the keyboard* and
+*rota: watching; this window cannot fit the session*. `rota run --attach`
+run inside a held session — by the agent in one, or anything it started —
+reaches the daemon as a watcher (*[The control
+socket](#the-control-socket)*): it shows the session, and the daemon
+refuses its typing in a note.
+
+**Switching.** `n` and `p` show the next session in the same window,
+cleared first, and keep the one shown when the next cannot be opened,
+saying why; with no other, *rota: no other live session*. What you type
+between the chord and the next session's first frame is dropped, so no key
+meant for one session ever reaches another.
+
+**A daemon restart is a reconnect.** When the link to the daemon goes —
+`rota serve stop` and `start`, an upgrade, a crash — the last row says
+*rota: the rota daemon went away; waiting for it (Ctrl-\ d leaves)*, and the
+attach dials again every half second for up to 60 seconds. The session is
+in its own process and goes on meanwhile. When the daemon is back the
+window is repainted from the session's screen, and what was typed in
+between is dropped, never replayed; the chord is still read, so `Ctrl-\ d`
+leaves while it waits. A session that stopped meanwhile ends the attach as
+the session's end; a daemon not back within the minute ends it as lost.
+
+**How it ends.** On every end — leaving, the session ending, the link lost,
+a write to the terminal failing, `SIGTERM`, `SIGHUP` or an interrupt sent to
+this `rota`, even a panic — the terminal is given back as it was found: its
+own settings, the main screen, the cursor shown, and every mode a CLI may
+have set reset (cursor keys, bracketed paste, the mouse and its encoding,
+focus reporting, the kitty keyboard flags on both screens). Leaving waits
+150 ms for the session's output to drain first. Then one line on stderr
+says why it ended and how to come back, as text with `--json` or not:
+
+```
+rota: detached from api; rota run --attach api returns to it
+rota: api ended, exit 0
+rota: api ended with no exit code: a signal stopped its CLI, or its holder went
+rota: lost api: rota was signalled to stop; rota run --attach api tries again
+```
+
+The exit code is `0` for a leave; the CLI's own code for an end, held to
+`0`–`255`, with no code at all `1`; `1` for an attach lost or refused; and
+`2` for a usage error, before anything is attached. A name that a shell
+would change is said in single quotes, or as the session's id when quotes
+would not do, so the line can be typed back as it is.
+
+### Over SSH
+
+```sh
+ssh -p 2222 me@desk list                      # every session
+ssh -t -p 2222 me@desk attach api             # this terminal on it
+ssh -t -p 2222 me@desk watch api              # ...to look only
+ssh -t -p 2222 me@desk new --label job -- --model sonnet
+ssh -p 2222 me@desk                           # the list and the commands
+```
+
+rota has an SSH server of its own, on `golang.org/x/crypto/ssh` with nothing
+in between, so the held sessions can be reached from a terminal anywhere,
+a phone's included. It is off unless the file says so:
+
+```toml
+[ssh]
+enabled = false             # nothing listens unless this is true
+listen = "127.0.0.1:2222"   # host:port, or a bare port for every interface;
+                            # beyond the loopback is allowed: SSH encrypts
+host_key = ""               # the server's ed25519 key, an absolute path; empty is
+                            # <store>/ssh_host_ed25519_key, made 0600 on first use
+
+[[users]]
+name     = "me"
+role     = "control"
+ssh_keys = ["ssh-ed25519 AAAA... me@laptop"]   # then no password is needed
+```
+
+**A control role here can run commands as the daemon's user, as on the
+web.** That is the sentence worth saying plainly, as it is for the
+terminal page: whoever signs in with a control user's key can start a CLI,
+or a login shell where `[terminal] shell` allows one. A bare port in
+`listen`, `"2222"`, listens on every interface, as it does in `[server]`. An
+address beyond the loopback needs no certificate, because SSH encrypts by
+itself. `[ssh] enabled` with no `[[users]]` entry holding `ssh_keys` is
+refused, *ssh.enabled is true, and no [[users]] entry has ssh_keys, so
+nobody could sign in*, and so is an empty `listen`, *ssh.listen is empty;
+write a host:port such as 127.0.0.1:2222*.
+
+**Keys alone.** A person signs in with a public key their `[[users]]` entry
+lists in `ssh_keys`, one `authorized_keys` line each with nothing before the
+type, and with nothing else: no password, no keyboard-interactive, and
+three tries. A user with keys may leave the password out, and then signs
+in over SSH alone; on the page their name is refused as an unknown name is
+(*[The principals](#the-principals)*). The keys taken are `ssh-ed25519`,
+`ecdsa-sha2-nistp256`, `-nistp384` and `-nistp521`, the security keys'
+`sk-ssh-ed25519@openssh.com` and `sk-ecdsa-sha2-nistp256@openssh.com`, and
+`ssh-rsa` of 2048 bits or more, signing with SHA-2 alone. Certificates,
+`authorized_keys` options such as `from=`, DSA, a shorter RSA key and an RSA
+signature by SHA-1 are refused, and one key belongs to one user. A key the
+file cannot take is refused when the file is read, naming the entry and
+the key's place and never the key: `[[users]] "me": ssh_keys #2: options
+before the key, such as from=, are not read; give the key alone`.
+
+**Who you are.** The key decides, and the login name typed before the `@`
+is not checked: it is logged beside the user, as `git@github.com` would be.
+A sign-in is the person the key belongs to, `{"name":"me","role":"control",
+"via":"user"}`, the same person as their sign-in on the page, so the
+keyboard follows one person across the page, SSH and, when that person is
+`local` (*[The control socket](#the-control-socket)*), this machine's own
+terminal (*[Roles, and the keyboard](#roles-and-the-keyboard)*). It reaches
+the API in the daemon's own process, with no socket and no port between,
+and the role table decides what it may do, as for anyone.
+
+**What a connection may ask.** Only `session` channels, up to eight on one
+connection. Port forwarding either way, agent forwarding, X11, subsystems
+such as `sftp`, signals and every `env` but `TERM` are refused. `TERM`, from
+the pty request or `env`, is kept only when it matches
+`^[A-Za-z0-9._+-]{1,64}$`, and is otherwise unset. A session runs one
+command from a fixed list, split on spaces and tabs with single and double
+quotes and nothing else — no escapes, globs or variables — and no shell
+ever reads the line:
+
+```
+rota over ssh takes one of:
+  list [--json]                      every session the daemon holds or lists
+  attach <session>                   look and type; Ctrl-\ then d leaves
+  watch <session>                    look only
+  new [--account N] [--label NAME] [--cwd DIR] [--shell] [--json] [-- ARGS]
+```
+
+Any other word, `list; rm -rf ~` included, runs nothing: *rota over ssh runs
+list, attach, watch and new, and nothing else*, then that text, on stderr,
+and the exit status is `2`. A line of more than 4096 bytes runs nothing
+either, *rota over ssh takes a command line of at most 4096 bytes*, exit
+`2`.
+
+- **`list`** prints one line per session, its values two spaces apart and
+  each made one line: the id; its status (`running`, `needs_you`, `quiet`),
+  or once stopped its state; its name; its provider and account; and its
+  folder. A value nobody gave is `-`. With none it prints `no sessions`.
+  `list --json` prints `{"terminals":[…]}`, each session's own document as
+  `GET /v1/terminals` lists it, with every control character escaped.
+
+  ```
+  0123456789abcdef  running  api  claude/me@example.com  /home/me/src/api
+  ```
+
+- **`attach <session>`** puts the terminal at the other end on the session
+  as `rota run --attach` does, chord, crop, notes, card and all (*[Attaching
+  from a terminal](#attaching-from-a-terminal)*). The session is found by
+  its id or the start of one, or the label, the name or the folder of a live
+  one; a terminal shared with `--share` by its id alone. It needs a
+  terminal, *attach needs a terminal: ssh -t <host> attach <session>*, exit
+  `2`: `ssh` asks for one by itself only with no command, so give `-t`. A
+  session that has stopped is *session api has ended*, exit `1`. The last
+  line goes to stderr and says to come back with `attach` and the word, or
+  the id when the name is one a shell would change: *rota: detached from
+  api; attach api returns to it*. The exit status is the attach's, as
+  above. There is no redial: the SSH server is inside the daemon, so a
+  daemon that stops ends the connection, and the attach ends lost with its
+  line.
+- **`watch <session>`** is `attach` that never types. A watch sign-in's
+  `attach` is a watch too.
+- **`new`** starts a session for the person the key signed in, as `POST
+  /v1/terminals` does: `--account N` (the rotation chooses when it is left
+  out), `--label NAME`, `--cwd DIR`, `--shell` for the login shell the file
+  must allow, which takes no account or arguments, and the CLI's own
+  arguments after `--`. Its size is the terminal's, or 120×40 with none. A
+  prompt, or `-p` or `--print` among the arguments, is refused, *new hands
+  the CLI its terminal, so it takes no prompt or -p: give the CLI's
+  arguments after --*, exit `2`, as for `--detach`. On a terminal it then
+  attaches to the session, as `attach` does; otherwise it says *held as
+  session job (0123456789abcdef)*, or with `--json` prints the session's
+  document. It runs with the daemon's environment, since a session's `env`
+  and `remote_control` are taken over the control socket alone, so there
+  is no Remote Control over SSH. A watch sign-in starts nothing: *this
+  sign-in may only watch; nothing here can be changed from it*, exit `1`.
+- **A bare `ssh`**, with no command, prints `list`'s lines, a blank line
+  and the commands, and exits `0`, or `1` when the sessions could not be
+  listed. The TUI goes there, in a later beta.
+
+**The host key.** The server proves itself with an ed25519 key, the only
+kind it signs with. Empty `host_key` is `<store>/ssh_host_ed25519_key`,
+made `0600` the first time the server starts; a daemon and a foreground
+`serve` starting at once keep one key between them. A `host_key` the file
+names is never made, and must already exist: *ssh.host_key /etc/rota/key
+does not exist; rota makes one only at its default path, so make it with:
+ssh-keygen -t ed25519 -N '' -f /etc/rota/key*. Either is refused when
+anybody but its owner may read it, when it is not ed25519 (*ssh.host_key
+/etc/rota/key is a ssh-rsa key; rota's host key is ed25519*), and when it
+has a passphrase (*ssh.host_key /etc/rota/key is encrypted; rota reads a key
+without a passphrase*), since nobody is there to type one.
+
+`rota serve status` says the key's fingerprint (*[The daemon](#the-daemon)*),
+`SHA256:` and 43 characters. The first time `ssh` connects it shows that
+fingerprint and asks: answer `yes` only when the two are the same. To
+change the key, stop the server, remove the file and start it again: a new
+one is made, and every client then sees a changed host key, which it is
+right to refuse until its fingerprint is compared with `serve status`'s
+once more and the old one taken out of `known_hosts` (`ssh-keygen -R
+'[desk]:2222'`).
+
+**Where it runs.** The daemon `rota serve start` starts serves SSH when its
+file says `[ssh] enabled`, beside its control socket and whatever port
+`[server] listen` opens; a file with `[ssh]` and no `[server] listen` opens
+SSH alone. A daemon that a session started by itself, `--ctl-only`, never
+opens SSH, whatever the file says. `serve start` adds where it listens to
+its line, `; ssh on 127.0.0.1:2222`, and the log says `rota daemon serves
+ssh` with the address and the fingerprint. Stopping the daemon closes SSH
+first, so each attach over it ends with its line, and the sessions go on.
+
+Foreground `rota serve` serves SSH as well, only with `[routes] terminal`,
+since SSH reaches the terminals and nothing else: *[ssh] enabled needs
+[routes] terminal in rota serve: SSH reaches the terminals and nothing else;
+rota serve start serves held sessions without it*, a usage error. That
+departs from the design, where `[ssh] enabled` alone would do: `[routes]
+terminal` also opens the terminals on the TCP port, which beyond the
+loopback needs TLS (*[A terminal on the server](#a-terminal-on-the-server)*).
+It says `rota 1.4.0 serving ssh on 127.0.0.1:2222 (host key SHA256:…)`.
+Windows refuses it: *the SSH server runs on linux and macOS*.
+
+**Limits.** A peer that has not signed in costs a bounded share of the
+server and learns only that it is an SSH server: the version string is
+`SSH-2.0-rota`, with no version number.
+
+| | |
+|---|---|
+| connecting and signing in | 20 seconds, then the connection is closed |
+| signing in at once | 32, and 8 from one address: an IPv4 host, or an IPv6 /64. On the default loopback listen every client is one address, so 8 |
+| connections open | 64, at most 16 of them one person's, and the last 16 kept for control users |
+| channels | 8 on one connection |
+| a command line | 4096 bytes |
+| attached at once | 16, at most 2 on one connection and 8 of them one person's, and the last 4 kept for control users |
+| keepalives | one every 30 seconds; three intervals unanswered close the connection |
+| idle | a signed-in connection with no command running is closed after 60 seconds |
+
+Each attach keeps a copy of its session's screen in the daemon, which is
+what the attach limits are for. A connection past a limit before signing in
+is closed with nothing said; one past a per-person limit is signed in,
+closed, and logged; an attach past one is refused in a sentence, *rota over
+ssh keeps the last 4 attached sessions for control; leave one first*. The
+key exchanges are ML-KEM and the elliptic curves, never the finite-field
+groups, and the MACs SHA-2 alone.
+
+**What is written down.** `ssh signed in` with the user, the login name, the
+key's fingerprint and the address; `ssh refused` with the address and the
+fingerprints of up to three keys it offered, at most once a minute for one
+address, the next line counting what was left out; `ssh command` with the
+user and the command's word, never its arguments; `ssh signed out`. Never a
+key.
+
+**A limit, the same as the double fork.** An agent inside a held session
+may watch only on `ctl.sock` (*[The control
+socket](#the-control-socket)*), but it runs as this user, so it can read
+this user's own SSH key in `~/.ssh`, or use the agent behind
+`SSH_AUTH_SOCK`, and sign in over SSH as the person that key belongs to,
+with that person's role. The watch-only rule is a guard against accidents,
+not a wall, and using a key is not an accident. Give rota a key of its own,
+with a passphrase, and list that one in `ssh_keys`, not the key you use
+for everything else.
 
 ### The playground
 
@@ -4610,8 +5020,12 @@ needless unmarshal costs microseconds, a lost result costs the run.
 | `cmd/rota/daemon*.go` | `rota serve start`, `stop` and `status` |
 | `cmd/rota/unit*.go` | `rota serve install` and `uninstall`: the systemd unit and the launchd agent |
 | `cmd/rota/ctlsock*.go` | The control socket, and who may use it |
-| `cmd/rota/client/` | A client of the control socket: listing the sessions, finding one by name, starting one, sending into one, stopping one |
+| `cmd/rota/client/` | A client of the control socket, or of the API in the same process: listing the sessions, finding one by name, starting one, sending into one, stopping one, and a session's terminal socket |
 | `cmd/rota/detach.go` | `rota run --detach` |
+| `cmd/rota/attach_cli.go` | `rota run --attach` |
+| `cmd/rota/attach/` | One attach, for `rota run --attach`, SSH and the TUI alike: the chord, the copy of the session's screen it passes through or crops, the notes and the card, switching, the redial, the terminal given back, and the one line at the end |
+| `cmd/rota/sshd/` | The SSH server: the keys it admits, the host key, the limits, what a channel may ask, and the commands `list`, `attach`, `watch` and `new` |
+| `cmd/rota/sshwire.go` | The SSH server in the daemon and in foreground `rota serve`, and what `serve start` and `status` say of it |
 | `cmd/rota/held.go`, `cmd/rota/held_list.go` | `rota serve hold`, and the held sessions as read from their records alone, for `rota list --sessions`, a `rota send` with no daemon, and a busy account's error |
 | `cmd/rota/hold/` | The holder: the pseudo-terminal, the screen it keeps with x/vt, the answers to the CLI's queries, Claude Code's record of the session, the link to the daemon and sending |
 | `scripts/vt/` | How the screens x/vt keeps are checked against xterm's: the captures' goldens and the script that makes them |
