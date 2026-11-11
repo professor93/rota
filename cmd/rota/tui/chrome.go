@@ -464,15 +464,29 @@ func (m *Model) chromeAsk() string {
 	return ask
 }
 
-// chromeEnds says what quitting ends besides the TUI: what each tab is busy
-// with, shown or not, as Busy names it. A login flow put aside is not among
-// them: its login stays parked, and Run's caller says how to finish it (R18).
+// chromeEnds says what quitting ends besides the TUI, as each Busy names
+// it: what each open overlay that has a Busy is busy with, the top one
+// first, then the flow put aside, then each tab, shown or not. A login flow
+// counts only through its own Busy, what its step keeps running (the
+// one-time page): its login stays parked, and Run's caller says how to
+// finish it (R18).
 func (m *Model) chromeEnds() string {
 	var what []string
-	for _, t := range m.tabs {
-		if b := clean(t.Busy()); b != "" {
-			what = append(what, b)
+	busy := func(v any) {
+		if b, ok := v.(interface{ Busy() string }); ok {
+			if s := clean(b.Busy()); s != "" {
+				what = append(what, s)
+			}
 		}
+	}
+	for i := len(m.stack) - 1; i >= 0; i-- {
+		busy(m.stack[i])
+	}
+	if m.aside != nil {
+		busy(m.aside)
+	}
+	for _, t := range m.tabs {
+		busy(t)
 	}
 	switch n := len(what); n {
 	case 0:

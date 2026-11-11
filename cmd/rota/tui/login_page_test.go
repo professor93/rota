@@ -742,6 +742,30 @@ func TestThePageGoesBackToTheFieldOfTheFlow(t *testing.T) {
 	back("its time ran out")
 }
 
+// The quit ask names the one-time page while it is up in the login flow,
+// and no longer once it has closed and the field is back.
+func TestTheQuitAskNamesTheOneTimePage(t *testing.T) {
+	loginPageOffer(t, nil, loginPageLo)
+	loginPageFaked(t, "http://127.0.0.1:1/SECRET", "")
+	m, _, ticks := loginModel(t, nil)
+	loginPress(t, m, "n", "enter", "enter", "w", "enter")
+	f := loginFlowOf(t, m)
+	if s, ok := f.step.(*loginPageStep); !ok || s.page == nil {
+		t.Fatalf("the page is not up: %T", f.step)
+	}
+	run(t, m, press("q")...)
+	if got, want := chromeAskRead(m), "press q again to quit; the one-time page ends too"; got != want {
+		t.Errorf("with the page up the ask is %q, want %q", got, want)
+	}
+	loginPageDrain(t, m, press("esc")...)
+	loginCodeOf(t, f)
+	run(t, m, ticks.advance(chromeQuitWindow)...)
+	run(t, m, press("q")...)
+	if got, want := chromeAskRead(m), "press q again to quit"; got != want {
+		t.Errorf("with the page closed the ask is %q, want %q", got, want)
+	}
+}
+
 func TestThePageURLIsCopiedNotLogged(t *testing.T) {
 	loginPageReal(t)
 	loginPageOffer(t, nil, loginPageLo)

@@ -866,3 +866,48 @@ func TestTheChromeAt80x24(t *testing.T) {
 	run(t, m, press("?")...)
 	golden(t, "chrome-80x24", screen+"\n\n"+plain(m)+"\n")
 }
+
+// chromeBusyOverlay is an overlay busy with what its Busy names.
+type chromeBusyOverlay struct {
+	*shellOverlay
+	busy string
+}
+
+func (o chromeBusyOverlay) Update(msg tea.Msg) (overlay, tea.Cmd) {
+	o.shellOverlay.Update(msg)
+	return o, nil
+}
+func (o chromeBusyOverlay) Busy() string { return o.busy }
+
+// chromeBusyAsider is a flow put aside whose step keeps something running.
+type chromeBusyAsider struct {
+	chromeAsider
+	busy string
+}
+
+func (a chromeBusyAsider) Update(msg tea.Msg) (overlay, tea.Cmd) {
+	a.shellOverlay.Update(msg)
+	return a, nil
+}
+func (a chromeBusyAsider) Busy() string { return a.busy }
+
+// The quit ask names what open overlays keep running, the top one first,
+// then the flow put aside, then the tabs; an overlay with nothing running,
+// or with no Busy at all, adds nothing.
+func TestTheQuitAskNamesWhatOverlaysKeepRunning(t *testing.T) {
+	tabs := chromeRegister(t, 10)
+	m := chromeModel(t, &fakeBackend{}, &fakeTicks{}, 160, 30)
+	tabs[10].busy = "the open run"
+	run(t, m, openMsg{O: chromeBusyAsider{chromeAsider{&shellOverlay{asider: true}, "login · aside"}, "the aside page"}}, press("esc")[0])
+	if m.aside == nil {
+		t.Fatal("the flow is not aside")
+	}
+	run(t, m, openMsg{O: chromeBusyOverlay{&shellOverlay{}, "the lower page"}},
+		openMsg{O: chromeBusyOverlay{&shellOverlay{}, ""}},
+		openMsg{O: &shellOverlay{}},
+		openMsg{O: chromeBusyOverlay{&shellOverlay{}, "the top page"}})
+	run(t, m, press("q")...)
+	if got, want := chromeAskRead(m), "press q again to quit; the top page, the lower page, the aside page and the open run end too"; got != want {
+		t.Errorf("the ask is %q, want %q", got, want)
+	}
+}
