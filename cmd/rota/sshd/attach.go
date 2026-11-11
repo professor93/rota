@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -13,7 +12,6 @@ import (
 	"github.com/professor93/rota/cmd/rota/attach"
 	"github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/internal/holdwire"
-	"github.com/professor93/rota/internal/vtscan"
 )
 
 // `attach <session>` and `watch <session>`: the person's terminal, at the
@@ -201,7 +199,7 @@ func attachRescue(t *chanTerm) {
 		return
 	}
 	_, rows := t.Size()
-	_, _ = t.Write(append(vtscan.ResetAll(), "\x1b[0m\x1b[r\x1b["+strconv.Itoa(max(rows, 1))+";1H\r\n"...))
+	_, _ = t.Write(append(attach.PutBack(rows), "\r\n"...))
 	panic(p)
 }
 

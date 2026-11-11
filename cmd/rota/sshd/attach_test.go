@@ -24,7 +24,6 @@ import (
 
 	"github.com/professor93/rota/cmd/rota/attach"
 	"github.com/professor93/rota/cmd/rota/client"
-	"github.com/professor93/rota/internal/vtscan"
 )
 
 /* ------------------------------------------------------------ helpers --- */
@@ -186,7 +185,7 @@ func attachGivenBack(t *testing.T, r *commandsRig) {
 // and the newline the line on stderr then goes below: every mode off, the
 // pen and the scroll region reset, and the cursor on the last row.
 func attachReset(rows int) string {
-	return string(vtscan.ResetAll()) + fmt.Sprintf("\x1b[0m\x1b[r\x1b[%d;1H\r\n", rows)
+	return string(attach.PutBack(rows)) + "\r\n"
 }
 
 // attachCUP is a cursor put somewhere: what a row of the crop starts with.

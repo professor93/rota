@@ -366,13 +366,27 @@ func runResult(t *testing.T, done <-chan Result) Result {
 	return Result{}
 }
 
-// runReset is what every end writes last, for a window rows high: every
-// mode off and the main screen, then the attributes and the scroll region
-// reset, which leaving the alternate screen would otherwise undo, and the
-// cursor on the window's last row, where the caller's line goes.
-func runReset(rows int) string {
-	return string(vtscan.ResetAll()) + "\x1b[0m\x1b[r" + fmt.Sprintf("\x1b[%d;1H", rows)
+// PutBack is what every end writes last, and every rescue from a panic,
+// for a window rows high: every mode off and the main screen, then the
+// attributes and the scroll region reset, which leaving the alternate
+// screen would otherwise undo, and the cursor on the window's last row,
+// where the caller's line goes. A window of no rows is put on its first.
+// These are the only bytes of it any test spells out.
+func TestPutBack(t *testing.T) {
+	for rows, cup := range map[int]string{30: "\x1b[30;1H", 1: "\x1b[1;1H", 0: "\x1b[1;1H", -3: "\x1b[1;1H"} {
+		if got, want := string(PutBack(rows)), string(vtscan.ResetAll())+"\x1b[0m\x1b[r"+cup; got != want {
+			t.Errorf("PutBack(%d) = %q, want %q", rows, got, want)
+		}
+	}
+	// Each call is a slice of its own, which a caller may append to.
+	a := append(PutBack(24), "\r\n"...)
+	if b := PutBack(24); strings.HasSuffix(string(b), "\r\n") || len(a) != len(b)+2 {
+		t.Errorf("an append to one PutBack reached the next: %q", b)
+	}
 }
+
+// runReset is what every end writes last, for a window rows high.
+func runReset(rows int) string { return string(PutBack(rows)) }
 
 func TestDetachDrainsResetsAndSaysSo(t *testing.T) {
 	runKnobs(t)

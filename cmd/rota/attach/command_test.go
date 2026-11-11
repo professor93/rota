@@ -19,7 +19,6 @@ import (
 	"github.com/professor93/rota/api"
 	"github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/internal/fakecli"
-	"github.com/professor93/rota/internal/vtscan"
 )
 
 // commandExec is what bubbletea's tea.Exec runs, spelt out here so that
@@ -419,7 +418,7 @@ func TestAPanicInACommandGivesEverythingBack(t *testing.T) {
 		if now.Iflag != before.Iflag || now.Oflag != before.Oflag || now.Lflag != before.Lflag || now.Cflag != before.Cflag {
 			t.Fatalf("after a panic the terminal's settings were %+v and are left %+v", before, now)
 		}
-		want := string(vtscan.ResetAll()) + "\x1b[0m\x1b[r\x1b[24;1H\r\n"
+		want := string(PutBack(24)) + "\r\n"
 		screen.wait(t, want)
 		runNoneLeft(t, left, commandFns...)
 	})

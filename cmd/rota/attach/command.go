@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/internal/pty"
-	"github.com/professor93/rota/internal/vtscan"
 )
 
 // Cmd is an attach as a command whose streams the caller sets and which it
@@ -135,7 +133,7 @@ func commandRescue(t Terminal, out io.Writer, restore func()) {
 		return
 	}
 	_, rows := t.Size()
-	_, _ = out.Write(append(vtscan.ResetAll(), "\x1b[0m\x1b[r\x1b["+strconv.Itoa(max(rows, 1))+";1H\r\n"...))
+	_, _ = out.Write(append(PutBack(rows), "\r\n"...))
 	restore()
 	panic(p)
 }

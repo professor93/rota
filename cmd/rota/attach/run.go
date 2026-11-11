@@ -579,8 +579,7 @@ func (r *runner) finish() Result {
 	// Written past a failed write too: a terminal that failed once may yet
 	// take the reset.
 	_, rows := r.t.Size()
-	b := append(vtscan.ResetAll(), "\x1b[0m\x1b[r\x1b["+strconv.Itoa(max(rows, 1))+";1H"...)
-	_, _ = r.t.Write(b)
+	_, _ = r.t.Write(PutBack(rows))
 	// Every link not yet closed says goodbye, for a moment at most.
 	var wg sync.WaitGroup
 	for _, h := range r.held {
@@ -605,6 +604,16 @@ func (r *runner) finish() Result {
 	case <-time.After(linkCloseWait):
 	}
 	return res
+}
+
+// PutBack is the bytes that give a window rows high back from a session,
+// which every end of an attach writes last and every rescue from a panic
+// too: every mode the session set off and the main screen, then the pen and
+// the scroll region reset, which leaving the alternate screen would
+// otherwise undo, and the cursor on the window's last row, where the line
+// saying how it ended goes. Each call returns a slice of its own.
+func PutBack(rows int) []byte {
+	return append(vtscan.ResetAll(), "\x1b[0m\x1b[r\x1b["+strconv.Itoa(max(rows, 1))+";1H"...)
 }
 
 // write writes p to the person's screen.

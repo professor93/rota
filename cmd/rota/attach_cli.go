@@ -6,13 +6,11 @@ import (
 	"io"
 	"os"
 	"slices"
-	"strconv"
 
 	"github.com/professor93/rota/cmd/rota/attach"
 	rotaclient "github.com/professor93/rota/cmd/rota/client"
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/pty"
-	"github.com/professor93/rota/internal/vtscan"
 )
 
 // rota run --attach <session>: this terminal on a session the store's
@@ -150,7 +148,7 @@ func attachRescue(t attach.Terminal, out io.Writer, restore func()) {
 		return
 	}
 	_, rows := t.Size()
-	_, _ = out.Write(append(vtscan.ResetAll(), "\x1b[0m\x1b[r\x1b["+strconv.Itoa(max(rows, 1))+";1H\r\n"...))
+	_, _ = out.Write(append(attach.PutBack(rows), "\r\n"...))
 	restore()
 	panic(p)
 }

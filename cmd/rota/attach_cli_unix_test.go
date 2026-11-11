@@ -330,7 +330,7 @@ func TestAPanicGivesTheTerminalBack(t *testing.T) {
 	if got != "boom" {
 		t.Fatalf("the panic went on as %v, want boom", got)
 	}
-	want := string(vtscan.ResetAll()) + "\x1b[0m\x1b[r\x1b[30;1H\r\n"
+	want := string(attach.PutBack(30)) + "\r\n"
 	screen.wait(t, "session"+want)
 	if now := attachTermios(t, master); now.Iflag != before.Iflag || now.Oflag != before.Oflag || now.Lflag != before.Lflag || now.Cflag != before.Cflag {
 		t.Fatalf("after a panic the terminal's settings were %+v and are left %+v", before, now)
