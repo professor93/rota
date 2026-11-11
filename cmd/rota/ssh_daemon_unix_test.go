@@ -466,6 +466,22 @@ func TestStartWithoutSSHSaysOnlyThatItRuns(t *testing.T) {
 	}
 }
 
+// A daemon that holds the store and does not answer on its control socket
+// yet may still be starting, and about to serve the SSH server its record
+// does not name yet: serve start names it and says nothing of SSH.
+func TestStartSaysNothingOfSSHForADaemonStillStarting(t *testing.T) {
+	r := newSSHRig(t)
+	release, err := holdwire.ClaimDaemon(r.terminals, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	want := fmt.Sprintf("rota daemon already running for %s (pid %d)\n", r.home, os.Getpid())
+	if out, errb, code := r.rota("serve", "start"); code != 0 || out != want || errb != "" {
+		t.Fatalf("serve start with a daemon still starting: exit %d %q %q, want %q", code, out, errb, want)
+	}
+}
+
 // [ssh] alone opens no HTTP port: status says http null, and ssh.
 func TestOnlySSHOpensNoHTTP(t *testing.T) {
 	r := newSSHRig(t)

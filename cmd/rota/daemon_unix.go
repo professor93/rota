@@ -56,10 +56,15 @@ func (c *cli) startDaemon(ctlOnly bool, conf string) error {
 		fmt.Fprintf(c.out, "rota daemon already running for %s%s\n", oneLine(r.home), pidOf(r.running))
 		// A file that turns SSH on, which the daemon running does not serve:
 		// it was most likely started on its control socket alone, as rota
-		// run --detach starts one, and it never will.
-		if !ctlOnly && r.running.PID != 0 && r.running.SSH == "" {
+		// run --detach starts one, and it never will. Judged only from a
+		// daemon that answers on its control socket, which it listens on
+		// only once its record names its SSH server: one still starting may
+		// be about to serve it.
+		if !ctlOnly && r.running.PID != 0 {
 			if cfg, _, _, err := daemonConfig(conf, r.home); err == nil && cfg.SSH.Enabled {
-				fmt.Fprintln(c.out, "it does not run the SSH server [ssh] turns on: a daemon started with --ctl-only, as rota run --detach starts one, never does; rota serve stop, then rota serve start, runs it")
+				if d := daemonAnswering(filepath.Dir(r.sock)); d != nil && d.PID == r.running.PID && d.SSH == "" {
+					fmt.Fprintln(c.out, "it does not run the SSH server [ssh] turns on: a daemon started with --ctl-only, as rota run --detach starts one, never does; rota serve stop, then rota serve start, runs it")
+				}
 			}
 		}
 		return nil
