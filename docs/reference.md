@@ -45,8 +45,11 @@ accounts in Postgres, pick by price, and never import a line of the rest.
 module, `github.com/professor93/rota`, has no `go.sum`, nothing to audit, and
 nothing to update. The `rota` program is a module of its own, so whatever it
 comes to need never reaches a program that imports them. It uses
-github.com/charmbracelet/x/vt to keep the screen of each held session and
-golang.org/x/crypto/ssh for its SSH server.
+github.com/charmbracelet/x/vt, with ultraviolet and x/ansi from the same
+authors, to keep the screen of each held session; golang.org/x/crypto/ssh
+for its SSH server; github.com/muesli/cancelreader to stop reading a
+terminal when an attach ends; and golang.org/x/sys to drop what was typed
+at the terminal before it is given back.
 Go 1.27 removed the last two temptation: `encoding/json/v2` is standard
 library now, so the hand-rolled JSON layer is gone and nothing here reaches
 for a faster JSON package. It was not always so: the server
