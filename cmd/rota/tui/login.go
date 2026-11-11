@@ -263,12 +263,17 @@ func (f *loginFlow) arm() {
 		k.Choose.SetEnabled(len(f.opts) > 0 || f.pick == loginConfirm)
 		k.Cancel.SetEnabled(true)
 	case loginBeginning:
-		k.Cancel.SetEnabled(true)
+		// A begin parks a login nobody has seen, so it may be left; a finish
+		// with no code acts on the server, and its end must be said.
+		k.Cancel.SetEnabled(f.login == nil)
 	case loginStepping:
+		// While the step awaits an answer it is not left: the answer, which
+		// may have finished the login, is always taken.
 		if f.stepping() && !f.step.Typing() {
+			waiting := loginWaiting(f.step)
 			k.Aside.SetEnabled(f.login != nil)
-			k.Abandon.SetEnabled(f.login != nil)
-			k.Close.SetEnabled(f.login == nil)
+			k.Abandon.SetEnabled(f.login != nil && !waiting)
+			k.Close.SetEnabled(f.login == nil && !waiting)
 		}
 	case loginEnded:
 		k.Again.SetEnabled(true)
@@ -420,9 +425,10 @@ func (f *loginFlow) begun(msg loginBegunMsg) tea.Cmd {
 
 // refused takes a begin the server refused. An account whose own CLI signs
 // it in gets the delegated step. An account of another provider refused
-// with no reason may run on a key of a provider whose login takes one: its
-// key is asked for on a login of the provider's own, and when that login
-// takes no key the first refusal stands. n long's second login refused
+// with no reason either has no uuid or e-mail, which ends the flow, or may
+// run on a key of a provider whose login takes one: its key is asked for on
+// a login of the provider's own, and when that login takes no key the
+// first refusal stands. n long's second login refused
 // ends the flow, since the account is made. Anything else is said under
 // the pick, and enter tries again.
 func (f *loginFlow) refused(b LoginBegin, err error) tea.Cmd {
@@ -433,6 +439,11 @@ func (f *loginFlow) refused(b LoginBegin, err error) tea.Cmd {
 		f.delegating = true
 		return f.show(f.steps.delegated(f.e, f.again.ID))
 	case isNo && no.Status == 400 && no.Reason == "" && b.Account != 0 && f.fellBack == "" && f.provider != rota.DefaultProvider:
+		if f.again.UUID == "" && f.again.Email == "" {
+			// Refused for having no uuid or e-mail, which no retry changes;
+			// a login of the provider's own would only be left parked.
+			return f.end(err.Error())
+		}
 		f.fellBack = err.Error()
 		return f.begin(LoginBegin{Provider: f.provider})
 	case f.fellBack != "":
@@ -568,7 +579,9 @@ func (f *loginFlow) tick() tea.Cmd {
 	if f.login == nil {
 		return nil
 	}
-	if !f.e.now().Before(f.ends) {
+	// An answer awaited is taken first: what was sent in time may have
+	// finished the login.
+	if !f.e.now().Before(f.ends) && !(f.stepping() && loginWaiting(f.step)) {
 		return f.end("the login " + f.login.ID + " has expired")
 	}
 	return f.ticker()

@@ -82,6 +82,17 @@ type loginSending struct {
 	said loginSaid
 }
 
+// sending says an answer is awaited. Until it comes the step is neither
+// left nor replaced (no x, no close, no page), so the answer is always
+// taken: one that finished the login is said, never lost.
+func (s *loginSending) sending() bool { return s.busy }
+
+// loginWaiting says s awaits an answer, when it can say.
+func loginWaiting(s step) bool {
+	w, ok := s.(interface{ sending() bool })
+	return ok && w.sending()
+}
+
 // send sends value through f, once: while its answer is awaited nothing
 // more is sent. The answer comes back as a loginAnswerMsg for to.
 func (s *loginSending) send(e *env, to step, value string, f func(ctx context.Context, b Backend) (LoginEnd, error)) tea.Cmd {
@@ -144,6 +155,12 @@ func loginScrub(text, value string) string {
 		text = strings.ReplaceAll(text, v, "[not repeated]")
 	}
 	return text
+}
+
+// loginSecretLike says v is no code: clean would change it (a key's shape,
+// or something a terminal would act on), or it starts as an API key does.
+func loginSecretLike(v string) bool {
+	return clean(v) != v || strings.HasPrefix(v, "sk-") || strings.HasPrefix(v, "xai-")
 }
 
 // loginTrim is a paste as a field takes it: line breaks gone, and the
@@ -237,9 +254,10 @@ func (s *loginCode) Typing() bool { return s.in.Focused() }
 func (s *loginCode) arm() {
 	k, typing := &s.keys, s.in.Focused()
 	k.Open.SetEnabled(!typing && s.e.o.OpenURL != nil)
-	for _, b := range []*key.Binding{&k.Copy, &k.Page, &k.Focus} {
+	for _, b := range []*key.Binding{&k.Copy, &k.Focus} {
 		b.SetEnabled(!typing)
 	}
+	k.Page.SetEnabled(!typing && !s.busy)
 	k.Submit.SetEnabled(typing)
 	k.Leave.SetEnabled(typing)
 	k.Next.SetEnabled(false)
@@ -329,8 +347,17 @@ func (s *loginCode) paste(content string) tea.Cmd {
 	return tea.Batch(cmd, s.submit())
 }
 
+// submit sends the code, unless it looks like a key or a token: that would
+// hand a credential to the provider's token endpoint as a code, so it stays
+// in the field, drawn redacted, and nothing is sent.
 func (s *loginCode) submit() tea.Cmd {
 	id, v := s.l.ID, strings.TrimSpace(s.in.Value())
+	if loginSecretLike(v) {
+		if !s.busy {
+			s.said = loginSaid{text: "that looks like a key or a token, not a code; nothing was sent"}
+		}
+		return nil
+	}
 	return s.send(s.e, s, v, func(ctx context.Context, b Backend) (LoginEnd, error) {
 		return b.FinishLogin(ctx, id, v)
 	})
@@ -350,7 +377,12 @@ func (s *loginCode) View(width int) string {
 	s.arm()
 	k := s.keys
 	lines = append(lines, "", "  "+loginHints(th, k.Open, k.Copy, k.Page, k.Focus, k.Submit, k.Leave), "")
-	lines = append(lines, loginField(th, fit("code", loginLabelWidth), s.in, s.ends, s.e.now()))
+	in := s.in
+	if loginSecretLike(in.Value()) {
+		// A key pasted here by mistake shows as stars, whatever its shape.
+		in.EchoMode = textinput.EchoPassword
+	}
+	lines = append(lines, loginField(th, fit("code", loginLabelWidth), in, s.ends, s.e.now()))
 	lines = append(lines, s.lines(th, loginLabelWidth, w)...)
 	return strings.Join(lines, "\n")
 }
@@ -401,7 +433,7 @@ func (s *loginSecret) arm() {
 	k, typing := &s.keys, s.Typing()
 	k.Open.SetEnabled(!typing && s.url() != "" && s.e.o.OpenURL != nil)
 	k.Copy.SetEnabled(!typing && s.url() != "")
-	k.Page.SetEnabled(!typing)
+	k.Page.SetEnabled(!typing && !s.busy)
 	k.Focus.SetEnabled(!typing)
 	k.Submit.SetEnabled(typing)
 	k.Next.SetEnabled(typing && s.ask.Label)

@@ -460,21 +460,32 @@ func TestAPasteFillsTheFieldOnceAndShowsNoKey(t *testing.T) {
 			t.Errorf("pending is not said beside the field:\n%s", plain(m))
 		}
 
-		// A key pasted into the code field is sent as it is, and never drawn.
-		b.FinishLoginFn = func(context.Context, string, string) (LoginEnd, error) {
-			return LoginEnd{}, fmt.Errorf("the provider would not take %s as a code", backendHTTPKey)
-		}
-		_, seen := run(t, m, tea.PasteMsg{Content: "\n" + backendHTTPKey + "\r\n"})
-		if got := loginFinishes(b); len(got) != 2 || got[1][1] != backendHTTPKey {
-			t.Errorf("sent %q", got)
-		}
-		if p := plain(m); strings.Contains(p, "TESTONLY") || !strings.Contains(p, "[not repeated]") {
-			t.Errorf("the key is drawn, or its echo not redacted:\n%s", p)
-		}
-		for _, s := range loginToasts(seen) {
-			if strings.Contains(s, "TESTONLY") {
-				t.Errorf("a toast holds the key: %q", s)
+		// A key or a token pasted into the code field is no code: it stays in
+		// the field, drawn as stars, and is never sent to the provider's
+		// token endpoint, by the paste or by enter.
+		for _, v := range []string{backendHTTPKey, backendHTTPSetup, "sk-proj-TESTONLY-0000000000", "xai-TESTONLY-key-00000000"} {
+			_, seen := run(t, m, tea.PasteMsg{Content: "\n" + v + "\r\n"})
+			seen = append(seen, loginPress(t, m, "enter")...)
+			if got := loginFinishes(b); len(got) != 1 {
+				t.Errorf("%.12s… was sent as a code: %q", v, got)
 			}
+			if s.in.Value() != v {
+				t.Errorf("the field does not hold what was pasted")
+			}
+			p := plain(m)
+			if strings.Contains(p, "TESTONLY") || !strings.Contains(loginText(m), "that looks like a key or a token, not a code; nothing was sent") {
+				t.Errorf("the key is drawn, or not said to be no code:\n%s", p)
+			}
+			for _, s := range loginToasts(seen) {
+				if strings.Contains(s, "TESTONLY") {
+					t.Errorf("a toast holds the key: %q", s)
+				}
+			}
+		}
+		// A code is still sent from the same field.
+		run(t, m, tea.PasteMsg{Content: "CODE2"})
+		if got := loginFinishes(b); len(got) != 2 || got[1][1] != "CODE2" {
+			t.Errorf("sent %q", got)
 		}
 	})
 
@@ -565,7 +576,18 @@ func TestAPasteFillsTheFieldOnceAndShowsNoKey(t *testing.T) {
 		if n := len(b.named("PasteKey")); n != 0 || !s.label.Focused() {
 			t.Fatalf("a key with a label to type was sent at once (%d), label focused %v", n, s.label.Focused())
 		}
-		loginPress(t, m, "w", "o", "r", "k")
+		// A key pasted into the label by mistake is never drawn there.
+		run(t, m, tea.PasteMsg{Content: backendHTTPSetup})
+		if p := plain(m); s.label.Value() != backendHTTPSetup || strings.Contains(p, "TESTONLY") {
+			t.Errorf("a key in the label is drawn:\n%s", p)
+		}
+		// The label takes what is typed, and a paste into it replaces that
+		// and sends nothing.
+		loginPress(t, m, "h", "o")
+		run(t, m, tea.PasteMsg{Content: "  work\r\n"})
+		if n := len(b.named("PasteKey")); n != 0 || s.label.Value() != "work" || s.value.Value() != backendHTTPKey {
+			t.Fatalf("a paste into the label gave %q and sent %d", s.label.Value(), n)
+		}
 		seen := loginPress(t, m, "enter")
 		if c := b.named("PasteKey"); len(c) != 1 || c[0].Args[0] != backendHTTPKey || c[0].Args[1] != "work" {
 			t.Fatalf("pasted %v", c)
@@ -1128,11 +1150,17 @@ type loginFakeStep struct {
 	name string
 	got  []string
 	left atomic.Bool
+	// back, when set, is the step esc goes back to, as Task 17's page goes
+	// back to the step it was opened from.
+	back step
 }
 
 func (s *loginFakeStep) Update(msg tea.Msg) (step, tea.Cmd) {
 	if k, ok := msg.(tea.KeyPressMsg); ok {
 		s.got = append(s.got, k.String())
+		if s.back != nil && k.String() == "esc" {
+			return s.back, nil
+		}
 	}
 	return s, nil
 }
@@ -1250,28 +1278,38 @@ func TestAnAnswerForAFlowGoneGoesNowhere(t *testing.T) {
 		t.Fatalf("the new flow did not get its own login: %+v", second.Pending())
 	}
 
-	// The answer to a code a flow abandoned sent reaches no other step.
-	release := make(chan struct{})
-	b.FinishLoginFn = func(ctx context.Context, id, code string) (LoginEnd, error) {
-		if code != "OLD" {
-			return LoginEnd{Pending: true}, nil
+	// A login that runs out while the answer to its code is awaited waits
+	// for that answer, which may have finished it, and only then ends.
+	for _, finished := range []bool{true, false} {
+		m, b, ticks := loginModel(t, nil)
+		hold := make(chan struct{})
+		b.FinishLoginFn = func(ctx context.Context, id, code string) (LoginEnd, error) {
+			select {
+			case <-hold:
+			case <-ctx.Done():
+			}
+			if finished {
+				return LoginEnd{Account: 14, Provider: "claude", Status: "added"}, nil
+			}
+			return LoginEnd{}, errors.New("the provider gave up")
 		}
-		select {
-		case <-release:
-		case <-ctx.Done():
+		loginPress(t, m, "n", "enter", "enter")
+		f := loginFlowOf(t, m)
+		run(t, m, tea.PasteMsg{Content: "CODE"})
+		run(t, m, ticks.advance(15*time.Minute)...)
+		if loginOf(m) != f || strings.Contains(loginText(m), "has expired") {
+			t.Fatalf("the flow ended while its answer was awaited:\n%s", plain(m))
 		}
-		return LoginEnd{}, errors.New("an answer for a flow gone")
-	}
-	b.BeginLoginFn = func(context.Context, LoginBegin) (backendLogin, error) {
-		return backendLogin{ID: "abc123", Provider: "claude", URL: loginURL, Kind: "code", CreatedAt: loginNow.UnixMilli()}, nil
-	}
-	run(t, m, tea.PasteMsg{Content: "OLD"})
-	loginPress(t, m, "esc", "x", "n", "enter", "enter")
-	third := loginFlowOf(t, m)
-	close(release)
-	await(t, m)
-	if p := plain(m); strings.Contains(p, "an answer for a flow gone") || third.Closed() {
-		t.Errorf("the abandoned flow's answer reached the new step:\n%s", p)
+		close(hold)
+		_, seen := await(t, m)
+		if finished {
+			loginToasted(t, seen, "Added claude account 14")
+			continue
+		}
+		run(t, m, ticks.advance(time.Second)...)
+		if txt := loginText(m); !strings.Contains(txt, "the login abc123 has expired; n begins another") {
+			t.Errorf("the flow does not end once the answer came:\n%s", plain(m))
+		}
 	}
 
 	// Nor does a tick of a flow abandoned move the new one: one countdown
@@ -1287,5 +1325,300 @@ func TestAnAnswerForAFlowGoneGoesNowhere(t *testing.T) {
 	}
 	if n != 1 {
 		t.Errorf("%d countdowns run for one flow", n)
+	}
+}
+
+// loginOffers is the keys a flow offers, as the footer and the help draw
+// them.
+func loginOffers(f *loginFlow) []string {
+	var out []string
+	for _, b := range f.Keys() {
+		out = append(out, b.Help().Key)
+	}
+	return out
+}
+
+// loginRecorded makes the Accounts tab's n and l open flows whose page is a
+// fake, recording what each page was asked for.
+func loginRecorded(m *Model, asked *[]pageAsk, pages *[]*loginFakeStep) {
+	accountsOf(m).do.login = func(e *env, again *wire.Account) asider {
+		f := newLogin(e, again).(*loginFlow)
+		f.steps.page = func(e *env, p pageAsk) step {
+			*asked = append(*asked, p)
+			page := &loginFakeStep{name: "the one-time page"}
+			*pages = append(*pages, page)
+			return page
+		}
+		return f
+	}
+}
+
+func TestAnAnswerAwaitedIsNeverLost(t *testing.T) {
+	t.Run("a code", func(t *testing.T) {
+		m, b, _ := loginModel(t, nil)
+		var asked []pageAsk
+		var pages []*loginFakeStep
+		loginRecorded(m, &asked, &pages)
+		hold := make(chan struct{})
+		b.FinishLoginFn = func(ctx context.Context, id, code string) (LoginEnd, error) {
+			select {
+			case <-hold:
+			case <-ctx.Done():
+			}
+			return LoginEnd{Account: 14, Provider: "claude", Status: "added"}, nil
+		}
+		loginPress(t, m, "n", "enter", "enter")
+		f := loginFlowOf(t, m)
+		code := f.step
+		run(t, m, tea.PasteMsg{Content: "CODE"})
+		loginPress(t, m, "esc")
+		// While the answer is awaited neither x nor w is offered, nor taken.
+		if got := loginOffers(f); slices.Contains(got, "x") || slices.Contains(got, "w") || !slices.Contains(got, "esc") {
+			t.Errorf("offered %q while an answer is awaited", got)
+		}
+		seen := loginPress(t, m, "x", "w")
+		if loginOf(m) != f || f.step != code || len(asked) != 0 {
+			t.Fatalf("x or w left the step whose answer is awaited (pages %d)", len(asked))
+		}
+		for _, s := range loginToasts(seen) {
+			if strings.Contains(s, "stays parked") {
+				t.Errorf("a login being finished is said to stay parked: %q", s)
+			}
+		}
+		close(hold)
+		_, seen = await(t, m)
+		loginToasted(t, seen, "Added claude account 14")
+		loginSaw(t, seen, selectMsg{Account: 14})
+		if loginOf(m) != nil {
+			t.Error("the flow is still open after its answer")
+		}
+	})
+
+	t.Run("a key", func(t *testing.T) {
+		m, b, _ := loginModel(t, loginRows())
+		var asked []pageAsk
+		var pages []*loginFakeStep
+		loginRecorded(m, &asked, &pages)
+		hold := make(chan struct{})
+		b.PasteKeyFn = func(ctx context.Context, k, label string) (LoginEnd, error) {
+			select {
+			case <-hold:
+			case <-ctx.Done():
+			}
+			return LoginEnd{Account: 9, Provider: "claude", Status: "updated"}, nil
+		}
+		loginSelect(t, m, 9)
+		loginPress(t, m, "l")
+		f := loginFlowOf(t, m)
+		run(t, m, tea.PasteMsg{Content: backendHTTPKey})
+		loginPress(t, m, "esc")
+		if got := loginOffers(f); slices.Contains(got, "esc") || slices.Contains(got, "w") {
+			t.Errorf("offered %q while an answer is awaited", got)
+		}
+		loginPress(t, m, "esc", "w", "x")
+		if loginOf(m) != f || len(asked) != 0 {
+			t.Fatal("esc, w or x left the step whose answer is awaited")
+		}
+		close(hold)
+		_, seen := await(t, m)
+		loginToasted(t, seen, "Updated claude account 9")
+		if loginOf(m) != nil {
+			t.Error("the flow is still open after its answer")
+		}
+	})
+
+	t.Run("aside", func(t *testing.T) {
+		// Put aside meanwhile, the flow still hears its answer.
+		m, b, _ := loginModel(t, nil)
+		hold := make(chan struct{})
+		b.FinishLoginFn = func(ctx context.Context, id, code string) (LoginEnd, error) {
+			select {
+			case <-hold:
+			case <-ctx.Done():
+			}
+			return LoginEnd{Account: 14, Provider: "claude", Status: "added"}, nil
+		}
+		loginPress(t, m, "n", "enter", "enter")
+		run(t, m, tea.PasteMsg{Content: "CODE"})
+		loginPress(t, m, "esc", "esc")
+		if m.aside == nil {
+			t.Fatal("esc did not put the flow aside")
+		}
+		close(hold)
+		_, seen := await(t, m)
+		loginToasted(t, seen, "Added claude account 14")
+		if m.aside != nil || loginOf(m) != nil {
+			t.Error("the flow is still kept after its answer")
+		}
+	})
+}
+
+func TestASignInByItselfIsNotCancelledUnsaid(t *testing.T) {
+	m, b, _ := loginModel(t, loginRows())
+	var made []int
+	accountsOf(m).do.login = func(e *env, again *wire.Account) asider {
+		f := newLogin(e, again).(*loginFlow)
+		f.steps.delegated = func(e *env, account int) step { made = append(made, account); return overlayNotYet() }
+		return f
+	}
+	b.BeginLoginFn = func(context.Context, LoginBegin) (backendLogin, error) {
+		return backendLogin{ID: "def456", Provider: "grok", URL: "https://console.x.example/keys", Kind: "apikey",
+			Delegated: true, CreatedAt: loginNow.UnixMilli()}, nil
+	}
+	hold := make(chan struct{})
+	b.FinishLoginFn = func(ctx context.Context, id, code string) (LoginEnd, error) {
+		select {
+		case <-hold:
+		case <-ctx.Done():
+		}
+		return LoginEnd{Account: 16, Provider: "grok", Status: "added", Delegated: true}, nil
+	}
+	loginPress(t, m, "n")
+	for range slices.Index(wire.LoginProviders(), "grok") - slices.Index(wire.LoginProviders(), "claude") {
+		loginPress(t, m, "down")
+	}
+	loginPress(t, m, "enter", "down", "enter")
+	f := loginFlowOf(t, m)
+	// The server registers the account whatever the TUI does now: esc is
+	// not offered, and does not hide what happens.
+	if got := loginOffers(f); slices.Contains(got, "esc") {
+		t.Errorf("esc is offered while the server signs the account in: %q", got)
+	}
+	loginPress(t, m, "esc")
+	if loginOf(m) != f {
+		t.Fatal("esc closed a flow whose account the server is registering")
+	}
+	close(hold)
+	_, seen := await(t, m)
+	loginToasted(t, seen, "Added grok account 16")
+	if !slices.Equal(made, []int{16}) {
+		t.Errorf("the delegated step was made for %v", made)
+	}
+}
+
+func TestAnAccountKnownByNothingStraysNoLogin(t *testing.T) {
+	const no = "rota knows account 8 by no uuid or e-mail, so no approval could be matched to it"
+	rows := append(loginRows(), wire.Account{ID: 8, Provider: "codex", Order: 6, Threshold: 75})
+	m, b, _ := loginModel(t, rows)
+	b.BeginLoginFn = func(context.Context, LoginBegin) (backendLogin, error) {
+		return backendLogin{}, &client.Refusal{Status: 400, Message: no}
+	}
+	loginSelect(t, m, 8)
+	loginPress(t, m, "l", "enter")
+	if got := loginBegins(b); !slices.Equal(got, []LoginBegin{{Account: 8}}) {
+		t.Errorf("begun %+v: a login of the provider's own was left parked", got)
+	}
+	if txt := loginText(m); !strings.Contains(txt, no+"; n begins another") {
+		t.Errorf("the refusal does not end the flow:\n%s", plain(m))
+	}
+
+	// Nor does a claude account, or a login begun for nobody, fall back.
+	m, b, _ = loginModel(t, loginRows())
+	b.BeginLoginFn = func(context.Context, LoginBegin) (backendLogin, error) {
+		return backendLogin{}, &client.Refusal{Status: 400, Message: "no"}
+	}
+	loginSelect(t, m, 12)
+	loginPress(t, m, "l", "enter", "esc", "n")
+	for range slices.Index(wire.LoginProviders(), "codex") - slices.Index(wire.LoginProviders(), "claude") {
+		loginPress(t, m, "down")
+	}
+	loginPress(t, m, "enter")
+	if got := loginBegins(b); !slices.Equal(got, []LoginBegin{{Account: 12}, {Provider: "codex"}}) {
+		t.Errorf("begun %+v", got)
+	}
+}
+
+func TestAStepIsLeftAndReplacedAsItSays(t *testing.T) {
+	m, b, ticks := loginModel(t, loginRows())
+	var asked []pageAsk
+	var pages []*loginFakeStep
+	loginRecorded(m, &asked, &pages)
+	// A step that goes back gives the flow the step it came from, as it was.
+	loginPress(t, m, "n", "enter", "enter", "enter", "A", "B", "esc")
+	f := loginFlowOf(t, m)
+	code := loginCodeOf(t, f)
+	loginPress(t, m, "w")
+	pages[0].back = code
+	loginPress(t, m, "esc")
+	if f.step != step(code) || code.in.Value() != "AB" {
+		t.Fatalf("the step the page went back to is not shown: %T", f.step)
+	}
+	// The flow's end leaves what its step holds open.
+	loginPress(t, m, "w")
+	run(t, m, ticks.advance(15*time.Minute)...)
+	if !pages[1].left.Load() || !strings.Contains(loginText(m), "has expired") {
+		t.Error("the page is left open when the login runs out")
+	}
+
+	// What ends the flow is scrubbed of what was sent.
+	b.FinishLoginFn = func(_ context.Context, id, code string) (LoginEnd, error) {
+		return LoginEnd{}, &client.Refusal{Status: 400, Reason: "unfinishable", Message: "the code " + code + " was approved by another id"}
+	}
+	loginPress(t, m, "esc", "n", "enter", "enter")
+	run(t, m, tea.PasteMsg{Content: "CODE-ABCDEFGH"})
+	if txt := loginText(m); strings.Contains(txt, "ABCDEFGH") || !strings.Contains(txt, "the code [not repeated] was approved by another id; n begins another") {
+		t.Errorf("the end repeats what was sent:\n%s", plain(m))
+	}
+
+	// x where no login is parked is no key of the flow's.
+	loginPress(t, m, "esc")
+	loginSelect(t, m, 9)
+	loginPress(t, m, "l")
+	g := loginFlowOf(t, m)
+	if got := loginOffers(g); slices.Contains(got, "x") {
+		t.Errorf("x is offered with no login parked: %q", got)
+	}
+	loginPress(t, m, "x")
+	if loginOf(m) != g || g.Closed() {
+		t.Error("x closed a flow with no login parked")
+	}
+}
+
+func TestAPasteIsTakenWhole(t *testing.T) {
+	m, b, _ := loginModel(t, nil)
+	b.FinishLoginFn = func(context.Context, string, string) (LoginEnd, error) {
+		return LoginEnd{}, &client.Refusal{Status: 400, Message: loginWrong}
+	}
+	loginPress(t, m, "n", "enter", "enter")
+	s := loginCodeOf(t, loginFlowOf(t, m))
+	// Line breaks inside go too, not only around it.
+	run(t, m, tea.PasteMsg{Content: "  CO\r\nDE\n"})
+	if got := loginFinishes(b); len(got) != 1 || got[0][1] != "CODE" {
+		t.Errorf("sent %q", got)
+	}
+	// What was pasted replaces the field, and typing goes on after it.
+	loginPress(t, m, "home")
+	run(t, m, tea.PasteMsg{Content: "XYZ"})
+	loginPress(t, m, "9")
+	if v := s.in.Value(); v != "XYZ9" {
+		t.Errorf("typing after a paste gives %q", v)
+	}
+}
+
+func TestTheCountdownKeepsItsPhase(t *testing.T) {
+	m, b, ticks := loginModel(t, nil)
+	b.BeginLoginFn = func(context.Context, LoginBegin) (backendLogin, error) {
+		return backendLogin{ID: "abc123", Provider: "claude", URL: loginURL, Kind: "code",
+			CreatedAt: loginNow.Add(-30500 * time.Millisecond).UnixMilli()}, nil
+	}
+	loginPress(t, m, "n", "enter", "enter")
+	if txt := loginText(m); !strings.Contains(txt, "code 15m left") {
+		t.Fatalf("14m29.5s left reads otherwise:\n%s", plain(m))
+	}
+	tick := func(msgs []tea.Msg) bool {
+		return slices.ContainsFunc(msgs, func(msg tea.Msg) bool { _, ok := msg.(loginTickMsg); return ok })
+	}
+	if due := ticks.advance(29 * time.Second); tick(due) {
+		t.Errorf("the countdown woke before it read otherwise")
+	} else {
+		run(t, m, due...)
+	}
+	due := ticks.advance(500 * time.Millisecond)
+	if !tick(due) {
+		t.Fatalf("the countdown did not wake when it reads otherwise")
+	}
+	run(t, m, due...)
+	if txt := loginText(m); !strings.Contains(txt, "code 14m left") {
+		t.Errorf("the countdown reads:\n%s", plain(m))
 	}
 }
