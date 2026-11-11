@@ -1,0 +1,54 @@
+ Add a claude account
+
+ What kind of login?
+
+ > short
+     A login rota refreshes; usage readings and Remote Control need it.
+   long
+     A year, inference only: no usage readings or Remote Control. Two
+     approvals: the login that makes the account, then the year-long token.
+   API key
+     A Claude Console key, paid per token: no usage readings or Remote Control;
+     it starts out of the rotation.
+----
+ Sign claude account 12 (a@x) in again
+
+ What kind of login?
+
+ > short
+     A login rota refreshes, which only this account's approval finishes; usage
+     readings and Remote Control need it.
+   long
+     A year, inference only: no usage readings or Remote Control. The token
+     goes on whichever account approves it.
+   setup token
+     A token `claude setup-token` printed, pasted: a year, inference only, on
+     this account.
+----
+ Sign claude account 12 (a@x) in again
+
+ Open this and approve access as a@x, which is claude account 12; no other
+ account's approval will finish it:
+
+   https://claude.example/oauth/authorize?code=true&client_id=c&state=s
+
+   ⏎ send  esc leave the field
+
+ code   WRONG                                                          15m left
+        authorization code was rejected (expired, already used, or mismatched):
+        Invalid authorization code; try the code again, or approve again at the
+        same link
+----
+ Sign claude account 12 (a@x) in again
+
+ Open this and approve access as a@x, which is claude account 12; no other
+ account's approval will finish it:
+
+   https://claude.example/oauth/authorize?code=true&client_id=c&state=s
+
+   c copy  w one-time page  ⏎ type it
+
+ code   WRONG                                                          15m left
+        authorization code was rejected (expired, already used, or mismatched):
+        Invalid authorization code; try the code again, or approve again at the
+        same link
