@@ -194,14 +194,20 @@ func (s *loginWaitDevice) ask() tea.Cmd {
 	}, func(err error) tea.Msg { return loginWaitAnswer{s: s, Err: err} }, &s.parked)
 }
 
-// answer takes what the server said, as the CLI's wait does. A 404 is a
-// login no longer parked: one another rota finished, one an answer lost on
-// the way finished here, or one that ran out; the listing is read again to
-// show which. A 400 is the provider's verdict on the device code (denied,
-// expired, spent), or a login no approval can finish: asking again cannot
-// help, so the step ends in the server's words. Any other failure (a busy
-// store, a provider or a daemon that did not answer) is said, and the wait
-// goes on, on the same login.
+// answer takes what the server said. A 404 is a login no longer parked: one
+// another rota finished, one an answer lost on the way finished here, or one
+// that ran out; the listing is read again to show which. A 400 ends the step
+// in the server's words. That is wider than the CLI's wait, which ends only
+// on the provider's verdict on the device code (denied, expired, spent) and
+// on a login no approval can finish: over HTTP a 400 carries no reason that
+// tells those from the store's other refusals of an approval, which the CLI
+// says and then asks again about. Those are an approval as an account the
+// login is not for, one naming no account, and an exchange that returned no
+// access token (store/login.go, lib/core.go). Ending on them costs nothing
+// today: no provider in lib signs in by device, and a device code is spent
+// once a token is issued for it. Any other failure (a busy store, a provider
+// or a daemon that did not answer) is said, and the wait goes on, on the same
+// login.
 func (s *loginWaitDevice) answer(a loginWaitAnswer) tea.Cmd {
 	if s.life.Err() != nil {
 		return nil
