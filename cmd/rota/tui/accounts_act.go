@@ -28,9 +28,11 @@ const accountsActBad = "a threshold is a whole percentage from 1 to 100"
 // in Update alone, and its zero value is ready.
 type accountsActState struct {
 	ids map[int]*accountsActFlight
-	// moving says a move is out, and moves are the ones pressed since, in
-	// order: each is sent once the one before it is answered.
+	// moving says a move is out, sent is that move, and moves are the ones
+	// pressed since, in order: each is sent once the one before it is
+	// answered.
 	moving bool
+	sent   accountsActPlace
 	moves  []accountsActPlace
 }
 
@@ -101,7 +103,7 @@ func (a *accountsTab) move(acct wire.Account, place string) tea.Cmd {
 		a.act.moves = append(a.act.moves, accountsActPlace{acct, place})
 		return nil
 	}
-	a.act.moving = true
+	a.act.moving, a.act.sent = true, accountsActPlace{acct, place}
 	return accountsActMoveTo(a.e, acct, place)
 }
 
@@ -122,9 +124,8 @@ func (s *accountsActState) moved(e *env, m accountsActAnswer) tea.Cmd {
 		return accountsActRefused(m.who+" could not "+accountsActMove(m.place), m.err)
 	}
 	if len(s.moves) > 0 {
-		next := s.moves[0]
-		s.moves = s.moves[1:]
-		return accountsActMoveTo(e, next.acct, next.place)
+		s.sent, s.moves = s.moves[0], s.moves[1:]
+		return accountsActMoveTo(e, s.sent.acct, s.sent.place)
 	}
 	s.moving = false
 	return accountsActRefresh
@@ -157,12 +158,32 @@ func (a *accountsTab) nudge(acct wire.Account, delta int) tea.Cmd {
 }
 
 // toggleOut takes acct out of the rotation, or puts it back last when it
-// is out.
+// is out: out as its last move waiting or out leaves it, since the table
+// shows it as it was until the listing is read again, else as the table
+// shows it.
 func (a *accountsTab) toggleOut(acct wire.Account) tea.Cmd {
-	if acct.Order < 1 {
+	out := acct.Order < 1
+	if place, ok := a.act.lastMove(acct.ID); ok {
+		out = place == "out"
+	}
+	if out {
 		return a.move(acct, "last")
 	}
 	return a.move(acct, "out")
+}
+
+// lastMove is the place of account id's last move waiting, or else of the
+// move out, when either is the account's.
+func (s *accountsActState) lastMove(id int) (string, bool) {
+	for i := len(s.moves) - 1; i >= 0; i-- {
+		if s.moves[i].acct.ID == id {
+			return s.moves[i].place, true
+		}
+	}
+	if s.moving && s.sent.acct.ID == id {
+		return s.sent.place, true
+	}
+	return "", false
 }
 
 // accountsActThreshold sets acct's threshold to to, or keeps it when to is

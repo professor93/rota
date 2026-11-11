@@ -282,6 +282,29 @@ func TestAccountsActMovesGoOneAtATime(t *testing.T) {
 	}
 }
 
+// x pressed again while the first x is out reads the moves pressed, not the
+// table, which shows the account in until the listing is read again: x x
+// takes it out and puts it back last. Another account's moves between
+// change nothing of it.
+func TestAccountsActXXPutsItBack(t *testing.T) {
+	m, b, f := accountsActModel(t, accountsThree())
+	accountsActStart(t, m)
+	release := f.holdNext()
+	run(t, m, press("x", "x", "down", "x", "up", "x")...)
+	if got := accountsActChanges(b); !slices.Equal(got, []string{"1 order out"}) {
+		t.Fatalf("with the first move out, the presses sent %q", got)
+	}
+	close(release)
+	await(t, m)
+	for len(harnessDriverOf(t).leftover()) > 0 {
+		await(t, m)
+	}
+	run(t, m)
+	if got := accountsActChanges(b); !slices.Equal(got, []string{"1 order out", "1 order last", "2 order out", "1 order out"}) {
+		t.Errorf("x x down x up x sent %q", got)
+	}
+}
+
 func TestNudgesCoalesce(t *testing.T) {
 	m, b, f := accountsActModel(t, accountsThree())
 	accountsActStart(t, m)
