@@ -115,6 +115,8 @@ type loginWaitDevice struct {
 	// started says the first question has gone. From then on exactly one
 	// of the timer and a question is out at a time, until the step ends.
 	started bool
+	// out says a question is out: asked, and its answer not heard yet.
+	out bool
 	// said is the last failure, cleaned, until an answer replaces it.
 	said string
 	// parked counts questions answered for and still running (env.callOr):
@@ -150,6 +152,7 @@ func (s *loginWaitDevice) Update(msg tea.Msg) (step, tea.Cmd) {
 		}
 	case loginWaitAnswer:
 		if msg.s == s {
+			s.out = false
 			cmd = s.answer(msg)
 		}
 	case tea.KeyPressMsg:
@@ -182,6 +185,7 @@ func (s *loginWaitDevice) ask() tea.Cmd {
 	if s.l.ID == "" {
 		return s.end(stepDone{Err: errors.New("there is no login to wait for")})
 	}
+	s.out = true
 	b, id, life := s.e.b, s.l.ID, s.life
 	return s.e.callOr(envFinishTimeout, func(ctx context.Context) tea.Msg {
 		// Under the program's life and the deadline, as every call, and
@@ -272,6 +276,11 @@ func (s *loginWaitDevice) Keys() []key.Binding {
 }
 
 func (*loginWaitDevice) Typing() bool { return false }
+
+// sending says a question is out. Until its answer comes the flow holds x
+// and close, as for a code awaiting its answer: the approval it asks about
+// may have finished the login.
+func (s *loginWaitDevice) sending() bool { return s.out }
 
 // newDelegatedStep signs account in through its own CLI, by `rota login N`:
 // locally enter hands it the terminal, and a clean exit finishes the step;

@@ -1723,3 +1723,46 @@ func TestTheCountdownKeepsItsPhase(t *testing.T) {
 		t.Errorf("the countdown reads:\n%s", plain(m))
 	}
 }
+
+// While a device login's question is out, x is held, as for a code whose
+// answer is awaited: the approval it asks about may have finished the
+// login. Once the answer is in, x abandons it.
+func TestADeviceQuestionOutHoldsX(t *testing.T) {
+	m, b, _ := loginModel(t, loginRows())
+	b.BeginLoginFn = func(context.Context, LoginBegin) (backendLogin, error) {
+		return backendLogin{ID: "dev123", Provider: "claude", URL: loginURL, Kind: "device", CreatedAt: loginNow.UnixMilli()}, nil
+	}
+	hold := make(chan struct{})
+	b.FinishLoginFn = func(ctx context.Context, id, code string) (LoginEnd, error) {
+		select {
+		case <-hold:
+		case <-ctx.Done():
+		}
+		return LoginEnd{Pending: true}, nil
+	}
+	loginPress(t, m, "n", "enter", "enter")
+	f := loginFlowOf(t, m)
+	s, ok := f.step.(*loginWaitDevice)
+	if !ok || !s.sending() {
+		t.Fatalf("the flow shows %T with no question out", f.step)
+	}
+	if got := loginOffers(f); slices.Contains(got, "x") {
+		t.Errorf("x is offered while the question is out: %q", got)
+	}
+	loginPress(t, m, "x")
+	if loginOf(m) != f || f.Closed() {
+		t.Fatal("x left a device login whose question is out")
+	}
+	close(hold)
+	await(t, m)
+	if s.sending() {
+		t.Fatal("the answer came, and the question is still out")
+	}
+	if got := loginOffers(f); !slices.Contains(got, "x") {
+		t.Errorf("x is not offered once the answer is in: %q", got)
+	}
+	loginPress(t, m, "x")
+	if loginOf(m) != nil {
+		t.Error("x did not abandon the login once the answer was in")
+	}
+}
