@@ -1386,6 +1386,16 @@ func (s shellStarting) Init() tea.Cmd {
 	return func() tea.Msg { return shellPing("started") }
 }
 
+// shellStartingAbout is shellStarting that says what it is about, so the
+// shell drops a second one asked for over it.
+type shellStartingAbout struct{ shellStarting }
+
+func (s shellStartingAbout) Update(msg tea.Msg) (overlay, tea.Cmd) {
+	s.shellOverlay.Update(msg)
+	return s, nil
+}
+func (shellStartingAbout) About() (string, int) { return "starting", 1 }
+
 // shellStartingAsider is shellStarting as the login flow is: it can be put
 // aside.
 type shellStartingAsider struct {
@@ -1434,6 +1444,14 @@ func TestAnOverlayIsStartedOnceAsItOpens(t *testing.T) {
 	if m.open(shellStarting{&shellOverlay{closed: true}, &none}) != nil || none != 0 {
 		t.Errorf("a closed overlay was started (%d)", none)
 	}
+	// The same overlay asked for twice opens once, and the one dropped is
+	// not started.
+	d := 0
+	run(t, m, openMsg{O: shellStartingAbout{shellStarting{&shellOverlay{}, &d}}})
+	if m.open(shellStartingAbout{shellStarting{&shellOverlay{}, &d}}) != nil || d != 1 || len(m.stack) != 1 {
+		t.Errorf("a duplicate was started (%d in all) or opened (stack %d)", d, len(m.stack))
+	}
+	run(t, m, press("esc")...)
 
 	// A flow put aside comes back in place of the one asked for, which is
 	// not started; nor is the one that came back started again.

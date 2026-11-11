@@ -303,6 +303,42 @@ func TestAccountsActXXPutsItBack(t *testing.T) {
 	if got := accountsActChanges(b); !slices.Equal(got, []string{"1 order out", "1 order last", "2 order out", "1 order out"}) {
 		t.Errorf("x x down x up x sent %q", got)
 	}
+
+	// The account's last move waiting is read, not its first.
+	m, b, f = accountsActModel(t, accountsThree())
+	accountsActStart(t, m)
+	release = f.holdNext()
+	run(t, m, press("x", "x", "x", "x")...)
+	close(release)
+	await(t, m)
+	for len(harnessDriverOf(t).leftover()) > 0 {
+		await(t, m)
+	}
+	run(t, m)
+	if got := accountsActChanges(b); !slices.Equal(got, []string{"1 order out", "1 order last", "1 order out", "1 order last"}) {
+		t.Errorf("x x x x sent %q", got)
+	}
+
+	// With the first answered and the second out, the second is read.
+	m, b, f = accountsActModel(t, accountsThree())
+	accountsActStart(t, m)
+	first := f.holdNext()
+	run(t, m, press("x", "x")...)
+	f.taken(t)
+	second := f.holdNext()
+	close(first)
+	await(t, m)
+	f.taken(t)
+	run(t, m, press("x")...)
+	close(second)
+	await(t, m)
+	for len(harnessDriverOf(t).leftover()) > 0 {
+		await(t, m)
+	}
+	run(t, m)
+	if got := accountsActChanges(b); !slices.Equal(got, []string{"1 order out", "1 order last", "1 order out"}) {
+		t.Errorf("x x, then x while the second is out, sent %q", got)
+	}
 }
 
 func TestNudgesCoalesce(t *testing.T) {
