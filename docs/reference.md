@@ -352,9 +352,9 @@ Held sessions run on Linux and macOS:
 
 | | |
 |---|---|
-| `rota serve start` | start this store's daemon in the background and say its pid and control socket, and its port if it opens one; a daemon already running is named and left alone, and the command exits `0` either way — see *[The daemon](#the-daemon)* |
+| `rota serve start` | start this store's daemon in the background and say its pid and control socket, and its port and SSH server if it opens them; a daemon already running is named and left alone, and the command exits `0` either way — see *[The daemon](#the-daemon)* |
 | `--foreground` | be the daemon in this process instead, as a supervisor runs it: it logs to its file and says nothing on stderr |
-| `--ctl-only` | serve the control socket alone, whatever `server.toml` says about a port |
+| `--ctl-only` | serve the control socket alone: no port, no SSH, whatever `server.toml` says. A daemon started by itself, as `rota run --detach` starts one, is always `--ctl-only`; `serve stop`, then `serve start`, to have the file's port and SSH |
 | `--config <path>` | the file to read the rest of this from (default `<store dir>/server.toml`) |
 | `rota serve stop` | stop the daemon; every session it holds goes on running, for the next daemon to take up. Refused, with or without `--all`, inside a held session |
 | `--all` | end every session as well, after asking `stop the rota daemon and end N sessions? [y/N]`; with no daemon running, end the sessions its holders still hold |
@@ -839,8 +839,14 @@ daemon already running is `rota daemon already running for <store> (pid N)`
 and exit `0`, whether it was found before anything started or won the store
 from this start's own daemon, which then stops, saying in the log that
 *another rota daemon serves* the store: two starts at once make one daemon,
-and both exit `0`. Once started, a daemon takes up every session still
-running on its store, as one restarted would.
+and both exit `0`. When the file this start reads says `[ssh] enabled` and
+the daemon running, answering on its control socket, serves no SSH, a
+second line says why: *it does not run the SSH server [ssh] turns on: a
+daemon started with --ctl-only, as rota run --detach starts one, never
+does; rota serve stop, then rota serve start, runs it*. A start that is
+itself `--ctl-only`, or a file without `[ssh] enabled`, never adds it.
+Once started, a daemon takes up every session still running on its store,
+as one restarted would.
 
 A daemon serves the store it is started for, which is the one `serve stop`
 and `serve status` look at, so a `server.toml` whose `[store] dir` names
