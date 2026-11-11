@@ -910,10 +910,9 @@ sessions: 2 running, 1 stopped
 ```
 
 with `http on <address>` before the last line when it opens a port, and
-`ssh on <address>, host key <fingerprint>` before the last line when it
-serves SSH, the fingerprint the one a client is shown (*[Over
-SSH](#over-ssh)*); the time is in this machine's zone. With no daemon it
-says `no rota daemon is
+after it `ssh on <address>, host key <fingerprint>` when it serves SSH, the
+fingerprint the one a client is shown (*[Over SSH](#over-ssh)*); the time
+is in this machine's zone. With no daemon it says `no rota daemon is
 running for <store>`, and the sessions line after it only when the store
 has a record of a running or a stopped one. With `--json`:
 
@@ -2036,7 +2035,8 @@ server runs itself does not have:
 - **The keyboard follows the person.** One person attached from several
   devices types on whichever of them without asking: typing (or `claim`) on
   a connection whose person holds the keyboard elsewhere moves it there, and
-  everyone is told. A person is a user signed in on the page, by name; the
+  everyone is told. A person is a user signed in on the page or over SSH,
+  by name; the
   control socket's principal, `local`, is the one `[[users]]` entry that may
   control when there is exactly one, the entry `[auth] local_user` names
   when there are more, and a person of its own when neither says. A bearer
@@ -2652,9 +2652,10 @@ It needs three things, and says which is missing:
 - **A live session.** It is found as `rota send` finds one (*Sending into a
   held session*, under *[The daemon](#the-daemon)*): its id, the start of
   one four characters or longer, or the label, the name or the folder of a
-  running one. One that is not found is said as `send` says it, and one that
-  has stopped is *session api has ended; rota list --sessions shows it*,
-  exit `1` both.
+  running one. One that is not found is *no session is "api": it is not an
+  id, the start of one, or the name of a live session*, and one that has
+  stopped, which only its id or the start of one finds, is *session api has
+  ended; rota list --sessions shows it*, exit `1` both.
 
 `--attach` takes the session and nothing else: no account (*--attach takes a
 session, not an account: rota run --attach <session>*), no prompt or CLI
@@ -2698,9 +2699,11 @@ screen once the chord ends, or three seconds after a key it does not know.
 the window says how to leave, beginning *rota: to leave, press Ctrl-\ then
 d; the session goes on*, and names the keys. It stays five seconds or until
 a key, and that key does what it would have done anyway. Who has been shown
-it is remembered in the store's `terminals/taught`, one name per line, so
-it is shown once per person's name, whether they attach here or over SSH; a
-person who reaches the daemon under two names is shown it twice.
+it is remembered in the store's `terminals/taught`, one name per line, by
+the name the attach is made as: `local` for `rota run --attach` at this
+machine, and the user's own name over SSH. So it is shown once for each of
+those names, and an owner who attaches both here and over SSH sees it once
+in each.
 
 **Its size.** Attaching never resizes a session: it is watched from several
 windows at once, and the last one to attach is not the one whose size it
@@ -2714,13 +2717,15 @@ window while attached changes nothing in the session either.
   which would garble it. The attach keeps its own copy of the session's
   screen, and draws from it, on the window's alternate screen, the part
   that fits: the bottom rows, since Claude Code draws its prompt at the
-  bottom, moved sideways only to keep the cursor in view. The window's last
+  bottom, moved up only as far as keeps the cursor's row in view, and
+  sideways only as far as keeps its column in view. The window's last
   row is a note, *rota: Ctrl-\ z fits; api is 100x30, this window 40x12*.
   Mouse reporting is off while the window is cropped, because its
   positions would point at the wrong cells; the other modes the session set
   stay on. A window made large enough leaves the crop and is drawn the
   session's screen again. A program that draws at the top of the screen
-  shows its bottom half first, and `z` fixes that.
+  with its cursor at the bottom shows its bottom half first, and `z` fixes
+  that.
 - **A session too large to keep a screen of** (*Falling behind*, in *[A
   terminal on the server](#a-terminal-on-the-server)*) is shown to a smaller
   window as the note alone, on a cleared window.
@@ -2728,9 +2733,11 @@ window while attached changes nothing in the session either.
 **The keyboard and the notes.** The keyboard rules are the page's: you are
 a person, as `local` on the control socket is, so typing here takes the
 keyboard from another of your own devices and not from somebody else.
-`Ctrl-\ k` asks whoever holds it; asked again ten seconds or more later, it
-takes it (*rota: asked alice for the keyboard; Ctrl-\ k again after 10s
-takes it*). Somebody asking you is said as *rota: bob asks for the keyboard;
+The first `Ctrl-\ k` asks whoever holds the keyboard, and says nothing; a
+second within ten seconds says *rota: asked alice for the keyboard; Ctrl-\ k
+again after 10s takes it*, and one ten seconds or more after the first takes
+it. A `k` at the window that holds it already says *rota: this window holds
+the keyboard*. Somebody asking you is said as *rota: bob asks for the keyboard;
 they may take it in 10s*, and the attach neither grants nor denies: the
 page does. What the daemon refuses is said in the last row the same way,
 *rota: * and its sentence, once in three seconds however often it is said.
@@ -2842,17 +2849,19 @@ before the key, such as from=, are not read; give the key alone`.
 is not checked: it is logged beside the user, as `git@github.com` would be.
 A sign-in is the person the key belongs to, `{"name":"me","role":"control",
 "via":"user"}`, the same person as their sign-in on the page, so the
-keyboard follows one person across the page, SSH and, when that person is
-`local` (*[The control socket](#the-control-socket)*), this machine's own
-terminal (*[Roles, and the keyboard](#roles-and-the-keyboard)*). It reaches
+keyboard follows one person across the page and SSH, and this machine's own
+terminal when `local` is that person: `[auth] local_user`, or the only
+control user (*[The control socket](#the-control-socket)*, *[Roles, and the
+keyboard](#roles-and-the-keyboard)*). It reaches
 the API in the daemon's own process, with no socket and no port between,
 and the role table decides what it may do, as for anyone.
 
 **What a connection may ask.** Only `session` channels, up to eight on one
 connection. Port forwarding either way, agent forwarding, X11, subsystems
 such as `sftp`, signals and every `env` but `TERM` are refused. `TERM`, from
-the pty request or `env`, is kept only when it matches
-`^[A-Za-z0-9._+-]{1,64}$`, and is otherwise unset. A session runs one
+the pty request or `env`, is taken only when it matches
+`^[A-Za-z0-9._+-]{1,64}$`: one that does not is not taken, and a pty
+request carrying it leaves `TERM` unset. A session runs one
 command from a fixed list, split on spaces and tabs with single and double
 quotes and nothing else — no escapes, globs or variables — and no shell
 ever reads the line:
@@ -2873,8 +2882,10 @@ either, *rota over ssh takes a command line of at most 4096 bytes*, exit
 
 - **`list`** prints one line per session, its values two spaces apart and
   each made one line: the id; its status (`running`, `needs_you`, `quiet`),
-  or once stopped its state; its name; its provider and account; and its
-  folder. A value nobody gave is `-`. With none it prints `no sessions`.
+  or once stopped its state; its name, or for a terminal with none its
+  label, folder or id; its provider and account, `shell` for a login shell;
+  and its folder. An account or a folder nobody gave is `-`. With none it
+  prints `no sessions`.
   `list --json` prints `{"terminals":[…]}`, each session's own document as
   `GET /v1/terminals` lists it, with every control character escaped.
 
@@ -2884,7 +2895,8 @@ either, *rota over ssh takes a command line of at most 4096 bytes*, exit
 
 - **`attach <session>`** puts the terminal at the other end on the session
   as `rota run --attach` does, chord, crop, notes, card and all (*[Attaching
-  from a terminal](#attaching-from-a-terminal)*). The session is found by
+  from a terminal](#attaching-from-a-terminal)*); `n` and `p` move among a
+  daemon's held sessions. The session is found by
   its id or the start of one, or the label, the name or the folder of a live
   one; a terminal shared with `--share` by its id alone. It needs a
   terminal, *attach needs a terminal: ssh -t <host> attach <session>*, exit
@@ -2994,7 +3006,10 @@ this user's own SSH key in `~/.ssh`, or use the agent behind
 with that person's role. The watch-only rule is a guard against accidents,
 not a wall, and using a key is not an accident. Give rota a key of its own,
 with a passphrase, and list that one in `ssh_keys`, not the key you use
-for everything else.
+for everything else. Keep it out of the ssh-agent the sessions can reach,
+or add it with `ssh-add -c`, which asks before each use: a key in the agent
+signs for whatever reaches `SSH_AUTH_SOCK`, passphrase or not, and a held
+CLI keeps that variable, since git over SSH inside a session needs it.
 
 ### The playground
 
