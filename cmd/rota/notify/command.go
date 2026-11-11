@@ -58,7 +58,7 @@ func newCommand(s api.EventSink, e env) (sender, error) {
 	}
 	name := s.Command[0]
 	if !filepath.IsAbs(name) && name != filepath.Base(name) {
-		return nil, fmt.Errorf("command %q is a relative path; give a name on PATH or an absolute path", name)
+		return nil, errors.New("command's program must be a name on PATH or an absolute path")
 	}
 	path, err := exec.LookPath(name)
 	if err != nil {

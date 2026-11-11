@@ -69,7 +69,7 @@ func newWebhook(s api.EventSink, e env) (sender, error) {
 	case err != nil:
 		return nil, errors.New("url is not an address")
 	case u.Scheme != "https" && u.Scheme != "http":
-		return nil, errors.New("a webhook goes over https, or over http only to this machine")
+		return nil, errors.New("a webhook goes over https, or over http only to this machine (127.0.0.1, ::1, localhost)")
 	case u.Hostname() == "":
 		return nil, errors.New("url has no host")
 	case u.User != nil:

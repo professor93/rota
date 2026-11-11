@@ -305,7 +305,7 @@ func TestARelativeProgramIsRefusedEvenWhenThere(t *testing.T) {
 	fakecli.Install(t, filepath.Join(dir, "bin"), "x", fakecli.Spec{})
 	t.Chdir(dir)
 	_, err := newCommand(api.EventSink{Type: "command", Command: []string{filepath.Join("bin", fakecli.Exe("x"))}}, env{})
-	if err == nil || !strings.Contains(err.Error(), "relative path") {
+	if err == nil || err.Error() != "command's program must be a name on PATH or an absolute path" {
 		t.Fatalf("got %v", err)
 	}
 }
