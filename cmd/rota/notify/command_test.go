@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -191,7 +192,9 @@ func TestACommandThatNeverExitsIsKilled(t *testing.T) {
 	err := snd.send(ctx, cmdEvent())
 	took := time.Since(start)
 	var d *drop
-	if !errors.As(err, &d) || !strings.Contains(err.Error(), "killed") {
+	// Said as the timeout, not as the signal the kill was (on unix) or the
+	// exit it gave (on Windows).
+	if !errors.As(err, &d) || !strings.HasPrefix(err.Error(), cmdKilled) {
 		t.Fatalf("got %#v", err)
 	}
 	if took > 3*time.Second {
@@ -213,7 +216,7 @@ func TestAHangingCommandIsBoundedByTheAttempt(t *testing.T) {
 	if took := time.Since(start); took > 3*time.Second {
 		t.Fatalf("dropped after %v", took)
 	}
-	if s := statusOf(t, n, "command"); s.State != stateFailing || !strings.Contains(s.LastError, "killed") {
+	if s := statusOf(t, n, "command"); s.State != stateFailing || !strings.HasPrefix(s.LastError, cmdKilled) {
 		t.Fatalf("%+v", s)
 	}
 }
@@ -277,6 +280,74 @@ func TestAMissingProgramFailsTheSinkNotTheDaemon(t *testing.T) {
 	eventually(t, "the webhook to send", func() bool { return len(other.delivered()) == 1 })
 	if s := statusOf(t, n, "command"); s.State != stateFailing || !strings.Contains(s.LastError, "rota-no-such-program") {
 		t.Fatalf("%+v", s)
+	}
+}
+
+// cmdKilled is how a program killed at the end of its attempt is said.
+const cmdKilled = "command did not exit in time and was killed"
+
+// A relative path is refused even when there is a file at it, wherever the
+// daemon happens to run.
+func TestARelativeProgramIsRefusedEvenWhenThere(t *testing.T) {
+	dir := t.TempDir()
+	fakecli.Install(t, filepath.Join(dir, "bin"), "x", fakecli.Spec{})
+	t.Chdir(dir)
+	_, err := newCommand(api.EventSink{Type: "command", Command: []string{filepath.Join("bin", fakecli.Exe("x"))}}, env{})
+	if err == nil || !strings.Contains(err.Error(), "relative path") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// A program gone after its sink was made is dropped at once: trying again
+// would not bring it back.
+func TestAProgramGoneAfterTheStartIsDropped(t *testing.T) {
+	path := fakecli.Install(t, t.TempDir(), "rota-cmd-gone", fakecli.Spec{})
+	snd := cmdSink(t, nil, path)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	err := cmdSend(t, snd, cmdEvent())
+	var d *drop
+	if !errors.As(err, &d) || !strings.HasPrefix(err.Error(), "command could not start") {
+		t.Fatalf("got %#v", err)
+	}
+}
+
+// Only a start failure that passes is tried again; the rest are dropped.
+func TestOnlyATemporaryStartFailureIsTriedAgain(t *testing.T) {
+	var r *retry
+	var d *drop
+	for _, err := range []error{syscall.EAGAIN, syscall.ENOMEM, syscall.ETXTBSY, syscall.EMFILE, syscall.ENFILE, syscall.EINTR} {
+		if got := cmdStartFailed(&os.PathError{Op: "fork/exec", Path: "/x", Err: err}, nil); errors.As(got, &d) || errors.As(got, &r) {
+			t.Fatalf("%v: %#v", err, got)
+		}
+	}
+	for _, err := range []error{syscall.ENOENT, syscall.EACCES, syscall.ENOEXEC, syscall.ENOTDIR, syscall.ELOOP, syscall.ENAMETOOLONG, syscall.E2BIG, errors.New("odd")} {
+		if got := cmdStartFailed(&os.PathError{Op: "fork/exec", Path: "/x", Err: err}, nil); !errors.As(got, &d) {
+			t.Fatalf("%v: %#v", err, got)
+		}
+	}
+}
+
+// Stdout is thrown away: only stderr is said.
+func TestACommandsStdoutIsNotSaid(t *testing.T) {
+	cmdFake(t, "rota-cmd-out", fakecli.Spec{Stdout: []string{"out line"}, Stderr: []string{"err line"}, Exit: 3})
+	if err := cmdSend(t, cmdSink(t, nil, "rota-cmd-out"), cmdEvent()); err == nil || err.Error() != "command exited 3: err line" {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// Stderr is kept to 4 KiB however much is written, and every write is
+// taken whole so the program is never held up.
+func TestACommandsStderrIsBounded(t *testing.T) {
+	h := &cmdHead{}
+	for range 10 {
+		if n, err := h.Write(make([]byte, 1000)); n != 1000 || err != nil {
+			t.Fatal(n, err)
+		}
+	}
+	if len(h.b) != cmdStderr {
+		t.Fatalf("kept %d", len(h.b))
 	}
 }
 

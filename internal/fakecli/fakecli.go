@@ -48,6 +48,7 @@ type Spec struct {
 	Touch string `json:"touch,omitempty"`
 	// StdinTo names a file to write what was read on stdin to, byte for
 	// byte, before exiting, so a test can see what a program was handed.
+	// The Echo, Tty and Exec modes end before it is written.
 	StdinTo string `json:"stdin_to,omitempty"`
 	// KeepStdin leaves stdin unread. The default reads it to the end, as
 	// every real CLI does with a piped prompt.

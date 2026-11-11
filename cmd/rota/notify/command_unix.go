@@ -3,6 +3,7 @@
 package notify
 
 import (
+	"os"
 	"os/exec"
 	"syscall"
 )
@@ -14,13 +15,14 @@ func ownGroup(cmd *exec.Cmd) {
 }
 
 // killGroup kills cmd's whole process group: the program and every helper
-// it started that is still in its group.
+// it started that is still in its group. It is os.ErrProcessDone when the
+// program had already ended: no member of the group is left (ESRCH), or on
+// macOS only zombies are (EPERM); the leader may still be a zombie for Wait
+// to reap, which a kill would not change.
 func killGroup(cmd *exec.Cmd) error {
 	err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	if err == syscall.ESRCH {
-		// Nothing of the group is left; the leader may still be a zombie
-		// for Wait to reap, which a kill of it would not change.
-		return nil
+	if err == syscall.ESRCH || err == syscall.EPERM {
+		return os.ErrProcessDone
 	}
 	return err
 }

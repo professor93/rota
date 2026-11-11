@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/professor93/rota/api"
@@ -78,7 +78,10 @@ func (c *command) secrets() []string { return c.keys }
 // stdout is thrown away and the first line of its stderr goes into the
 // error. Exit 0 is delivered, 75 is tried again, and any other end is
 // dropped. When ctx ends first, the program and its whole process group are
-// killed, and the event dropped.
+// killed, and the event dropped. A program that exits by itself has its
+// group left alone: a script may mean to leave a job running in the
+// background (sound &), and one still holding stderr costs the attempt no
+// more than cmdWaitDelay.
 func (c *command) send(ctx context.Context, e events.Event) error {
 	cmd := exec.CommandContext(ctx, c.path, c.args...)
 	cmd.Env = c.environ()
@@ -87,10 +90,13 @@ func (c *command) send(ctx context.Context, e events.Event) error {
 	cmd.Stderr = stderr
 	cmd.WaitDelay = cmdWaitDelay
 	ownGroup(cmd)
+	// killed is set only when the kill landed: a program that ended by
+	// itself as ctx ended is said by how it ended.
 	var killed atomic.Bool
 	cmd.Cancel = func() error {
-		killed.Store(true)
-		return killGroup(cmd)
+		err := killGroup(cmd)
+		killed.Store(err == nil)
+		return err
 	}
 	err := cmd.Run()
 	st := cmd.ProcessState
@@ -110,10 +116,23 @@ func (c *command) send(ctx context.Context, e events.Event) error {
 		return again(errors.New("command exited 75"+said), 0)
 	case st != nil:
 		return dropped(errors.New("command ended: " + st.String() + said))
-	case errors.Is(err, fs.ErrNotExist), errors.Is(err, fs.ErrPermission):
-		return dropped(errors.New(cleanErr(fmt.Errorf("command could not start: %w", err), c.keys)))
 	}
-	return errors.New(cleanErr(fmt.Errorf("command could not start: %w", err), c.keys))
+	return cmdStartFailed(err, c.keys)
+}
+
+// cmdStartFailed is a program that did not start, as send says it, cleaned
+// with keys. A failure that passes, such as a fork limit or a binary being
+// written, is tried again; any other, such as a program gone, not allowed
+// to run or not a program at all (a script without its #! line), is
+// dropped at once.
+func cmdStartFailed(err error, keys []string) error {
+	msg := errors.New(cleanErr(fmt.Errorf("command could not start: %w", err), keys))
+	for _, temp := range []error{syscall.EAGAIN, syscall.ENOMEM, syscall.ETXTBSY, syscall.EMFILE, syscall.ENFILE, syscall.EINTR} {
+		if errors.Is(err, temp) {
+			return msg
+		}
+	}
+	return dropped(msg)
 }
 
 // said is line as an error ends with it: after ": ", without a hidden value
