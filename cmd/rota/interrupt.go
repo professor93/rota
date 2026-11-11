@@ -20,17 +20,26 @@ import (
 // ignored. stop puts the signals back as they were, and is called before
 // anything is handed to the CLI; interruptedDuring does both.
 func interrupted() (ctx context.Context, stop context.CancelFunc) {
+	sigs := interruptSignals()
+	if len(sigs) == 0 {
+		// NotifyContext with no signals would take every one.
+		return context.WithCancel(context.Background())
+	}
+	return signal.NotifyContext(context.Background(), sigs...)
+}
+
+// interruptSignals is the signals interrupted takes, and the TUI holds
+// until its server has stopped: an interrupt, and outside Windows a
+// terminate and a hang-up, leaving any this process was started ignoring
+// ignored.
+func interruptSignals() []os.Signal {
 	var sigs []os.Signal
 	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP} {
 		if (sig == os.Interrupt || runtime.GOOS != "windows") && !signal.Ignored(sig) {
 			sigs = append(sigs, sig)
 		}
 	}
-	if len(sigs) == 0 {
-		// NotifyContext with no signals would take every one.
-		return context.WithCancel(context.Background())
-	}
-	return signal.NotifyContext(context.Background(), sigs...)
+	return sigs
 }
 
 // interruptedDuring runs look under interrupted's context, and reports whether

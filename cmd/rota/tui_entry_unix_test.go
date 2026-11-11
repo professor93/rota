@@ -4,14 +4,19 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
+	"os/signal"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/professor93/rota/api"
 	rotaclient "github.com/professor93/rota/cmd/rota/client"
@@ -69,6 +74,36 @@ func tuiRecord(t *testing.T, terminals, id string, m holdwire.Meta) string {
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// A real hang-up or terminate sent to this very process while the TUI runs
+// is taken, with nothing standing in for signal.Notify: the TUI ends as
+// quitting does and the command with 130. Were the signal not taken, its
+// default would end the test binary itself — the failure this guards.
+func TestARealHangUpOrTerminateEndsTheTUI(t *testing.T) {
+	for _, sig := range []syscall.Signal{syscall.SIGHUP, syscall.SIGTERM} {
+		t.Run(sig.String(), func(t *testing.T) {
+			if signal.Ignored(sig) {
+				t.Skipf("this process was started ignoring %v", sig)
+			}
+			t.Setenv("ROTA_HOME", t.TempDir())
+			tuiAt(t, true)
+			tuiStarts(t, func(ctx context.Context, o tui.Options) (tui.Result, error) {
+				if err := syscall.Kill(os.Getpid(), sig); err != nil {
+					t.Error(err)
+				}
+				select {
+				case <-ctx.Done():
+				case <-time.After(10 * time.Second):
+					t.Errorf("%v did not end the TUI", sig)
+				}
+				return tui.Result{}, fmt.Errorf("%w: %w", tea.ErrProgramKilled, ctx.Err())
+			})
+			if out, errs, code := call(t); code != 130 || out != "" || errs != "" {
+				t.Fatalf("%v: %d %q %q", sig, code, out, errs)
+			}
+		})
+	}
 }
 
 // With the daemon running, the header's answer is the daemon's: its pid and

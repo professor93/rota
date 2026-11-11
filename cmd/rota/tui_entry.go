@@ -69,10 +69,12 @@ var quitSayAfter = time.Second
 // process's from the start until the server has stopped: the TUI refreshes
 // accounts in this process, and a signal's default would end it between a
 // provider's answer and the save, with the token it replaced already spent.
-// A hang-up — the window closed — ends the TUI as quitting does. An
-// interrupt or a terminate is Bubble Tea's to act on while the program
-// runs, and once it has ended is let pass, so the wait for the save
-// finishes; the line quitWait says tells what it is waiting for.
+// A hang-up — the window closed — or a terminate ends the TUI as quitting
+// does, and the command as interrupted ends one, with 130. An interrupt is
+// Bubble Tea's while the program runs (a ^C typed into a CLI the TUI has
+// handed the terminal to reaches this process too, and is the CLI's), and
+// once it has ended is let pass, so the wait for the save finishes; the
+// line quitWait says tells what it is waiting for.
 func (c *cli) openTUI() error {
 	home, terminals, err := daemonStore()
 	if err != nil {
@@ -81,9 +83,9 @@ func (c *cli) openTUI() error {
 	ctx, hangUp := context.WithCancel(context.Background())
 	defer hangUp()
 	sigs := make(chan os.Signal, 4)
-	release := tuiSignals(sigs, quitSignals()...)
+	release := tuiSignals(sigs, interruptSignals()...)
 	defer release()
-	hungUp := make(chan struct{})
+	cut := make(chan struct{})
 	ended := make(chan struct{})
 	watched := make(chan struct{})
 	go func() {
@@ -91,11 +93,11 @@ func (c *cli) openTUI() error {
 		for {
 			select {
 			case sig := <-sigs:
-				if sig == syscall.SIGHUP {
+				if sig == syscall.SIGHUP || sig == syscall.SIGTERM {
 					select {
-					case <-hungUp:
+					case <-cut:
 					default:
-						close(hungUp)
+						close(cut)
 						hangUp()
 					}
 				}
@@ -147,7 +149,7 @@ func (c *cli) openTUI() error {
 		}
 	}
 	select {
-	case <-hungUp:
+	case <-cut:
 		return errInterrupted
 	default:
 	}
@@ -162,19 +164,6 @@ func (c *cli) openTUI() error {
 var tuiSignals = func(c chan<- os.Signal, sigs ...os.Signal) (release func()) {
 	signal.Notify(c, sigs...)
 	return func() { signal.Stop(c) }
-}
-
-// quitSignals is the signals interrupted takes: an interrupt, and outside
-// Windows a terminate and a hang-up, leaving any this process was started
-// ignoring ignored.
-func quitSignals() []os.Signal {
-	var sigs []os.Signal
-	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP} {
-		if (sig == os.Interrupt || runtime.GOOS != "windows") && !signal.Ignored(sig) {
-			sigs = append(sigs, sig)
-		}
-	}
-	return sigs
 }
 
 // quitWait runs stop, which waits for a refresh under way to be answered

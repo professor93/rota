@@ -336,37 +336,46 @@ func (f *tuiSignalsFake) send(t *testing.T, sig os.Signal) {
 	}
 }
 
-// The window closed under the TUI: a hang-up ends it as quitting does, with
-// the status of an interrupt and no error line. An interrupt or a terminate
-// while it runs is Bubble Tea's, and ends nothing here.
+// The window closed under the TUI, or the process told to end: a hang-up
+// or a terminate ends it as quitting does, with the status interrupted
+// gives (130) and no error line. An interrupt while it runs is Bubble
+// Tea's, or a CLI's the TUI has handed the terminal to, and ends nothing
+// here.
 func TestAHangUpEndsTheTUIAsQuittingDoes(t *testing.T) {
-	t.Setenv("ROTA_HOME", t.TempDir())
-	tuiAt(t, true)
-	f := fakeSignals(t)
-	tuiStarts(t, func(ctx context.Context, o tui.Options) (tui.Result, error) {
-		f.send(t, os.Interrupt)
-		f.send(t, syscall.SIGTERM)
-		time.Sleep(50 * time.Millisecond)
-		if ctx.Err() != nil {
-			t.Error("an interrupt or a terminate ended the TUI's context")
-		}
-		f.send(t, syscall.SIGHUP)
-		select {
-		case <-ctx.Done():
-		case <-time.After(10 * time.Second):
-			t.Error("a hang-up did not end the TUI")
-		}
-		return tui.Result{}, fmt.Errorf("%w: %w", tea.ErrProgramKilled, ctx.Err())
-	})
-	out, errs, code := call(t)
-	if code != 130 || out != "" || errs != "" {
-		t.Fatalf("a hang-up: %d %q %q", code, out, errs)
+	for _, sig := range []os.Signal{syscall.SIGHUP, syscall.SIGTERM} {
+		t.Run(sig.String(), func(t *testing.T) {
+			t.Setenv("ROTA_HOME", t.TempDir())
+			tuiAt(t, true)
+			f := fakeSignals(t)
+			tuiStarts(t, func(ctx context.Context, o tui.Options) (tui.Result, error) {
+				f.send(t, os.Interrupt)
+				time.Sleep(50 * time.Millisecond)
+				if ctx.Err() != nil {
+					t.Error("an interrupt ended the TUI's context")
+				}
+				f.send(t, sig)
+				select {
+				case <-ctx.Done():
+				case <-time.After(10 * time.Second):
+					t.Errorf("%v did not end the TUI", sig)
+				}
+				return tui.Result{}, fmt.Errorf("%w: %w", tea.ErrProgramKilled, ctx.Err())
+			})
+			out, errs, code := call(t)
+			if code != 130 || out != "" || errs != "" {
+				t.Fatalf("%v: %d %q %q", sig, code, out, errs)
+			}
+			if !slices.Equal(f.sigs, interruptSignals()) || f.released.Load() != 1 {
+				t.Fatalf("asked for %v, let go %d times; want %v once", f.sigs, f.released.Load(), interruptSignals())
+			}
+		})
 	}
-	if !slices.Equal(f.sigs, quitSignals()) || f.released.Load() != 1 {
-		t.Fatalf("asked for %v, let go %d times; want %v once", f.sigs, f.released.Load(), quitSignals())
-	}
-	if runtime.GOOS != "windows" && !slices.Contains(f.sigs, os.Signal(syscall.SIGHUP)) && !signal.Ignored(syscall.SIGHUP) {
-		t.Fatal("a hang-up is not taken")
+	if runtime.GOOS != "windows" {
+		for _, sig := range []os.Signal{syscall.SIGHUP, syscall.SIGTERM, os.Interrupt} {
+			if !slices.Contains(interruptSignals(), sig) && !signal.Ignored(sig) {
+				t.Fatalf("%v is not taken", sig)
+			}
+		}
 	}
 }
 
@@ -452,8 +461,10 @@ func TestQuittingWaitsForARefreshToBeSaved(t *testing.T) {
 	close(answer)
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
+		// The terminate sent meanwhile ends the command as interrupted
+		// would, once the save is done.
+		if err != errInterrupted {
+			t.Fatalf("quitting ended with %v; want %v, for the terminate", err, errInterrupted)
 		}
 	case <-time.After(60 * time.Second):
 		t.Fatal("quitting never ended")
