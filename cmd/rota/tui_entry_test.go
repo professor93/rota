@@ -4,9 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
+	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -14,9 +19,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/professor93/rota/api"
 	"github.com/professor93/rota/cmd/rota/tui"
 	"github.com/professor93/rota/internal/fakecli"
@@ -220,6 +228,10 @@ func TestTheTUIsServerIsMadeAsR1Says(t *testing.T) {
 	if dir != abs || len(got.Token) < 20 || got.RefreshEvery >= 0 || got.HoldCommand != nil || got.Log == nil {
 		t.Fatalf("the TUI's server: %+v", got)
 	}
+	// Its log would land on the TUI's screen: it says nothing at all.
+	if got.Log.Enabled(context.Background(), slog.LevelError) {
+		t.Fatal("the TUI's server logs")
+	}
 	if got.Routes == nil || *got.Routes != (api.Routes{API: true, WebSocket: true, Health: true}) {
 		t.Fatalf("the TUI's server answers %+v", got.Routes)
 	}
@@ -247,7 +259,8 @@ func TestAPendingLoginIsSaidOnTheWayOut(t *testing.T) {
 	}{
 		{"just begun", 0, strconv.Itoa(int(loginTTL/time.Minute)) + "m"},
 		{"begun four minutes ago", 4 * time.Minute, strconv.Itoa(int(loginTTL/time.Minute)-4) + "m"},
-		{"almost out", loginTTL - 30*time.Second, "(30|29|28)s"},
+		{"almost out", loginTTL - 30*time.Second, "(?:30|[12]?[0-9])s"},
+		{"run out", loginTTL + time.Minute, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			tuiStarts(t, func(ctx context.Context, o tui.Options) (tui.Result, error) {
@@ -262,6 +275,13 @@ func TestAPendingLoginIsSaidOnTheWayOut(t *testing.T) {
 			if err := (&cli{out: &out, err: &errs, in: strings.NewReader("")}).openTUI(); err != nil {
 				t.Fatal(err)
 			}
+			if c.left == "" {
+				// Open for nobody: not offered.
+				if out.Len() != 0 || errs.Len() != 0 {
+					t.Fatalf("a login that has run out: %q %q", out.String(), errs.String())
+				}
+				return
+			}
 			m := regexp.MustCompile(`^The login stays open for ` + c.left + `: rota login ([0-9a-f]{6}) <key>\n$`).FindStringSubmatch(errs.String())
 			if m == nil || out.Len() != 0 {
 				t.Fatalf("on the way out: %q %q", out.String(), errs.String())
@@ -275,6 +295,206 @@ func TestAPendingLoginIsSaidOnTheWayOut(t *testing.T) {
 				t.Fatalf("finishing it: %d %q", code, got)
 			}
 		})
+	}
+}
+
+// tuiSignalsFake stands in for signal.Notify: a test sends the signals
+// itself, and sees what was asked for and when it was let go of.
+type tuiSignalsFake struct {
+	mu       sync.Mutex
+	c        chan<- os.Signal
+	sigs     []os.Signal
+	released atomic.Int32
+}
+
+func fakeSignals(t *testing.T) *tuiSignalsFake {
+	t.Helper()
+	f := &tuiSignalsFake{}
+	was := tuiSignals
+	tuiSignals = func(c chan<- os.Signal, sigs ...os.Signal) func() {
+		f.mu.Lock()
+		f.c, f.sigs = c, sigs
+		f.mu.Unlock()
+		return func() { f.released.Add(1) }
+	}
+	t.Cleanup(func() { tuiSignals = was })
+	return f
+}
+
+func (f *tuiSignalsFake) send(t *testing.T, sig os.Signal) {
+	t.Helper()
+	f.mu.Lock()
+	c := f.c
+	f.mu.Unlock()
+	if c == nil {
+		t.Fatal("no signal was asked for")
+	}
+	select {
+	case c <- sig:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("nobody took %v", sig)
+	}
+}
+
+// The window closed under the TUI: a hang-up ends it as quitting does, with
+// the status of an interrupt and no error line. An interrupt or a terminate
+// while it runs is Bubble Tea's, and ends nothing here.
+func TestAHangUpEndsTheTUIAsQuittingDoes(t *testing.T) {
+	t.Setenv("ROTA_HOME", t.TempDir())
+	tuiAt(t, true)
+	f := fakeSignals(t)
+	tuiStarts(t, func(ctx context.Context, o tui.Options) (tui.Result, error) {
+		f.send(t, os.Interrupt)
+		f.send(t, syscall.SIGTERM)
+		time.Sleep(50 * time.Millisecond)
+		if ctx.Err() != nil {
+			t.Error("an interrupt or a terminate ended the TUI's context")
+		}
+		f.send(t, syscall.SIGHUP)
+		select {
+		case <-ctx.Done():
+		case <-time.After(10 * time.Second):
+			t.Error("a hang-up did not end the TUI")
+		}
+		return tui.Result{}, fmt.Errorf("%w: %w", tea.ErrProgramKilled, ctx.Err())
+	})
+	out, errs, code := call(t)
+	if code != 130 || out != "" || errs != "" {
+		t.Fatalf("a hang-up: %d %q %q", code, out, errs)
+	}
+	if !slices.Equal(f.sigs, quitSignals()) || f.released.Load() != 1 {
+		t.Fatalf("asked for %v, let go %d times; want %v once", f.sigs, f.released.Load(), quitSignals())
+	}
+	if runtime.GOOS != "windows" && !slices.Contains(f.sigs, os.Signal(syscall.SIGHUP)) && !signal.Ignored(syscall.SIGHUP) {
+		t.Fatal("a hang-up is not taken")
+	}
+}
+
+// An interrupt Bubble Tea took ends the TUI as an interrupt ends any
+// command: status 130, and no error line.
+func TestAnInterruptedTUIIsAnInterrupt(t *testing.T) {
+	t.Setenv("ROTA_HOME", t.TempDir())
+	tuiAt(t, true)
+	tuiStarts(t, func(context.Context, tui.Options) (tui.Result, error) {
+		return tui.Result{}, tea.ErrInterrupted
+	})
+	if out, errs, code := call(t); code != 130 || out != "" || errs != "" {
+		t.Fatalf("an interrupted TUI: %d %q %q", code, out, errs)
+	}
+}
+
+// Quitting while a refresh is under way in the TUI's server waits for its
+// answer and the save, says so once, and lets no interrupt or terminate cut
+// the wait: the token it replaced is spent the moment the provider answers.
+// Once it returns, the TUI's API is gone.
+func TestQuittingWaitsForARefreshToBeSaved(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("ROTA_HOME", home)
+	writeStore(t, home, `{"ordered":true,"nextId":2,"accounts":[
+		{"id":1,"provider":"claude","email":"a@b.c","uuid":"u1","order":1,
+		 "token":{"accessToken":"OLD-1","refreshToken":"R-OLD","expiresAt":1}}]}`)
+	asked := make(chan struct{}, 1)
+	answer := make(chan struct{})
+	claudeAt(t, func(_ int32, w http.ResponseWriter, _ *http.Request) {
+		select {
+		case asked <- struct{}{}:
+		default:
+		}
+		select {
+		case <-answer:
+		case <-time.After(30 * time.Second):
+		}
+		json.NewEncoder(w).Encode(map[string]any{"access_token": "NEW-1", "refresh_token": "R-NEW", "expires_in": 3600})
+	})
+	f := fakeSignals(t)
+	was := quitSayAfter
+	quitSayAfter = 50 * time.Millisecond
+	t.Cleanup(func() { quitSayAfter = was })
+	var backend tui.Backend
+	tuiStarts(t, func(ctx context.Context, o tui.Options) (tui.Result, error) {
+		backend = o.Backend
+		// The person quits while the listing's refresh is with the
+		// provider: the TUI's own call ends, and the refresh goes on.
+		call, cancel := context.WithCancel(ctx)
+		defer cancel()
+		go func() {
+			select {
+			case <-asked:
+			case <-time.After(20 * time.Second):
+			}
+			cancel()
+		}()
+		if _, err := o.Backend.Accounts(call, tui.RefreshForce); err == nil {
+			t.Error("the listing was answered while the refresh was held")
+		}
+		return tui.Result{}, nil
+	})
+	said := &quitWriter{wrote: make(chan struct{}, 4)}
+	done := make(chan error, 1)
+	go func() { done <- (&cli{out: io.Discard, err: said, in: strings.NewReader("")}).openTUI() }()
+	select {
+	case <-said.wrote:
+	case err := <-done:
+		t.Fatalf("quitting returned (%v) without waiting for the refresh", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("quitting never said what it waits for")
+	}
+	f.send(t, os.Interrupt)
+	f.send(t, syscall.SIGTERM)
+	select {
+	case err := <-done:
+		t.Fatalf("quitting returned (%v) before the refresh was saved", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if n := f.released.Load(); n != 0 {
+		t.Fatal("the signals were let go of while the save was still to come")
+	}
+	close(answer)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(60 * time.Second):
+		t.Fatal("quitting never ended")
+	}
+	if got := said.String(); got != "rota: waiting for a refresh to be saved\n" {
+		t.Fatalf("quitting said %q", got)
+	}
+	if got := readAccounts(t, home).Accounts[0].Token.Access; got != "NEW-1" {
+		t.Fatalf("the store holds %q; want the refreshed NEW-1", got)
+	}
+	if f.released.Load() != 1 {
+		t.Fatalf("the signals were let go of %d times", f.released.Load())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := backend.Who(ctx); err == nil {
+		t.Fatal("the TUI's API still answers after quitting")
+	}
+}
+
+// A panic out of the TUI still stops its server, waiting for a save as
+// quitting does, on its way up.
+func TestAPanicInTheTUIStillStopsItsServer(t *testing.T) {
+	t.Setenv("ROTA_HOME", t.TempDir())
+	var backend tui.Backend
+	tuiStarts(t, func(_ context.Context, o tui.Options) (tui.Result, error) {
+		backend = o.Backend
+		panic("the TUI broke")
+	})
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("the panic did not reach the caller")
+			}
+		}()
+		_ = (&cli{out: io.Discard, err: io.Discard, in: strings.NewReader("")}).openTUI()
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := backend.Who(ctx); err == nil {
+		t.Fatal("the TUI's API still answers after a panic")
 	}
 }
 

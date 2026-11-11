@@ -12,8 +12,13 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
+	"sync"
+	"syscall"
 	"time"
+
+	tea "charm.land/bubbletea/v2"
 
 	"github.com/professor93/rota/api"
 	rotaclient "github.com/professor93/rota/cmd/rota/client"
@@ -59,11 +64,51 @@ var quitSayAfter = time.Second
 // served inside this process to the local principal (R1). No port and no
 // socket is opened for it, and no daemon is started or claimed; the daemon,
 // when one runs, is asked only for the sessions it holds.
+//
+// The signals a command's look at its accounts takes (interrupted) are this
+// process's from the start until the server has stopped: the TUI refreshes
+// accounts in this process, and a signal's default would end it between a
+// provider's answer and the save, with the token it replaced already spent.
+// A hang-up — the window closed — ends the TUI as quitting does. An
+// interrupt or a terminate is Bubble Tea's to act on while the program
+// runs, and once it has ended is let pass, so the wait for the save
+// finishes; the line quitWait says tells what it is waiting for.
 func (c *cli) openTUI() error {
 	home, terminals, err := daemonStore()
 	if err != nil {
 		return err
 	}
+	ctx, hangUp := context.WithCancel(context.Background())
+	defer hangUp()
+	sigs := make(chan os.Signal, 4)
+	release := tuiSignals(sigs, quitSignals()...)
+	defer release()
+	hungUp := make(chan struct{})
+	ended := make(chan struct{})
+	watched := make(chan struct{})
+	go func() {
+		defer close(watched)
+		for {
+			select {
+			case sig := <-sigs:
+				if sig == syscall.SIGHUP {
+					select {
+					case <-hungUp:
+					default:
+						close(hungUp)
+						hangUp()
+					}
+				}
+			case <-ended:
+				return
+			}
+		}
+	}()
+	defer func() {
+		close(ended)
+		<-watched
+	}()
+
 	srv, err := tuiServer(api.Options{
 		Dir:          home,
 		Token:        rand.Text(),
@@ -77,8 +122,13 @@ func (c *cli) openTUI() error {
 		return err
 	}
 	cl, stop := rotaclient.InProcess(srv.LocalHandler(&ctlControl))
+	quit := sync.OnceFunc(func() {
+		stop()
+		srv.Stop()
+	})
+	defer quit() // a panic out of the TUI still waits for the save
 	host, _ := os.Hostname()
-	res, err := startTUI(context.Background(), tui.Options{
+	res, err := startTUI(ctx, tui.Options{
 		Backend: tui.NewHTTP(cl.HTTP(), "http://rota"),
 		In:      c.in,
 		Out:     c.out,
@@ -87,17 +137,44 @@ func (c *cli) openTUI() error {
 		OpenURL: localBrowser(),
 		Host:    host,
 	})
-	quitWait(c.err, func() {
-		stop()
-		srv.Stop()
-	})
+	quitWait(c.err, quit)
 	if l := res.Pending; l != nil {
 		// The TUI's reading of the login carries no state, and finishLater
-		// needs none: the id and the kind say the command (R18).
-		ends := time.UnixMilli(l.CreatedAt).Add(loginTTL)
-		fmt.Fprintf(c.err, "The login stays open for %s: %s\n", timeLeft(ends), finishLater(&rota.Login{ID: l.ID, Kind: l.Kind}))
+		// needs none: the id and the kind say the command (R18). One that
+		// has run out is open for nobody, and is not offered.
+		if ends := time.UnixMilli(l.CreatedAt).Add(loginTTL); time.Now().Before(ends) {
+			fmt.Fprintf(c.err, "The login stays open for %s: %s\n", timeLeft(ends), finishLater(&rota.Login{ID: l.ID, Kind: l.Kind}))
+		}
+	}
+	select {
+	case <-hungUp:
+		return errInterrupted
+	default:
+	}
+	if errors.Is(err, tea.ErrInterrupted) {
+		return errInterrupted
 	}
 	return err
+}
+
+// tuiSignals has c told of sigs until release is called: signal.Notify, a
+// variable so a test can send the signals itself.
+var tuiSignals = func(c chan<- os.Signal, sigs ...os.Signal) (release func()) {
+	signal.Notify(c, sigs...)
+	return func() { signal.Stop(c) }
+}
+
+// quitSignals is the signals interrupted takes: an interrupt, and outside
+// Windows a terminate and a hang-up, leaving any this process was started
+// ignoring ignored.
+func quitSignals() []os.Signal {
+	var sigs []os.Signal
+	for _, sig := range []os.Signal{os.Interrupt, syscall.SIGTERM, syscall.SIGHUP} {
+		if (sig == os.Interrupt || runtime.GOOS != "windows") && !signal.Ignored(sig) {
+			sigs = append(sigs, sig)
+		}
+	}
+	return sigs
 }
 
 // quitWait runs stop, which waits for a refresh under way to be answered

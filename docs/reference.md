@@ -230,7 +230,9 @@ one; anywhere else — a pipe, a script, CI, Windows — and as `rota --json`,
 it prints the short usage and exits 0, as it always has. The TUI is
 answered by rota's own API served inside the process, which opens no port
 and no socket; a run it starts, an Ask kept open included, is cut only
-after 24 hours rather than at the API's ten minutes.
+after 24 hours rather than at the API's ten minutes, or an hour for one
+kept open. Quitting waits for a refresh under way to be saved, and so does
+closing the window.
 
 ### Every command, and every flag it takes
 

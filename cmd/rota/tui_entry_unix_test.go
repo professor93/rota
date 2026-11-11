@@ -4,10 +4,12 @@ package main
 
 import (
 	"context"
+	"net"
 	"os"
 	"os/exec"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ import (
 	"github.com/professor93/rota/cmd/rota/tui"
 	"github.com/professor93/rota/internal/holdwire"
 	"github.com/professor93/rota/internal/pty"
+	"github.com/professor93/rota/wire"
 )
 
 // The TUI opens only where both ends are a terminal it can draw on: a
@@ -107,6 +110,59 @@ func TestTheDaemonIsAskedWhenItRuns(t *testing.T) {
 	}
 	if took := time.Since(began); took > 2*time.Second {
 		t.Fatalf("a call whose context had ended took %v", took)
+	}
+}
+
+// A daemon whose socket takes a connection and never answers is left when
+// the header's call ends, and said to run with why it could not be asked:
+// the call never outlives its context.
+func TestADaemonThatDoesNotAnswerIsLeftWhenTheCallEnds(t *testing.T) {
+	_, terminals := ctlStore(t)
+	release, err := holdwire.ClaimDaemon(terminals, wire.Version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(release)
+	ln, err := net.Listen("unix", holdwire.CtlSock(terminals))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var held []net.Conn
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			held = append(held, c)
+			mu.Unlock()
+		}
+	}()
+	t.Cleanup(func() {
+		ln.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, c := range held {
+			c.Close()
+		}
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	got := make(chan tui.Daemon, 1)
+	began := time.Now()
+	go func() { got <- localDaemon(terminals)(ctx) }()
+	select {
+	case d := <-got:
+		if !d.Running || d.Err == "" || d.PID != os.Getpid() {
+			t.Fatalf("a daemon that does not answer: %+v; want running, with why", d)
+		}
+		if took := time.Since(began); took > 1500*time.Millisecond {
+			t.Fatalf("the call took %v past a context of 100ms", took)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the call outlived its context")
 	}
 }
 
