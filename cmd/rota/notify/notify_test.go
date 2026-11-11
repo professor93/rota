@@ -500,7 +500,8 @@ func TestASinkThatCannotBeBuiltIsFailing(t *testing.T) {
 	eventually(t, "both to reach telegram", func() bool { return len(f.delivered()) == 2 })
 	eventually(t, "the test to be answered", func() bool { return statusOf(t, n, "webhook").LastTest != nil })
 	s := statusOf(t, n, "webhook")
-	if s.State != stateFailing || s.LastError != "the secret file is open to others" || s.Sent != 0 || s.Dropped != 0 {
+	if s.State != stateFailing || s.LastError != "the secret file is open to others" || s.Sent != 0 || s.Dropped != 0 ||
+		!s.FailingSince.Equal(s.LastErrorAt) || s.FailingSince.IsZero() {
 		t.Fatalf("%+v", s)
 	}
 	if lt := *s.LastTest; lt.ID != 2 || lt.OK || lt.Error != s.LastError {

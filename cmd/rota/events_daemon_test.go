@@ -46,6 +46,11 @@ func TestSinkLines(t *testing.T) {
 		{notify.Status{Name: "webhook", State: "failing", LastError: "webhook answered 502 Bad Gateway",
 			LastErrorAt: time.Date(2026, 11, 11, 10, 14, 0, 0, time.Local)},
 			"events: webhook failing since 10:14: webhook answered 502 Bad Gateway"},
+		// Failing since the first failure in a row, however often it was
+		// tried since.
+		{notify.Status{Name: "webhook", State: "failing", LastError: "webhook answered 502 Bad Gateway",
+			FailingSince: time.Date(2026, 11, 11, 8, 0, 0, 0, time.Local), LastErrorAt: time.Date(2026, 11, 11, 10, 19, 0, 0, time.Local)},
+			"events: webhook failing since 08:00: webhook answered 502 Bad Gateway"},
 		{notify.Status{Name: "webhook-2", State: "failing", LastError: "a\x1b]0;x\x07b",
 			LastErrorAt: time.Date(2026, 11, 9, 8, 5, 0, 0, time.Local)},
 			"events: webhook-2 failing since 2026-11-09 08:05: a ]0;x b"},
@@ -54,6 +59,42 @@ func TestSinkLines(t *testing.T) {
 	} {
 		if got := sinkLine(c.s, now); got != c.want {
 			t.Errorf("%+v:\n got %q\nwant %q", c.s, got, c.want)
+		}
+	}
+}
+
+// Each sink's answer to --test is one line, in one of three shapes.
+func TestOutcomeLines(t *testing.T) {
+	for _, c := range []struct {
+		o    notify.Outcome
+		want string
+	}{
+		{notify.Outcome{Sink: "webhook", Answered: true, OK: true}, "webhook: delivered"},
+		{notify.Outcome{Sink: "webhook-2", Answered: true, Error: "dial tcp 127.0.0.1:9: connect: connection refused"},
+			"webhook-2: failed: dial tcp 127.0.0.1:9: connect: connection refused"},
+		{notify.Outcome{Sink: "telegram", Answered: true, Error: "a\nb\x1b"}, "telegram: failed: a b "},
+		{notify.Outcome{Sink: "command"}, "command: no answer within 20s"},
+	} {
+		if got := outcomeLine(c.o); got != c.want {
+			t.Errorf("%+v:\n got %q\nwant %q", c.o, got, c.want)
+		}
+	}
+}
+
+// A command sink's program sees neither ROTA_TOKEN nor the variable
+// auth.token_env names, and each is named once.
+func TestHiddenEnv(t *testing.T) {
+	for _, c := range []struct {
+		cfg  *api.Config
+		want []string
+	}{
+		{nil, []string{"ROTA_TOKEN"}},
+		{&api.Config{}, []string{"ROTA_TOKEN"}},
+		{&api.Config{Auth: api.AuthSection{TokenEnv: "ROTA_TOKEN"}}, []string{"ROTA_TOKEN"}},
+		{&api.Config{Auth: api.AuthSection{TokenEnv: "MY_TOK"}}, []string{"ROTA_TOKEN", "MY_TOK"}},
+	} {
+		if got := hiddenEnv(c.cfg); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("token_env %v: %q, want %q", c.cfg, got, c.want)
 		}
 	}
 }

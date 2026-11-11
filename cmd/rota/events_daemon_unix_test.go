@@ -50,6 +50,7 @@ type hook struct {
 	delay time.Duration
 	mu    sync.Mutex
 	got   []sinkGot
+	open  int
 }
 
 func newHook(t *testing.T, key string, delay time.Duration) *hook {
@@ -60,9 +61,17 @@ func newHook(t *testing.T, key string, delay time.Duration) *hook {
 		_ = json.Unmarshal(body, &e)
 		mac := hmac.New(sha256.New, []byte(key))
 		mac.Write(body)
+		h.mu.Lock()
+		h.open++
+		h.mu.Unlock()
+		defer func() { h.mu.Lock(); h.open--; h.mu.Unlock() }()
 		e.Signed = r.Header.Get("X-Rota-Signature") == "sha256="+hex.EncodeToString(mac.Sum(nil)) &&
 			r.Header.Get("X-Rota-Event") == e.Type
-		time.Sleep(h.delay)
+		select {
+		case <-time.After(h.delay):
+		case <-r.Context().Done(): // the daemon gave up on it
+			return
+		}
 		h.mu.Lock()
 		h.got = append(h.got, e)
 		h.mu.Unlock()
@@ -70,6 +79,13 @@ func newHook(t *testing.T, key string, delay time.Duration) *hook {
 	}))
 	t.Cleanup(h.srv.Close)
 	return h
+}
+
+// inFlight is how many requests the hook is still to answer.
+func (h *hook) inFlight() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.open
 }
 
 // find is the first event of typ (and name, where name is not "") heard.
@@ -350,11 +366,44 @@ func TestStopDeliversDaemonStopped(t *testing.T) {
 	if _, ok := r.hook.find("daemon.stopped", ""); !ok {
 		t.Fatalf("serve stop returned after %s, before the webhook had answered daemon.stopped:\n%s", took, r.log())
 	}
-	if took >= daemonStopWait {
+	// A drain that waited for its deadline rather than for the run to end
+	// would take eventsDrain.
+	if took >= eventsDrain {
 		t.Fatalf("serve stop took %s", took)
 	}
 	if strings.Contains(r.log(), "events were still being sent") {
 		t.Fatalf("the drain ran out:\n%s", r.log())
+	}
+}
+
+// A sink that hangs takes the whole drain, and the daemon keeps its
+// goodbye second all the same: a viewer still attached is told why it is
+// closed, and the log says the events were cut short and nothing about
+// requests still open.
+func TestAStopWithAHungSinkKeepsItsGoodbye(t *testing.T) {
+	r := newSinkRig(t, sinkOpts{delay: time.Hour})
+	pid, _ := r.start()
+	within(t, "daemon.started is in flight", 20*time.Second, func() bool { return r.hook.inFlight() > 0 })
+	id := r.newSession("viewed")
+	viewer := r.attach(id)
+	viewer.waitDoc("hello")
+	viewer.waitOut("ready 100x30")
+
+	began := time.Now()
+	if out, errb, code := r.rota("serve", "stop"); code != 0 || out != "rota daemon stopped; 1 session keeps running\n" {
+		t.Fatalf("serve stop: exit %d %q %q", code, out, errb)
+	}
+	if code, why := viewer.closed(serveGrace); code != 1001 || why != "the server is stopping" {
+		t.Fatalf("the viewer was closed with %d %q", code, why)
+	}
+	within(t, "the daemon's process goes", 20*time.Second, func() bool { return gone(pid) })
+	if took := time.Since(began); took < eventsDrain || took >= daemonStopWait {
+		t.Fatalf("the stop took %s", took)
+	}
+	log := r.log()
+	if !strings.Contains(log, "events were still being sent as the rota daemon stopped") ||
+		strings.Contains(log, "requests were still open") || !strings.Contains(log, `msg="rota daemon stopped"`) {
+		t.Fatalf("the log:\n%s", log)
 	}
 }
 
@@ -376,6 +425,16 @@ func TestABrokenSinkHurtsNothing(t *testing.T) {
 	if s := r.session(id); s.State != "live" {
 		t.Fatalf("the session is %q", s.State)
 	}
+	out, errb, code = r.rota("serve", "status", "--test", "all")
+	if code != 1 || !strings.HasPrefix(out, "webhook: delivered\ncommand: delivered\nwebhook-2: failed: ") || strings.Count(out, "\n") != 3 {
+		t.Fatalf("--test all with a sink down: exit %d %q %q", code, out, errb)
+	}
+	out, errb, code = r.rota("--json", "serve", "status", "--test", "webhook-2")
+	var outcomes []notify.Outcome
+	if err := json.Unmarshal([]byte(out), &outcomes); code != 1 || err != nil || len(outcomes) != 1 ||
+		outcomes[0].Sink != "webhook-2" || !outcomes[0].Answered || outcomes[0].OK || outcomes[0].Error == "" {
+		t.Fatalf("--json --test webhook-2: exit %d %q %q", code, out, errb)
+	}
 	if out, errb, code := r.rota("serve", "stop"); code != 0 {
 		t.Fatalf("serve stop: exit %d %q %q", code, out, errb)
 	}
@@ -395,6 +454,11 @@ func TestTheDaemonLogHoldsNoSinkSecret(t *testing.T) {
 	within(t, "sinks.json says webhook-2 is failing", 20*time.Second, func() bool { return r.sinkState("webhook-2").State == "failing" })
 	text, _, _ := r.rota("serve", "status")
 	doc, _ := r.statusRaw()
+	tested, _, _ := r.rota("serve", "status", "--test", "all")
+	testedJSON, _, _ := r.rota("--json", "serve", "status", "--test", "webhook-2")
+	if !strings.Contains(tested, "webhook-2: failed: ") || !strings.Contains(testedJSON, `"ok": false`) {
+		t.Fatalf("--test did not reach the broken sink: %q %q", tested, testedJSON)
+	}
 	sinks, err := os.ReadFile(notify.StatusPath(r.terminals))
 	if err != nil {
 		t.Fatal(err)
@@ -405,7 +469,8 @@ func TestTheDaemonLogHoldsNoSinkSecret(t *testing.T) {
 	if !strings.Contains(r.log(), "webhook-2") {
 		t.Fatalf("the log never said the broken sink failed:\n%s", r.log())
 	}
-	for what, s := range map[string]string{"daemon.log": r.log(), "sinks.json": string(sinks), "serve status": text, "serve status --json": string(doc["sinks"])} {
+	for what, s := range map[string]string{"daemon.log": r.log(), "sinks.json": string(sinks), "serve status": text, "serve status --json": string(doc["sinks"]),
+		"--test": tested, "--json --test": testedJSON} {
 		for _, secret := range []string{"XYZSECRET", hookKey} {
 			if strings.Contains(s, secret) {
 				t.Errorf("%s holds %q:\n%s", what, secret, s)

@@ -39,18 +39,26 @@ func startEvents(cfg *api.Config, terminals string, log *slog.Logger) *notify.No
 		_ = os.Remove(notify.StatusPath(terminals))
 		return nil
 	}
-	hide := []string{"ROTA_TOKEN"}
-	if name := cfg.Auth.TokenEnv; name != "" && name != "ROTA_TOKEN" {
-		hide = append(hide, name)
-	}
 	names := sinkNames(cfg)
 	log.Info(fmt.Sprintf("events: %s: %s", sinksN(len(names)), strings.Join(names, ", ")))
-	n, err := notify.Start(notify.Options{Events: cfg.Events, Terminals: terminals, Log: log, Version: wire.Version, HideEnv: hide})
+	n, err := notify.Start(notify.Options{Events: cfg.Events, Terminals: terminals, Log: log, Version: wire.Version, HideEnv: hiddenEnv(cfg)})
 	if err != nil {
 		log.Warn("events: no sink runs: " + unsecret(err.Error()))
 		return nil
 	}
 	return n
+}
+
+// hiddenEnv is the variables a command sink's program never sees: ROTA_TOKEN,
+// and the one auth.token_env names, each once.
+func hiddenEnv(cfg *api.Config) []string {
+	hide := []string{"ROTA_TOKEN"}
+	if cfg != nil {
+		if name := cfg.Auth.TokenEnv; name != "" && name != "ROTA_TOKEN" {
+			hide = append(hide, name)
+		}
+	}
+	return hide
 }
 
 // sinkNames is what each sink cfg names is called, as notify calls it.
@@ -92,7 +100,9 @@ func eventNotes(cfg *api.Config) []string {
 }
 
 // statusSinks is each sink the daemon pid runs, as its sinks.json says: nil
-// when the file is not there, or another process wrote it.
+// when the file is not there, or another process wrote it. ReadStatus checks
+// the file's pid is a daemon's; this checks it is the one status asked, which
+// may have been followed by another between the two reads.
 func statusSinks(terminals string, pid int) []notify.Status {
 	f, err := notify.ReadStatus(terminals)
 	if err != nil || f == nil || pid == 0 || f.PID != pid {
@@ -118,8 +128,12 @@ func sinkLine(s notify.Status, now time.Time) string {
 			line += ", last " + agoFrom(now.Sub(s.LastSent))
 		}
 	case "failing":
-		if !s.LastErrorAt.IsZero() {
-			line += " since " + clockAt(s.LastErrorAt, now)
+		since := s.FailingSince
+		if since.IsZero() {
+			since = s.LastErrorAt // a file from before failing_since was kept
+		}
+		if !since.IsZero() {
+			line += " since " + clockAt(since, now)
 		}
 		if s.LastError != "" {
 			line += ": " + oneLine(s.LastError)

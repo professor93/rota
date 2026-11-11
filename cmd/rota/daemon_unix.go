@@ -364,9 +364,14 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 	// Then the server, which ends every WebSocket either listener handed
 	// over, lets go of every held session, still running, and lets go of
 	// the claim last; and what it ended has the rest of serveGrace to say
-	// goodbye before this process is gone.
+	// goodbye before this process is gone, and daemonGoodbye at least: a
+	// drain that ran out has taken the rest.
+	bye := began.Add(serveGrace)
+	if least := time.Now().Add(daemonGoodbye); least.After(bye) {
+		bye = least
+	}
 	srv.Stop()
-	if !requests.wait(began.Add(serveGrace)) {
+	if !requests.wait(bye) {
 		log.Warn("requests were still open as the rota daemon stopped")
 	}
 	if portErr != nil && !errors.Is(portErr, nethttp.ErrServerClosed) {

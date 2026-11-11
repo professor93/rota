@@ -280,7 +280,7 @@ func (s *sink) sent(e events.Event, probe bool) []line {
 	}
 	s.n.dirty.Store(true)
 	was := s.st.State
-	s.st.State = stateOK
+	s.st.State, s.st.FailingSince = stateOK, time.Time{}
 	if was == stateFailing {
 		return []line{{false, fmt.Sprintf("events: %s sends again", s.st.Name)}}
 	}
@@ -314,14 +314,15 @@ func (s *sink) done(e events.Event, probe bool, msg *string, why string) []line 
 	return append(lines, s.dropLocked(e, why, now)...)
 }
 
-// failLocked makes the sink failing with msg, said when it starts to be.
+// failLocked makes the sink failing with msg, said when it starts to be,
+// which is when it has been failing since: a retry does not move that.
 func (s *sink) failLocked(msg string, now time.Time) []line {
 	s.st.LastError, s.st.LastErrorAt = msg, now
 	s.n.dirty.Store(true)
 	if s.st.State == stateFailing {
 		return nil
 	}
-	s.st.State = stateFailing
+	s.st.State, s.st.FailingSince = stateFailing, now
 	return []line{{true, fmt.Sprintf("events: %s failing: %s", s.st.Name, msg)}}
 }
 

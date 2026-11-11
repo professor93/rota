@@ -275,6 +275,7 @@ func Start(o Options) (*Notifier, error) {
 	for i, s := range n.sinks {
 		if errs[i] != nil {
 			s.st.State, s.st.LastError, s.st.LastErrorAt = stateFailing, cleanErr(errs[i], slices.Concat(s.keys, made)), now
+			s.st.FailingSince = now
 			log.Warn(fmt.Sprintf("events: %s failing: %s", s.st.Name, s.st.LastError))
 		}
 	}

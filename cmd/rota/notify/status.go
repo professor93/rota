@@ -27,21 +27,23 @@ const (
 
 // Status is how one sink stands: what it is called and where it sends, the
 // events it is for, its state, how many events it sent and dropped, when it
-// last sent, its last error and when, and how its last test went. Nothing
+// last sent, its last error and when, since when it has been failing (zero
+// while it is not), and how its last test went. Nothing
 // in it is a secret: the target of a webhook is its scheme and host alone,
 // and every error has been through cleanErr.
 type Status struct {
-	Name        string      `json:"name"`
-	Type        string      `json:"type"`
-	Target      string      `json:"target"`
-	On          []string    `json:"on"`
-	State       string      `json:"state"`
-	Sent        int         `json:"sent"`
-	Dropped     int         `json:"dropped"`
-	LastSent    time.Time   `json:"last_sent,omitzero"`
-	LastError   string      `json:"last_error,omitempty"`
-	LastErrorAt time.Time   `json:"last_error_at,omitzero"`
-	LastTest    *TestResult `json:"last_test,omitzero"`
+	Name         string      `json:"name"`
+	Type         string      `json:"type"`
+	Target       string      `json:"target"`
+	On           []string    `json:"on"`
+	State        string      `json:"state"`
+	Sent         int         `json:"sent"`
+	Dropped      int         `json:"dropped"`
+	LastSent     time.Time   `json:"last_sent,omitzero"`
+	LastError    string      `json:"last_error,omitempty"`
+	LastErrorAt  time.Time   `json:"last_error_at,omitzero"`
+	FailingSince time.Time   `json:"failing_since,omitzero"`
+	LastTest     *TestResult `json:"last_test,omitzero"`
 }
 
 // TestResult is how a sink answered the test event ID, and when.
