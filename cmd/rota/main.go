@@ -2438,6 +2438,9 @@ func (c *cli) serve(args []string) (err error) {
 	for _, note := range serveNotes(&opts, listener, false) {
 		say(note)
 	}
+	for _, note := range eventNotes(cfg) {
+		say(note)
+	}
 	server := newHTTPServer(listener.Addr, srv.Handler(), logger)
 
 	// Shut down on the first signal and wait for work in flight; a second

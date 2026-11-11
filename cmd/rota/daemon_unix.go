@@ -158,7 +158,7 @@ func (c *cli) spawnDaemon(ctlOnly bool, conf string) (*daemonStart, error) {
 			return nil, fmt.Errorf("the rota daemon did not start, and wrote nothing to %s", oneLine(logPath))
 		case d := <-tried:
 			if d != nil && d.PID == pid {
-				return &daemonStart{home: home, sock: sock, started: d}, nil
+				return &daemonStart{home: home, sock: sock, started: d, sinks: sinkNames(cfg)}, nil
 			}
 		case <-deadline.C:
 			// Another daemon answering, which this one is slow to lose the
@@ -213,11 +213,13 @@ func daemonOf(terminals string) (*holdwire.Daemon, bool) {
 // It claims the store (api.New, for a server with HoldCommand) — and exits
 // 0, saying so in the log, when another daemon already has — opens a TCP
 // port only where server.toml asks and --ctl-only does not forbid, and
-// serves ctl.sock until SIGTERM or an interrupt. A hangup is not a stop. On
-// the way out, all within serveGrace, both listeners close, then Stop ends
-// their WebSockets and lets go of every session, still running, for the
-// next daemon to take up, and of the claim last; then the WebSockets' goodbyes
-// are waited for.
+// serves ctl.sock until SIGTERM or an interrupt, sending its events to the
+// sinks server.toml names. A hangup is not a stop. On the way out, all
+// within serveGrace, both listeners close; the sinks get until eventsDrain,
+// also from the start of the shutdown, to send what they have, daemon.stopped
+// last; then Stop ends the WebSockets and lets go of every session, still
+// running, for the next daemon to take up, and of the claim last; then the
+// WebSockets' goodbyes are waited for.
 func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 	home, terminals, err := daemonStore()
 	if err != nil {
@@ -314,6 +316,7 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 		srv.Stop()
 		return failed(err)
 	}
+	ev := startEvents(cfg, terminals, log)
 	served := make(chan error, 1)
 	said := []any{"version", wire.Version, "store", home, "ctl", holdwire.CtlSock(terminals)}
 	if port != nil {
@@ -351,6 +354,13 @@ func (c *cli) runDaemon(ctlOnly bool, conf string) error {
 	}
 	stopCtl()
 	wg.Wait()
+	// Then the sinks, which StopRefreshing handed daemon.stopped and the end
+	// of the stream: what they have is sent while this daemon still holds
+	// the store, so serve stop, which waits for the claim, returns once it
+	// has been, and no successor's sinks.json is written over.
+	if !ev.Wait(began.Add(eventsDrain)) {
+		log.Warn("events were still being sent as the rota daemon stopped")
+	}
 	// Then the server, which ends every WebSocket either listener handed
 	// over, lets go of every held session, still running, and lets go of
 	// the claim last; and what it ended has the rest of serveGrace to say
@@ -584,10 +594,11 @@ func (c *cli) stopHolders(home, terminals string, yes bool) error {
 /* --------------------------------------------------------------- status --- */
 
 // daemonStatus is `rota serve status`: what daemon.pid says of the daemon,
-// and what the daemon says of its sessions, or with no daemon what their
-// records say. A daemon that holds the store and does not answer is an
-// error, never no daemon.
-func (c *cli) daemonStatus() error {
+// what the daemon says of its sessions and its sinks.json of its sinks, or
+// with no daemon what the sessions' records say. A daemon that holds the
+// store and does not answer is an error, never no daemon. With test, it is
+// `serve status --test`, which with no daemon says what status says.
+func (c *cli) daemonStatus(test string) error {
 	home, terminals, err := daemonStore()
 	if err != nil {
 		return err
@@ -606,6 +617,9 @@ func (c *cli) daemonStatus() error {
 			return err
 		}
 		return exitCode(3)
+	}
+	if test != "" {
+		return c.testSinks(terminals, test)
 	}
 	cl, err := rotaclient.Dial(terminals)
 	if err == nil {
@@ -636,5 +650,6 @@ func (c *cli) daemonStatus() error {
 			doc.Sessions.Stopped++
 		}
 	}
+	doc.Sinks = statusSinks(terminals, d.PID)
 	return c.sayStatus(doc)
 }
