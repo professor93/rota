@@ -742,6 +742,38 @@ func TestThePageGoesBackToTheFieldOfTheFlow(t *testing.T) {
 	back("its time ran out")
 }
 
+// What is typed straight after w reaches the field before the page comes,
+// since w asks for it by a command. A paste the field sends is answered
+// there: the page never replaces a step awaiting its answer, so the login
+// it finished is said. An esc puts the flow aside with its field, and no
+// page is put behind it.
+func TestWhatIsTypedAfterWKeepsTheField(t *testing.T) {
+	loginPageOffer(t, nil, loginPageLo)
+	m, b, _ := loginModel(t, nil)
+	b.FinishLoginFn = func(_ context.Context, id, code string) (LoginEnd, error) {
+		return LoginEnd{Account: 14, Provider: "claude", Status: "added"}, nil
+	}
+	loginPress(t, m, "n", "enter", "enter")
+	f := loginFlowOf(t, m)
+	loginCodeOf(t, f)
+	seen := loginSettle(t, m, press("w")[0], tea.PasteMsg{Content: "ABCDEF123"})
+	loginToasted(t, seen, "Added claude account 14")
+	if loginOf(m) != nil {
+		t.Errorf("the flow is still open, showing %T", f.step)
+	}
+	if got := loginFinishes(b); !slices.Equal(got, [][2]string{{"abc123", "ABCDEF123"}}) {
+		t.Errorf("finished %q", got)
+	}
+
+	loginPress(t, m, "n", "enter", "enter")
+	g := loginFlowOf(t, m)
+	code := loginCodeOf(t, g)
+	loginSettle(t, m, press("w", "esc")...)
+	if !g.Aside() || g.step != step(code) || g.Busy() != "" {
+		t.Errorf("w esc left the flow aside %v, showing %T, busy %q", g.Aside(), g.step, g.Busy())
+	}
+}
+
 // The quit ask names the one-time page while it is up in the login flow,
 // and no longer once it has closed and the field is back.
 func TestTheQuitAskNamesTheOneTimePage(t *testing.T) {

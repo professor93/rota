@@ -208,7 +208,9 @@ func (f *loginFlow) Update(msg tea.Msg) (overlay, tea.Cmd) {
 		}
 		return f, nil
 	case loginPageMsg:
-		if f.stage == loginStepping && msg.from == f.step {
+		// Not over a step that sent what was typed after w and awaits its
+		// answer, nor behind a flow put aside meanwhile.
+		if f.stage == loginStepping && msg.from == f.step && !f.aside && !loginWaiting(f.step) {
 			// The page goes back to the step it was opened from.
 			msg.ask.Back = msg.from
 			return f, f.show(f.steps.page(f.e, msg.ask))
