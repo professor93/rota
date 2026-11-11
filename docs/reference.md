@@ -48,8 +48,8 @@ comes to need never reaches a program that imports them. It uses
 github.com/charmbracelet/x/vt, with ultraviolet and x/ansi from the same
 authors, to keep the screen of each held session; golang.org/x/crypto/ssh
 for its SSH server; github.com/muesli/cancelreader to stop reading a
-terminal when an attach ends; and golang.org/x/sys to drop what was typed
-at the terminal before it is given back.
+terminal when an attach ends; and golang.org/x/sys to drop, on Linux, what
+was typed at the terminal before it is given back.
 Go 1.27 removed the last two temptation: `encoding/json/v2` is standard
 library now, so the hand-rolled JSON layer is gone and nothing here reaches
 for a faster JSON package. It was not always so: the server
@@ -2666,9 +2666,10 @@ It needs three things, and says which is missing:
   stopped, which only its id or the start of one finds, is *session api has
   ended; rota list --sessions shows it*, exit `1` both.
 
-It is never the session it runs in. Shown inside itself, a session would be
-shown its own output, print it again, and so on without end, so `--attach`
-run inside a held session refuses that one however it is named: *you are
+It never attaches to the session it runs in. Shown inside itself, a session
+would be shown its own output, print it again, and so on without end, so
+`--attach` run inside a held session refuses that one however it is named:
+*you are
 inside api; attaching to it would feed it its own output*, exit `1`.
 `Ctrl-\` `n` and `p` pass it over too. A process is inside a session as
 `ctl.sock` tells it (*[The control socket](#the-control-socket)*), and one
@@ -3030,9 +3031,9 @@ or add it with `ssh-add -c`, which asks before each use: a key in the agent
 signs for whatever reaches `SSH_AUTH_SOCK`, passphrase or not, and a held
 CLI keeps that variable, since git over SSH inside a session needs it.
 
-**Another, of the same kind.** `rota run --attach` refuses the session it
-runs in (*[Attaching from a terminal](#attaching-from-a-terminal)*), but
-the SSH server cannot see the process at the other end of a connection, so
+**Another limit: the session you are in.** `rota run --attach` refuses the
+session it runs in (*[Attaching from a terminal](#attaching-from-a-terminal)*),
+but the SSH server cannot see the process at the other end of a connection, so
 it cannot tell that an `ssh -t <host> attach api` typed inside session api
 comes from api itself. That attach shows api its own output, which api
 prints again, without end, and floods every other window on it. Don't:
